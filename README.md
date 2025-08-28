@@ -1,7 +1,4 @@
-<<<<<<< HEAD
-# email_bot
-=======
-# Email Bot v4 — Рассылка HTML-писем через Telegram
+# Email Bot — Рассылка HTML-писем через Telegram
 
 ## Возможности
 - Парсинг email-адресов из PDF и Excel
