@@ -1,38 +1,52 @@
-# Email Bot — Рассылка HTML-писем через Telegram
+# Email Bot
 
-## Возможности
-- Парсинг email-адресов из PDF и Excel
-- Поддержка трёх направлений: спорт, туризм, медицина
-- Отправка HTML-писем с форматированием и логотипом
-- Проверка, были ли письма отправлены ранее (по IMAP mail.ru)
-- Письма отображаются в "Отправленные"
-- Управление рассылкой через Telegram
+![CI](https://github.com/taravskayavm/email_bot/actions/workflows/ci.yml/badge.svg)
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
+![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)
+![Lint: Ruff](https://img.shields.io/badge/lint-ruff-blueviolet.svg)
 
-## Установка и запуск
+Telegram-бот для автоматизации рассылки писем:
+- парсит email-адреса из PDF и Excel,
+- поддерживает ручное подтверждение перед отправкой,
+- ведёт историю рассылок (одно письмо не чаще, чем раз в 6 месяцев),
+- позволяет управлять группами адресатов и шаблонами писем,
+- имеет систему исключений (блок-лист).
 
-1. Установите зависимости:
-```
+## 🚀 Установка и запуск
+
+```bash
+git clone https://github.com/taravskayavm/email_bot.git
+cd email_bot
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
 pip install -r requirements.txt
-```
 
-2. Создайте файл `.env` (на основе `.env.example`) и укажите логин/пароль от почты.
-
-3. Запустите бота:
-```
+cp .env.example .env   # и заполнить своими данными
 python email_bot.py
 ```
+
+## 🛠 Технологии
+- Python 3.11
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
+- Pandas, OpenPyXL
+- PyMuPDF
+- Pre-commit + Ruff + Black + Flake8 + Mypy
+- Pytest + Coverage
+
+## 📦 CI/CD
+GitHub Actions проверяет:
+- синтаксис и зависимости,
+- стиль кода (Ruff, Flake8, Black),
+- аннотации типов (Mypy),
+- тесты (Pytest с покрытием).
+
+Статус сборки: ![CI](https://github.com/taravskayavm/email_bot/actions/workflows/ci.yml/badge.svg)
+
 ---
 
-## Open-source & Privacy
-
-В репозитории нет персональных данных. Исключены через `.gitignore`:
-`.env`, `blocked_emails.txt`, `bot_errors.log`, `sent_log.csv`.
-
-### Quick start
-```bash
-python -m venv .venv && source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
-cp .env.example .env  # затем заполните
-python email_bot.py
-```
->>>>>>> 51d698b (Initial commit)
+⚠️ **License: All Rights Reserved**  
+Использование, копирование или модификация этого кода возможны только с разрешения автора.
