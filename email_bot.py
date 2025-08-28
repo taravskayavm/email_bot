@@ -5,15 +5,14 @@ import os
 import re
 import csv
 import time
-import ssl
 import asyncio
 import zipfile
 import imaplib
-import smtplib
 import email
 import random
 import threading
 import concurrent.futures
+import logging
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -32,6 +31,9 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+
+from emailbot.utils import load_env, setup_logging
+from emailbot.smtp_client import SmtpClient
 
 # ---------------- Пути/Конфиг ----------------
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -84,38 +86,11 @@ session_data: dict[int, dict] = {}
 
 _recent_cache = {"at": None, "set": set(), "ttl": 600}
 
+logger = logging.getLogger(__name__)
+
 TOKEN = ""
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
-
-
-# ---------------- Загрузка .env ----------------
-def load_env():
-    try:
-        from dotenv import load_dotenv as _load
-        _load(dotenv_path=SCRIPT_DIR / ".env")
-        _load()
-    except Exception:
-        pass
-
-    def read_env_file(p: Path):
-        if not p.exists():
-            return
-        try:
-            with p.open(encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    if not s or s.startswith("#") or "=" not in s:
-                        continue
-                    k, v = s.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip('\'"')
-                    os.environ.setdefault(k, v)
-        except Exception:
-            pass
-
-    read_env_file(SCRIPT_DIR / ".env")
-    read_env_file(Path.cwd() / ".env")
 
 
 # ---------------- Утилиты ----------------
@@ -144,6 +119,7 @@ def strip_html(html: str) -> str:
 
 
 def log_error(msg: str):
+    logger.error(msg)
     try:
         with open(SCRIPT_DIR / "bot_errors.log", "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} {msg}\n")
@@ -495,12 +471,14 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
     last_exc = None
     for _ in range(max_tries):
         try:
-            with smtplib.SMTP_SSL("smtp.mail.ru", 465, context=ssl.create_default_context()) as server:
-                server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-                server.sendmail(EMAIL_ADDRESS, recipient, raw_message)
-                return
+            with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+                client.send(EMAIL_ADDRESS, recipient, raw_message)
+            logger.info("Email sent to %s", recipient)
+            return
         except Exception as e:
-            last_exc = e; time.sleep(2)
+            last_exc = e
+            logger.warning("SMTP send failed to %s: %s", recipient, e)
+            time.sleep(2)
     raise last_exc
 
 
@@ -1453,7 +1431,8 @@ def check_env_vars():
 
 # ---------------- Запуск ----------------
 def main():
-    load_env()
+    setup_logging(SCRIPT_DIR / "bot.log")
+    load_env(SCRIPT_DIR)
     global TOKEN, EMAIL_ADDRESS, EMAIL_PASSWORD
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
