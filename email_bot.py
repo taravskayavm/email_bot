@@ -17,6 +17,13 @@ from telegram.ext import (
 
 from emailbot.utils import load_env, setup_logging
 from emailbot import messaging, bot_handlers
+from emailbot.extraction import (
+    _preclean_text_for_emails,
+    extract_clean_emails_from_text,
+    detect_numeric_truncations,
+    find_prefix_repairs,
+    is_allowed_tld,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
