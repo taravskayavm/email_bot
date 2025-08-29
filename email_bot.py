@@ -1,75 +1,28 @@
 # -*- coding: utf-8 -*-
-# email_bot.py — версия с устранением «усечённых» адресов и улучшенной склейкой
+"""Entry point for the email bot application."""
+
+from __future__ import annotations
 
 import os
-import re
-import csv
-import time
-import asyncio
-import zipfile
-import imaplib
-import email
-import random
 import threading
-import concurrent.futures
-import logging
-from datetime import datetime, timedelta
-from email.message import EmailMessage
-from email.utils import formataddr
-import html as htmllib
 from pathlib import Path
-from typing import Tuple, Set, List, Dict
 
-import aiohttp
-import fitz                       # PyMuPDF
-import pandas as pd
-from docx import Document
-from telegram import (
-    Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
 )
 
 from emailbot.utils import load_env, setup_logging
-from emailbot.smtp_client import SmtpClient
-
-# ---------------- Пути/Конфиг ----------------
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-LOG_FILE = str(SCRIPT_DIR / "sent_log.csv")
-BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
-MAX_EMAILS_PER_DAY = 200
-
-TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
-TEMPLATE_MAP = {
-    "спорт":    os.path.join(TEMPLATES_DIR, "sport.htm"),
-    "туризм":   os.path.join(TEMPLATES_DIR, "tourism.htm"),
-    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
-}
-SIGNATURE_HTML = (
-    '<div style="margin-top:20px;font-size:12px;color:#666">'
-    '—<br>Если вы больше не хотите получать письма — ответьте на это письмо словом <b>Unsubscribe</b>.'
-    "</div>"
-)
-
-PRIVACY_NOTICE_HTML = (
-    '<div style="margin-top:16px;font:12px/1.4 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#666">'
-    '<div style="border-top:1px solid #e5e5e5;margin:12px 0 8px"></div>'
-    '<b>Почему вы получили это письмо?</b>'
-    '<div>Мы пишем по профессиональному адресу, опубликованному в открытых источниках '
-    '(официальные сайты/профили публикаций), с предложением профильного сотрудничества.</div>'
-    '<div style="margin-top:6px"><b>Правовое основание:</b> legitimate interests (ст. 6(1)(f) GDPR / '
-    'профильные интересы в РФ). <b>Цели:</b> экспертное/издательское сотрудничество. '
-    '<b>Источник:</b> публичные страницы организации/автора.</div>'
-    '<div style="margin-top:6px"><b>Ваши права:</b> вы можете возразить против подобных писем и/или отписаться — '
-    'ответьте <b>Unsubscribe</b> на это письмо; мы добавим адрес в список исключений. '
-    'Срок хранения контакта — не более необходимого для коммуникации, записи об отписке — дольше, '
-    'чтобы не писать повторно.</div>'
-    '<div style="margin-top:6px">Политику конфиденциальности и контакты для запросов можно получить по запросу.</div>'
-    '</div>'
+from emailbot import messaging, bot_handlers
+from emailbot.extraction import (
+    _preclean_text_for_emails,
+    extract_clean_emails_from_text,
+    detect_numeric_truncations,
+    find_prefix_repairs,
+    is_allowed_tld,
 )
 
 TECH_PATTERNS = ["noreply", "no-reply", "do-not-reply", "donotreply",
@@ -1110,391 +1063,66 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Дополнительные действия:", reply_markup=InlineKeyboardMarkup(extra_buttons))
         return
 
-    await prompt_upload(update, context)
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    bucket = session_data.get(chat_id, {}) or {}
-    allowed_all = bucket.get("preview_allowed_all", [])
-    numeric = bucket.get("suspect_numeric", []) or []
-    foreign = bucket.get("foreign", []) or []
-    if not (allowed_all or numeric or foreign):
-        await query.answer("Нет данных для примеров. Загрузите файл/ссылки.", show_alert=True); return
-    await query.answer()
-    sample_allowed = sample_preview(allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = sample_preview(numeric, PREVIEW_NUMERIC)
-    sample_foreign = sample_preview(foreign, PREVIEW_FOREIGN)
-    report = []
-    if sample_allowed: report.append("🧪 Примеры (.ru/.com):\n" + "\n".join(sample_allowed))
-    if sample_numeric: report.append("🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric))
-    if sample_foreign: report.append("🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign))
-    await query.message.reply_text("\n\n".join(report) if report else "Показать нечего.")
-
-
-async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    keyboard = [
-        [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
-        [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
-        [InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина")]
-    ]
-    await query.message.reply_text("⬇️ Выберите направление рассылки:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    group_code = query.data.split("_")[1]
-    template_path = TEMPLATE_MAP[group_code]
-    chat_id = query.message.chat.id
-    emails = session_data.get(chat_id, {}).get("to_send", [])
-    session_data.setdefault(chat_id, {})
-    session_data[chat_id]["group"] = group_code
-    session_data[chat_id]["template"] = template_path
-    session_data[chat_id]["to_send"] = emails
-    await query.message.reply_text(
-        f"✉️ Готово к отправке {len(emails)} писем.\n"
-        f"Для запуска рассылки нажмите кнопку ниже.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✉️ Начать рассылку", callback_data="start_sending")]])
-    )
-
-
-async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_all_awaiting(context)
-    await update.message.reply_text("Введите email или список email-адресов (через запятую/пробел/с новой строки):")
-    context.user_data["awaiting_manual_email"] = True
-
-
-async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    numeric = bucket.get("suspect_numeric", []) or []
-    if not numeric:
-        await query.answer("Цифровых адресов нет", show_alert=True); return
-    await query.answer()
-    preview_list = numeric[:60]
-    txt = f"Найдено цифровых логинов: {len(numeric)}.\nБудут добавлены все.\n\nПример:\n" + "\n".join(preview_list)
-    more = len(numeric) - len(preview_list)
-    if more > 0:
-        txt += f"\n… и ещё {more}."
-    await query.message.reply_text(
-        txt,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Включить все цифровые", callback_data="confirm_include_numeric")],
-            [InlineKeyboardButton("↩️ Отмена", callback_data="cancel_include_numeric")]
-        ])
-    )
-
-
-async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    numeric = bucket.get("suspect_numeric", []) or []
-    if not numeric:
-        await query.answer("Цифровых адресов нет", show_alert=True); return
-    current = set(bucket.get("to_send", []))
-    added = [e for e in numeric if e not in current]
-    current.update(numeric)
-    bucket["to_send"] = sorted(current)
-    await query.answer()
-    await query.message.reply_text(f"➕ Добавлено цифровых адресов: {len(added)}.\nИтого к отправке: {len(bucket['to_send'])}.")
-
-
-async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("Ок, цифровые адреса оставлены выключенными.")
-
-
-def _chunk_list(items: List[str], size=60) -> List[List[str]]:
-    return [items[i:i+size] for i in range(0, len(items), size)]
-
-
-async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    numeric = session_data.get(chat_id, {}).get("suspect_numeric", []) or []
-    if not numeric:
-        await query.answer("Список пуст", show_alert=True); return
-    await query.answer()
-    for chunk in _chunk_list(numeric, 60):
-        await query.message.reply_text("🔢 Цифровые логины:\n" + "\n".join(chunk))
-
-
-async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    foreign = session_data.get(chat_id, {}).get("foreign", []) or []
-    if not foreign:
-        await query.answer("Список пуст", show_alert=True); return
-    await query.answer()
-    for chunk in _chunk_list(foreign, 60):
-        await query.message.reply_text("🌍 Иностранные домены (исключены):\n" + "\n".join(chunk))
-
-
-async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    repairs: List[tuple[str, str]] = bucket.get("repairs", []) or []
-    if not repairs:
-        await query.answer("Нет кандидатов на исправление", show_alert=True); return
-    current = set(bucket.get("to_send", []))
-    applied = 0
-    changed = []
-    for bad, good in repairs:
-        if bad in current:
-            current.discard(bad)
-            if is_allowed_tld(good):
-                current.add(good)
-                applied += 1
-                if applied <= 12:
-                    changed.append(f"{bad} → {good}")
-    bucket["to_send"] = sorted(current)
-    await query.answer()
-    txt = f"🧩 Применено исправлений: {applied}."
-    if changed:
-        txt += "\n" + "\n".join(changed)
-        if applied > len(changed):
-            txt += f"\n… и ещё {applied - len(changed)}."
-    await query.message.reply_text(txt)
-
-
-async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    repairs: List[tuple[str, str]] = session_data.get(chat_id, {}).get("repairs", []) or []
-    if not repairs:
-        await query.answer("Список пуст", show_alert=True); return
-    await query.answer()
-    pairs = [f"{b} → {g}" for (b, g) in repairs]
-    for chunk in _chunk_list(pairs, 60):
-        await query.message.reply_text("🧩 Возможные исправления:\n" + "\n".join(chunk))
-
-
-async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    group_code = query.data.split("_")[2]
-    template_path = TEMPLATE_MAP[group_code]
-
-    emails_raw = context.user_data.get("manual_emails", [])
-    all_text = " ".join(emails_raw)
-    emails = sorted({normalize_email(x) for x in extract_clean_emails_from_text(all_text)})
-    if not emails:
-        await query.message.reply_text("❗ Список email пуст."); return
-
-    loop = asyncio.get_running_loop()
-    recent_sent = await loop.run_in_executor(None, get_recent_6m_union)
-    blocked = get_blocked_emails()
-    sent_today = get_sent_today()
-
-    to_send = [e for e in emails if e not in recent_sent and e not in sent_today and e not in blocked]
-    if not to_send:
-        await query.message.reply_text("❗ Все адреса уже есть в истории за 6 мес. или в блок-листе.")
-        context.user_data["manual_emails"] = []; return
-
-    available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
-    if available <= 0 and not is_force_send(chat_id):
-        await update.callback_query.message.reply_text(
-            f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-            "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
-        ); return
-    if not is_force_send(chat_id) and len(to_send) > available:
-        to_send = to_send[:available]
-        await query.message.reply_text(f"⚠️ Учитываю дневной лимит: будет отправлено {available} адресов из списка.")
-
-    await query.message.reply_text(f"✉️ Рассылка начата. Отправляем {len(to_send)} писем...")
-
-    sent_count = 0
-    errors = []
-    for email_addr in to_send:
-        try:
-            await async_send_email(email_addr, template_path)
-            log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
-            sent_count += 1
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            errors.append(f"{email_addr} — {e}")
-            err = str(e).lower()
-            if ("invalid mailbox" in err or "user is terminated" in err or "non-local recipient verification failed" in err):
-                add_blocked_email(email_addr)
-            log_sent_email(email_addr, group_code, "error", chat_id, template_path, str(e))
-
-    await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-    if errors:
-        await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
-
-    context.user_data["manual_emails"] = []
-    clear_recent_sent_cache()
-    disable_force_send(chat_id)
-
-
-def get_sent_today() -> Set[str]:
-    if not os.path.exists(LOG_FILE):
-        return set()
-    today = datetime.now().date()
-    sent_today = set()
-    with open(LOG_FILE, encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 4:
-                continue
-            try:
-                dt = datetime.fromisoformat(row[0])
-                if dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)
-            except Exception:
-                continue
-            if dt.date() != today:
-                continue
-            status = (row[3] or "").strip().lower()
-            if status == "ok":
-                sent_today.add(normalize_email(row[1]))
-    return sent_today
-
-
-async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    data = session_data.get(chat_id, {})
-    to_send_raw = data.get("to_send", [])
-    template_path = data.get("template")
-    group_code = data.get("group")
-
-    all_text = " ".join(to_send_raw)
-    to_send = sorted({normalize_email(x) for x in extract_clean_emails_from_text(all_text)})
-
-    if not to_send:
-        await query.message.reply_text("❗ Нет email для рассылки."); return
-
-    loop = asyncio.get_running_loop()
-    recent_sent = await loop.run_in_executor(None, get_recent_6m_union)
-    blocked = get_blocked_emails()
-    sent_today = get_sent_today()
-
-    emails_to_send = [e for e in to_send if e not in recent_sent and e not in sent_today and e not in blocked]
-    if not emails_to_send:
-        await query.message.reply_text("❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."); return
-
-    available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
-    if available <= 0 and not is_force_send(chat_id):
-        await query.message.reply_text(
-            f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-            "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
-        ); return
-    if not is_force_send(chat_id) and len(emails_to_send) > available:
-        emails_to_send = emails_to_send[:available]
-        await query.message.reply_text(f"⚠️ Учитываю дневной лимит: будет отправлено {available} адресов из списка.")
-
-    await query.message.reply_text(f"✉️ Рассылка начата. Отправляем {len(emails_to_send)} писем...")
-
-    sent_count = 0
-    bad_emails = []
-    for email_addr in emails_to_send:
-        try:
-            await async_send_email(email_addr, template_path)
-            log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
-            sent_count += 1
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            error_text = str(e).lower()
-            if ("invalid mailbox" in error_text or "user is terminated" in error_text or "non-local recipient verification failed" in error_text):
-                add_blocked_email(email_addr)
-                bad_emails.append(email_addr)
-            log_sent_email(email_addr, group_code, "error", chat_id, template_path, str(e))
-
-    await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-    if bad_emails:
-        await query.message.reply_text("🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails))
-
-    clear_recent_sent_cache()
-    disable_force_send(chat_id)
-
-
-# ---------------- Сервис/потоки ----------------
-async def autosync_imap_with_message(query):
-    await query.message.reply_text("🔄 Синхронизация истории отправки с сервером...")
-    loop = asyncio.get_running_loop()
-    added = await loop.run_in_executor(None, sync_log_with_imap)
-    clear_recent_sent_cache()
-    await query.message.reply_text(
-        f"✅ Синхронизация завершена. В лог добавлено новых адресов: {added}.\n"
-        f"История отправки обновлена на последние 6 месяцев."
-    )
-
-
-def periodic_unsubscribe_check():
-    while True:
-        try:
-            process_unsubscribe_requests()
-        except Exception as e:
-            log_error(f"periodic_unsubscribe_check: {e}")
-        time.sleep(300)
-
-
-def check_env_vars():
-    for var in ["TELEGRAM_BOT_TOKEN", "EMAIL_ADDRESS", "EMAIL_PASSWORD"]:
-        if not os.getenv(var):
-            raise EnvironmentError(f"Переменная окружения {var} не задана!")
-
-
-# ---------------- Запуск ----------------
-def main():
+def main() -> None:
     setup_logging(SCRIPT_DIR / "bot.log")
     load_env(SCRIPT_DIR)
-    global TOKEN, EMAIL_ADDRESS, EMAIL_PASSWORD
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
-    EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
-    check_env_vars()
 
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    dedupe_blocked_file()
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    messaging.EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+    messaging.EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+    messaging.check_env_vars()
 
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
+    messaging.dedupe_blocked_file()
 
-    # Главное меню
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📤"), prompt_upload))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧹"), reset_email_list))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧾"), about_bot))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🚫"), add_block_prompt))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📄"), show_blocked_list))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^✉️"), prompt_manual_email))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧭"), prompt_change_group))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📈"), report_command))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🔄"), sync_imap_command))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🚀"), force_send_command))
+    app = ApplicationBuilder().token(token).build()
 
-    # Файлы и тексты
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))  # последним!
+    app.add_handler(CommandHandler("start", bot_handlers.start))
 
-    # Колбэки
-    app.add_handler(CallbackQueryHandler(send_manual_email, pattern="^manual_group_"))
-    app.add_handler(CallbackQueryHandler(proceed_to_group, pattern="^proceed_group$"))
-    app.add_handler(CallbackQueryHandler(select_group, pattern="^group_"))
-    app.add_handler(CallbackQueryHandler(send_all, pattern="^start_sending"))
-    app.add_handler(CallbackQueryHandler(report_callback, pattern="^report_"))
-    app.add_handler(CallbackQueryHandler(show_numeric_list, pattern="^show_numeric$"))
-    app.add_handler(CallbackQueryHandler(show_foreign_list, pattern="^show_foreign$"))
-    app.add_handler(CallbackQueryHandler(refresh_preview, pattern="^refresh_preview$"))
-    app.add_handler(CallbackQueryHandler(ask_include_numeric, pattern="^ask_include_numeric$"))
-    app.add_handler(CallbackQueryHandler(include_numeric_emails, pattern="^confirm_include_numeric$"))
-    app.add_handler(CallbackQueryHandler(cancel_include_numeric, pattern="^cancel_include_numeric$"))
-    app.add_handler(CallbackQueryHandler(apply_repairs, pattern="^apply_repairs$"))
-    app.add_handler(CallbackQueryHandler(show_repairs,  pattern="^show_repairs$"))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧹"), bot_handlers.reset_email_list))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧾"), bot_handlers.about_bot))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🚫"), bot_handlers.add_block_prompt))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^✉️"), bot_handlers.prompt_manual_email))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🧭"), bot_handlers.prompt_change_group))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command))
+
+    app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text))
+
+    app.add_handler(CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_group_"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.include_numeric_emails, pattern="^confirm_include_numeric$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.cancel_include_numeric, pattern="^cancel_include_numeric$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.apply_repairs, pattern="^apply_repairs$"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.show_repairs, pattern="^show_repairs$"))
 
     print("Бот запущен.")
-    t = threading.Thread(target=periodic_unsubscribe_check, daemon=True)
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
+    )
     t.start()
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        stop_event.set()
+        t.join()
 
 
 if __name__ == "__main__":
     main()
+
