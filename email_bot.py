@@ -455,14 +455,21 @@ async def extract_emails_from_zip(zip_path: str, progress_msg, download_dir: str
         if progress_msg:
             await progress_msg.edit_text(f"В архиве {total_files} файлов. Начинаем обработку...")
         for idx, inner_file in enumerate(file_list, 1):
-            extracted_path = os.path.join(download_dir, inner_file)
-            os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
-            z.extract(inner_file, download_dir)
-            extracted_files.append(extracted_path)
-            allowed, loose = extract_from_uploaded_file(extracted_path)
-            all_allowed.update(allowed); all_loose.update(loose)
             if progress_msg:
-                await progress_msg.edit_text(f"🔄 Обработка файла {idx}/{total_files}:\n{inner_file}")
+                await progress_msg.edit_text(f"🔄 Обработка файла {idx}/{total_files}: {inner_file}")
+            try:
+                extracted_path = os.path.join(download_dir, inner_file)
+                os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+                z.extract(inner_file, download_dir)
+                extracted_files.append(extracted_path)
+                allowed, loose = extract_from_uploaded_file(extracted_path)
+                all_allowed.update(allowed)
+                all_loose.update(loose)
+            except Exception as e:
+                log_error(f"extract_emails_from_zip:{inner_file}:{e}")
+                if progress_msg:
+                    await progress_msg.reply_text(f"⚠️ Ошибка при анализе файла {inner_file}")
+                continue
     return all_allowed, extracted_files, all_loose
 
 
@@ -900,17 +907,18 @@ async def _compose_report_and_save(chat_id: int, allowed_all: Set[str], filtered
     sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
     sample_foreign = sample_preview(bucket["foreign"], PREVIEW_FOREIGN)
 
-    report = (
-        "✅ Анализ завершён.\n"
-        f"Найдено адресов (.ru/.com): {len(allowed_all)}\n"
-        f"Уникальных (после базовой очистки): {len(filtered)}\n"
-        f"Подозрительные (логин только из цифр, исключены): {len(suspicious_numeric)}\n"
-        f"Иностранные домены (исключены): {len(foreign)}"
-    )
+    excluded_total = len(suspicious_numeric) + len(foreign)
+    report_lines = [
+        "✅ Анализ завершён",
+        f"Найдено адресов (.ru/.com): {len(allowed_all)}",
+        f"Уникальных: {len(filtered)}",
+        f"Исключено: {excluded_total} (подозрительные/иностранные)"
+    ]
+    report = "\n".join(report_lines)
     if sample_allowed:
         report += "\n\n🧪 Примеры (.ru/.com):\n" + "\n".join(sample_allowed)
     if sample_numeric:
-        report += "\n\n🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric)
+        report += "\n\n🔢 Примеры подозрительных (исключены):\n" + "\n".join(sample_numeric)
     if sample_foreign:
         report += "\n\n🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign)
     return report
@@ -926,8 +934,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f = await doc.get_file()
     await f.download_to_drive(file_path)
 
-    await update.message.reply_text("Файл загружен. Идёт анализ...")
-    progress_msg = await update.message.reply_text("🔎 Анализируем...")
+    await update.message.reply_text("📥 Файл загружен. Идёт анализ...")
+    progress_msg = await update.message.reply_text(f"🔄 Обработка файла: {doc.file_name}")
 
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
@@ -935,15 +943,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if file_path.lower().endswith(".zip"):
-            allowed_all, extracted_files, loose_all = await extract_emails_from_zip(file_path, progress_msg, DOWNLOAD_DIR)
+            allowed_all, extracted_files, loose_all = await extract_emails_from_zip(
+                file_path, progress_msg, DOWNLOAD_DIR
+            )
             repairs = collect_repairs_from_files(extracted_files)
         else:
             allowed, loose = extract_from_uploaded_file(file_path)
-            allowed_all.update(allowed); loose_all.update(loose)
+            allowed_all.update(allowed)
+            loose_all.update(loose)
             extracted_files.append(file_path)
             repairs = collect_repairs_from_files([file_path])
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
+        await progress_msg.reply_text(f"⚠️ Ошибка при анализе файла {doc.file_name}")
 
     # Устраняем «усечённые» цифровые (33@ → vilena33@), ДО отчёта
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
@@ -962,17 +974,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
     # Сохраняем в сессию
+    unique_filtered = sorted(set(filtered))
     bucket = session_data.setdefault(chat_id, {})
-    bucket["all_emails"] = set(filtered)
+    bucket["all_emails"] = set(unique_filtered)
     bucket["all_files"] = extracted_files
-    bucket["to_send"] = sorted(set(filtered))
+    bucket["to_send"] = sorted(set(unique_filtered))
     bucket["group"] = bucket.get("group")
     bucket["template"] = bucket.get("template")
     bucket["repairs"] = repairs
     bucket["repairs_sample"] = sample_preview([f"{b} → {g}" for (b, g) in repairs], 6)
 
     # Отчёт
-    report = await _compose_report_and_save(chat_id, allowed_all, filtered, suspicious_numeric, foreign)
+    report = await _compose_report_and_save(chat_id, allowed_all, unique_filtered, suspicious_numeric, foreign)
     if repairs:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
         for s in bucket["repairs_sample"]:
@@ -1066,16 +1079,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         foreign_all = collapse_footnote_variants(foreign_all)
 
+        unique_filtered = sorted(set(filtered))
         bucket = session_data.setdefault(chat_id, {})
-        bucket["all_emails"] = set(filtered)
+        bucket["all_emails"] = set(unique_filtered)
         bucket["all_files"] = []
-        bucket["to_send"] = sorted(set(filtered))
+        bucket["to_send"] = sorted(set(unique_filtered))
         bucket["group"] = bucket.get("group")
         bucket["template"] = bucket.get("template")
         bucket["repairs"] = repairs_all
         bucket["repairs_sample"] = sample_preview([f"{b} → {g}" for (b, g) in repairs_all], 6)
 
-        report = await _compose_report_and_save(chat_id, allowed_all, filtered, suspicious_numeric, sorted(foreign_all))
+        report = await _compose_report_and_save(chat_id, allowed_all, unique_filtered, suspicious_numeric, sorted(foreign_all))
         if bucket["repairs"]:
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
             for s in bucket["repairs_sample"]:
