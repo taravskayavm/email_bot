@@ -20,6 +20,7 @@ from .utils import log_error
 
 
 ALLOWED_TLDS = {"ru", "com"}
+ALLOWED_TLD_PATTERN = "|".join(ALLOWED_TLDS)
 
 
 def normalize_email(s: str) -> str:
@@ -28,7 +29,8 @@ def normalize_email(s: str) -> str:
 
 def is_allowed_tld(email_addr: str) -> bool:
     e = normalize_email(email_addr)
-    return bool(re.search(r"@[A-Za-z0-9.-]+\.(?:ru|com)$", e))
+    pattern = rf"@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN})$"
+    return bool(re.search(pattern, e))
 
 
 def strip_html(html: str) -> str:
@@ -149,7 +151,7 @@ def extract_clean_emails_from_text(text: str) -> Set[str]:
         return set()
     text = _preclean_text_for_emails(text)
     base_re = re.compile(
-        r"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.(?:ru|com))(?=[^\w]|$)"
+        rf"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN}))(?=[^\w]|$)"
     )
     raw = set(base_re.findall(text))
     if not raw:
