@@ -51,4 +51,4 @@ jobs:
 
       - name: Run tests with Pytest
         run: |
-          pytest --maxfail=3 --disable-warnings -q --cov=. --cov-report=term-missing
+          pytest --maxfail=1 --disable-warnings --cov=. --cov-report=term-missing
