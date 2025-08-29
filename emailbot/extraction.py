@@ -55,15 +55,26 @@ def sample_preview(items, k: int) -> list[str]:
     return random.sample(lst, k)
 
 
+def remove_invisibles(text: str) -> str:
+    """Remove zero-width and similar invisible characters.
+
+    Currently strips soft hyphens (\u00ad), non-breaking hyphens (\u2011),
+    zero-width spaces (\u200b) and converts non-breaking spaces (\xa0) to
+    regular spaces.
+    """
+    if not text:
+        return ""
+    s = text
+    s = s.replace("\u00ad", "").replace("\u2011", "").replace("\u200b", "")
+    s = s.replace("\xa0", " ")
+    return s
+
+
 # ---------------- Предобработка текста ----------------
 def _preclean_text_for_emails(text: str) -> str:
     if not text:
         return ""
-    s = text
-
-    # убираем невидимые
-    s = s.replace("\u00ad", "").replace("\u2011", "").replace("\u200b", "")
-    s = s.replace("\xa0", " ")
+    s = remove_invisibles(text)
 
     # защита от прилипания односимвольных маркеров перед email
     s = re.sub(
@@ -282,10 +293,7 @@ async def async_extract_emails_from_url(
 def _remove_invisibles_keep_newlines(text: str) -> str:
     if not text:
         return ""
-    s = text
-    s = s.replace("\u00ad", "").replace("\u2011", "").replace("\u200b", "")
-    s = s.replace("\xa0", " ")
-    return s
+    return remove_invisibles(text)
 
 
 def find_prefix_repairs(raw_text: str) -> List[tuple[str, str]]:
