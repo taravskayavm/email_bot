@@ -1414,8 +1414,8 @@ async def autosync_imap_with_message(query):
     )
 
 
-def periodic_unsubscribe_check():
-    while True:
+def periodic_unsubscribe_check(stop_event: threading.Event):
+    while not stop_event.is_set():
         try:
             process_unsubscribe_requests()
         except Exception as e:
@@ -1477,9 +1477,14 @@ def main():
     app.add_handler(CallbackQueryHandler(show_repairs,  pattern="^show_repairs$"))
 
     print("Бот запущен.")
-    t = threading.Thread(target=periodic_unsubscribe_check, daemon=True)
+    stop_event = threading.Event()
+    t = threading.Thread(target=periodic_unsubscribe_check, args=(stop_event,), daemon=True)
     t.start()
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        stop_event.set()
+        t.join()
 
 
 if __name__ == "__main__":
