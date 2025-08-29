@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import os
 import threading
+import logging
+import re
+import random
+from datetime import datetime, timedelta
 from pathlib import Path
+import html as htmllib
 
 from telegram.ext import (
     ApplicationBuilder,
