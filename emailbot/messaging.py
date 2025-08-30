@@ -144,7 +144,7 @@ def build_message(
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     # Attach the HTML version explicitly as ``text/html``.
-    msg.add_alternative(html_body, maintype="text", subtype="html")
+    msg.add_alternative(html_body, subtype="html")
     logo_path = SCRIPT_DIR / "Logo.png"
     if logo_path.exists():
         try:
