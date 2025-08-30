@@ -196,4 +196,4 @@ async def test_manual_input_parsing_accepts_gmail(caplog):
     assert ctx.user_data["manual_emails"] == ["taravskayavm@gmail.com"]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert isinstance(update.message.reply_markups[0], InlineKeyboardMarkup)
-    assert any("Manual input parsing" in r.message for r in caplog.records)
+    assert any("Manual input parsing" in r.getMessage() for r in caplog.records)
