@@ -50,9 +50,15 @@ class DummyUpdate:
         self.message = DummyMessage(text=text, document=document, chat_id=chat_id)
         self.effective_chat = types.SimpleNamespace(id=chat_id)
         if callback_data is not None:
-            self.callback_query = types.SimpleNamespace(
-                data=callback_data, message=DummyMessage(chat_id=chat_id)
-            )
+            class DummyQuery:
+                def __init__(self, data, chat_id):
+                    self.data = data
+                    self.message = DummyMessage(chat_id=chat_id)
+
+                async def answer(self, *a, **k):
+                    return
+
+            self.callback_query = DummyQuery(callback_data, chat_id)
 
 
 class DummyContext:
