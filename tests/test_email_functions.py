@@ -16,6 +16,10 @@ def test_preclean_merges_hyphen_newlines_and_spaces():
     assert extraction._preclean_text_for_emails(raw) == "username@example.com"
 
 
+def test_preclean_keeps_common_provider_email():
+    assert extraction._preclean_text_for_emails("user@gmail.com") == "user@gmail.com"
+
+
 def test_extract_clean_emails_handles_variants_and_truncations():
     text = (
         "user-\nname @ example. c o m\n"
@@ -25,6 +29,12 @@ def test_extract_clean_emails_handles_variants_and_truncations():
     )
     expected = {"username@example.com", "john@example.com", "vilena33@mail.ru"}
     assert extraction.extract_clean_emails_from_text(text) == expected
+
+
+def test_extract_clean_emails_from_text_allows_provider_email():
+    assert extraction.extract_clean_emails_from_text("Contact: user@gmail.com") == {
+        "user@gmail.com"
+    }
 
 
 @pytest.mark.parametrize(
