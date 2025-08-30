@@ -1,6 +1,9 @@
 import sys
 from pathlib import Path
 
+import asyncio
+import aiohttp
+from aiohttp import web
 import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -48,3 +51,44 @@ def test_find_prefix_repairs_detects_cases():
 def test_remove_invisibles_strips_zero_width_and_nbsp():
     raw = "a\u00adb\u2011c\u200b\xa0d"
     assert extraction.remove_invisibles(raw) == "abc d"
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
+
+
+async def _serve(handler):
+    app = web.Application()
+    app.router.add_get("/", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "localhost", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    url = f"http://localhost:{port}/"
+    async with aiohttp.ClientSession() as session:
+        result = await extraction.async_extract_emails_from_url(url, session)
+    await runner.cleanup()
+    return url, result
+
+
+def test_async_extract_emails_from_url_success():
+    async def handler(request):
+        return web.Response(text="contact: test@example.com foreign@example.de")
+
+    url, result = _run_async(_serve(handler))
+    assert result[0] == url
+    assert set(result[1]) == {"test@example.com"}
+    assert set(result[2]) == {"foreign@example.de"}
+
+
+def test_async_extract_emails_from_url_http_error(monkeypatch):
+    async def handler(request):
+        return web.Response(status=404)
+
+    logged: list[str] = []
+    monkeypatch.setattr(extraction, "log_error", lambda msg: logged.append(msg))
+
+    url, result = _run_async(_serve(handler))
+    assert result == (url, [], [], [])
+    assert logged and "HTTP 404" in logged[0]
