@@ -9,6 +9,7 @@ import csv
 import asyncio
 import imaplib
 import urllib.parse
+import logging
 from datetime import datetime, timedelta
 from typing import Set, List, Optional
 
@@ -36,6 +37,7 @@ from .extraction import (
     collect_repairs_from_files,
     sample_preview,
     async_extract_emails_from_url,
+    _preclean_text_for_emails,
 )
 from .messaging import (
     DOWNLOAD_DIR,
@@ -59,6 +61,8 @@ from .messaging import (
 from .smtp_client import SmtpClient
 from .utils import log_error
 
+
+logger = logging.getLogger(__name__)
 
 PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
@@ -595,11 +599,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     text = update.message.text or ""
     if context.user_data.get("awaiting_block_email"):
-        emails = {
-            normalize_email(x)
-            for x in extract_emails_loose(text)
-            if "@" in x
-        }
+        clean = _preclean_text_for_emails(text)
+        emails: Set[str] = set()
+        for src in (text, clean):
+            emails.update(
+                normalize_email(x)
+                for x in extract_emails_loose(src)
+                if "@" in x
+            )
         added = [e for e in emails if add_blocked_email(e)]
         await update.message.reply_text(
             f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
@@ -607,11 +614,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        raw = {normalize_email(x) for x in extract_emails_loose(text)}
-        raw = collapse_footnote_variants(raw)
-        filtered = [e for e in raw if is_allowed_tld(e)]
+        clean = _preclean_text_for_emails(text)
+        candidates: Set[str] = set()
+        for src in (text, clean):
+            candidates.update(
+                normalize_email(x)
+                for x in extract_emails_loose(src)
+                if "@" in x
+            )
+        found = collapse_footnote_variants(candidates)
+        filtered = [e for e in found if is_allowed_tld(e)]
         filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
+        logger.info(
+            "Manual input parsing: raw=%r clean=%r found=%r filtered=%r",
+            text,
+            clean,
+            found,
+            filtered,
+        )
         if filtered:
             context.user_data["manual_emails"] = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
