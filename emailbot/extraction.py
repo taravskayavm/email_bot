@@ -136,9 +136,9 @@ def _preclean_text_for_emails(text: str) -> str:
     s = _RX_DOT_COM.sub(".com", s)
     s = _RX_DOT_RU.sub(".ru", s)
 
-    # '@gmail.co' → '.com' (и др. провайдеры)
-    s = _RX_PROV1.sub(r"@\1.com", s)
-    s = _RX_PROV2.sub(r"@\1.com", s)
+    # '@gmail.co' → '@gmail.com' (и др. провайдеры)
+    s = _RX_PROV1.sub(r"\1m", s)
+    s = _RX_PROV2.sub(r"\1m", s)
 
     # разделим «слипшийся хвост» после .ru/.com
     s = _RX_SUFFIX.sub(r"\1 ", s)
