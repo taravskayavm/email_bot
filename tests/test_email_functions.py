@@ -63,6 +63,13 @@ def test_remove_invisibles_strips_zero_width_and_nbsp():
     assert extraction.remove_invisibles(raw) == "abc d"
 
 
+def test_is_allowed_tld_accepts_com_and_subdomain():
+    expected = "com" in extraction.ALLOWED_TLDS
+    assert extraction.is_allowed_tld("user@mail.google.com") == expected
+    assert extraction.is_allowed_tld("user@domain.com,") == expected
+    assert extraction.is_allowed_tld("user@domain.com\u00A0") == expected
+
+
 def _run_async(coro):
     return asyncio.run(coro)
 
