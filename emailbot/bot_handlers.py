@@ -54,10 +54,8 @@ from .messaging import (
     send_email_with_sessions,
     was_emailed_recently,
     get_preferred_sent_folder,
-    EMAIL_ADDRESS,
-    EMAIL_PASSWORD,
-    IMAP_FOLDER_FILE,
 )
+from . import messaging
 from .smtp_client import SmtpClient
 from .utils import log_error
 
@@ -212,7 +210,7 @@ async def imap_folders_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         status, data = imap.list()
         imap.logout()
         if status != "OK" or not data:
@@ -268,7 +266,7 @@ async def choose_imap_folder(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     encoded = query.data.split(":", 1)[1]
     folder = urllib.parse.unquote(encoded)
-    with open(IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
+    with open(messaging.IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
         f.write(folder)
     await query.answer()
     await query.message.reply_text(f"📁 Папка сохранена: {folder}")
@@ -825,7 +823,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         imap.select(f'"{sent_folder}"')
     except Exception as e:
@@ -869,7 +867,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     sent_count = 0
     errors: list[str] = []
     bad_emails: list[str] = []
-    with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+    with SmtpClient(
+        "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
+    ) as client:
         for email_addr in to_send:
             try:
                 send_email_with_sessions(
@@ -925,7 +925,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         imap.select(f'"{sent_folder}"')
     except Exception as e:
@@ -967,7 +967,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sent_count = 0
     errors: list[str] = []
     bad_emails: list[str] = []
-    with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+    with SmtpClient(
+        "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
+    ) as client:
         for email_addr in emails_to_send:
             try:
                 send_email_with_sessions(
