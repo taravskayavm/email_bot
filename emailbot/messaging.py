@@ -34,9 +34,9 @@ MAX_EMAILS_PER_DAY = 200
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
-    "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
-    "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
-    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
+    "спорт": os.path.join(TEMPLATES_DIR, "sport.html"),
+    "туризм": os.path.join(TEMPLATES_DIR, "tourism.html"),
+    "медицина": os.path.join(TEMPLATES_DIR, "medicine.html"),
 }
 
 SIGNATURE_HTML = (
