@@ -485,11 +485,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        state = session_data.setdefault(chat_id, SessionState())
-        state.manual_emails.append(text)
-        await update.message.reply_text(
-            "Добавлено. Введите ещё или нажмите кнопку «✉️ Ручная рассылка»."
-        )
+        raw = {normalize_email(x) for x in extract_emails_loose(text)}
+        raw = collapse_footnote_variants(raw)
+        filtered = [e for e in raw if is_allowed_tld(e)]
+        filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
+        filtered = [e for e in filtered if not is_numeric_localpart(e)]
+        if filtered:
+            state = session_data.setdefault(chat_id, SessionState())
+            state.manual_emails = sorted(filtered)
+            context.user_data["awaiting_manual_email"] = False
+            keyboard = [
+                [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
+                [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
+                [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
+            ]
+            await update.message.reply_text(
+                f"К отправке: {', '.join(state.manual_emails)}\n\n⬇️ Выберите направление письма:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не найдено ни одного email (.ru/.com)."
+            )
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -653,9 +670,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     template_path = TEMPLATE_MAP[group_code]
 
     state = session_data.setdefault(chat_id, SessionState())
-    emails_raw = state.manual_emails
-    all_text = " ".join(emails_raw)
-    emails = sorted({normalize_email(x) for x in extract_clean_emails_from_text(all_text)})
+    emails = state.manual_emails
     if not emails:
         await query.message.reply_text("❗ Список email пуст.")
         return
