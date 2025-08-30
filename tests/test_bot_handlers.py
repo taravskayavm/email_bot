@@ -125,6 +125,19 @@ def test_handle_text_manual_emails():
     assert "К отправке: 1test@site.com, user@example.com" in update.message.replies[0]
 
 
+def test_prompt_manual_email_clears_previous_list():
+    update = DummyUpdate(text="/manual")
+    ctx = DummyContext()
+    ctx.user_data["manual_emails"] = ["old@example.com"]
+    ctx.user_data["awaiting_block_email"] = True
+
+    run(bh.prompt_manual_email(update, ctx))
+
+    assert "manual_emails" not in ctx.user_data
+    assert ctx.user_data["awaiting_manual_email"] is True
+    assert ctx.user_data.get("awaiting_block_email") is False
+
+
 def test_select_group_sets_html_template():
     update = DummyUpdate(callback_data="group_спорт")
     ctx = DummyContext()
