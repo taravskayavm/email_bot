@@ -278,6 +278,11 @@ async def async_extract_emails_from_url(
 ):
     try:
         async with session.get(url, timeout=20) as resp:
+            if resp.status >= 400:
+                log_error(
+                    f"async_extract_emails_from_url: {url}: HTTP {resp.status}"
+                )
+                return (url, [], [], [])
             html_text = await resp.text()
             allowed = extract_clean_emails_from_text(html_text)
             loose = set(extract_emails_loose(html_text))
