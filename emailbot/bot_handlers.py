@@ -82,7 +82,6 @@ class SessionState:
     repairs_sample: List[str] = field(default_factory=list)
     group: Optional[str] = None
     template: Optional[str] = None
-    manual_emails: List[str] = field(default_factory=list)
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -293,6 +292,7 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Clear stored e-mails and reset the session state."""
 
     init_state(context)
+    context.user_data.pop("manual_emails", None)
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
@@ -538,8 +538,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
         if filtered:
-            state = get_state(context)
-            state.manual_emails = sorted(filtered)
+            context.user_data["manual_emails"] = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
             keyboard = [
                 [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
@@ -547,7 +546,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
             ]
             await update.message.reply_text(
-                f"К отправке: {', '.join(state.manual_emails)}\n\n⬇️ Выберите направление письма:",
+                f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n⬇️ Выберите направление письма:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
@@ -726,8 +725,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     group_code = query.data.split("_")[2]
     template_path = TEMPLATE_MAP[group_code]
 
-    state = get_state(context)
-    emails = state.manual_emails
+    emails = context.user_data.get("manual_emails", [])
     if not emails:
         await query.message.reply_text("❗ Список email пуст.")
         return
@@ -744,7 +742,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.message.reply_text(
             "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
         )
-        state.manual_emails = []
+        context.user_data["manual_emails"] = []
         return
 
     available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
@@ -789,7 +787,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if errors:
         await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
-    state.manual_emails = []
+    context.user_data["manual_emails"] = []
     clear_recent_sent_cache()
     disable_force_send(chat_id)
 
