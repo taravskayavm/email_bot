@@ -256,18 +256,18 @@ async def _show_imap_page(update_or_query, context, page: int) -> None:
 
 async def imap_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    page = int(query.data.split(":")[1])
     await query.answer()
+    page = int(query.data.split(":")[1])
     await _show_imap_page(query, context, page)
 
 
 async def choose_imap_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    await query.answer()
     encoded = query.data.split(":", 1)[1]
     folder = urllib.parse.unquote(encoded)
     with open(messaging.IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
         f.write(folder)
-    await query.answer()
     await query.message.reply_text(f"📁 Папка сохранена: {folder}")
 
 
@@ -339,6 +339,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Send the selected report to the user."""
 
     query = update.callback_query
+    await query.answer()
     period = query.data.replace("report_", "")
     mapping = {
         "day": "Отчёт за день",
@@ -565,6 +566,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle group selection and prepare messages for sending."""
 
     query = update.callback_query
+    await query.answer()
     group_code = query.data.split("_")[1]
     template_path = TEMPLATE_MAP[group_code]
     state = get_state(context)
@@ -774,11 +776,11 @@ async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_T
     if not numeric:
         await query.answer("Цифровых адресов нет", show_alert=True)
         return
+    await query.answer()
     current = set(state.to_send)
     added = [e for e in numeric if e not in current]
     current.update(numeric)
     state.to_send = sorted(current)
-    await query.answer()
     await query.message.reply_text(
         f"➕ Добавлено цифровых адресов: {len(added)}.\nИтого к отправке: {len(state.to_send)}."
     )
@@ -831,6 +833,7 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not repairs:
         await query.answer("Нет кандидатов на исправление", show_alert=True)
         return
+    await query.answer()
     current = set(state.to_send)
     applied = 0
     changed = []
@@ -843,7 +846,6 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 if applied <= 12:
                     changed.append(f"{bad} → {good}")
     state.to_send = sorted(current)
-    await query.answer()
     txt = f"🧩 Применено исправлений: {applied}."
     if changed:
         txt += "\n" + "\n".join(changed)
@@ -873,6 +875,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Send e-mails entered manually by the user."""
 
     query = update.callback_query
+    await query.answer()
     chat_id = query.message.chat.id
     group_code = query.data.split("_")[2]
     template_path = TEMPLATE_MAP[group_code]
@@ -970,6 +973,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send all prepared e-mails respecting limits."""
 
     query = update.callback_query
+    await query.answer()
     chat_id = query.message.chat.id
     state = get_state(context)
     emails = state.to_send
