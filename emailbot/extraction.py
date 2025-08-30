@@ -7,6 +7,8 @@ import re
 import zipfile
 import random
 import concurrent.futures
+import tempfile
+from pathlib import Path
 from typing import Tuple, Set, List, Dict
 
 import aiohttp
@@ -21,6 +23,40 @@ from .utils import log_error
 
 ALLOWED_TLDS = {"ru", "com"}
 ALLOWED_TLD_PATTERN = "|".join(ALLOWED_TLDS)
+
+# Precompiled regex patterns for heavy use
+_RX_PROTECT = re.compile(
+    r"(?im)\b([A-Za-z0-9])\s*[\-\)\]\u2010\u2011\u2012\u2013\u2014]\s*\n\s*(?=[A-Za-z][A-Za-z0-9._%+-]*@)"
+)
+_RX_DEHYPHEN = re.compile(
+    r"([A-Za-z0-9._%+\-])[\-\u2010\u2011\u2012\u2013\u2014]\s*\n\s*([A-Za-z0-9._%+\-])"
+)
+_RX_JOIN_NOHYPHEN = re.compile(
+    r"([A-Za-z]{3,})\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@"
+)
+_RX_JOIN_DOT = re.compile(
+    r"([A-Za-z]{2,})([._])\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@"
+)
+_RX_JOIN_NUM = re.compile(r"([A-Za-z]{2,})\s*\n\s*([0-9]{1,6})\s*@")
+_RX_CRLF = re.compile(r"[\r\n]+")
+_RX_AT = re.compile(r"\s*@\s*")
+_RX_DOT = re.compile(r"(@[A-Za-z0-9.-]+)\s*\.\s*([A-Za-z]{2,10})\b")
+_RX_DOT_COM = re.compile(r"\.\s*c\s*o\s*m\b", re.I)
+_RX_DOT_RU = re.compile(r"\.\s*r\s*u\b", re.I)
+_PROV = r"(gmail|yahoo|hotmail|outlook|protonmail|icloud|aol|live|msn|mail|yandex|rambler|bk|list|inbox|ya)"
+_RX_PROV1 = re.compile(rf"(@{_PROV}\.co)(?=[^\w]|$)", re.I)
+_RX_PROV2 = re.compile(rf"(@{_PROV}\.co)\s*m\b", re.I)
+_RX_SUFFIX = re.compile(r"(\.(?:ru|com))(?=[A-Za-z0-9])")
+
+_PAT_A = re.compile(
+    r"(?im)\b([a-z])\s*\n\s*([a-z][a-z0-9._%+\-]{2,})@([a-z0-9.-]+\.(?:ru|com))"
+)
+_PAT_B = re.compile(
+    r"(?im)\b([a-z]{2,})\s*\n\s*([0-9]{1,6})\s*@([a-z0-9.-]+\.(?:ru|com))"
+)
+
+_PDF_CACHE = Path(tempfile.gettempdir()) / "pdf_cache"
+_PDF_CACHE.mkdir(exist_ok=True)
 
 
 def normalize_email(s: str) -> str:
@@ -77,46 +113,35 @@ def _preclean_text_for_emails(text: str) -> str:
     s = remove_invisibles(text)
 
     # защита от прилипания односимвольных маркеров перед email
-    s = re.sub(
-        r"(?im)\b([A-Za-z0-9])\s*[\-\)\]\u2010\u2011\u2012\u2013\u2014]\s*\n\s*(?=[A-Za-z][A-Za-z0-9._%+-]*@)",
-        "",
-        s,
-    )
+    s = _RX_PROTECT.sub("", s)
 
     # де-гипенизация переносов (g-\nmail → gmail)
-    s = re.sub(
-        r"([A-Za-z0-9._%+\-])[\-\u2010\u2011\u2012\u2013\u2014]\s*\n\s*([A-Za-z0-9._%+\-])",
-        r"\1\2",
-        s,
-    )
+    s = _RX_DEHYPHEN.sub(r"\1\2", s)
 
     # склейка без дефиса — буква на новой строке
-    s = re.sub(r"([A-Za-z]{3,})\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@", r"\1\2@", s)
-    s = re.sub(r"([A-Za-z]{2,})([._])\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@", r"\1\2\3@", s)
+    s = _RX_JOIN_NOHYPHEN.sub(r"\1\2@", s)
+    s = _RX_JOIN_DOT.sub(r"\1\2\3@", s)
 
     # новый кейс: слово на строке + ЧИСЛА на следующей + (возможные) пробелы перед '@'
-    s = re.sub(r"([A-Za-z]{2,})\s*\n\s*([0-9]{1,6})\s*@", r"\1\2@", s)
+    s = _RX_JOIN_NUM.sub(r"\1\2@", s)
 
     # \r/\n -> пробел
-    s = re.sub(r"[\r\n]+", " ", s)
+    s = _RX_CRLF.sub(" ", s)
 
     # убрать пробелы вокруг '@' и точки
-    s = re.sub(r"\s*@\s*", "@", s)
-    s = re.sub(r"(@[A-Za-z0-9.-]+)\s*\.\s*([A-Za-z]{2,10})\b", r"\1.\2", s)
+    s = _RX_AT.sub("@", s)
+    s = _RX_DOT.sub(r"\1.\2", s)
 
     # '. c o m' / '. r u'
-    s = re.sub(r"\.\s*c\s*o\s*m\b", ".com", flags=re.I, string=s)
-    s = re.sub(r"\.\s*r\s*u\b", ".ru", flags=re.I, string=s)
+    s = _RX_DOT_COM.sub(".com", s)
+    s = _RX_DOT_RU.sub(".ru", s)
 
     # '@gmail.co' → '.com' (и др. провайдеры)
-    prov = (
-        r"(gmail|yahoo|hotmail|outlook|protonmail|icloud|aol|live|msn|mail|yandex|rambler|bk|list|inbox|ya)"
-    )
-    s = re.sub(rf"(@{prov}\.co)(?=[^\w]|$)", r"@\1.com", s, flags=re.I)
-    s = re.sub(rf"(@{prov}\.co)\s*m\b", r"@\1.com", s, flags=re.I)
+    s = _RX_PROV1.sub(r"@\1.com", s)
+    s = _RX_PROV2.sub(r"@\1.com", s)
 
     # разделим «слипшийся хвост» после .ru/.com
-    s = re.sub(r"(\.(?:ru|com))(?=[A-Za-z0-9])", r"\1 ", s)
+    s = _RX_SUFFIX.sub(r"\1 ", s)
 
     return s
 
@@ -211,14 +236,26 @@ def apply_numeric_truncation_removal(allowed_set: Set[str]) -> Tuple[Set[str], L
 
 
 # --- извлечение из разных форматов ---
+def _cached_pdf_text(path: str) -> str:
+    try:
+        st = os.stat(path)
+        key = f"{st.st_size}_{int(st.st_mtime)}"
+        cache_path = _PDF_CACHE / key
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8")
+        doc = fitz.open(path)
+        texts = [page.get_text() or "" for page in doc]
+        doc.close()
+        joined = " ".join(texts)
+        cache_path.write_text(joined, encoding="utf-8")
+        return joined
+    except Exception as e:
+        log_error(f"_cached_pdf_text: {path}: {e}")
+        return ""
+
+
 def _extract_from_pdf(path: str) -> Tuple[Set[str], Set[str]]:
-    doc = fitz.open(path)
-    texts = []
-    for page in doc:
-        page_text = page.get_text() or ""
-        texts.append(page_text)
-    doc.close()
-    joined = " ".join(texts)
+    joined = _cached_pdf_text(path)
     loose = set(extract_emails_loose(joined))
     allowed = set(extract_clean_emails_from_text(joined))
     return allowed, loose
@@ -307,20 +344,14 @@ def find_prefix_repairs(raw_text: str) -> List[tuple[str, str]]:
     s = _remove_invisibles_keep_newlines(raw_text)
     pairs, seen = [], set()
 
-    pat_a = re.compile(
-        r"(?im)\b([a-z])\s*\n\s*([a-z][a-z0-9._%+\-]{2,})@([a-z0-9.-]+\.(?:ru|com))"
-    )
-    for m in pat_a.finditer(s):
+    for m in _PAT_A.finditer(s):
         left, rest, dom = m.group(1).lower(), m.group(2).lower(), m.group(3).lower()
         bad, good = f"{rest}@{dom}", f"{left}{rest}@{dom}"
         if (bad, good) not in seen:
             seen.add((bad, good))
             pairs.append((bad, good))
 
-    pat_b = re.compile(
-        r"(?im)\b([a-z]{2,})\s*\n\s*([0-9]{1,6})\s*@([a-z0-9.-]+\.(?:ru|com))"
-    )
-    for m in pat_b.finditer(s):
+    for m in _PAT_B.finditer(s):
         word, digits, dom = m.group(1).lower(), m.group(2), m.group(3).lower()
         bad, good = f"{digits}@{dom}", f"{word}{digits}@{dom}"
         if (bad, good) not in seen:
@@ -362,7 +393,8 @@ def extract_emails_multithreaded(file_paths: List[str]) -> Tuple[Set[str], Set[s
             log_error(f"extract_emails_multithreaded:{file}: {ex}")
             return set(), set()
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    max_workers = min(32, (os.cpu_count() or 1) * 2)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for allowed, loose in executor.map(process, file_paths):
             allowed_all.update(allowed)
             loose_all.update(loose)

@@ -129,7 +129,7 @@ def test_select_group_sets_html_template():
     run(bh.select_group(update, ctx))
 
     state = ctx.chat_data[SESSION_KEY]
-    assert state.template.endswith(".html")
+    assert state.template.endswith((".htm", ".html"))
 
 
 def test_send_manual_email_uses_html_template(monkeypatch):
@@ -139,13 +139,35 @@ def test_send_manual_email_uses_html_template(monkeypatch):
 
     sent_paths = []
 
-    async def fake_send(addr, path, *a, **kw):
+    def fake_send(client, imap, folder, addr, path, *a, **kw):
         sent_paths.append(path)
 
-    monkeypatch.setattr(bh, "async_send_email", fake_send)
-    monkeypatch.setattr(bh, "get_recent_6m_union", lambda: set())
+    class DummyImap:
+        def login(self, *a, **k):
+            return "OK", None
+
+        def list(self, *a, **k):
+            return "OK", []
+
+        def select(self, *a, **k):
+            return "OK", None
+
+        def logout(self):
+            return
+
+    class DummyClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(bh, "SmtpClient", lambda *a, **k: DummyClient())
+    monkeypatch.setattr(bh, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()))
+    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
     monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+    monkeypatch.setattr(bh, "was_emailed_recently", lambda *a, **k: False)
     monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
     monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
     monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
@@ -157,4 +179,4 @@ def test_send_manual_email_uses_html_template(monkeypatch):
 
     run(bh.send_manual_email(update, ctx))
 
-    assert sent_paths and sent_paths[0].endswith(".html")
+    assert sent_paths and sent_paths[0].endswith((".htm", ".html"))

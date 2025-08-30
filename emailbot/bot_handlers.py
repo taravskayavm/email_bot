@@ -7,6 +7,8 @@ import time
 import re
 import csv
 import asyncio
+import imaplib
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Set, List, Optional
 
@@ -40,16 +42,21 @@ from .messaging import (
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
-    async_send_email,
     add_blocked_email,
     dedupe_blocked_file,
     get_blocked_emails,
     log_sent_email,
     get_sent_today,
-    get_recent_6m_union,
     clear_recent_sent_cache,
     sync_log_with_imap,
+    send_email_with_sessions,
+    was_emailed_recently,
+    get_preferred_sent_folder,
+    EMAIL_ADDRESS,
+    EMAIL_PASSWORD,
+    IMAP_FOLDER_FILE,
 )
+from .smtp_client import SmtpClient
 from .utils import log_error
 
 
@@ -135,6 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["✉️ Ручная рассылка", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
+        ["📁 Папки IMAP"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -193,6 +201,73 @@ async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         "⬇️ Выберите направление рассылки:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+async def imap_folders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List available IMAP folders and allow user to choose."""
+
+    try:
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        status, data = imap.list()
+        imap.logout()
+        if status != "OK" or not data:
+            await update.message.reply_text("❌ Не удалось получить список папок.")
+            return
+        folders = [
+            line.decode(errors="ignore").split(" \"", 2)[-1].strip("\"") for line in data
+        ]
+        context.user_data["imap_folders"] = folders
+        await _show_imap_page(update, context, 0)
+    except Exception as e:
+        log_error(f"imap_folders_command: {e}")
+        await update.message.reply_text(f"❌ Ошибка IMAP: {e}")
+
+
+async def _show_imap_page(update_or_query, context, page: int) -> None:
+    folders = context.user_data.get("imap_folders", [])
+    per_page = 6
+    start = page * per_page
+    sub = folders[start : start + per_page]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f,
+                callback_data="imap_choose:" + urllib.parse.quote(f, safe=""),
+            )
+        ]
+        for f in sub
+    ]
+    if len(folders) > per_page:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"imap_page:{page-1}"))
+        if start + per_page < len(folders):
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"imap_page:{page+1}"))
+        keyboard.append(nav)
+    markup = InlineKeyboardMarkup(keyboard)
+    text = "Выберите папку для сохранения отправленных писем:" 
+    if isinstance(update_or_query, Update):
+        await update_or_query.message.reply_text(text, reply_markup=markup)
+    else:
+        await update_or_query.message.edit_text(text, reply_markup=markup)
+
+
+async def imap_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    page = int(query.data.split(":")[1])
+    await query.answer()
+    await _show_imap_page(query, context, page)
+
+
+async def choose_imap_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    encoded = query.data.split(":", 1)[1]
+    folder = urllib.parse.unquote(encoded)
+    with open(IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
+        f.write(folder)
+    await query.answer()
+    await query.message.reply_text(f"📁 Папка сохранена: {folder}")
 
 
 async def force_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -730,19 +805,34 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.message.reply_text("❗ Список email пуст.")
         return
 
-    loop = asyncio.get_running_loop()
-    recent_sent = await loop.run_in_executor(None, get_recent_6m_union)
+    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
 
-    to_send = [
-        e for e in emails if e not in recent_sent and e not in sent_today and e not in blocked
-    ]
+    try:
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        sent_folder = get_preferred_sent_folder(imap)
+        imap.select(f'"{sent_folder}"')
+    except Exception as e:
+        log_error(f"imap connect: {e}")
+        await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+        return
+
+    to_send = []
+    for e in emails:
+        if e in blocked or e in sent_today:
+            continue
+        if was_emailed_recently(e, lookup_days, imap=imap, folder=sent_folder):
+            continue
+        to_send.append(e)
+
     if not to_send:
         await query.message.reply_text(
             "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
         )
         context.user_data["manual_emails"] = []
+        imap.logout()
         return
 
     available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
@@ -763,27 +853,37 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
     sent_count = 0
-    errors = []
-    for email_addr in to_send:
-        try:
-            await async_send_email(email_addr, template_path)
-            log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
-            sent_count += 1
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            errors.append(f"{email_addr} — {e}")
-            err = str(e).lower()
-            if (
-                "invalid mailbox" in err
-                or "user is terminated" in err
-                or "non-local recipient verification failed" in err
-            ):
-                add_blocked_email(email_addr)
-            log_sent_email(
-                email_addr, group_code, "error", chat_id, template_path, str(e)
-            )
+    errors: list[str] = []
+    bad_emails: list[str] = []
+    with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+        for email_addr in to_send:
+            try:
+                send_email_with_sessions(
+                    client, imap, sent_folder, email_addr, template_path
+                )
+                log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
+                sent_count += 1
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                errors.append(f"{email_addr} — {e}")
+                err = str(e).lower()
+                if (
+                    "invalid mailbox" in err
+                    or "user is terminated" in err
+                    or "non-local recipient verification failed" in err
+                ):
+                    add_blocked_email(email_addr)
+                    bad_emails.append(email_addr)
+                log_sent_email(
+                    email_addr, group_code, "error", chat_id, template_path, str(e)
+                )
+    imap.logout()
 
     await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+    if bad_emails:
+        await query.message.reply_text(
+            "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)
+        )
     if errors:
         await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
@@ -805,18 +905,32 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Нет данных для отправки", show_alert=True)
         return
 
-    loop = asyncio.get_running_loop()
-    recent_sent = await loop.run_in_executor(None, get_recent_6m_union)
+    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
 
-    emails_to_send = [
-        e for e in emails if e not in recent_sent and e not in sent_today and e not in blocked
-    ]
+    try:
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        sent_folder = get_preferred_sent_folder(imap)
+        imap.select(f'"{sent_folder}"')
+    except Exception as e:
+        log_error(f"imap connect: {e}")
+        await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+        return
+
+    emails_to_send: List[str] = []
+    for e in emails:
+        if e in blocked or e in sent_today:
+            continue
+        if was_emailed_recently(e, lookup_days, imap=imap, folder=sent_folder):
+            continue
+        emails_to_send.append(e)
     if not emails_to_send:
         await query.message.reply_text(
             "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
         )
+        imap.logout()
         return
 
     available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
@@ -837,31 +951,39 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     sent_count = 0
-    bad_emails = []
-    for email_addr in emails_to_send:
-        try:
-            await async_send_email(email_addr, template_path)
-            log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
-            sent_count += 1
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            error_text = str(e).lower()
-            if (
-                "invalid mailbox" in error_text
-                or "user is terminated" in error_text
-                or "non-local recipient verification failed" in error_text
-            ):
-                add_blocked_email(email_addr)
-                bad_emails.append(email_addr)
-            log_sent_email(
-                email_addr, group_code, "error", chat_id, template_path, str(e)
-            )
+    errors: list[str] = []
+    bad_emails: list[str] = []
+    with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+        for email_addr in emails_to_send:
+            try:
+                send_email_with_sessions(
+                    client, imap, sent_folder, email_addr, template_path
+                )
+                log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
+                sent_count += 1
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                errors.append(f"{email_addr} — {e}")
+                error_text = str(e).lower()
+                if (
+                    "invalid mailbox" in error_text
+                    or "user is terminated" in error_text
+                    or "non-local recipient verification failed" in error_text
+                ):
+                    add_blocked_email(email_addr)
+                    bad_emails.append(email_addr)
+                log_sent_email(
+                    email_addr, group_code, "error", chat_id, template_path, str(e)
+                )
+    imap.logout()
 
     await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
     if bad_emails:
         await query.message.reply_text(
             "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)
         )
+    if errors:
+        await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
     clear_recent_sent_cache()
     disable_force_send(chat_id)
