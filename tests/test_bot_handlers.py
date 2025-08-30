@@ -105,7 +105,6 @@ def test_handle_text_manual_emails():
 
     run(handle_text(update, ctx))
 
-    state = ctx.chat_data[SESSION_KEY]
-    assert state.manual_emails == ["1test@site.com", "user@example.com"]
+    assert ctx.user_data["manual_emails"] == ["1test@site.com", "user@example.com"]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert "К отправке: 1test@site.com, user@example.com" in update.message.replies[0]

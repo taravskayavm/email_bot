@@ -23,12 +23,15 @@ from .extraction import normalize_email, strip_html
 
 logger = logging.getLogger(__name__)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+# Resolve the project root (one level above this file) and use shared
+# directories located at the repository root.
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(SCRIPT_DIR / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = 200
 
+# HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
     "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
@@ -121,7 +124,8 @@ def build_message(
     msg["List-Unsubscribe"] = f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>"
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
-    msg.add_alternative(html_body, subtype="html")
+    # Attach the HTML version explicitly as ``text/html``.
+    msg.add_alternative(html_body, maintype="text", subtype="html")
     logo_path = SCRIPT_DIR / "Logo.png"
     if logo_path.exists():
         try:
