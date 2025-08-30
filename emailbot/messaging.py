@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
-from typing import Set, List, Dict
+from typing import Set, List, Dict, Optional
 
 from .smtp_client import SmtpClient
 from .utils import log_error
@@ -34,9 +34,9 @@ MAX_EMAILS_PER_DAY = 200
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
-    "спорт": os.path.join(TEMPLATES_DIR, "sport.html"),
-    "туризм": os.path.join(TEMPLATES_DIR, "tourism.html"),
-    "медицина": os.path.join(TEMPLATES_DIR, "medicine.html"),
+    "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
+    "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
+    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
 }
 
 SIGNATURE_HTML = (
@@ -65,6 +65,8 @@ PRIVACY_NOTICE_HTML = (
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
+IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+
 
 def _read_template_file(path: str) -> str:
     if not os.path.exists(path):
@@ -73,6 +75,14 @@ def _read_template_file(path: str) -> str:
             path = alt
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
+    if IMAP_FOLDER_FILE.exists():
+        name = IMAP_FOLDER_FILE.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    return detect_sent_folder(imap)
 
 
 def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
@@ -90,18 +100,27 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
     raise last_exc
 
 
-def save_to_sent_folder(raw_message: str):
+def save_to_sent_folder(
+    raw_message: str,
+    imap: Optional[imaplib.IMAP4_SSL] = None,
+    folder: Optional[str] = None,
+):
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        sent_folder = detect_sent_folder(imap)
+        close = False
+        if imap is None:
+            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            close = True
+        if folder is None:
+            folder = get_preferred_sent_folder(imap)
         imap.append(
-            f'"{sent_folder}"',
+            f'"{folder}"',
             "\\Seen",
             imaplib.Time2Internaldate(time.time()),
             raw_message.encode("utf-8"),
         )
-        imap.logout()
+        if close:
+            imap.logout()
     except Exception as e:
         log_error(f"save_to_sent_folder: {e}")
 
@@ -166,6 +185,21 @@ def send_email(
 async def async_send_email(recipient: str, html_path: str):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, send_email, recipient, html_path)
+
+
+def send_email_with_sessions(
+    client: SmtpClient,
+    imap: imaplib.IMAP4_SSL,
+    sent_folder: str,
+    recipient: str,
+    html_path: str,
+    subject: str = "Издательство Лань приглашает к сотрудничеству",
+):
+    extra_html = PRIVACY_NOTICE_HTML if _is_first_contact(recipient) else None
+    msg = build_message(recipient, html_path, subject, extra_html=extra_html)
+    raw = msg.as_string()
+    client.send(EMAIL_ADDRESS, recipient, raw)
+    save_to_sent_folder(raw, imap=imap, folder=sent_folder)
 
 
 def process_unsubscribe_requests():
@@ -238,7 +272,7 @@ def log_sent_email(
         writer = csv.writer(f)
         writer.writerow(
             [
-                datetime.now().isoformat(),
+                datetime.utcnow().isoformat(),
                 normalize_email(email_addr),
                 group,
                 status,
@@ -247,6 +281,9 @@ def log_sent_email(
                 error_msg if error_msg else "",
             ]
         )
+        f.flush()
+    global _log_cache
+    _log_cache = None
 
 
 def _parse_list_line(line: bytes):
@@ -273,8 +310,65 @@ def detect_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     return "Sent"
 
 
+_log_cache: dict[str, List[datetime]] | None = None
+
+
+def _load_sent_log() -> dict[str, List[datetime]]:
+    global _log_cache
+    if _log_cache is not None:
+        return _log_cache
+    cache: Dict[str, List[datetime]] = {}
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(row[0])
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                except Exception:
+                    continue
+                cache.setdefault(normalize_email(row[1]), []).append(dt)
+    _log_cache = cache
+    return cache
+
+
+def was_emailed_recently(
+    email_addr: str,
+    since_days: int = 180,
+    imap: Optional[imaplib.IMAP4_SSL] = None,
+    folder: Optional[str] = None,
+) -> bool:
+    cutoff = datetime.utcnow() - timedelta(days=since_days)
+    cache = _load_sent_log()
+    lst = cache.get(normalize_email(email_addr), [])
+    if any(dt >= cutoff for dt in lst):
+        return True
+    try:
+        close = False
+        if imap is None:
+            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            close = True
+        if folder is None:
+            folder = get_preferred_sent_folder(imap)
+        imap.select(f'"{folder}"')
+        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
+        status, data = imap.search(
+            None, f'(SINCE {date_str} TO "{email_addr}")'
+        )
+        if close:
+            imap.logout()
+        return bool(data and data[0])
+    except Exception as e:
+        log_error(f"was_emailed_recently: {e}")
+        return False
+
+
 def get_recent_6m_union() -> Set[str]:
-    cutoff = datetime.now() - timedelta(days=180)
+    cutoff = datetime.utcnow() - timedelta(days=180)
     result: Set[str] = set()
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
@@ -313,7 +407,7 @@ def clear_recent_sent_cache():
 def get_sent_today() -> Set[str]:
     if not os.path.exists(LOG_FILE):
         return set()
-    today = datetime.now().date()
+    today = datetime.utcnow().date()
     sent = set()
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -335,7 +429,7 @@ def sync_log_with_imap() -> int:
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        sent_folder = detect_sent_folder(imap)
+        sent_folder = get_preferred_sent_folder(imap)
         status, _ = imap.select(f'"{sent_folder}"')
         if status != "OK":
             log_error("Sent folder not selected")
@@ -398,11 +492,14 @@ __all__ = [
     "PRIVACY_NOTICE_HTML",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",
+    "IMAP_FOLDER_FILE",
     "send_raw_smtp_with_retry",
     "save_to_sent_folder",
+    "get_preferred_sent_folder",
     "build_message",
     "send_email",
     "async_send_email",
+    "send_email_with_sessions",
     "process_unsubscribe_requests",
     "get_blocked_emails",
     "add_blocked_email",
@@ -416,5 +513,6 @@ __all__ = [
     "sync_log_with_imap",
     "periodic_unsubscribe_check",
     "check_env_vars",
+    "was_emailed_recently",
 ]
 
