@@ -817,7 +817,6 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.message.reply_text("❗ Список email пуст.")
         return
 
-    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
 
@@ -835,13 +834,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     for e in emails:
         if e in blocked or e in sent_today:
             continue
-        if was_emailed_recently(e, lookup_days, imap=imap, folder=sent_folder):
-            continue
         to_send.append(e)
 
     if not to_send:
         await query.message.reply_text(
-            "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
+            "❗ Все адреса уже есть в блок-листе или отправлены сегодня."
         )
         context.user_data["manual_emails"] = []
         imap.logout()
