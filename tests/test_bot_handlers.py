@@ -186,13 +186,14 @@ def test_send_manual_email_uses_html_template(monkeypatch):
     assert sent_paths and sent_paths[0].endswith((".htm", ".html"))
 
 
-def test_manual_input_parsing_accepts_gmail(caplog):
+@pytest.mark.asyncio
+async def test_manual_input_parsing_accepts_gmail(caplog):
     update = DummyUpdate(text="taravskayavm@gmail.com")
     ctx = DummyContext()
     ctx.user_data["awaiting_manual_email"] = True
     with caplog.at_level(logging.INFO):
-        run(handle_text(update, ctx))
+        await handle_text(update, ctx)
     assert ctx.user_data["manual_emails"] == ["taravskayavm@gmail.com"]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert isinstance(update.message.reply_markups[0], InlineKeyboardMarkup)
-    assert any("Manual input parsing" in r.message for r in caplog.records)
+    assert any("Manual input parsing" in r.getMessage() for r in caplog.records)

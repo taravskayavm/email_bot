@@ -1,8 +1,11 @@
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+  - repo: local
     hooks:
       - id: check-added-large-files
+        name: check for large files
+        entry: pre_commit_hooks/check_added_large_files.py
+        language: system
       - id: check-merge-conflict
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
+        name: check for merge conflicts
+        entry: pre_commit_hooks/check_merge_conflict.py
+        language: system

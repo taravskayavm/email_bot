@@ -583,38 +583,41 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ask the user to enter e-mail addresses manually."""
-
-    clear_all_awaiting(context)
-    await update.message.reply_text(
-        "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
-    )
-    context.user_data["awaiting_manual_email"] = True
-
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process text messages for uploads, blocking or manual lists."""
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
+
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
-        emails = {
-            normalize_email(x)
-            for x in extract_emails_loose(clean)
-            if "@" in x
-        }
+        # извлекаем из сырого и из очищенного — чтобы не пропустить адреса с невидимыми символами
+        emails: Set[str] = set()
+        for src in (text, clean):
+            emails.update(
+                normalize_email(x)
+                for x in extract_emails_loose(src)
+                if "@" in x
+            )
         added = [e for e in emails if add_blocked_email(e)]
         await update.message.reply_text(
             f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
         )
         context.user_data["awaiting_block_email"] = False
         return
+
     if context.user_data.get("awaiting_manual_email"):
         clean = _preclean_text_for_emails(text)
-        found = {normalize_email(x) for x in extract_emails_loose(clean)}
-        found = collapse_footnote_variants(found)
+        # собрать кандидатов из raw + cleaned, нормализовать и убрать мусор
+        candidates: Set[str] = set()
+        for src in (text, clean):
+            candidates.update(
+                normalize_email(x)
+                for x in extract_emails_loose(src)
+                if "@" in x
+            )
+        found = collapse_footnote_variants(candidates)
+        # последовательная фильтрация
         filtered = [e for e in found if is_allowed_tld(e)]
         filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
@@ -643,6 +646,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
+    # дальше — обработка URL'ов как было
     urls = re.findall(r"https?://\S+", text)
     if urls:
         await update.message.reply_text("🌐 Загружаем страницы...")
@@ -665,7 +669,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"Добавлено адресов: {len(allowed_all)}. Иностранных доменов: {len(foreign_all)}"
         )
         return
-
 
 async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask whether numeric-only addresses should be added."""
@@ -699,7 +702,6 @@ async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE
             ]
         ),
     )
-
 
 async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Include numeric-only e-mail addresses in the send list."""
