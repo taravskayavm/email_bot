@@ -587,6 +587,7 @@ async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Ask the user to enter e-mail addresses manually."""
 
     clear_all_awaiting(context)
+    context.user_data.pop("manual_emails", None)
     await update.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
     )
