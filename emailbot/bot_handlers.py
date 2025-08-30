@@ -144,7 +144,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["✉️ Ручная рассылка", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
-        ["📁 Папки IMAP"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -656,12 +655,78 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
+
+        technical_emails = [e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)]
+        filtered = sorted(e for e in allowed_all if e not in technical_emails)
+        suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+        filtered = [e for e in filtered if not is_numeric_localpart(e)]
+
         state = get_state(context)
-        state.to_send.extend(sorted(allowed_all))
+        current = set(state.to_send)
+        current.update(filtered)
+        state.to_send = sorted(current)
         state.foreign = sorted(foreign_all)
-        state.repairs = list(dict.fromkeys(state.repairs + repairs_all))
+        state.repairs = list(dict.fromkeys(repairs_all))
+        state.repairs_sample = sample_preview(
+            [f"{b} → {g}" for (b, g) in state.repairs], 6
+        )
+
+        report = await _compose_report_and_save(
+            context, allowed_all, filtered, suspicious_numeric, foreign_all
+        )
+        if state.repairs_sample:
+            report += "\n\n🧩 Возможные исправления (проверьте вручную):"
+            for s in state.repairs_sample:
+                report += f"\n{s}"
+        await update.message.reply_text(report)
+
+        extra_buttons = [
+            [InlineKeyboardButton("🔁 Показать ещё примеры", callback_data="refresh_preview")]
+        ]
+        if suspicious_numeric:
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"➕ Включить цифровые ({len(suspicious_numeric)})",
+                        callback_data="ask_include_numeric",
+                    )
+                ]
+            )
+            extra_buttons.append(
+                [InlineKeyboardButton("🔢 Показать цифровые", callback_data="show_numeric")]
+            )
+        if state.foreign:
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"🌍 Показать иностранные ({len(state.foreign)})",
+                        callback_data="show_foreign",
+                    )
+                ]
+            )
+        if state.repairs:
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"🧩 Применить исправления ({len(state.repairs)})",
+                        callback_data="apply_repairs",
+                    )
+                ]
+            )
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🧩 Показать все исправления", callback_data="show_repairs"
+                    )
+                ]
+            )
+        extra_buttons.append(
+            [InlineKeyboardButton("▶️ Перейти к выбору направления", callback_data="proceed_group")]
+        )
+
         await update.message.reply_text(
-            f"Добавлено адресов: {len(allowed_all)}. Иностранных доменов: {len(foreign_all)}"
+            "Дополнительные действия:",
+            reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
         return
 
@@ -832,14 +897,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     to_send = []
     for e in emails:
-        if e in blocked or e in sent_today:
+        if e in blocked:
             continue
         to_send.append(e)
 
     if not to_send:
-        await query.message.reply_text(
-            "❗ Все адреса уже есть в блок-листе или отправлены сегодня."
-        )
+        await query.message.reply_text("❗ Все адреса уже есть в блок-листе.")
         context.user_data["manual_emails"] = []
         imap.logout()
         return
