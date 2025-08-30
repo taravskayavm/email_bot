@@ -87,7 +87,19 @@ class SessionState:
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
-session_data: dict[int, SessionState] = {}
+SESSION_KEY = "state"
+
+
+def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
+    """Initialize session state for the current chat."""
+    state = SessionState()
+    context.chat_data[SESSION_KEY] = state
+    return state
+
+
+def get_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
+    """Return existing session state or initialize a new one."""
+    return context.chat_data.get(SESSION_KEY) or init_state(context)
 
 
 def enable_force_send(chat_id: int) -> None:
@@ -108,6 +120,7 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    init_state(context)
     keyboard = [
         ["📤 Загрузить данные для поиска контактов", "🧹 Очистить список"],
         ["📄 Показать исключения", "🚫 Добавить в исключения"],
@@ -248,29 +261,20 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    state = session_data.setdefault(chat_id, SessionState())
-    state.all_emails.clear()
-    state.all_files.clear()
-    state.to_send.clear()
-    state.suspect_numeric.clear()
-    state.foreign.clear()
-    state.preview_allowed_all.clear()
-    state.repairs.clear()
-    state.repairs_sample.clear()
+    init_state(context)
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
 
 
 async def _compose_report_and_save(
-    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
     allowed_all: Set[str],
     filtered: List[str],
     suspicious_numeric: List[str],
     foreign: List[str],
 ) -> str:
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     state.preview_allowed_all = sorted(allowed_all)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
@@ -341,7 +345,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     state.all_emails = set(filtered)
     state.all_files = extracted_files
     state.to_send = sorted(set(filtered))
@@ -351,7 +355,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     report = await _compose_report_and_save(
-        chat_id, allowed_all, filtered, suspicious_numeric, foreign
+        context, allowed_all, filtered, suspicious_numeric, foreign
     )
     if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
@@ -407,8 +411,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.get(chat_id)
+    state = context.chat_data.get(SESSION_KEY)
     allowed_all = state.preview_allowed_all if state else []
     numeric = state.suspect_numeric if state else []
     foreign = state.foreign if state else []
@@ -447,8 +450,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     group_code = query.data.split("_")[1]
     template_path = TEMPLATE_MAP[group_code]
-    chat_id = query.message.chat.id
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     emails = state.to_send
     state.group = group_code
     state.template = template_path
@@ -491,7 +493,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
         if filtered:
-            state = session_data.setdefault(chat_id, SessionState())
+            state = get_state(context)
             state.manual_emails = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
             keyboard = [
@@ -523,7 +525,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
-        state = session_data.setdefault(chat_id, SessionState())
+        state = get_state(context)
         state.to_send.extend(sorted(allowed_all))
         state.foreign = sorted(foreign_all)
         state.repairs = list(dict.fromkeys(state.repairs + repairs_all))
@@ -535,8 +537,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     numeric = state.suspect_numeric
     if not numeric:
         await query.answer("Цифровых адресов нет", show_alert=True)
@@ -568,8 +569,7 @@ async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     numeric = state.suspect_numeric
     if not numeric:
         await query.answer("Цифровых адресов нет", show_alert=True)
@@ -592,8 +592,7 @@ async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_T
 
 async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.get(chat_id)
+    state = context.chat_data.get(SESSION_KEY)
     numeric = state.suspect_numeric if state else []
     if not numeric:
         await query.answer("Список пуст", show_alert=True)
@@ -605,8 +604,7 @@ async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.get(chat_id)
+    state = context.chat_data.get(SESSION_KEY)
     foreign = state.foreign if state else []
     if not foreign:
         await query.answer("Список пуст", show_alert=True)
@@ -620,8 +618,7 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     repairs: List[tuple[str, str]] = state.repairs
     if not repairs:
         await query.answer("Нет кандидатов на исправление", show_alert=True)
@@ -649,8 +646,7 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
-    state = session_data.get(chat_id)
+    state = context.chat_data.get(SESSION_KEY)
     repairs: List[tuple[str, str]] = state.repairs if state else []
     if not repairs:
         await query.answer("Список пуст", show_alert=True)
@@ -669,7 +665,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_code = query.data.split("_")[2]
     template_path = TEMPLATE_MAP[group_code]
 
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     emails = state.manual_emails
     if not emails:
         await query.message.reply_text("❗ Список email пуст.")
@@ -740,7 +736,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    state = session_data.setdefault(chat_id, SessionState())
+    state = get_state(context)
     emails = state.to_send
     group_code = state.group
     template_path = state.template
