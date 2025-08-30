@@ -8,7 +8,9 @@ import re
 import csv
 import asyncio
 from datetime import datetime, timedelta
-from typing import Set, List
+from typing import Set, List, Optional
+
+from dataclasses import dataclass, field
 
 import aiohttp
 from telegram import (
@@ -69,9 +71,23 @@ TECH_PATTERNS = [
     "info@",
 ]
 
+@dataclass
+class SessionState:
+    all_emails: Set[str] = field(default_factory=set)
+    all_files: List[str] = field(default_factory=list)
+    to_send: List[str] = field(default_factory=list)
+    suspect_numeric: List[str] = field(default_factory=list)
+    foreign: List[str] = field(default_factory=list)
+    preview_allowed_all: List[str] = field(default_factory=list)
+    repairs: List[tuple[str, str]] = field(default_factory=list)
+    repairs_sample: List[str] = field(default_factory=list)
+    group: Optional[str] = None
+    template: Optional[str] = None
+    manual_emails: List[str] = field(default_factory=list)
+
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
-session_data: dict[int, dict] = {}
+session_data: dict[int, SessionState] = {}
 
 
 def enable_force_send(chat_id: int) -> None:
@@ -233,14 +249,15 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    bucket["all_emails"] = set()
-    bucket["all_files"] = []
-    bucket["to_send"] = []
-    bucket["suspect_numeric"] = []
-    bucket["foreign"] = []
-    bucket["preview_allowed_all"] = []
-    bucket["repairs"] = []
+    state = session_data.setdefault(chat_id, SessionState())
+    state.all_emails.clear()
+    state.all_files.clear()
+    state.to_send.clear()
+    state.suspect_numeric.clear()
+    state.foreign.clear()
+    state.preview_allowed_all.clear()
+    state.repairs.clear()
+    state.repairs_sample.clear()
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
@@ -253,14 +270,14 @@ async def _compose_report_and_save(
     suspicious_numeric: List[str],
     foreign: List[str],
 ) -> str:
-    bucket = session_data.setdefault(chat_id, {})
-    bucket["preview_allowed_all"] = sorted(allowed_all)
-    bucket["suspect_numeric"] = suspicious_numeric
-    bucket["foreign"] = sorted(foreign)
+    state = session_data.setdefault(chat_id, SessionState())
+    state.preview_allowed_all = sorted(allowed_all)
+    state.suspect_numeric = suspicious_numeric
+    state.foreign = sorted(foreign)
 
-    sample_allowed = sample_preview(bucket["preview_allowed_all"], PREVIEW_ALLOWED)
+    sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
     sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
-    sample_foreign = sample_preview(bucket["foreign"], PREVIEW_FOREIGN)
+    sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
     report = (
         "✅ Анализ завершён.\n"
@@ -324,23 +341,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
-    bucket = session_data.setdefault(chat_id, {})
-    bucket["all_emails"] = set(filtered)
-    bucket["all_files"] = extracted_files
-    bucket["to_send"] = sorted(set(filtered))
-    bucket["group"] = bucket.get("group")
-    bucket["template"] = bucket.get("template")
-    bucket["repairs"] = repairs
-    bucket["repairs_sample"] = sample_preview(
+    state = session_data.setdefault(chat_id, SessionState())
+    state.all_emails = set(filtered)
+    state.all_files = extracted_files
+    state.to_send = sorted(set(filtered))
+    state.repairs = repairs
+    state.repairs_sample = sample_preview(
         [f"{b} → {g}" for (b, g) in repairs], 6
     )
 
     report = await _compose_report_and_save(
         chat_id, allowed_all, filtered, suspicious_numeric, foreign
     )
-    if bucket["repairs_sample"]:
+    if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
-        for s in bucket["repairs_sample"]:
+        for s in state.repairs_sample:
             report += f"\n{s}"
     await update.message.reply_text(report)
 
@@ -359,20 +374,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extra_buttons.append(
             [InlineKeyboardButton("🔢 Показать цифровые", callback_data="show_numeric")]
         )
-    if bucket["foreign"]:
+    if state.foreign:
         extra_buttons.append(
             [
                 InlineKeyboardButton(
-                    f"🌍 Показать иностранные ({len(bucket['foreign'])})",
+                    f"🌍 Показать иностранные ({len(state.foreign)})",
                     callback_data="show_foreign",
                 )
             ]
         )
-    if bucket["repairs"]:
+    if state.repairs:
         extra_buttons.append(
             [
                 InlineKeyboardButton(
-                    f"🧩 Применить исправления ({len(bucket['repairs'])})",
+                    f"🧩 Применить исправления ({len(state.repairs)})",
                     callback_data="apply_repairs",
                 )
             ]
@@ -393,10 +408,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    bucket = session_data.get(chat_id, {}) or {}
-    allowed_all = bucket.get("preview_allowed_all", [])
-    numeric = bucket.get("suspect_numeric", []) or []
-    foreign = bucket.get("foreign", []) or []
+    state = session_data.get(chat_id)
+    allowed_all = state.preview_allowed_all if state else []
+    numeric = state.suspect_numeric if state else []
+    foreign = state.foreign if state else []
     if not (allowed_all or numeric or foreign):
         await query.answer("Нет данных для примеров. Загрузите файл/ссылки.", show_alert=True)
         return
@@ -433,11 +448,10 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_code = query.data.split("_")[1]
     template_path = TEMPLATE_MAP[group_code]
     chat_id = query.message.chat.id
-    emails = session_data.get(chat_id, {}).get("to_send", [])
-    session_data.setdefault(chat_id, {})
-    session_data[chat_id]["group"] = group_code
-    session_data[chat_id]["template"] = template_path
-    session_data[chat_id]["to_send"] = emails
+    state = session_data.setdefault(chat_id, SessionState())
+    emails = state.to_send
+    state.group = group_code
+    state.template = template_path
     await query.message.reply_text(
         f"✉️ Готово к отправке {len(emails)} писем.\n"
         f"Для запуска рассылки нажмите кнопку ниже.",
@@ -471,8 +485,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        context.user_data.setdefault("manual_emails", []).append(text)
-        await update.message.reply_text("Добавлено. Введите ещё или нажмите кнопку «✉️ Ручная рассылка».")
+        state = session_data.setdefault(chat_id, SessionState())
+        state.manual_emails.append(text)
+        await update.message.reply_text(
+            "Добавлено. Введите ещё или нажмите кнопку «✉️ Ручная рассылка»."
+        )
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -489,11 +506,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
-        bucket = session_data.setdefault(chat_id, {})
-        bucket.setdefault("to_send", [])
-        bucket["to_send"].extend(sorted(allowed_all))
-        bucket["foreign"] = sorted(foreign_all)
-        bucket["repairs"] = list(dict.fromkeys(bucket.get("repairs", []) + repairs_all))
+        state = session_data.setdefault(chat_id, SessionState())
+        state.to_send.extend(sorted(allowed_all))
+        state.foreign = sorted(foreign_all)
+        state.repairs = list(dict.fromkeys(state.repairs + repairs_all))
         await update.message.reply_text(
             f"Добавлено адресов: {len(allowed_all)}. Иностранных доменов: {len(foreign_all)}"
         )
@@ -503,8 +519,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    numeric = bucket.get("suspect_numeric", []) or []
+    state = session_data.setdefault(chat_id, SessionState())
+    numeric = state.suspect_numeric
     if not numeric:
         await query.answer("Цифровых адресов нет", show_alert=True)
         return
@@ -536,18 +552,18 @@ async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    numeric = bucket.get("suspect_numeric", []) or []
+    state = session_data.setdefault(chat_id, SessionState())
+    numeric = state.suspect_numeric
     if not numeric:
         await query.answer("Цифровых адресов нет", show_alert=True)
         return
-    current = set(bucket.get("to_send", []))
+    current = set(state.to_send)
     added = [e for e in numeric if e not in current]
     current.update(numeric)
-    bucket["to_send"] = sorted(current)
+    state.to_send = sorted(current)
     await query.answer()
     await query.message.reply_text(
-        f"➕ Добавлено цифровых адресов: {len(added)}.\nИтого к отправке: {len(bucket['to_send'])}."
+        f"➕ Добавлено цифровых адресов: {len(added)}.\nИтого к отправке: {len(state.to_send)}."
     )
 
 
@@ -560,7 +576,8 @@ async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_T
 async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    numeric = session_data.get(chat_id, {}).get("suspect_numeric", []) or []
+    state = session_data.get(chat_id)
+    numeric = state.suspect_numeric if state else []
     if not numeric:
         await query.answer("Список пуст", show_alert=True)
         return
@@ -572,7 +589,8 @@ async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    foreign = session_data.get(chat_id, {}).get("foreign", []) or []
+    state = session_data.get(chat_id)
+    foreign = state.foreign if state else []
     if not foreign:
         await query.answer("Список пуст", show_alert=True)
         return
@@ -586,12 +604,12 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    repairs: List[tuple[str, str]] = bucket.get("repairs", []) or []
+    state = session_data.setdefault(chat_id, SessionState())
+    repairs: List[tuple[str, str]] = state.repairs
     if not repairs:
         await query.answer("Нет кандидатов на исправление", show_alert=True)
         return
-    current = set(bucket.get("to_send", []))
+    current = set(state.to_send)
     applied = 0
     changed = []
     for bad, good in repairs:
@@ -602,7 +620,7 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 applied += 1
                 if applied <= 12:
                     changed.append(f"{bad} → {good}")
-    bucket["to_send"] = sorted(current)
+    state.to_send = sorted(current)
     await query.answer()
     txt = f"🧩 Применено исправлений: {applied}."
     if changed:
@@ -615,7 +633,8 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    repairs: List[tuple[str, str]] = session_data.get(chat_id, {}).get("repairs", []) or []
+    state = session_data.get(chat_id)
+    repairs: List[tuple[str, str]] = state.repairs if state else []
     if not repairs:
         await query.answer("Список пуст", show_alert=True)
         return
@@ -633,7 +652,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_code = query.data.split("_")[2]
     template_path = TEMPLATE_MAP[group_code]
 
-    emails_raw = context.user_data.get("manual_emails", [])
+    state = session_data.setdefault(chat_id, SessionState())
+    emails_raw = state.manual_emails
     all_text = " ".join(emails_raw)
     emails = sorted({normalize_email(x) for x in extract_clean_emails_from_text(all_text)})
     if not emails:
@@ -652,7 +672,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
         )
-        context.user_data["manual_emails"] = []
+        state.manual_emails = []
         return
 
     available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
@@ -697,7 +717,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if errors:
         await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
-    context.user_data["manual_emails"] = []
+    state.manual_emails = []
     clear_recent_sent_cache()
     disable_force_send(chat_id)
 
@@ -705,10 +725,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat.id
-    bucket = session_data.setdefault(chat_id, {})
-    emails = bucket.get("to_send", [])
-    group_code = bucket.get("group")
-    template_path = bucket.get("template")
+    state = session_data.setdefault(chat_id, SessionState())
+    emails = state.to_send
+    group_code = state.group
+    template_path = state.template
     if not emails or not group_code or not template_path:
         await query.answer("Нет данных для отправки", show_alert=True)
         return
