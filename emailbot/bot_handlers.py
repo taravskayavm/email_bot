@@ -18,12 +18,12 @@ from telegram import (
     ReplyKeyboardMarkup,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    CallbackQuery,
 )
-from telegram.ext import ContextTypes, filters
+from telegram.ext import ContextTypes
 
 from .extraction import (
     normalize_email,
-    extract_clean_emails_from_text,
     extract_emails_loose,
     extract_from_uploaded_file,
     extract_emails_from_zip,
@@ -31,7 +31,6 @@ from .extraction import (
     is_allowed_tld,
     is_numeric_localpart,
     collapse_footnote_variants,
-    find_prefix_repairs,
     collect_repairs_from_files,
     sample_preview,
     async_extract_emails_from_url,
@@ -103,23 +102,33 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
 
 
 def enable_force_send(chat_id: int) -> None:
+    """Allow this chat to bypass the daily sending limit."""
+
     FORCE_SEND_CHAT_IDS.add(chat_id)
 
 
 def disable_force_send(chat_id: int) -> None:
+    """Disable the force-send mode for the chat."""
+
     FORCE_SEND_CHAT_IDS.discard(chat_id)
 
 
 def is_force_send(chat_id: int) -> bool:
+    """Return ``True`` if the chat bypasses the daily limit."""
+
     return chat_id in FORCE_SEND_CHAT_IDS
 
 
-def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE):
+def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset all awaiting flags stored in ``user_data``."""
+
     for key in ["awaiting_block_email", "awaiting_manual_email"]:
         context.user_data[key] = False
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the main menu and initialize state."""
+
     init_state(context)
     keyboard = [
         ["📤 Загрузить данные для поиска контактов", "🧹 Очистить список"],
@@ -132,21 +141,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
 
 
-async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt the user to upload files or URLs with e-mail addresses."""
+
     await update.message.reply_text(
         "📥 Загрузите данные с e-mail-адресами для рассылки.\n\n"
         "Поддерживаемые форматы: PDF, Excel (.xlsx), Word (.docx), CSV, ZIP (с этими файлами внутри), а также ссылки на сайты."
     )
 
 
-async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a short description of the bot."""
+
     await update.message.reply_text(
         "Бот делает рассылку HTML-писем с учётом истории отправки (IMAP 180 дней) и блок-листа. "
         "Один адрес — не чаще 1 раза в 6 месяцев. Домены: только .ru и .com."
     )
 
 
-async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask the user to provide e-mails to add to the block list."""
+
     clear_all_awaiting(context)
     await update.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки), которые нужно добавить в исключения:"
@@ -154,7 +169,9 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_block_email"] = True
 
 
-async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the current list of blocked e-mail addresses."""
+
     dedupe_blocked_file()
     blocked = get_blocked_emails()
     if not blocked:
@@ -165,7 +182,9 @@ async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt the user to choose a mailing group."""
+
     keyboard = [
         [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
         [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
@@ -177,7 +196,9 @@ async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def force_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def force_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enable ignoring of the daily sending limit for this chat."""
+
     chat_id = update.effective_chat.id
     enable_force_send(chat_id)
     await update.message.reply_text(
@@ -186,7 +207,9 @@ async def force_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt the user to select a reporting period."""
+
     keyboard = [
         [InlineKeyboardButton("📆 День", callback_data="report_day")],
         [InlineKeyboardButton("🗓 Неделя", callback_data="report_week")],
@@ -198,7 +221,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def get_report(period="day"):
+def get_report(period: str = "day") -> str:
+    """Return statistics of sent e-mails for the given period."""
+
     if not os.path.exists(LOG_FILE):
         return "Нет данных о рассылках."
     now = datetime.now()
@@ -235,7 +260,9 @@ def get_report(period="day"):
     return f"Успешных: {cnt_ok}\nОшибок: {cnt_err}"
 
 
-async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the selected report to the user."""
+
     query = update.callback_query
     period = query.data.replace("report_", "")
     mapping = {
@@ -248,7 +275,9 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"📊 {mapping.get(period, period)}:\n{text}")
 
 
-async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Synchronize local log with the IMAP "Sent" folder."""
+
     await update.message.reply_text(
         "⏳ Сканируем папку «Отправленные» (последние 180 дней)..."
     )
@@ -260,7 +289,9 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
 
 
-async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear stored e-mails and reset the session state."""
+
     init_state(context)
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
@@ -274,6 +305,8 @@ async def _compose_report_and_save(
     suspicious_numeric: List[str],
     foreign: List[str],
 ) -> str:
+    """Compose a summary report and store samples in session state."""
+
     state = get_state(context)
     state.preview_allowed_all = sorted(allowed_all)
     state.suspect_numeric = suspicious_numeric
@@ -299,7 +332,9 @@ async def _compose_report_and_save(
     return report
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle an uploaded document with potential e-mail addresses."""
+
     doc = update.message.document
     if not doc:
         return
@@ -409,7 +444,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a fresh sample of extracted e-mail addresses."""
+
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
     allowed_all = state.preview_allowed_all if state else []
@@ -432,7 +469,9 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("\n\n".join(report) if report else "Показать нечего.")
 
 
-async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch to the mailing group selection step."""
+
     query = update.callback_query
     await query.answer()
     keyboard = [
@@ -446,7 +485,9 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle group selection and prepare messages for sending."""
+
     query = update.callback_query
     group_code = query.data.split("_")[1]
     template_path = TEMPLATE_MAP[group_code]
@@ -463,7 +504,9 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask the user to enter e-mail addresses manually."""
+
     clear_all_awaiting(context)
     await update.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
@@ -471,7 +514,9 @@ async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["awaiting_manual_email"] = True
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process text messages for uploads, blocking or manual lists."""
+
     chat_id = update.effective_chat.id
     text = update.message.text or ""
     if context.user_data.get("awaiting_block_email"):
@@ -535,7 +580,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask whether numeric-only addresses should be added."""
+
     query = update.callback_query
     state = get_state(context)
     numeric = state.suspect_numeric
@@ -567,7 +614,9 @@ async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Include numeric-only e-mail addresses in the send list."""
+
     query = update.callback_query
     state = get_state(context)
     numeric = state.suspect_numeric
@@ -584,13 +633,17 @@ async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keep numeric addresses excluded from the send list."""
+
     query = update.callback_query
     await query.answer()
     await query.message.reply_text("Ок, цифровые адреса оставлены выключенными.")
 
 
-async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display a list of numeric-only e-mail addresses."""
+
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
     numeric = state.suspect_numeric if state else []
@@ -602,7 +655,9 @@ async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("🔢 Цифровые логины:\n" + "\n".join(chunk))
 
 
-async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show e-mail addresses with foreign domains."""
+
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
     foreign = state.foreign if state else []
@@ -616,7 +671,9 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apply suggested address repairs to the send list."""
+
     query = update.callback_query
     state = get_state(context)
     repairs: List[tuple[str, str]] = state.repairs
@@ -644,7 +701,9 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(txt)
 
 
-async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display all potential e-mail address repairs."""
+
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
     repairs: List[tuple[str, str]] = state.repairs if state else []
@@ -659,7 +718,9 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send e-mails entered manually by the user."""
+
     query = update.callback_query
     chat_id = query.message.chat.id
     group_code = query.data.split("_")[2]
@@ -733,7 +794,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disable_force_send(chat_id)
 
 
-async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send all prepared e-mails respecting limits."""
+
     query = update.callback_query
     chat_id = query.message.chat.id
     state = get_state(context)
@@ -806,7 +869,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disable_force_send(chat_id)
 
 
-async def autosync_imap_with_message(query):
+async def autosync_imap_with_message(query: CallbackQuery) -> None:
+    """Synchronize IMAP logs and notify the user via message."""
+
     await query.message.reply_text(
         "🔄 Синхронизация истории отправки с сервером..."
     )
@@ -818,8 +883,9 @@ async def autosync_imap_with_message(query):
         f"История отправки обновлена на последние 6 месяцев."
     )
 
+def _chunk_list(items: List[str], size: int = 60) -> List[List[str]]:
+    """Split ``items`` into chunks of ``size`` elements."""
 
-def _chunk_list(items: List[str], size=60) -> List[List[str]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
