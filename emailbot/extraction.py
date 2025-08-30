@@ -22,7 +22,10 @@ from .utils import log_error
 
 
 ALLOWED_TLDS = {"ru", "com"}
-ALLOWED_TLD_PATTERN = "|".join(ALLOWED_TLDS)
+if ALLOWED_TLDS:
+    ALLOWED_TLD_PATTERN = "|".join(ALLOWED_TLDS)
+else:
+    ALLOWED_TLD_PATTERN = r"[A-Za-z]{2,}"
 
 # Precompiled regex patterns for heavy use
 _RX_PROTECT = re.compile(
@@ -64,9 +67,15 @@ def normalize_email(s: str) -> str:
 
 
 def is_allowed_tld(email_addr: str) -> bool:
-    e = normalize_email(email_addr)
-    pattern = rf"@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN})$"
-    return bool(re.search(pattern, e))
+    e = normalize_email(remove_invisibles(email_addr))
+    if not ALLOWED_TLDS:
+        return True
+    match = re.search(
+        r"@[A-Za-z0-9.-]+\.([A-Za-z]{2,})(?=[^A-Za-z0-9]|$)", e, re.IGNORECASE
+    )
+    if not match:
+        return False
+    return match.group(1).lower() in ALLOWED_TLDS
 
 
 def strip_html(html: str) -> str:
@@ -143,7 +152,7 @@ def _preclean_text_for_emails(text: str) -> str:
     # разделим «слипшийся хвост» после .ru/.com
     s = _RX_SUFFIX.sub(r"\1 ", s)
 
-    return s
+    return s.strip()
 
 
 # ---------------- Извлечение email ----------------
