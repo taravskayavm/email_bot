@@ -77,3 +77,15 @@ def test_log_sent_email_records_entries(temp_files):
     assert len(rows) == 2
     assert rows[0][1:4] == ["user@example.com", "group1", "ok"]
     assert rows[1][3] == "error" and rows[1][6] == "boom"
+
+
+def test_build_message_adds_html_alternative(tmp_path, monkeypatch):
+    html_file = tmp_path / "template.html"
+    html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+    msg = messaging.build_message(
+        "recipient@example.com", str(html_file), "Subject"
+    )
+    html_part = msg.get_body("html")
+    assert html_part is not None
+    assert "Hello" in html_part.get_content()
