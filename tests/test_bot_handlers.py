@@ -24,10 +24,11 @@ class DummyDocument:
 
 
 class DummyMessage:
-    def __init__(self, text: str | None = None, document=None):
+    def __init__(self, text: str | None = None, document=None, chat_id: int = 123):
         self.text = text
         self.document = document
         self.replies: list[str] = []
+        self.chat = types.SimpleNamespace(id=chat_id)
 
     async def reply_text(self, text, reply_markup=None):
         self.replies.append(text)
@@ -35,9 +36,19 @@ class DummyMessage:
 
 
 class DummyUpdate:
-    def __init__(self, text: str | None = None, document=None, chat_id: int = 123):
-        self.message = DummyMessage(text=text, document=document)
+    def __init__(
+        self,
+        text: str | None = None,
+        document=None,
+        chat_id: int = 123,
+        callback_data: str | None = None,
+    ):
+        self.message = DummyMessage(text=text, document=document, chat_id=chat_id)
         self.effective_chat = types.SimpleNamespace(id=chat_id)
+        if callback_data is not None:
+            self.callback_query = types.SimpleNamespace(
+                data=callback_data, message=DummyMessage(chat_id=chat_id)
+            )
 
 
 class DummyContext:
@@ -108,3 +119,42 @@ def test_handle_text_manual_emails():
     assert ctx.user_data["manual_emails"] == ["1test@site.com", "user@example.com"]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert "К отправке: 1test@site.com, user@example.com" in update.message.replies[0]
+
+
+def test_select_group_sets_html_template():
+    update = DummyUpdate(callback_data="group_спорт")
+    ctx = DummyContext()
+    ctx.chat_data[SESSION_KEY] = SessionState(to_send=["a@example.com"])
+
+    run(bh.select_group(update, ctx))
+
+    state = ctx.chat_data[SESSION_KEY]
+    assert state.template.endswith(".html")
+
+
+def test_send_manual_email_uses_html_template(monkeypatch):
+    update = DummyUpdate(callback_data="manual_group_туризм")
+    ctx = DummyContext()
+    ctx.user_data["manual_emails"] = ["user@example.com"]
+
+    sent_paths = []
+
+    async def fake_send(addr, path, *a, **kw):
+        sent_paths.append(path)
+
+    monkeypatch.setattr(bh, "async_send_email", fake_send)
+    monkeypatch.setattr(bh, "get_recent_6m_union", lambda: set())
+    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
+    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
+
+    async def dummy_sleep(_):
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
+
+    run(bh.send_manual_email(update, ctx))
+
+    assert sent_paths and sent_paths[0].endswith(".html")
