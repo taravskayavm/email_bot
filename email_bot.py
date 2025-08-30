@@ -62,6 +62,9 @@ def main() -> None:
         MessageHandler(filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command)
     )
     app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^📁"), bot_handlers.imap_folders_command)
+    )
+    app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command)
     )
     app.add_handler(
@@ -113,6 +116,12 @@ def main() -> None:
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_repairs, pattern="^show_repairs$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.imap_page_callback, pattern="^imap_page:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:")
     )
 
     print("Бот запущен.")
