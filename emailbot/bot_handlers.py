@@ -2,42 +2,42 @@
 
 from __future__ import annotations
 
-import os
-import time
-import re
-import csv
 import asyncio
+import csv
 import imaplib
-import urllib.parse
 import logging
-from datetime import datetime, timedelta
-from typing import Set, List, Optional
-
+import os
+import re
+import time
+import urllib.parse
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import List, Optional, Set
 
 import aiohttp
 from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    CallbackQuery,
+    ReplyKeyboardMarkup,
+    Update,
 )
 from telegram.ext import ContextTypes
 
+from . import messaging
 from .extraction import (
-    normalize_email,
-    extract_emails_loose,
-    extract_from_uploaded_file,
-    extract_emails_from_zip,
+    _preclean_text_for_emails,
     apply_numeric_truncation_removal,
-    is_allowed_tld,
-    is_numeric_localpart,
+    async_extract_emails_from_url,
     collapse_footnote_variants,
     collect_repairs_from_files,
+    extract_emails_from_zip,
+    extract_emails_loose,
+    extract_from_uploaded_file,
+    is_allowed_tld,
+    is_numeric_localpart,
+    normalize_email,
     sample_preview,
-    async_extract_emails_from_url,
-    _preclean_text_for_emails,
 )
 from .messaging import (
     DOWNLOAD_DIR,
@@ -45,20 +45,18 @@ from .messaging import (
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
     add_blocked_email,
+    clear_recent_sent_cache,
     dedupe_blocked_file,
     get_blocked_emails,
-    log_sent_email,
-    get_sent_today,
-    clear_recent_sent_cache,
-    sync_log_with_imap,
-    send_email_with_sessions,
-    was_emailed_recently,
     get_preferred_sent_folder,
+    get_sent_today,
+    log_sent_email,
+    send_email_with_sessions,
+    sync_log_with_imap,
+    was_emailed_recently,
 )
-from . import messaging
 from .smtp_client import SmtpClient
 from .utils import log_error
-
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +76,7 @@ TECH_PATTERNS = [
     "admin",
     "info@",
 ]
+
 
 @dataclass
 class SessionState:
@@ -190,7 +189,9 @@ async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
 
-async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def prompt_change_group(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt the user to choose a mailing group."""
 
     keyboard = [
@@ -204,7 +205,9 @@ async def prompt_change_group(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def imap_folders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def imap_folders_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """List available IMAP folders and allow user to choose."""
 
     try:
@@ -216,7 +219,7 @@ async def imap_folders_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Не удалось получить список папок.")
             return
         folders = [
-            line.decode(errors="ignore").split(" \"", 2)[-1].strip("\"") for line in data
+            line.decode(errors="ignore").split(' "', 2)[-1].strip('"') for line in data
         ]
         context.user_data["imap_folders"] = folders
         await _show_imap_page(update, context, 0)
@@ -242,26 +245,30 @@ async def _show_imap_page(update_or_query, context, page: int) -> None:
     if len(folders) > per_page:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("⬅️", callback_data=f"imap_page:{page-1}"))
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"imap_page:{page - 1}"))
         if start + per_page < len(folders):
-            nav.append(InlineKeyboardButton("➡️", callback_data=f"imap_page:{page+1}"))
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"imap_page:{page + 1}"))
         keyboard.append(nav)
     markup = InlineKeyboardMarkup(keyboard)
-    text = "Выберите папку для сохранения отправленных писем:" 
+    text = "Выберите папку для сохранения отправленных писем:"
     if isinstance(update_or_query, Update):
         await update_or_query.message.reply_text(text, reply_markup=markup)
     else:
         await update_or_query.message.edit_text(text, reply_markup=markup)
 
 
-async def imap_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def imap_page_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     query = update.callback_query
     await query.answer()
     page = int(query.data.split(":")[1])
     await _show_imap_page(query, context, page)
 
 
-async def choose_imap_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def choose_imap_folder(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     query = update.callback_query
     await query.answer()
     encoded = query.data.split(":", 1)[1]
@@ -271,7 +278,9 @@ async def choose_imap_folder(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"📁 Папка сохранена: {folder}")
 
 
-async def force_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def force_send_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Enable ignoring of the daily sending limit for this chat."""
 
     chat_id = update.effective_chat.id
@@ -405,7 +414,9 @@ async def _compose_report_and_save(
     if sample_numeric:
         report += "\n\n🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric)
     if sample_foreign:
-        report += "\n\n🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign)
+        report += "\n\n🌍 Примеры иностранных (исключены):\n" + "\n".join(
+            sample_foreign
+        )
     return report
 
 
@@ -449,7 +460,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
 
     technical_emails = [e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)]
-    filtered = [e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)]
+    filtered = [
+        e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
+    ]
 
     suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
     filtered = [e for e in filtered if not is_numeric_localpart(e)]
@@ -462,9 +475,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.all_files = extracted_files
     state.to_send = sorted(set(filtered))
     state.repairs = repairs
-    state.repairs_sample = sample_preview(
-        [f"{b} → {g}" for (b, g) in state.repairs], 6
-    )
+    state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
 
     report = await _compose_report_and_save(
         context, allowed_all, filtered, suspicious_numeric, foreign
@@ -474,7 +485,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         for s in state.repairs_sample:
             report += f"\n{s}"
     extra_buttons = [
-        [InlineKeyboardButton("🔁 Показать ещё примеры", callback_data="refresh_preview")]
+        [
+            InlineKeyboardButton(
+                "🔁 Показать ещё примеры", callback_data="refresh_preview"
+            )
+        ]
     ]
     if suspicious_numeric:
         extra_buttons.append(
@@ -507,10 +522,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ]
         )
         extra_buttons.append(
-            [InlineKeyboardButton("🧩 Показать все исправления", callback_data="show_repairs")]
+            [
+                InlineKeyboardButton(
+                    "🧩 Показать все исправления", callback_data="show_repairs"
+                )
+            ]
         )
     extra_buttons.append(
-        [InlineKeyboardButton("▶️ Перейти к выбору направления", callback_data="proceed_group")]
+        [
+            InlineKeyboardButton(
+                "▶️ Перейти к выбору направления", callback_data="proceed_group"
+            )
+        ]
     )
     report += "\n\nДополнительные действия:"
     await update.message.reply_text(
@@ -528,7 +551,9 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     numeric = state.suspect_numeric if state else []
     foreign = state.foreign if state else []
     if not (allowed_all or numeric or foreign):
-        await query.answer("Нет данных для примеров. Загрузите файл/ссылки.", show_alert=True)
+        await query.answer(
+            "Нет данных для примеров. Загрузите файл/ссылки.", show_alert=True
+        )
         return
     await query.answer()
     sample_allowed = sample_preview(allowed_all, PREVIEW_ALLOWED)
@@ -540,8 +565,12 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if sample_numeric:
         report.append("🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric))
     if sample_foreign:
-        report.append("🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign))
-    await query.message.reply_text("\n\n".join(report) if report else "Показать нечего.")
+        report.append(
+            "🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign)
+        )
+    await query.message.reply_text(
+        "\n\n".join(report) if report else "Показать нечего."
+    )
 
 
 async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -580,7 +609,9 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def prompt_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def prompt_manual_email(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Ask the user to enter e-mail addresses manually."""
 
     clear_all_awaiting(context)
@@ -598,11 +629,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text or ""
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
-        emails = {
-            normalize_email(x)
-            for x in extract_emails_loose(clean)
-            if "@" in x
-        }
+        emails = {normalize_email(x) for x in extract_emails_loose(clean) if "@" in x}
         added = [e for e in emails if add_blocked_email(e)]
         await update.message.reply_text(
             f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
@@ -629,16 +656,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboard = [
                 [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
                 [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
-                [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
+                [
+                    InlineKeyboardButton(
+                        "🩺 Медицина", callback_data="manual_group_медицина"
+                    )
+                ],
             ]
             await update.message.reply_text(
                 f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n⬇️ Выберите направление письма:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
-            await update.message.reply_text(
-                "❌ Не найдено ни одного email (.ru/.com)."
-            )
+            await update.message.reply_text("❌ Не найдено ни одного email (.ru/.com).")
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -646,7 +675,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("🌐 Загружаем страницы...")
         results = []
         async with aiohttp.ClientSession() as session:
-            tasks = [async_extract_emails_from_url(url, session, chat_id) for url in urls]
+            tasks = [
+                async_extract_emails_from_url(url, session, chat_id) for url in urls
+            ]
             results = await asyncio.gather(*tasks)
         allowed_all: Set[str] = set()
         foreign_all: Set[str] = set()
@@ -656,7 +687,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
 
-        technical_emails = [e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)]
+        technical_emails = [
+            e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
+        ]
         filtered = sorted(e for e in allowed_all if e not in technical_emails)
         suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
@@ -667,7 +700,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state.to_send = sorted(current)
         state.foreign = sorted(foreign_all)
         state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
-        state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
+        state.repairs_sample = sample_preview(
+            [f"{b} → {g}" for (b, g) in state.repairs], 6
+        )
 
         report = await _compose_report_and_save(
             context, allowed_all, filtered, suspicious_numeric, foreign_all
@@ -677,7 +712,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for s in state.repairs_sample:
                 report += f"\n{s}"
         extra_buttons = [
-            [InlineKeyboardButton("🔁 Показать ещё примеры", callback_data="refresh_preview")]
+            [
+                InlineKeyboardButton(
+                    "🔁 Показать ещё примеры", callback_data="refresh_preview"
+                )
+            ]
         ]
         if suspicious_numeric:
             extra_buttons.append(
@@ -689,7 +728,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]
             )
             extra_buttons.append(
-                [InlineKeyboardButton("🔢 Показать цифровые", callback_data="show_numeric")]
+                [
+                    InlineKeyboardButton(
+                        "🔢 Показать цифровые", callback_data="show_numeric"
+                    )
+                ]
             )
         if state.foreign:
             extra_buttons.append(
@@ -717,7 +760,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]
             )
         extra_buttons.append(
-            [InlineKeyboardButton("▶️ Перейти к выбору направления", callback_data="proceed_group")]
+            [
+                InlineKeyboardButton(
+                    "▶️ Перейти к выбору направления", callback_data="proceed_group"
+                )
+            ]
         )
         report += "\n\nДополнительные действия:"
         await update.message.reply_text(
@@ -727,7 +774,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
 
-async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def ask_include_numeric(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Ask whether numeric-only addresses should be added."""
 
     query = update.callback_query
@@ -755,13 +804,19 @@ async def ask_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE
                         callback_data="confirm_include_numeric",
                     )
                 ],
-                [InlineKeyboardButton("↩️ Отмена", callback_data="cancel_include_numeric")],
+                [
+                    InlineKeyboardButton(
+                        "↩️ Отмена", callback_data="cancel_include_numeric"
+                    )
+                ],
             ]
         ),
     )
 
 
-async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def include_numeric_emails(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Include numeric-only e-mail addresses in the send list."""
 
     query = update.callback_query
@@ -780,7 +835,9 @@ async def include_numeric_emails(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-async def cancel_include_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cancel_include_numeric(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Keep numeric addresses excluded from the send list."""
 
     query = update.callback_query
@@ -860,9 +917,7 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
     pairs = [f"{b} → {g}" for (b, g) in repairs]
     for chunk in _chunk_list(pairs, 60):
-        await query.message.reply_text(
-            "🧩 Возможные исправления:\n" + "\n".join(chunk)
-        )
+        await query.message.reply_text("🧩 Возможные исправления:\n" + "\n".join(chunk))
 
 
 async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -931,9 +986,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
-                    log_sent_email(
-                        email_addr, group_code, "ok", chat_id, template_path
-                    )
+                    log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
                     sent_count += 1
                     await asyncio.sleep(1.5)
                 except Exception as e:
@@ -1038,9 +1091,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
-                    log_sent_email(
-                        email_addr, group_code, "ok", chat_id, template_path
-                    )
+                    log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
                     sent_count += 1
                     await asyncio.sleep(1.5)
                 except Exception as e:
@@ -1075,9 +1126,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def autosync_imap_with_message(query: CallbackQuery) -> None:
     """Synchronize IMAP logs and notify the user via message."""
     await query.answer()
-    await query.message.reply_text(
-        "🔄 Синхронизация истории отправки с сервером..."
-    )
+    await query.message.reply_text("🔄 Синхронизация истории отправки с сервером...")
     loop = asyncio.get_running_loop()
     added = await loop.run_in_executor(None, sync_log_with_imap)
     clear_recent_sent_cache()
@@ -1085,6 +1134,7 @@ async def autosync_imap_with_message(query: CallbackQuery) -> None:
         f"✅ Синхронизация завершена. В лог добавлено новых адресов: {added}.\n"
         f"История отправки обновлена на последние 6 месяцев."
     )
+
 
 def _chunk_list(items: List[str], size: int = 60) -> List[List[str]]:
     """Split ``items`` into chunks of ``size`` elements."""
@@ -1121,4 +1171,3 @@ __all__ = [
     "send_all",
     "autosync_imap_with_message",
 ]
-

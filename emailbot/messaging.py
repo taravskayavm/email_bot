@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import email
+import imaplib
+import logging
 import os
 import re
-import csv
 import time
-import imaplib
-import email
-import logging
-import asyncio
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
-from typing import Set, List, Dict, Optional, Callable, Awaitable
+from typing import Awaitable, Callable, Dict, List, Optional, Set
 
+from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
 from .utils import log_error
-from .extraction import normalize_email, strip_html
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,25 +40,25 @@ TEMPLATE_MAP = {
 
 SIGNATURE_HTML = (
     '<div style="margin-top:20px;font-size:12px;color:#666">'
-    '—<br>Если вы больше не хотите получать письма — ответьте на это письмо словом <b>Unsubscribe</b>.'
+    "—<br>Если вы больше не хотите получать письма — ответьте на это письмо словом <b>Unsubscribe</b>."
     "</div>"
 )
 
 PRIVACY_NOTICE_HTML = (
     '<div style="margin-top:16px;font:12px/1.4 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#666">'
     '<div style="border-top:1px solid #e5e5e5;margin:12px 0 8px"></div>'
-    '<b>Почему вы получили это письмо?</b>'
-    '<div>Мы пишем по профессиональному адресу, опубликованному в открытых источниках '
-    '(официальные сайты/профили публикаций), с предложением профильного сотрудничества.</div>'
+    "<b>Почему вы получили это письмо?</b>"
+    "<div>Мы пишем по профессиональному адресу, опубликованному в открытых источниках "
+    "(официальные сайты/профили публикаций), с предложением профильного сотрудничества.</div>"
     '<div style="margin-top:6px"><b>Правовое основание:</b> legitimate interests (ст. 6(1)(f) GDPR / '
-    'профильные интересы в РФ). <b>Цели:</b> экспертное/издательское сотрудничество. '
-    '<b>Источник:</b> публичные страницы организации/автора.</div>'
+    "профильные интересы в РФ). <b>Цели:</b> экспертное/издательское сотрудничество. "
+    "<b>Источник:</b> публичные страницы организации/автора.</div>"
     '<div style="margin-top:6px"><b>Ваши права:</b> вы можете возразить против подобных писем и/или отписаться — '
-    'ответьте <b>Unsubscribe</b> на это письмо; мы добавим адрес в список исключений. '
-    'Срок хранения контакта — не более необходимого для коммуникации, записи об отписке — дольше, '
-    'чтобы не писать повторно.</div>'
+    "ответьте <b>Unsubscribe</b> на это письмо; мы добавим адрес в список исключений. "
+    "Срок хранения контакта — не более необходимого для коммуникации, записи об отписке — дольше, "
+    "чтобы не писать повторно.</div>"
     '<div style="margin-top:6px">Политику конфиденциальности и контакты для запросов можно получить по запросу.</div>'
-    '</div>'
+    "</div>"
 )
 
 EMAIL_ADDRESS = ""
@@ -99,7 +98,9 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
     last_exc = None
     for _ in range(max_tries):
         try:
-            with SmtpClient("smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD) as client:
+            with SmtpClient(
+                "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
+            ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent to %s", recipient)
             return
@@ -236,6 +237,7 @@ def create_task_with_logging(
                 except Exception as inner:
                     logger.exception(inner)
                     log_error(inner)
+
     return asyncio.create_task(runner())
 
 
@@ -260,7 +262,7 @@ def process_unsubscribe_requests():
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         imap.select("INBOX")
         result, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
-        for num in (data[0].split() if data and data[0] else []):
+        for num in data[0].split() if data and data[0] else []:
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
@@ -403,12 +405,8 @@ def was_emailed_recently(
             logger.warning("select %s failed (%s), using Sent", folder, status)
             folder = "Sent"
             imap.select(f'"{folder}"')
-        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime(
-            "%d-%b-%Y"
-        )
-        status, data = imap.search(
-            None, f'(SINCE {date_str} HEADER To "{email_addr}")'
-        )
+        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
+        status, data = imap.search(None, f'(SINCE {date_str} HEADER To "{email_addr}")')
         return status == "OK" and bool(data and data[0])
     except Exception as e:
         log_error(f"was_emailed_recently: {e}")
@@ -494,7 +492,7 @@ def sync_log_with_imap() -> int:
         date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
         added = 0
-        for num in (data[0].split() if data and data[0] else []):
+        for num in data[0].split() if data and data[0] else []:
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
@@ -587,4 +585,3 @@ __all__ = [
     "check_env_vars",
     "was_emailed_recently",
 ]
-
