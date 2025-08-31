@@ -1,6 +1,6 @@
 """Helpers for the email bot."""
 
-from . import bot_handlers, extraction, messaging
+from . import bot_handlers, extraction, messaging, unsubscribe
 from .smtp_client import SmtpClient
 from .utils import load_env, log_error, setup_logging
 
@@ -12,4 +12,5 @@ __all__ = [
     "extraction",
     "messaging",
     "bot_handlers",
+    "unsubscribe",
 ]

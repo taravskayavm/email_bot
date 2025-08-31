@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import secrets
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -38,37 +39,20 @@ TEMPLATE_MAP = {
     "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
 }
 
-SIGNATURE_HTML = (
-    '<div style="margin-top:20px;font-size:12px;color:#666">'
-    "—<br>Если вы больше не хотите получать письма — "
-    "ответьте на это письмо словом <b>Unsubscribe</b>."
-    "</div>"
-)
-
-PRIVACY_NOTICE_HTML = (
-    '<div style="margin-top:16px;font:12px/1.4 -apple-system,Segoe UI,Roboto,Arial,'
-    'sans-serif;color:#666">'
-    '<div style="border-top:1px solid #e5e5e5;margin:12px 0 8px"></div>'
-    "<b>Почему вы получили это письмо?</b>"
-    "<div>Мы пишем по профессиональному адресу, опубликованному в открытых источниках "
-    "(официальные сайты/профили публикаций), с предложением "
-    "профильного сотрудничества.</div>"
-    '<div style="margin-top:6px"><b>Правовое основание:</b> legitimate interests '
-    "(ст. 6(1)(f) GDPR / профильные интересы в РФ). <b>Цели:</b> "
-    "экспертное/издательское сотрудничество. <b>Источник:</b> публичные "
-    "страницы организации/автора.</div>"
-    '<div style="margin-top:6px"><b>Ваши права:</b> вы можете возразить против '
-    "подобных писем и/или отписаться — "
-    "ответьте <b>Unsubscribe</b> на это письмо; мы добавим адрес в список исключений. "
-    "Срок хранения контакта — не более необходимого для коммуникации, "
-    "записи об отписке — дольше, "
-    "чтобы не писать повторно.</div>"
-    '<div style="margin-top:6px">Политику конфиденциальности и контакты для запросов '
-    "можно получить "
-    "по запросу.</div>"
-    "</div>"
-)
-
+SIGNATURE_HTML = """
+<div style="margin-top:20px;font-size:14px;color:#222;line-height:1.4;font-family:Arial,sans-serif;">
+<img src="cid:logo" alt="Логотип Лань" style="float:right;max-width:120px;height:auto;" data-src="https://{host}/Logo.png">
+--<br>С уважением,<br>
+Таравская Владлена Михайловна<br>
+Заведующая редакцией литературы по медицине, спорту и туризму<br>
+ООО Издательство «ЛАНЬ»<br><br>
+8 (812) 336-90-92, доб. 208<br><br>
+196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>
+Рабочие часы: 10.00-18.00<br><br>
+med@lanbook.ru<br>
+<a href="https://www.lanbook.com">www.lanbook.com</a>
+</div>
+"""
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
@@ -162,14 +146,19 @@ def save_to_sent_folder(
                 log_error(f"save_to_sent_folder logout: {e}")
 
 
-def build_message(
-    to_addr: str, html_path: str, subject: str, extra_html: str | None = None
-) -> EmailMessage:
+def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
-    html_body = html_body.replace("</body>", f"{SIGNATURE_HTML}</body>")
-    if extra_html:
-        html_body = html_body.replace("</body>", f"{extra_html}</body>")
-    text_body = strip_html(html_body)
+    host = os.getenv("HOST", "example.com")
+    sig = SIGNATURE_HTML.format(host=host)
+    token = secrets.token_urlsafe(16)
+    link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
+    unsub_html = (
+        f'<div style="margin-top:8px"><a href="{link}" '
+        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
+        'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
+    )
+    html_body = html_body.replace("</body>", f"{sig}{unsub_html}</body>")
+    text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
     msg["From"] = formataddr(
         ("Редакция литературы по медицине, спорту и туризму", EMAIL_ADDRESS)
@@ -177,10 +166,11 @@ def build_message(
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    msg["List-Unsubscribe"] = f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>"
+    msg["List-Unsubscribe"] = (
+        f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
+    )
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
-    # Attach the HTML version explicitly as ``text/html``.
     msg.add_alternative(html_body, subtype="html")
     logo_path = SCRIPT_DIR / "Logo.png"
     if logo_path.exists():
@@ -192,12 +182,7 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
-    return msg
-
-
-def _is_first_contact(recipient: str) -> bool:
-    recent = get_recent_6m_union()
-    return normalize_email(recipient) not in recent
+    return msg, token
 
 
 def send_email(
@@ -207,11 +192,11 @@ def send_email(
     notify_func=None,
 ):
     try:
-        extra_html = PRIVACY_NOTICE_HTML if _is_first_contact(recipient) else None
-        msg = build_message(recipient, html_path, subject, extra_html=extra_html)
+        msg, token = build_message(recipient, html_path, subject)
         raw = msg.as_string()
         send_raw_smtp_with_retry(raw, recipient, max_tries=3)
         save_to_sent_folder(raw)
+        return token
     except Exception as e:
         log_error(f"send_email: {recipient}: {e}")
         if notify_func:
@@ -219,10 +204,10 @@ def send_email(
         raise
 
 
-async def async_send_email(recipient: str, html_path: str):
+async def async_send_email(recipient: str, html_path: str) -> str:
     loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(None, send_email, recipient, html_path)
+        return await loop.run_in_executor(None, send_email, recipient, html_path)
     except Exception as e:
         logger.exception(e)
         log_error(e)
@@ -257,11 +242,11 @@ def send_email_with_sessions(
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
 ):
-    extra_html = PRIVACY_NOTICE_HTML if _is_first_contact(recipient) else None
-    msg = build_message(recipient, html_path, subject, extra_html=extra_html)
+    msg, token = build_message(recipient, html_path, subject)
     raw = msg.as_string()
     client.send(EMAIL_ADDRESS, recipient, raw)
     save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+    return token
 
 
 def process_unsubscribe_requests():
@@ -276,7 +261,7 @@ def process_unsubscribe_requests():
             msg = email.message_from_bytes(raw_email)
             sender = email.utils.parseaddr(msg.get("From"))[1]
             if sender:
-                add_blocked_email(sender)
+                mark_unsubscribed(sender)
             imap.store(num, "+FLAGS", "\\Seen")
         imap.logout()
     except Exception as e:
@@ -318,8 +303,51 @@ def dedupe_blocked_file():
         f.write("\n".join(sorted(keep)) + "\n")
 
 
+def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
+    if not os.path.exists(LOG_FILE):
+        return False
+    email_norm = normalize_email(email_addr)
+    with open(LOG_FILE, encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 8 and row[1] == email_norm and row[7] == token:
+                return True
+    return False
+
+
+def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
+    email_norm = normalize_email(email_addr)
+    rows = []
+    changed = False
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 10:
+                    row.extend([""] * (10 - len(row)))
+                if row[1] == email_norm and (token is None or row[7] == token):
+                    row[8] = "1"
+                    row[9] = datetime.utcnow().isoformat()
+                    changed = True
+                rows.append(row)
+    if changed:
+        with open(LOG_FILE, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+    add_blocked_email(email_norm)
+    return changed
+
+
 def log_sent_email(
-    email_addr, group, status="ok", user_id=None, filename=None, error_msg=None
+    email_addr,
+    group,
+    status="ok",
+    user_id=None,
+    filename=None,
+    error_msg=None,
+    unsubscribe_token="",
+    unsubscribed="",
+    unsubscribed_at="",
 ):
     os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8", newline="") as f:
@@ -333,6 +361,9 @@ def log_sent_email(
                 user_id if user_id else "",
                 filename if filename else "",
                 error_msg if error_msg else "",
+                unsubscribe_token,
+                unsubscribed,
+                unsubscribed_at,
             ]
         )
         f.flush()
@@ -528,6 +559,9 @@ def sync_log_with_imap() -> int:
                         "",
                         "",
                         "",
+                        "",
+                        "",
+                        "",
                     ]
                 )
                 f.flush()
@@ -566,7 +600,6 @@ __all__ = [
     "MAX_EMAILS_PER_DAY",
     "TEMPLATE_MAP",
     "SIGNATURE_HTML",
-    "PRIVACY_NOTICE_HTML",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",
     "IMAP_FOLDER_FILE",
@@ -582,6 +615,8 @@ __all__ = [
     "get_blocked_emails",
     "add_blocked_email",
     "dedupe_blocked_file",
+    "verify_unsubscribe_token",
+    "mark_unsubscribed",
     "log_sent_email",
     "detect_sent_folder",
     "get_recent_6m_union",
