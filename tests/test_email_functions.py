@@ -1,12 +1,8 @@
 import asyncio
-import sys
-from pathlib import Path
 
 import aiohttp
 import pytest
 from aiohttp import web
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import emailbot.extraction as extraction
 

@@ -26,7 +26,8 @@ else:
 
 # Precompiled regex patterns for heavy use
 _RX_PROTECT = re.compile(
-    r"(?im)\b([A-Za-z0-9])\s*[\-\)\]\u2010\u2011\u2012\u2013\u2014]\s*\n\s*(?=[A-Za-z][A-Za-z0-9._%+-]*@)"
+    r"(?im)\b([A-Za-z0-9])\s*[\-\)\]\u2010\u2011\u2012\u2013\u2014]\s*\n\s*"
+    r"(?=[A-Za-z][A-Za-z0-9._%+-]*@)"
 )
 _RX_DEHYPHEN = re.compile(
     r"([A-Za-z0-9._%+\-])[\-\u2010\u2011\u2012\u2013\u2014]\s*\n\s*([A-Za-z0-9._%+\-])"
@@ -39,7 +40,10 @@ _RX_AT = re.compile(r"\s*@\s*")
 _RX_DOT = re.compile(r"(@[A-Za-z0-9.-]+)\s*\.\s*([A-Za-z]{2,10})\b")
 _RX_DOT_COM = re.compile(r"\.\s*c\s*o\s*m\b", re.I)
 _RX_DOT_RU = re.compile(r"\.\s*r\s*u\b", re.I)
-_PROV = r"(gmail|yahoo|hotmail|outlook|protonmail|icloud|aol|live|msn|mail|yandex|rambler|bk|list|inbox|ya)"
+_PROV = (
+    "(gmail|yahoo|hotmail|outlook|protonmail|icloud|aol|live|"
+    "msn|mail|yandex|rambler|bk|list|inbox|ya)"
+)
 _RX_PROV1 = re.compile(rf"(@{_PROV}\.co)(?=[^\w]|$)", re.I)
 _RX_PROV2 = re.compile(rf"(@{_PROV}\.co)\s*m\b", re.I)
 _RX_SUFFIX = re.compile(r"(\.(?:ru|com))(?=[A-Za-z0-9])")
@@ -189,7 +193,8 @@ def extract_clean_emails_from_text(text: str) -> Set[str]:
         return set()
     text = _preclean_text_for_emails(text)
     base_re = re.compile(
-        rf"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN}))(?=[^\w]|$)"
+        rf"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN}))"
+        r"(?=[^\w]|$)"
     )
     raw = set(base_re.findall(text))
     if not raw:
