@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-import os
-import re
-import zipfile
-import random
 import concurrent.futures
+import html as htmllib
+import os
+import random
+import re
 import tempfile
+import zipfile
 from pathlib import Path
-from typing import Tuple, Set, List, Dict
+from typing import Dict, List, Set, Tuple
 
-import aiohttp
 import fitz  # PyMuPDF
 import pandas as pd
 from docx import Document
 
-import html as htmllib
-
 from .utils import log_error
-
 
 ALLOWED_TLDS = {"ru", "com"}
 if ALLOWED_TLDS:
@@ -34,12 +31,8 @@ _RX_PROTECT = re.compile(
 _RX_DEHYPHEN = re.compile(
     r"([A-Za-z0-9._%+\-])[\-\u2010\u2011\u2012\u2013\u2014]\s*\n\s*([A-Za-z0-9._%+\-])"
 )
-_RX_JOIN_NOHYPHEN = re.compile(
-    r"([A-Za-z]{3,})\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@"
-)
-_RX_JOIN_DOT = re.compile(
-    r"([A-Za-z]{2,})([._])\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@"
-)
+_RX_JOIN_NOHYPHEN = re.compile(r"([A-Za-z]{3,})\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@")
+_RX_JOIN_DOT = re.compile(r"([A-Za-z]{2,})([._])\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@")
 _RX_JOIN_NUM = re.compile(r"([A-Za-z]{2,})\s*\n\s*([0-9]{1,6})\s*@")
 _RX_CRLF = re.compile(r"[\r\n]+")
 _RX_AT = re.compile(r"\s*@\s*")
@@ -234,7 +227,9 @@ def detect_numeric_truncations(candidates: Set[str]) -> List[tuple[str, str]]:
     return pairs
 
 
-def apply_numeric_truncation_removal(allowed_set: Set[str]) -> Tuple[Set[str], List[tuple[str, str]]]:
+def apply_numeric_truncation_removal(
+    allowed_set: Set[str],
+) -> Tuple[Set[str], List[tuple[str, str]]]:
     pairs = detect_numeric_truncations(allowed_set)
     if not pairs:
         return allowed_set, []
@@ -319,15 +314,11 @@ def extract_from_uploaded_file(path: str) -> Tuple[Set[str], Set[str]]:
     return set(), set()
 
 
-async def async_extract_emails_from_url(
-    url: str, session, chat_id: int | None = None
-):
+async def async_extract_emails_from_url(url: str, session, chat_id: int | None = None):
     try:
         async with session.get(url, timeout=20) as resp:
             if resp.status >= 400:
-                log_error(
-                    f"async_extract_emails_from_url: {url}: HTTP {resp.status}"
-                )
+                log_error(f"async_extract_emails_from_url: {url}: HTTP {resp.status}")
                 return (url, [], [], [])
             html_text = await resp.text()
             allowed = extract_clean_emails_from_text(html_text)
@@ -418,12 +409,16 @@ async def extract_emails_from_zip(
     extracted_files: List[str] = []
     with zipfile.ZipFile(zip_path, "r") as z:
         file_list = [
-            f for f in z.namelist() if f.lower().endswith((".pdf", ".xlsx", ".csv", ".docx"))
+            f
+            for f in z.namelist()
+            if f.lower().endswith((".pdf", ".xlsx", ".csv", ".docx"))
         ]
         total_files = len(file_list)
         if total_files == 0:
             if progress_msg:
-                await progress_msg.edit_text("❌ В архиве не найдено поддерживаемых файлов.")
+                await progress_msg.edit_text(
+                    "❌ В архиве не найдено поддерживаемых файлов."
+                )
             return all_allowed, extracted_files, all_loose
         if progress_msg:
             await progress_msg.edit_text(
@@ -462,4 +457,3 @@ __all__ = [
     "extract_emails_multithreaded",
     "extract_emails_from_zip",
 ]
-

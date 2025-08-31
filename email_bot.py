@@ -15,8 +15,8 @@ from telegram.ext import (
     filters,
 )
 
+from emailbot import bot_handlers, messaging
 from emailbot.utils import load_env, setup_logging
-from emailbot import messaging, bot_handlers
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -41,34 +41,50 @@ def main() -> None:
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🧹"), bot_handlers.reset_email_list)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🧹"), bot_handlers.reset_email_list
+        )
     )
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^🧾"), bot_handlers.about_bot)
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🚫"), bot_handlers.add_block_prompt)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🚫"), bot_handlers.add_block_prompt
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^✉️"), bot_handlers.prompt_manual_email)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^✉️"), bot_handlers.prompt_manual_email
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🧭"), bot_handlers.prompt_change_group)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🧭"), bot_handlers.prompt_change_group
+        )
     )
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command)
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^📁"), bot_handlers.imap_folders_command)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📁"), bot_handlers.imap_folders_command
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command
+        )
     )
 
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
@@ -82,11 +98,13 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")
     )
+    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.select_group, pattern="^group_")
+        CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending")
     )
-    app.add_handler(CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending"))
-    app.add_handler(CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_"))
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+    )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")
     )

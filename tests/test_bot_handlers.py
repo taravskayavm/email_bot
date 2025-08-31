@@ -1,16 +1,21 @@
-import sys
-from pathlib import Path
-import types
 import asyncio
 import logging
+import sys
+import types
+from pathlib import Path
 
-import pytest
 from telegram import InlineKeyboardMarkup
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import emailbot.bot_handlers as bh
-from emailbot.bot_handlers import start, handle_document, handle_text, SESSION_KEY, SessionState
+from emailbot.bot_handlers import (
+    SESSION_KEY,
+    SessionState,
+    handle_document,
+    handle_text,
+    start,
+)
 
 
 class DummyFile:
@@ -50,6 +55,7 @@ class DummyUpdate:
         self.message = DummyMessage(text=text, document=document, chat_id=chat_id)
         self.effective_chat = types.SimpleNamespace(id=chat_id)
         if callback_data is not None:
+
             class DummyQuery:
                 def __init__(self, data, chat_id):
                     self.data = data
@@ -90,8 +96,14 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
         "extract_from_uploaded_file",
         lambda path: ({"good@example.com", "123@site.com"}, {"foreign@example.de"}),
     )
-    monkeypatch.setattr(bh, "collect_repairs_from_files", lambda files: [("bad@example.com", "good@example.com")])
-    monkeypatch.setattr(bh, "apply_numeric_truncation_removal", lambda allowed: (allowed, []))
+    monkeypatch.setattr(
+        bh,
+        "collect_repairs_from_files",
+        lambda files: [("bad@example.com", "good@example.com")],
+    )
+    monkeypatch.setattr(
+        bh, "apply_numeric_truncation_removal", lambda allowed: (allowed, [])
+    )
     monkeypatch.setattr(bh, "sample_preview", lambda items, k: list(items)[:k])
 
     run(handle_document(update, ctx))
@@ -120,7 +132,9 @@ def test_handle_text_add_block(monkeypatch):
 
 
 def test_handle_text_manual_emails():
-    update = DummyUpdate(text="User@example.com support@support.com 123@site.com 1test@site.com")
+    update = DummyUpdate(
+        text="User@example.com support@support.com 123@site.com 1test@site.com"
+    )
     ctx = DummyContext()
     ctx.user_data["awaiting_manual_email"] = True
 
@@ -186,7 +200,9 @@ def test_send_manual_email_uses_html_template(monkeypatch):
             return False
 
     monkeypatch.setattr(bh, "SmtpClient", lambda *a, **k: DummyClient())
-    monkeypatch.setattr(bh, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()))
+    monkeypatch.setattr(
+        bh, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap())
+    )
     monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
     monkeypatch.setattr(bh, "get_sent_today", lambda: set())

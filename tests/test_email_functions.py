@@ -1,10 +1,10 @@
+import asyncio
 import sys
 from pathlib import Path
 
-import asyncio
 import aiohttp
-from aiohttp import web
 import pytest
+from aiohttp import web
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -67,7 +67,7 @@ def test_is_allowed_tld_accepts_com_and_subdomain():
     expected = "com" in extraction.ALLOWED_TLDS
     assert extraction.is_allowed_tld("user@mail.google.com") == expected
     assert extraction.is_allowed_tld("user@domain.com,") == expected
-    assert extraction.is_allowed_tld("user@domain.com\u00A0") == expected
+    assert extraction.is_allowed_tld("user@domain.com\u00a0") == expected
 
 
 def _run_async(coro):

@@ -1,8 +1,8 @@
 """Helpers for the email bot."""
 
-from .utils import load_env, setup_logging, log_error
+from . import bot_handlers, extraction, messaging
 from .smtp_client import SmtpClient
-from . import extraction, messaging, bot_handlers
+from .utils import load_env, log_error, setup_logging
 
 __all__ = [
     "load_env",

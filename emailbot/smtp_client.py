@@ -1,12 +1,14 @@
-import ssl
 import smtplib
+import ssl
 from typing import Optional
 
 
 class SmtpClient:
     """Simple SMTP client with context manager support."""
 
-    def __init__(self, host: str, port: int, username: str, password: str, use_ssl: bool = True):
+    def __init__(
+        self, host: str, port: int, username: str, password: str, use_ssl: bool = True
+    ):
         self.host = host
         self.port = port
         self.username = username
