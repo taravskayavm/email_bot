@@ -39,19 +39,20 @@ TEMPLATE_MAP = {
     "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
 }
 
-SIGNATURE_HTML = """
-<div style="margin-top:20px;font-size:0.9em;color:#222;line-height:1.4;font-family:Arial,sans-serif;">
---<br>С уважением,<br>
-Таравская Владлена Михайловна<br>
-Заведующая редакцией литературы по медицине, спорту и туризму<br>
-ООО Издательство «ЛАНЬ»<br><br>
-8 (812) 336-90-92, доб. 208<br><br>
-196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>
-Рабочие часы: 10.00-18.00<br><br>
-med@lanbook.ru<br>
-<a href="https://www.lanbook.com">www.lanbook.com</a>
-</div>
-"""
+# Text of the signature without styling. The surrounding block and
+# font settings are injected dynamically based on the template used for
+# the message.
+SIGNATURE_TEXT = (
+    "--<br>С уважением,<br>"
+    "Таравская Владлена Михайловна<br>"
+    "Заведующая редакцией литературы по медицине, спорту и туризму<br>"
+    "ООО Издательство «ЛАНЬ»<br><br>"
+    "8 (812) 336-90-92, доб. 208<br><br>"
+    "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
+    "Рабочие часы: 10.00-18.00<br><br>"
+    "med@lanbook.ru<br>"
+    '<a href="https://www.lanbook.com">www.lanbook.com</a>'
+)
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
@@ -65,6 +66,31 @@ def _read_template_file(path: str) -> str:
             path = alt
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def _extract_fonts(html: str) -> tuple[str, int]:
+    """Return font-family and base font-size from the HTML template.
+
+    The function searches for the most common ``font-size`` declaration in
+    the template and uses the first ``font-family`` declaration. Defaults are
+    provided if not found.
+    """
+
+    # Font family
+    fam_match = re.search(r"font-family:\s*([^;]+);", html, flags=re.IGNORECASE)
+    font_family = "Arial,sans-serif"
+    if fam_match:
+        font_family = fam_match.group(1).replace("!important", "").strip()
+
+    # Font size – choose the most common value in the document
+    sizes = re.findall(r"font-size:\s*(\d+)px", html, flags=re.IGNORECASE)
+    font_size = 16
+    if sizes:
+        from collections import Counter
+
+        font_size = int(Counter(sizes).most_common(1)[0][0])
+
+    return font_family, font_size
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
@@ -148,7 +174,12 @@ def save_to_sent_folder(
 def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
-    sig = SIGNATURE_HTML
+    font_family, base_size = _extract_fonts(html_body)
+    sig_size = max(base_size - 1, 1)
+    signature_html = (
+        f'<div style="margin-top:20px;font-family:{font_family};'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{SIGNATURE_TEXT}</div>'
+    )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
         html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
@@ -159,7 +190,7 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
         'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
-    html_body = html_body.replace("</body>", f"{sig}{unsub_html}</body>")
+    html_body = html_body.replace("</body>", f"{signature_html}{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
     msg["From"] = formataddr(
