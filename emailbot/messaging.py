@@ -78,11 +78,21 @@ def _read_template_file(path: str) -> str:
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
+    """Return the preferred "Sent" folder, validating it on the server."""
+
     if IMAP_FOLDER_FILE.exists():
         name = IMAP_FOLDER_FILE.read_text(encoding="utf-8").strip()
         if name:
-            return name
-    return detect_sent_folder(imap)
+            status, _ = imap.select(f'"{name}"')
+            if status == "OK":
+                return name
+            logger.warning("Stored sent folder %s not selectable, falling back", name)
+    detected = detect_sent_folder(imap)
+    status, _ = imap.select(f'"{detected}"')
+    if status == "OK":
+        return detected
+    logger.warning("Detected sent folder %s not selectable, using Sent", detected)
+    return "Sent"
 
 
 def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
@@ -113,16 +123,26 @@ def save_to_sent_folder(
             close = True
         if folder is None:
             folder = get_preferred_sent_folder(imap)
-        imap.append(
+        status, _ = imap.select(f'"{folder}"')
+        if status != "OK":
+            logger.warning("select %s failed (%s), using Sent", folder, status)
+            folder = "Sent"
+            imap.select(f'"{folder}"')
+        res = imap.append(
             f'"{folder}"',
             "\\Seen",
             imaplib.Time2Internaldate(time.time()),
             raw_message.encode("utf-8"),
         )
-        if close:
-            imap.logout()
+        logger.info("imap.append to %s: %s", folder, res)
     except Exception as e:
         log_error(f"save_to_sent_folder: {e}")
+    finally:
+        if close and imap is not None:
+            try:
+                imap.logout()
+            except Exception as e:
+                log_error(f"save_to_sent_folder logout: {e}")
 
 
 def build_message(
@@ -221,15 +241,21 @@ def process_unsubscribe_requests():
         log_error(f"process_unsubscribe_requests: {e}")
 
 
+def _canonical_blocked(email_str: str) -> str:
+    e = normalize_email(email_str)
+    e = re.sub(r"^\.+", "", e)
+    return e
+
+
 def get_blocked_emails() -> Set[str]:
     if not os.path.exists(BLOCKED_FILE):
         return set()
     with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        return set(normalize_email(line) for line in f if "@" in line)
+        return set(_canonical_blocked(line) for line in f if "@" in line)
 
 
 def add_blocked_email(email_str: str) -> bool:
-    email_norm = re.sub(r"^\.+", "", normalize_email(email_str))
+    email_norm = _canonical_blocked(email_str)
     if not email_norm or "@" not in email_norm:
         return False
     existing = get_blocked_emails()
@@ -244,8 +270,7 @@ def dedupe_blocked_file():
     if not os.path.exists(BLOCKED_FILE):
         return
     with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        raw = [normalize_email(line) for line in f if "@" in line]
-    raw = [re.sub(r"^\.+", "", e) for e in raw]
+        raw = [_canonical_blocked(line) for line in f if "@" in line]
     keep = set(raw)
     by_suffix: Dict[str, Set[str]] = {}
     for e in list(keep):
@@ -254,9 +279,7 @@ def dedupe_blocked_file():
             suffix = m.group(2)
             by_suffix.setdefault(suffix, set()).add(e)
     for suffix, variants in by_suffix.items():
-        many = len(variants) >= 2
-        clean_present = suffix in keep
-        if many or clean_present:
+        if len(variants) >= 2 or suffix in keep:
             keep.difference_update(variants)
             keep.add(suffix)
     with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
@@ -354,17 +377,27 @@ def was_emailed_recently(
             close = True
         if folder is None:
             folder = get_preferred_sent_folder(imap)
-        imap.select(f'"{folder}"')
-        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
-        status, data = imap.search(
-            None, f'(SINCE {date_str} TO "{email_addr}")'
+        status, _ = imap.select(f'"{folder}"')
+        if status != "OK":
+            logger.warning("select %s failed (%s), using Sent", folder, status)
+            folder = "Sent"
+            imap.select(f'"{folder}"')
+        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime(
+            "%d-%b-%Y"
         )
-        if close:
-            imap.logout()
-        return bool(data and data[0])
+        status, data = imap.search(
+            None, f'(SINCE {date_str} HEADER To "{email_addr}")'
+        )
+        return status == "OK" and bool(data and data[0])
     except Exception as e:
         log_error(f"was_emailed_recently: {e}")
         return False
+    finally:
+        if close and imap is not None:
+            try:
+                imap.logout()
+            except Exception as e:
+                log_error(f"was_emailed_recently logout: {e}")
 
 
 def get_recent_6m_union() -> Set[str]:
@@ -426,15 +459,16 @@ def get_sent_today() -> Set[str]:
 
 
 def sync_log_with_imap() -> int:
+    imap = None
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         status, _ = imap.select(f'"{sent_folder}"')
         if status != "OK":
-            log_error("Sent folder not selected")
-            imap.logout()
-            return 0
+            logger.warning("select %s failed (%s), using Sent", sent_folder, status)
+            sent_folder = "Sent"
+            imap.select(f'"{sent_folder}"')
         existing = get_recent_6m_union()
         date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
@@ -471,11 +505,16 @@ def sync_log_with_imap() -> int:
                 )
                 f.flush()
             added += 1
-        imap.logout()
         return added
     except Exception as e:
         log_error(f"sync_log_with_imap: {e}")
         raise
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception as e:
+                log_error(f"sync_log_with_imap logout: {e}")
 
 
 def periodic_unsubscribe_check(stop_event):
