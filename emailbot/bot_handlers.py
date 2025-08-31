@@ -463,7 +463,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.to_send = sorted(set(filtered))
     state.repairs = repairs
     state.repairs_sample = sample_preview(
-        [f"{b} → {g}" for (b, g) in repairs], 6
+        [f"{b} → {g}" for (b, g) in state.repairs], 6
     )
 
     report = await _compose_report_and_save(
@@ -668,10 +668,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         current.update(filtered)
         state.to_send = sorted(current)
         state.foreign = sorted(foreign_all)
-        state.repairs = list(dict.fromkeys(repairs_all))
-        state.repairs_sample = sample_preview(
-            [f"{b} → {g}" for (b, g) in state.repairs], 6
-        )
+        state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
+        state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
 
         report = await _compose_report_and_save(
             context, allowed_all, filtered, suspicious_numeric, foreign_all
