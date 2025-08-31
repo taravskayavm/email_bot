@@ -123,13 +123,13 @@ def save_to_sent_folder(
             close = True
         if folder is None:
             folder = get_preferred_sent_folder(imap)
-        status, _ = imap.select(f'"{folder}"')
+        status, _ = imap.select(folder)
         if status != "OK":
             logger.warning("select %s failed (%s), using Sent", folder, status)
             folder = "Sent"
-            imap.select(f'"{folder}"')
+            imap.select(folder)
         res = imap.append(
-            f'"{folder}"',
+            folder,
             "\\Seen",
             imaplib.Time2Internaldate(time.time()),
             raw_message.encode("utf-8"),
