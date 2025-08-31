@@ -97,3 +97,47 @@ def test_build_message_adds_html_alternative(tmp_path, monkeypatch):
     html_part = msg.get_body("html")
     assert html_part is not None
     assert "Hello" in html_part.get_content()
+
+
+def test_save_to_sent_folder_serializes_string():
+    class DummyImap:
+        def __init__(self):
+            self.append_args = None
+
+        def select(self, folder):
+            return "OK", []
+
+        def append(self, folder, flags, internaldate, msg_bytes):
+            self.append_args = (folder, flags, internaldate, msg_bytes)
+            return "OK", []
+
+    msg = messaging.EmailMessage()
+    msg["From"] = "a@example.com"
+    msg["To"] = "b@example.com"
+    msg.set_content("Hello")
+    raw = msg.as_string()
+    imap = DummyImap()
+    messaging.save_to_sent_folder(raw, imap=imap, folder="Sent")
+    assert isinstance(imap.append_args[3], bytes)
+    assert imap.append_args[3] == raw.encode("utf-8")
+
+
+def test_save_to_sent_folder_serializes_email_message():
+    class DummyImap:
+        def __init__(self):
+            self.append_args = None
+
+        def select(self, folder):
+            return "OK", []
+
+        def append(self, folder, flags, internaldate, msg_bytes):
+            self.append_args = (folder, flags, internaldate, msg_bytes)
+            return "OK", []
+
+    msg = messaging.EmailMessage()
+    msg["From"] = "a@example.com"
+    msg["To"] = "b@example.com"
+    msg.set_content("Hi")
+    imap = DummyImap()
+    messaging.save_to_sent_folder(msg, imap=imap, folder="Sent")
+    assert imap.append_args[3] == msg.as_bytes()
