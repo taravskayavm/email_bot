@@ -473,8 +473,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
         for s in state.repairs_sample:
             report += f"\n{s}"
-    await update.message.reply_text(report)
-
     extra_buttons = [
         [InlineKeyboardButton("🔁 Показать ещё примеры", callback_data="refresh_preview")]
     ]
@@ -514,9 +512,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     extra_buttons.append(
         [InlineKeyboardButton("▶️ Перейти к выбору направления", callback_data="proceed_group")]
     )
-
+    report += "\n\nДополнительные действия:"
     await update.message.reply_text(
-        "Дополнительные действия:",
+        report,
         reply_markup=InlineKeyboardMarkup(extra_buttons),
     )
 
@@ -678,8 +676,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
             for s in state.repairs_sample:
                 report += f"\n{s}"
-        await update.message.reply_text(report)
-
         extra_buttons = [
             [InlineKeyboardButton("🔁 Показать ещё примеры", callback_data="refresh_preview")]
         ]
@@ -723,9 +719,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         extra_buttons.append(
             [InlineKeyboardButton("▶️ Перейти к выбору направления", callback_data="proceed_group")]
         )
-
+        report += "\n\nДополнительные действия:"
         await update.message.reply_text(
-            "Дополнительные действия:",
+            report,
             reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
         return
