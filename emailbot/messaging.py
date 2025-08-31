@@ -40,8 +40,7 @@ TEMPLATE_MAP = {
 }
 
 SIGNATURE_HTML = """
-<div style="margin-top:20px;font-size:14px;color:#222;line-height:1.4;font-family:Arial,sans-serif;">
-<img src="cid:logo" alt="Логотип Лань" style="float:right;max-width:120px;height:auto;" data-src="https://{host}/Logo.png">
+<div style="margin-top:20px;font-size:0.9em;color:#222;line-height:1.4;font-family:Arial,sans-serif;">
 --<br>С уважением,<br>
 Таравская Владлена Михайловна<br>
 Заведующая редакцией литературы по медицине, спорту и туризму<br>
@@ -149,7 +148,10 @@ def save_to_sent_folder(
 def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
-    sig = SIGNATURE_HTML.format(host=host)
+    sig = SIGNATURE_HTML
+    inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
+    if not inline_logo:
+        html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
     token = secrets.token_urlsafe(16)
     link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
     unsub_html = (
@@ -173,7 +175,7 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     logo_path = SCRIPT_DIR / "Logo.png"
-    if logo_path.exists():
+    if inline_logo and logo_path.exists():
         try:
             with logo_path.open("rb") as img:
                 img_bytes = img.read()
@@ -503,7 +505,7 @@ def get_sent_today() -> Set[str]:
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.reader(f)
         for row in reader:
-            if len(row) < 2:
+            if len(row) < 4 or row[3] not in {"ok", "sent", "success"}:
                 continue
             try:
                 dt = datetime.fromisoformat(row[0])
@@ -514,6 +516,10 @@ def get_sent_today() -> Set[str]:
             if dt.date() == today:
                 sent.add(normalize_email(row[1]))
     return sent
+
+
+def count_sent_today() -> int:
+    return len(get_sent_today())
 
 
 def sync_log_with_imap() -> int:
@@ -623,6 +629,7 @@ __all__ = [
     "get_recently_contacted_emails_cached",
     "clear_recent_sent_cache",
     "get_sent_today",
+    "count_sent_today",
     "sync_log_with_imap",
     "periodic_unsubscribe_check",
     "check_env_vars",

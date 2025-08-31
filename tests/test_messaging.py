@@ -1,6 +1,6 @@
 import asyncio
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
 from aiohttp import web
@@ -113,6 +113,74 @@ def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
         f"Отписаться: https://{token_host}/unsubscribe?email=recipient@example.com&token={token}"
         in text_part.get_content()
     )
+
+
+def test_build_message_logo_toggle(tmp_path, monkeypatch):
+    html_file = tmp_path / "template.html"
+    html_file.write_text(
+        "<html><body><img src=\"cid:logo\" alt=\"l\">Hello</body></html>",
+        encoding="utf-8",
+    )
+    logo = tmp_path / "Logo.png"
+    logo.write_bytes(b"fake")
+    monkeypatch.setattr(messaging, "SCRIPT_DIR", tmp_path)
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+
+    monkeypatch.setenv("INLINE_LOGO", "1")
+    msg, _ = messaging.build_message(
+        "r@example.com", str(html_file), "Subj"
+    )
+    html = msg.get_body("html").get_content()
+    assert html.count("cid:logo") == 1
+    assert html.count("<img") == 1
+
+    monkeypatch.setenv("INLINE_LOGO", "0")
+    msg2, _ = messaging.build_message(
+        "r@example.com", str(html_file), "Subj"
+    )
+    html2 = msg2.get_body("html").get_content()
+    assert "cid:logo" not in html2
+    assert "<img" not in html2
+
+
+def test_count_sent_today_ignores_external(tmp_path, monkeypatch):
+    log = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    today = datetime.utcnow()
+    yesterday = today - timedelta(days=1)
+    with open(log, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([today.isoformat(), "a@example.com", "g", "external"])
+        w.writerow([today.isoformat(), "b@example.com", "g", "ok"])
+        w.writerow([yesterday.isoformat(), "c@example.com", "g", "ok"])
+    assert messaging.count_sent_today() == 1
+    assert messaging.get_sent_today() == {"b@example.com"}
+
+
+def test_limit_not_triggered_by_external(tmp_path, monkeypatch):
+    log = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    today = datetime.utcnow()
+    with open(log, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        for i in range(3000):
+            w.writerow([today.isoformat(), f"ext{i}@e.com", "g", "external"])
+    sent_today = messaging.get_sent_today()
+    available = max(0, messaging.MAX_EMAILS_PER_DAY - len(sent_today))
+    assert available == messaging.MAX_EMAILS_PER_DAY
+
+
+def test_limit_triggered_after_200_sent(tmp_path, monkeypatch):
+    log = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    today = datetime.utcnow()
+    with open(log, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        for i in range(200):
+            w.writerow([today.isoformat(), f"ok{i}@e.com", "g", "ok"])
+    sent_today = messaging.get_sent_today()
+    available = max(0, messaging.MAX_EMAILS_PER_DAY - len(sent_today))
+    assert available == 0
 
 
 def test_save_to_sent_folder_serializes_string():
