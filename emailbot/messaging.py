@@ -244,6 +244,7 @@ def process_unsubscribe_requests():
 def _canonical_blocked(email_str: str) -> str:
     e = normalize_email(email_str)
     e = re.sub(r"^\.+", "", e)
+    e = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", e)
     return e
 
 
@@ -251,7 +252,7 @@ def get_blocked_emails() -> Set[str]:
     if not os.path.exists(BLOCKED_FILE):
         return set()
     with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        return set(_canonical_blocked(line) for line in f if "@" in line)
+        return {_canonical_blocked(line) for line in f if "@" in line}
 
 
 def add_blocked_email(email_str: str) -> bool:
@@ -270,21 +271,9 @@ def dedupe_blocked_file():
     if not os.path.exists(BLOCKED_FILE):
         return
     with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        raw = [_canonical_blocked(line) for line in f if "@" in line]
-    keep = set(raw)
-    by_suffix: Dict[str, Set[str]] = {}
-    for e in list(keep):
-        m = re.match(r"^(\d{1,2})([A-Za-z][A-Za-z0-9._%+-]*@.+)$", e, flags=re.I)
-        if m:
-            suffix = m.group(2)
-            by_suffix.setdefault(suffix, set()).add(e)
-    for suffix, variants in by_suffix.items():
-        if len(variants) >= 2 or suffix in keep:
-            keep.difference_update(variants)
-            keep.add(suffix)
+        keep = {_canonical_blocked(line) for line in f if "@" in line}
     with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
-        if keep:
-            f.write("\n".join(sorted(keep)) + "\n")
+        f.write("\n".join(sorted(keep)) + "\n")
 
 
 def log_sent_email(

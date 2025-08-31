@@ -48,6 +48,10 @@ def test_add_blocked_email_handles_duplicates_and_invalid(temp_files):
     assert messaging.add_blocked_email("user@example.com") is False
     assert blocked.read_text().splitlines() == ["user@example.com"]
 
+    # numeric variant should also be treated as duplicate
+    assert messaging.add_blocked_email("1user@example.com") is False
+    assert blocked.read_text().splitlines() == ["user@example.com"]
+
 
 def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
     blocked, _ = temp_files
@@ -64,7 +68,7 @@ def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
     )
     messaging.dedupe_blocked_file()
     result = blocked.read_text().splitlines()
-    assert result == ["1jane@example.com", "john@example.com"]
+    assert result == ["jane@example.com", "john@example.com"]
 
 
 def test_log_sent_email_records_entries(temp_files):
