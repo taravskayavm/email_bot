@@ -174,6 +174,7 @@ def test_send_manual_email_uses_html_template(monkeypatch):
 
     def fake_send(client, imap, folder, addr, path, *a, **kw):
         sent_paths.append(path)
+        return "tok"
 
     class DummyImap:
         def login(self, *a, **k):
