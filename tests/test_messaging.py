@@ -1,7 +1,7 @@
 import csv
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -16,12 +16,16 @@ def fake_smtp(monkeypatch):
     class DummySmtp:
         def __init__(self, *a, **kw):
             pass
+
         def __enter__(self):
             return self
+
         def __exit__(self, exc_type, exc, tb):
             pass
+
         def send(self, *a, **kw):
             pass
+
     monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
 
 
@@ -56,14 +60,16 @@ def test_add_blocked_email_handles_duplicates_and_invalid(temp_files):
 def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
     blocked, _ = temp_files
     blocked.write_text(
-        "\n".join([
-            "john@example.com",
-            "John@example.com",
-            "1john@example.com",
-            "2john@example.com",
-            "1jane@example.com",
-            "1john@example.com",
-        ])
+        "\n".join(
+            [
+                "john@example.com",
+                "John@example.com",
+                "1john@example.com",
+                "2john@example.com",
+                "1jane@example.com",
+                "1john@example.com",
+            ]
+        )
         + "\n"
     )
     messaging.dedupe_blocked_file()
@@ -91,9 +97,7 @@ def test_build_message_adds_html_alternative(tmp_path, monkeypatch):
     html_file = tmp_path / "template.html"
     html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
-    msg = messaging.build_message(
-        "recipient@example.com", str(html_file), "Subject"
-    )
+    msg = messaging.build_message("recipient@example.com", str(html_file), "Subject")
     html_part = msg.get_body("html")
     assert html_part is not None
     assert "Hello" in html_part.get_content()
