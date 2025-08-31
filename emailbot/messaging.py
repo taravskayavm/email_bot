@@ -436,7 +436,7 @@ def sync_log_with_imap() -> int:
             imap.logout()
             return 0
         existing = get_recent_6m_union()
-        date_180 = (datetime.now() - timedelta(days=180)).strftime("%d-%b-%Y")
+        date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
         added = 0
         for num in (data[0].split() if data and data[0] else []):
@@ -452,13 +452,24 @@ def sync_log_with_imap() -> int:
                 dt = email.utils.parsedate_to_datetime(msg.get("Date"))
                 if dt and dt.tzinfo:
                     dt = dt.replace(tzinfo=None)
-                if dt and dt < datetime.now() - timedelta(days=180):
+                if dt and dt < datetime.utcnow() - timedelta(days=180):
                     continue
             except Exception:
-                continue
+                dt = None
             with open(LOG_FILE, "a", encoding="utf-8", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([dt.isoformat(), to_addr, "imap_sync", "external"])
+                writer.writerow(
+                    [
+                        (dt or datetime.utcnow()).isoformat(),
+                        normalize_email(to_addr),
+                        "imap_sync",
+                        "external",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+                f.flush()
             added += 1
         imap.logout()
         return added
