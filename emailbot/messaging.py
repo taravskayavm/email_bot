@@ -111,7 +111,7 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
 
 
 def save_to_sent_folder(
-    raw_message: str,
+    raw_message: EmailMessage | str | bytes,
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
 ):
@@ -128,11 +128,19 @@ def save_to_sent_folder(
             logger.warning("select %s failed (%s), using Sent", folder, status)
             folder = "Sent"
             imap.select(folder)
+
+        if isinstance(raw_message, EmailMessage):
+            msg_bytes = raw_message.as_bytes()
+        elif isinstance(raw_message, bytes):
+            msg_bytes = raw_message
+        else:
+            msg_bytes = raw_message.encode("utf-8")
+
         res = imap.append(
             folder,
             "\\Seen",
             imaplib.Time2Internaldate(time.time()),
-            raw_message.encode("utf-8"),
+            msg_bytes,
         )
         logger.info("imap.append to %s: %s", folder, res)
     except Exception as e:
