@@ -1,12 +1,7 @@
 import csv
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import pytest
-
-# Ensure package root on path
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from emailbot import messaging
 

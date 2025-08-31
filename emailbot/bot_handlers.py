@@ -152,8 +152,11 @@ async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Prompt the user to upload files or URLs with e-mail addresses."""
 
     await update.message.reply_text(
-        "📥 Загрузите данные с e-mail-адресами для рассылки.\n\n"
-        "Поддерживаемые форматы: PDF, Excel (.xlsx), Word (.docx), CSV, ZIP (с этими файлами внутри), а также ссылки на сайты."
+        (
+            "📥 Загрузите данные с e-mail-адресами для рассылки.\n\n"
+            "Поддерживаемые форматы: PDF, Excel (.xlsx), Word (.docx), CSV, "
+            "ZIP (с этими файлами внутри), а также ссылки на сайты."
+        )
     )
 
 
@@ -161,8 +164,11 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a short description of the bot."""
 
     await update.message.reply_text(
-        "Бот делает рассылку HTML-писем с учётом истории отправки (IMAP 180 дней) и блок-листа. "
-        "Один адрес — не чаще 1 раза в 6 месяцев. Домены: только .ru и .com."
+        (
+            "Бот делает рассылку HTML-писем с учётом истории отправки "
+            "(IMAP 180 дней) и блок-листа. Один адрес — не чаще 1 раза в 6 "
+            "месяцев. Домены: только .ru и .com."
+        )
     )
 
 
@@ -171,7 +177,11 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     clear_all_awaiting(context)
     await update.message.reply_text(
-        "Введите email или список email-адресов (через запятую/пробел/с новой строки), которые нужно добавить в исключения:"
+        (
+            "Введите email или список email-адресов "
+            "(через запятую/пробел/с новой строки), "
+            "которые нужно добавить в исключения:"
+        )
     )
     context.user_data["awaiting_block_email"] = True
 
@@ -601,8 +611,10 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     state.group = group_code
     state.template = template_path
     await query.message.reply_text(
-        f"✉️ Готово к отправке {len(emails)} писем.\n"
-        f"Для запуска рассылки нажмите кнопку ниже.",
+        (
+            f"✉️ Готово к отправке {len(emails)} писем.\n"
+            "Для запуска рассылки нажмите кнопку ниже."
+        ),
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("✉️ Начать рассылку", callback_data="start_sending")]]
         ),
@@ -617,7 +629,10 @@ async def prompt_manual_email(
     clear_all_awaiting(context)
     context.user_data.pop("manual_emails", None)
     await update.message.reply_text(
-        "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
+        (
+            "Введите email или список email-адресов "
+            "(через запятую/пробел/с новой строки):"
+        )
     )
     context.user_data["awaiting_manual_email"] = True
 
@@ -663,7 +678,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ],
             ]
             await update.message.reply_text(
-                f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n⬇️ Выберите направление письма:",
+                (
+                    f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
+                    "⬇️ Выберите направление письма:"
+                ),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
@@ -831,7 +849,10 @@ async def include_numeric_emails(
     current.update(numeric)
     state.to_send = sorted(current)
     await query.message.reply_text(
-        f"➕ Добавлено цифровых адресов: {len(added)}.\nИтого к отправке: {len(state.to_send)}."
+        (
+            f"➕ Добавлено цифровых адресов: {len(added)}.\n"
+            f"Итого к отправке: {len(state.to_send)}."
+        )
     )
 
 
@@ -961,14 +982,20 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
             await update.callback_query.message.reply_text(
-                f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
+                (
+                    f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
+                    "Если вы исправили ошибки — нажмите "
+                    "«🚀 Игнорировать лимит» и запустите ещё раз."
+                )
             )
             return
         if not is_force_send(chat_id) and len(to_send) > available:
             to_send = to_send[:available]
             await query.message.reply_text(
-                f"⚠️ Учитываю дневной лимит: будет отправлено {available} адресов из списка."
+                (
+                    f"⚠️ Учитываю дневной лимит: будет отправлено "
+                    f"{available} адресов из списка."
+                )
             )
 
         await query.message.reply_text(
@@ -1066,14 +1093,20 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
             await query.message.reply_text(
-                f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
+                (
+                    f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
+                    "Если вы исправили ошибки — нажмите "
+                    "«🚀 Игнорировать лимит» и запустите ещё раз."
+                )
             )
             return
         if not is_force_send(chat_id) and len(emails_to_send) > available:
             emails_to_send = emails_to_send[:available]
             await query.message.reply_text(
-                f"⚠️ Учитываю дневной лимит: будет отправлено {available} адресов из списка."
+                (
+                    f"⚠️ Учитываю дневной лимит: будет отправлено "
+                    f"{available} адресов из списка."
+                )
             )
 
         await query.message.reply_text(
