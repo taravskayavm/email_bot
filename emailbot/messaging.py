@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
-from typing import Set, List, Dict, Optional
+from typing import Set, List, Dict, Optional, Callable, Awaitable
 
 from .smtp_client import SmtpClient
 from .utils import log_error
@@ -204,7 +204,31 @@ def send_email(
 
 async def async_send_email(recipient: str, html_path: str):
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, send_email, recipient, html_path)
+    try:
+        await loop.run_in_executor(None, send_email, recipient, html_path)
+    except Exception as e:
+        logger.exception(e)
+        log_error(e)
+        raise
+
+
+def create_task_with_logging(
+    coro,
+    notify_func: Callable[[str], Awaitable[None]] | None = None,
+):
+    async def runner():
+        try:
+            await coro
+        except Exception as e:
+            logger.exception(e)
+            log_error(e)
+            if notify_func:
+                try:
+                    await notify_func(f"❌ Ошибка: {e}")
+                except Exception as inner:
+                    logger.exception(inner)
+                    log_error(inner)
+    return asyncio.create_task(runner())
 
 
 def send_email_with_sessions(
@@ -538,6 +562,7 @@ __all__ = [
     "build_message",
     "send_email",
     "async_send_email",
+    "create_task_with_logging",
     "send_email_with_sessions",
     "process_unsubscribe_requests",
     "get_blocked_emails",
