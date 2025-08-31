@@ -1,12 +1,8 @@
 import asyncio
 import logging
-import sys
 import types
-from pathlib import Path
 
 from telegram import InlineKeyboardMarkup
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import emailbot.bot_handlers as bh
 from emailbot.bot_handlers import (
