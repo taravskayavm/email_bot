@@ -1010,10 +1010,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ) as client:
             for email_addr in to_send:
                 try:
-                    send_email_with_sessions(
+                    token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
-                    log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
+                    log_sent_email(
+                        email_addr,
+                        group_code,
+                        "ok",
+                        chat_id,
+                        template_path,
+                        unsubscribe_token=token,
+                    )
                     sent_count += 1
                     await asyncio.sleep(1.5)
                 except Exception as e:
@@ -1121,10 +1128,17 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ) as client:
             for email_addr in emails_to_send:
                 try:
-                    send_email_with_sessions(
+                    token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
-                    log_sent_email(email_addr, group_code, "ok", chat_id, template_path)
+                    log_sent_email(
+                        email_addr,
+                        group_code,
+                        "ok",
+                        chat_id,
+                        template_path,
+                        unsubscribe_token=token,
+                    )
                     sent_count += 1
                     await asyncio.sleep(1.5)
                 except Exception as e:
