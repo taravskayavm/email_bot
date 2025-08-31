@@ -963,7 +963,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
-    asyncio.create_task(long_job())
+    async def _run_long_job():
+        try:
+            await long_job()
+        except Exception as e:
+            log_error(f"send_manual_email: {e}")
+            await query.message.reply_text(f"❌ Ошибка: {e}")
+
+    asyncio.create_task(_run_long_job())
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1069,12 +1076,19 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
-    asyncio.create_task(long_job())
+    async def _run_long_job():
+        try:
+            await long_job()
+        except Exception as e:
+            log_error(f"send_all: {e}")
+            await query.message.reply_text(f"❌ Ошибка: {e}")
+
+    asyncio.create_task(_run_long_job())
 
 
 async def autosync_imap_with_message(query: CallbackQuery) -> None:
     """Synchronize IMAP logs and notify the user via message."""
-
+    await query.answer()
     await query.message.reply_text(
         "🔄 Синхронизация истории отправки с сервером..."
     )
