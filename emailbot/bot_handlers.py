@@ -981,6 +981,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
+            logger.info(
+                "Daily limit reached: %s emails sent today (source=sent_log)",
+                len(sent_today),
+            )
             await update.callback_query.message.reply_text(
                 (
                     f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
@@ -1099,6 +1103,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
+            logger.info(
+                "Daily limit reached: %s emails sent today (source=sent_log)",
+                len(sent_today),
+            )
             await query.message.reply_text(
                 (
                     f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
