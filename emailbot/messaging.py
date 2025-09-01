@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # directories located at the repository root.
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-LOG_FILE = str(SCRIPT_DIR / "sent_log.csv")
+LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = 200
 
@@ -382,6 +382,8 @@ def log_sent_email(
     unsubscribed="",
     unsubscribed_at="",
 ):
+    if status not in {"ok", "sent", "success"}:
+        return
     os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -451,6 +453,17 @@ def _load_sent_log() -> dict[str, List[datetime]]:
                 cache.setdefault(normalize_email(row[1]), []).append(dt)
     _log_cache = cache
     return cache
+
+
+def was_sent_within(email: str, days: int = 180) -> bool:
+    """Return True if ``email`` was sent to within ``days`` days."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    cache = _load_sent_log()
+    lst = cache.get(normalize_email(email), [])
+    if any(dt >= cutoff for dt in lst):
+        return True
+    recent = get_recently_contacted_emails_cached()
+    return normalize_email(email) in recent
 
 
 def was_emailed_recently(
@@ -664,5 +677,6 @@ __all__ = [
     "sync_log_with_imap",
     "periodic_unsubscribe_check",
     "check_env_vars",
+    "was_sent_within",
     "was_emailed_recently",
 ]
