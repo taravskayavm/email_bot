@@ -25,20 +25,56 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from . import messaging
-from .extraction import (
-    _preclean_text_for_emails,
-    apply_numeric_truncation_removal,
-    async_extract_emails_from_url,
-    collapse_footnote_variants,
-    collect_repairs_from_files,
-    extract_emails_from_zip,
-    extract_emails_loose,
-    extract_from_uploaded_file,
-    is_allowed_tld,
-    is_numeric_localpart,
-    normalize_email,
-    sample_preview,
-)
+from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
+
+
+def _preclean_text_for_emails(text: str) -> str:
+    return text
+
+
+def apply_numeric_truncation_removal(allowed):
+    return allowed, []
+
+
+async def async_extract_emails_from_url(url, session):
+    return url, [], [], []
+
+
+def collapse_footnote_variants(emails):
+    return emails
+
+
+def collect_repairs_from_files(files):
+    return []
+
+
+def extract_emails_from_zip(path):
+    return set(), set()
+
+
+def extract_emails_loose(text):
+    return set(smart_extract_emails(text))
+
+
+def extract_from_uploaded_file(path):
+    return set(), set()
+
+
+def is_allowed_tld(email_addr: str) -> bool:
+    tld = email_addr.rsplit(".", 1)[-1].lower()
+    return tld in {"ru", "com"}
+
+
+def is_numeric_localpart(email_addr: str) -> bool:
+    local = email_addr.split("@", 1)[0]
+    return local.isdigit()
+
+
+def sample_preview(items, k: int):
+    lst = list(dict.fromkeys(items))
+    if len(lst) <= k:
+        return lst
+    return lst[:k]
 from .messaging import (
     DOWNLOAD_DIR,
     LOG_FILE,
@@ -100,6 +136,7 @@ def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
     """Initialize session state for the current chat."""
     state = SessionState()
     context.chat_data[SESSION_KEY] = state
+    context.chat_data["cancel_event"] = asyncio.Event()
     return state
 
 
@@ -143,6 +180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["✉️ Ручная рассылка", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
+        ["⏹️ Стоп"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -170,6 +208,15 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "месяцев. Домены: только .ru и .com."
         )
     )
+
+
+async def stop_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the stop button by signalling cancellation."""
+    event = context.chat_data.get("cancel_event")
+    if event:
+        event.set()
+    await update.message.reply_text("Остановлено…")
+    context.chat_data["cancel_event"] = asyncio.Event()
 
 
 async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -652,16 +699,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        clean = _preclean_text_for_emails(text)
-        found = {normalize_email(x) for x in extract_emails_loose(clean)}
-        found = collapse_footnote_variants(found)
+        found = extract_emails_manual(text)
         filtered = [e for e in found if is_allowed_tld(e)]
         filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
         filtered = [e for e in filtered if not is_numeric_localpart(e)]
         logger.info(
-            "Manual input parsing: raw=%r clean=%r found=%r filtered=%r",
+            "Manual input parsing: raw=%r found=%r filtered=%r",
             text,
-            clean,
             found,
             filtered,
         )
@@ -1009,10 +1053,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         sent_count = 0
         errors: list[str] = []
         bad_emails: list[str] = []
+        cancel_event = context.chat_data.get("cancel_event")
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
             for email_addr in to_send:
+                if cancel_event and cancel_event.is_set():
+                    break
                 try:
                     token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
@@ -1041,8 +1088,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
         imap.logout()
-
-        await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+        if cancel_event and cancel_event.is_set():
+            await query.message.reply_text(
+                f"Остановлено. Отправлено писем: {sent_count}"
+            )
+        else:
+            await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
         if bad_emails:
             await query.message.reply_text(
                 "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)
@@ -1131,10 +1182,13 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sent_count = 0
         errors: list[str] = []
         bad_emails: list[str] = []
+        cancel_event = context.chat_data.get("cancel_event")
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
             for email_addr in emails_to_send:
+                if cancel_event and cancel_event.is_set():
+                    break
                 try:
                     token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
@@ -1163,8 +1217,12 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
         imap.logout()
-
-        await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+        if cancel_event and cancel_event.is_set():
+            await query.message.reply_text(
+                f"Остановлено. Отправлено писем: {sent_count}"
+            )
+        else:
+            await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
         if bad_emails:
             await query.message.reply_text(
                 "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)

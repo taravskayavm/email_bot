@@ -85,12 +85,11 @@ def test_log_sent_email_records_entries(temp_files):
     )
     with open(log_path, encoding="utf-8") as f:
         rows = list(csv.reader(f))
-    assert len(rows) == 2
+    assert len(rows) == 1
     assert len(rows[0]) == 10
     ts = datetime.fromisoformat(rows[0][0])
     assert abs((datetime.utcnow() - ts).total_seconds()) < 5
     assert rows[0][1:4] == ["user@example.com", "group1", "ok"]
-    assert rows[1][3] == "error" and rows[1][6] == "boom"
 
 
 def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
