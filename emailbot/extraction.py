@@ -1,464 +1,400 @@
-"""Email extraction and processing helpers."""
+# -*- coding: utf-8 -*-
+"""
+Извлечение e-mail и очистка HTML, без внешних зависимостей (офлайн).
+
+Публичные функции:
+- strip_html(html: str) -> str
+- extract_emails_document(text: str) -> list[str]
+- extract_emails_manual(text: str) -> list[str]
+"""
 
 from __future__ import annotations
-
-import concurrent.futures
-import html as htmllib
-import os
-import random
 import re
-import tempfile
-import zipfile
-from pathlib import Path
-from typing import Dict, List, Set, Tuple
+import unicodedata
+from html import unescape
+from typing import List, Tuple
 
-import fitz  # PyMuPDF
-import pandas as pd
-from docx import Document
-
-from .utils import log_error
-
-ALLOWED_TLDS = {"ru", "com"}
-if ALLOWED_TLDS:
-    ALLOWED_TLD_PATTERN = "|".join(ALLOWED_TLDS)
-else:
-    ALLOWED_TLD_PATTERN = r"[A-Za-z]{2,}"
-
-# Precompiled regex patterns for heavy use
-_RX_PROTECT = re.compile(
-    r"(?im)\b([A-Za-z0-9])\s*[\-\)\]\u2010\u2011\u2012\u2013\u2014]\s*\n\s*"
-    r"(?=[A-Za-z][A-Za-z0-9._%+-]*@)"
-)
-_RX_DEHYPHEN = re.compile(
-    r"([A-Za-z0-9._%+\-])[\-\u2010\u2011\u2012\u2013\u2014]\s*\n\s*([A-Za-z0-9._%+\-])"
-)
-_RX_JOIN_NOHYPHEN = re.compile(r"([A-Za-z]{3,})\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@")
-_RX_JOIN_DOT = re.compile(r"([A-Za-z]{2,})([._])\s*\n\s*([A-Za-z][A-Za-z0-9._%+\-]*)@")
-_RX_JOIN_NUM = re.compile(r"([A-Za-z]{2,})\s*\n\s*([0-9]{1,6})\s*@")
-_RX_CRLF = re.compile(r"[\r\n]+")
-_RX_AT = re.compile(r"\s*@\s*")
-_RX_DOT = re.compile(r"(@[A-Za-z0-9.-]+)\s*\.\s*([A-Za-z]{2,10})\b")
-_RX_DOT_COM = re.compile(r"\.\s*c\s*o\s*m\b", re.I)
-_RX_DOT_RU = re.compile(r"\.\s*r\s*u\b", re.I)
-_PROV = (
-    "(gmail|yahoo|hotmail|outlook|protonmail|icloud|aol|live|"
-    "msn|mail|yandex|rambler|bk|list|inbox|ya)"
-)
-_RX_PROV1 = re.compile(rf"(@{_PROV}\.co)(?=[^\w]|$)", re.I)
-_RX_PROV2 = re.compile(rf"(@{_PROV}\.co)\s*m\b", re.I)
-_RX_SUFFIX = re.compile(r"(\.(?:ru|com))(?=[A-Za-z0-9])")
-
-_PAT_A = re.compile(
-    r"(?im)\b([a-z])\s*\n\s*([a-z][a-z0-9._%+\-]{2,})@([a-z0-9.-]+\.(?:ru|com))"
-)
-_PAT_B = re.compile(
-    r"(?im)\b([a-z]{2,})\s*\n\s*([0-9]{1,6})\s*@([a-z0-9.-]+\.(?:ru|com))"
-)
-
-_PDF_CACHE = Path(tempfile.gettempdir()) / "pdf_cache"
-_PDF_CACHE.mkdir(exist_ok=True)
+__all__ = [
+    "strip_html",
+    "extract_emails_document",
+    "extract_emails_manual",
+    "smart_extract_emails",
+    "normalize_email",
+]
 
 
 def normalize_email(s: str) -> str:
     return (s or "").strip().lower()
 
 
-def is_allowed_tld(email_addr: str) -> bool:
-    e = normalize_email(remove_invisibles(email_addr))
-    if not ALLOWED_TLDS:
-        return True
-    match = re.search(
-        r"@[A-Za-z0-9.-]+\.([A-Za-z]{2,})(?=[^A-Za-z0-9]|$)", e, re.IGNORECASE
-    )
-    if not match:
-        return False
-    return match.group(1).lower() in ALLOWED_TLDS
+# ====================== НОРМАЛИЗАЦИЯ ТЕКСТА ======================
 
+_Z_SPACE_RE = re.compile(r"[\u2000-\u200A\u202F\u205F\u3000]")  # тонкие/узкие/идеографические пробелы
+_BULLETS = "•·⋅◦"
+_BRACKETS_OPEN = "([{〔【〈《"
+_BRACKETS_CLOSE = ")]}\u3015\u3011\u3009\u300B"
 
-def strip_html(html: str) -> str:
-    if not html:
-        return ""
-    s = html
-    s = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", s)
-    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
-    s = re.sub(r"(?i)</p\s*>", "\n", s)
-    s = re.sub(r"(?i)</div\s*>", "\n", s)
-    s = re.sub(r"(?is)<[^>]+>", " ", s)
-    s = htmllib.unescape(s)
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n\s*\n+", "\n", s)
-    return s.strip()
-
-
-def sample_preview(items, k: int) -> list[str]:
-    lst = list(dict.fromkeys(items))
-    if len(lst) <= k:
-        return lst
-    return random.sample(lst, k)
-
-
-def remove_invisibles(text: str) -> str:
-    """Remove zero-width and similar invisible characters.
-
-    Currently strips soft hyphens (\u00ad), non-breaking hyphens (\u2011),
-    zero-width spaces (\u200b) and converts non-breaking spaces (\xa0) to
-    regular spaces.
-    """
-    if not text:
-        return ""
-    s = text
-    s = s.replace("\u00ad", "").replace("\u2011", "").replace("\u200b", "")
-    s = s.replace("\xa0", " ")
+def _normalize_typography(s: str) -> str:
+    # Юникодная нормализация
+    s = unicodedata.normalize("NFKC", s or "")
+    # Пробелы
+    s = s.replace("\u00A0", " ")  # NBSP
+    s = _Z_SPACE_RE.sub(" ", s)  # Z* пробелы -> обычный пробел
+    # Нулевой ширины, BOM, мягкий перенос
+    s = (s.replace("\u200B", "").replace("\u200C", "").replace("\u200D", "")
+           .replace("\uFEFF", "").replace("\u00AD", ""))
+    # Тире/минусы к ASCII '-'
+    s = (s.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-")
+           .replace("\u2013", "-").replace("\u2014", "-").replace("\u2015", "-")
+           .replace("\u2212", "-").replace("\u2043", "-").replace("\uFE63", "-")
+           .replace("\uFF0D", "-"))
+    # Апострофы/кавычки к ASCII "'"
+    s = (s.replace("\u2018", "'").replace("\u2019", "'").replace("\u2032", "'")
+           .replace("\uFF07", "'"))
+    # Полноширинные знаки
+    s = s.replace("\uFF20", "@").replace("\uFF0E", ".")
     return s
 
+def _preprocess_text(text: str) -> str:
+    text = _normalize_typography(text)
+    # Склейка переносов внутри адресов (сохраняем дефис/точку и др. atext)
+    atext = "A-Za-z0-9!#$%&'*+/=?^_`{|}~.-"
+    text = re.sub(fr"([{atext}])-\n([{atext}])", r"\1-\2", text)
+    text = re.sub(fr"([{atext}])\n([{atext}])", r"\1\2", text)
+    return text
 
-# ---------------- Предобработка текста ----------------
-def _preclean_text_for_emails(text: str) -> str:
-    if not text:
+# ====================== STRIP HTML ======================
+
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b[^>]*>.*?</\1>")
+_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_BR_RE = re.compile(r"(?is)<br\s*/?>")
+_P_BLOCK_RE = re.compile(r"(?is)</?(p|div|tr|h[1-6]|table|ul|ol)\b[^>]*>")
+_LI_RE = re.compile(r"(?is)<li\b[^>]*>")
+
+def strip_html(html: str) -> str:
+    """
+    Удаляет HTML-разметку:
+    - script/style блоки;
+    - переводит <br> -> \n, <p>/<div>/<tr>/<h1..6>/<table>/<ul>/<ol> -> \n;
+    - <li> -> '\n- ';
+    - снимает остальные теги;
+    - декодирует HTML-сущности; схлопывает пробелы/пустые строки.
+    """
+    if not html:
         return ""
-    s = remove_invisibles(text)
-
-    # защита от прилипания односимвольных маркеров перед email
-    s = _RX_PROTECT.sub("", s)
-
-    # де-гипенизация переносов (g-\nmail → gmail)
-    s = _RX_DEHYPHEN.sub(r"\1\2", s)
-
-    # склейка без дефиса — буква на новой строке
-    s = _RX_JOIN_NOHYPHEN.sub(r"\1\2@", s)
-    s = _RX_JOIN_DOT.sub(r"\1\2\3@", s)
-
-    # новый кейс: слово на строке + ЧИСЛА на следующей + (возможные) пробелы перед '@'
-    s = _RX_JOIN_NUM.sub(r"\1\2@", s)
-
-    # \r/\n -> пробел
-    s = _RX_CRLF.sub(" ", s)
-
-    # убрать пробелы вокруг '@' и точки
-    s = _RX_AT.sub("@", s)
-    s = _RX_DOT.sub(r"\1.\2", s)
-
-    # '. c o m' / '. r u'
-    s = _RX_DOT_COM.sub(".com", s)
-    s = _RX_DOT_RU.sub(".ru", s)
-
-    # '@gmail.co' → '@gmail.com' (и др. провайдеры)
-    s = _RX_PROV1.sub(r"\1m", s)
-    s = _RX_PROV2.sub(r"\1m", s)
-
-    # разделим «слипшийся хвост» после .ru/.com
-    s = _RX_SUFFIX.sub(r"\1 ", s)
-
+    s = _normalize_typography(html)
+    s = _SCRIPT_STYLE_RE.sub("\n", s)
+    s = _BR_RE.sub("\n", s)
+    s = _LI_RE.sub("\n- ", s)
+    s = _P_BLOCK_RE.sub("\n", s)
+    s = _TAG_RE.sub(" ", s)  # снять остальные теги
+    s = unescape(s)
+    s = s.replace("\r", "")
+    # NBSP (после unescape) -> пробел
+    s = s.replace("\xa0", " ")
+    # Схлопывание пробелов и пустых строк
+    s = re.sub(r"[ \t\f\v]+", " ", s)
+    s = re.sub(r"\n[ \t]+", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
+# ====================== ПОМОЩНИКИ ДЛЯ E-MAIL ======================
 
-# ---------------- Извлечение email ----------------
-def extract_emails_loose(text: str) -> List[str]:
+_ATEXT_PUNCT = set("!#$%&'*+/=?^_`{|}~.-")  # RFC 5322 atext (включая '.' и '-')
+
+def _is_local_char(ch: str) -> bool:
+    return ch.isalnum() or ch in _ATEXT_PUNCT
+
+def _valid_local(local: str) -> bool:
+    if not local or local[0] == "." or local[-1] == "." or ".." in local:
+        return False
+    return all(_is_local_char(c) for c in local)
+
+def _valid_domain(domain: str) -> bool:
+    parts = domain.split(".")
+    if len(parts) < 2:
+        return False
+    for label in parts:
+        if not label or label[0] == "-" or label[-1] == "-":
+            return False
+        # доменная метка — ASCII alnum или '-'
+        if not all(c.isalnum() or c == "-" for c in label):
+            return False
+    tld = parts[-1]
+    if tld.startswith("xn--"):
+        return 4 <= len(tld) <= 63
+    return tld.isalpha() and 2 <= len(tld) <= 63
+
+def _scan_local_left(text: str, at_idx: int) -> Tuple[str, int]:
+    i = at_idx - 1
+    buf = []
+    while i >= 0 and _is_local_char(text[i]):
+        buf.append(text[i]); i -= 1
+    return "".join(reversed(buf)), i  # i — индекс символа слева от local (или -1)
+
+def _scan_domain_right(text: str, at_idx: int) -> str:
+    n, j = len(text), at_idx + 1
+    labels: list[str] = []
+    while j < n:
+        if j >= n or not text[j].isalnum():
+            break
+        start = j
+        j += 1
+        while j < n and (text[j].isalnum() or text[j] == "-"):
+            j += 1
+        label = text[start:j]
+        if not label or label.endswith("-"):
+            break
+        labels.append(label)
+        if j < n and text[j] == ".":
+            j += 1
+            continue
+        else:
+            break
+    if len(labels) < 2:
+        return ""
+    return ".".join(labels)
+
+# ====================== ОБРЕЗКА TLD ======================
+
+_COMMON_TLDS = {
+    # generic + популярные
+    "com","org","net","edu","gov","mil","info","biz","name","pro","int",
+    "aero","coop","museum","travel","mobi","online","site","agency","app","dev","io","ai",
+    # ccTLD
+    "ru","su","by","kz","ua","uk","us","ca","de","fr","it","pl","cz","sk","ch","se","no","fi",
+    "es","pt","nl","be","tr","ge","az","am","kg","uz","tj","tm","cn","jp","kr","lt","lv","ee",
+    "in","br","ar","au","nz","at","dk","gr","hu","ro","rs","bg","md","il","ie","hk","sg","my",
+    "id","th","vn","pk","ae","qa","sa","eg","ma","tn","al","mk","ba","hr","si","me","is","li",
+    "za","ng","ke"
+}
+
+def _longest_known_tld_prefix(s: str) -> str | None:
+    s = s.lower()
+    best = None
+    for t in _COMMON_TLDS:
+        if s.startswith(t) and (best is None or len(t) > len(best)):
+            best = t
+    return best
+
+def _trim_appended_word(domain: str) -> str:
+    """
+    Укоротить последний ярлык до валидного TLD в случаях:
+      - 'rurussia' -> 'ru'; 'edua' -> 'edu'; 'ru2020','ru_abc','ru-abc' -> 'ru'
+      - повторы 'ruru','comcom','comcomcom' -> один раз
+      - 'onlinebiz' -> 'online'
+    """
+    parts = domain.split(".")
+    last = parts[-1]
+    if last.startswith("xn--"):
+        return domain
+
+    t = last.lower()
+    if t in _COMMON_TLDS:
+        return domain
+
+    # Повтор TLD (2+ раза): comcom[com], ruru, comcomcom
+    for base in sorted(_COMMON_TLDS, key=len, reverse=True):
+        if len(t) >= 2*len(base) and t == base * (len(t)//len(base)):
+            parts[-1] = base
+            return ".".join(parts)
+
+    # base + хвост (буквы/цифры/_/-) длиной 1..10
+    m = re.match(r"^([a-z]{2,})([A-Za-z0-9_-]{1,10})$", t)
+    if m:
+        base = m.group(1)
+        pref = _longest_known_tld_prefix(base)
+        if pref:
+            parts[-1] = pref
+            return ".".join(parts)
+
+    # Максимальный известный префикс (onlinebiz -> online)
+    pref = _longest_known_tld_prefix(t)
+    if pref:
+        parts[-1] = pref
+        return ".".join(parts)
+
+    return domain
+
+# ====================== ГРАНИЦЫ/ПРЕФИКСЫ ======================
+
+def _is_left_boundary(ch: str | None) -> bool:
+    if ch is None:
+        return True
+    if ch.isalnum():
+        return False
+    # Символы «склейки» local-part НЕ считаем границей
+    if ch in "._%+-'~=/":
+        return False
+    cat = unicodedata.category(ch)  # Z* (separators), P* (punctuation)
+    if cat.startswith("Z") or cat.startswith("P"):
+        return True
+    if ch in _BULLETS or ch in _BRACKETS_OPEN + _BRACKETS_CLOSE:
+        return True
+    return False
+
+_LIST_MARKER_RE = re.compile(
+    rf"(?m)[\s{re.escape(_BULLETS)}{re.escape(_BRACKETS_OPEN)}]"
+    r"[A-Za-z0-9][\)\.\:]\s+$"
+)
+
+def _multi_prefix_mode(text: str) -> bool:
+    """
+    «Ряд префиксов» по документу:
+    True, если >=3 маркеров перед адресами, или >=2 разных префикса, каждый >=2 раз.
+    """
+    counts, total = {}, 0
+    for m in re.finditer(r"(?m)(.)([A-Za-z0-9])([A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+)@", text):
+        left, pref = m.group(1), m.group(2)
+        if _is_left_boundary(left):
+            counts[pref] = counts.get(pref, 0) + 1
+            total += 1
+    if total >= 3:
+        return True
+    return sum(1 for v in counts.values() if v >= 2) >= 2
+
+# ====================== ОСНОВНАЯ ФУНКЦИЯ ======================
+
+def smart_extract_emails(text: str) -> List[str]:
+    """
+    Возвращает список e-mail из «грязного» текста (PDF/ZIP), очищая:
+    - префиксные сноски (1/a/б/… без скобок) перед адресами;
+    - «пришитые» слова/хвосты после TLD;
+    - переносы строк и типографику внутри адресов.
+    Не режет валидный local-part (поддержаны все символы RFC atext).
+    """
+    text = _preprocess_text(text)
+    low_text = text.lower()
+    multi_mode = _multi_prefix_mode(text)
+
+    # Словарь «похожих на почту» форм (для скоринга V2 независимо от порядка)
+    seen_in_text = set(m.group(0) for m in re.finditer(
+        r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+", low_text
+    ))
+
+    emails: list[str] = []
+    i, n = 0, len(text)
+    while True:
+        at = text.find("@", i)
+        if at == -1:
+            break
+
+        local, left_idx = _scan_local_left(text, at)
+        domain_raw = _scan_domain_right(text, at)
+        domain = domain_raw
+        if not local or not domain:
+            i = at + 1
+            continue
+
+        domain = _trim_appended_word(domain)
+
+        # Вариант V1 — как есть
+        email_v1 = f"{local}@{domain}".lower()
+
+        # Вариант V2 — снять 1 префикс (если слева граница и после снятия local валиден)
+        choose_v2 = False
+        email_v2 = email_v1
+        left_char = text[left_idx] if left_idx >= 0 else None
+
+        if len(local) >= 2 and _is_left_boundary(left_char):
+            prefix_char = local[0]
+            local2 = local[1:]
+            if _valid_local(local2) and (prefix_char.isdigit() or prefix_char.islower()):
+                email_v2 = f"{local2}@{domain}".lower()
+                # --- скоринг ---
+                score_v1 = 0
+                score_v2 = 0
+
+                email_raw = f"{local}@{domain_raw}".lower()
+                if email_raw in seen_in_text: score_v1 += 2
+                if email_v2 in seen_in_text: score_v2 += 2
+
+                if email_v2 in emails: score_v2 += 3       # уже видели без префикса -> сильный сигнал
+                if prefix_char.isdigit():
+                    score_v2 += 4    # цифры чаще сноски
+                elif prefix_char.lower() in {"a", "b", "c"}:
+                    score_v2 += 3    # буквенные сноски a/b/c
+
+                # проверим шаблон списка непосредственно слева
+                left_slice_start = max(0, at - len(local) - 4)
+                left_slice = text[left_slice_start: at - len(local)]
+                if _LIST_MARKER_RE.search(left_slice):
+                    score_v2 += 4
+
+                if multi_mode: score_v2 += 2               # «ряд префиксов» по документу
+                if len(local2) >= 2: score_v2 += 1
+                if len(local)  >= 2: score_v1 += 1
+
+                choose_v2 = score_v2 > score_v1
+
+        final_email = email_v2 if choose_v2 else email_v1
+        loc, dom = final_email.split("@", 1)
+        if _valid_local(loc) and _valid_domain(dom):
+            emails.append(final_email)
+
+        i = at + 1
+
+    # Дедуп с сохранением порядка
+    out, seen = [], set()
+    for e in emails:
+        if e not in seen:
+            out.append(e); seen.add(e)
+    return out
+
+
+# --- MANUAL mode (for chat input) ---------------------------------
+
+_EMAIL_CORE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
+_RE_ANGLE = re.compile(rf"<\s*({_EMAIL_CORE})\s*>")
+_RE_MAILTO = re.compile(rf"mailto:\s*({_EMAIL_CORE})", re.IGNORECASE)
+_RE_RAW = re.compile(rf"(?<![A-Za-z0-9._%+-])({_EMAIL_CORE})(?![A-Za-z0-9-])")
+
+_TRAIL_PUNCT = ".,;:!?)”’»"
+
+
+def _strip_trailing_punct(addr: str) -> str:
+    while addr and addr[-1] in _TRAIL_PUNCT:
+        addr = addr[:-1]
+    return addr
+
+
+def extract_emails_manual(text: str) -> list[str]:
+    """
+    Консервативный парсер для ручного ввода в чате.
+    Понимает <email>, mailto:, разделители и терминальную пунктуацию.
+    НЕ снимает «префиксы-сноски».
+    """
     if not text:
         return []
-    s = _preclean_text_for_emails(text)
-    rx = re.compile(r"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
-    return [normalize_email(x) for x in rx.findall(s)]
 
+    s = _preprocess_text(text)
+    s_low = s.lower()
 
-def collapse_footnote_variants(emails: set[str]) -> set[str]:
-    if not emails:
-        return set()
-    base = {re.sub(r"^\.+", "", normalize_email(e)) for e in emails}
-    by_suffix: dict[str, set[str]] = {}
-    prefix_of: dict[str, str] = {}
-    for e in list(base):
-        m_num = re.match(r"^(\d{1,2})([A-Za-z][A-Za-z0-9._%+-]*@.+)$", e, flags=re.I)
-        if m_num:
-            by_suffix.setdefault(m_num.group(2), set()).add(e)
-            prefix_of[e] = m_num.group(1)
+    found: list[str] = []
+
+    for m in _RE_ANGLE.finditer(s_low):
+        found.append(_strip_trailing_punct(m.group(1)))
+    for m in _RE_MAILTO.finditer(s_low):
+        found.append(_strip_trailing_punct(m.group(1)))
+    for m in _RE_RAW.finditer(s_low):
+        found.append(_strip_trailing_punct(m.group(1)))
+
+    out, seen = [], set()
+    for e in found:
+        e = e.strip().lower()
+        if not e:
             continue
-        m_chr = re.match(r"^([A-Za-z])([A-Za-z][A-Za-z0-9._%+-]*@.+)$", e, flags=re.I)
-        if m_chr:
-            by_suffix.setdefault(m_chr.group(2), set()).add(e)
-            prefix_of[e] = m_chr.group(1)
+        try:
+            local, dom = e.split("@", 1)
+        except ValueError:
             continue
-    keep = set(base)
-    for suffix, variants in by_suffix.items():
-        clean_present = suffix in keep
-        distinct_pfx = set(prefix_of[v] for v in variants if v in prefix_of)
-        if clean_present or len(distinct_pfx) >= 2:
-            keep.difference_update(variants)
-            keep.add(suffix)
-    return keep
+        if _valid_local(local) and _valid_domain(dom):
+            if e not in seen:
+                out.append(e); seen.add(e)
+    return out
 
 
-def extract_clean_emails_from_text(text: str) -> Set[str]:
-    if not text:
-        return set()
-    text = _preclean_text_for_emails(text)
-    base_re = re.compile(
-        rf"([A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.(?:{ALLOWED_TLD_PATTERN}))"
-        r"(?=[^\w]|$)"
-    )
-    raw = set(base_re.findall(text))
-    if not raw:
-        return set()
-    result: Set[str] = {re.sub(r"^\.+", "", e) for e in raw}
-    result = collapse_footnote_variants(result)
-    result = {e for e in result if is_allowed_tld(e)}
-    return result
+# Чтобы сохранить обратную совместимость
+def extract_emails_document(text: str) -> list[str]:
+    return smart_extract_emails(text)
 
-
-def is_numeric_localpart(email_addr: str) -> bool:
-    e = normalize_email(email_addr)
-    return "@" in e and e.split("@", 1)[0].isdigit()
-
-
-# ---------- Поиск/устранение усечённых адресов ----------
-def detect_numeric_truncations(candidates: Set[str]) -> List[tuple[str, str]]:
-    by_key: Dict[tuple[str, str], Set[str]] = {}
-    for e in candidates:
-        loc, dom = e.split("@", 1)
-        m = re.match(r"^([a-z]+)(\d{1,6})$", loc)
-        if m:
-            key = (m.group(2), dom)
-            by_key.setdefault(key, set()).add(e)
-
-    pairs: List[tuple[str, str]] = []
-    for e in list(candidates):
-        loc, dom = e.split("@", 1)
-        if loc.isdigit():
-            key = (loc, dom)
-            fulls = by_key.get(key, set())
-            if len(fulls) == 1:
-                good = next(iter(fulls))
-                pairs.append((e, good))
-    return pairs
-
-
-def apply_numeric_truncation_removal(
-    allowed_set: Set[str],
-) -> Tuple[Set[str], List[tuple[str, str]]]:
-    pairs = detect_numeric_truncations(allowed_set)
-    if not pairs:
-        return allowed_set, []
-    cleaned = set(allowed_set)
-    for bad, _ in pairs:
-        cleaned.discard(bad)
-    return cleaned, pairs
-
-
-# --- извлечение из разных форматов ---
-def _cached_pdf_text(path: str) -> str:
-    try:
-        st = os.stat(path)
-        key = f"{st.st_size}_{int(st.st_mtime)}"
-        cache_path = _PDF_CACHE / key
-        if cache_path.exists():
-            return cache_path.read_text(encoding="utf-8")
-        doc = fitz.open(path)
-        texts = [page.get_text() or "" for page in doc]
-        doc.close()
-        joined = " ".join(texts)
-        cache_path.write_text(joined, encoding="utf-8")
-        return joined
-    except Exception as e:
-        log_error(f"_cached_pdf_text: {path}: {e}")
-        return ""
-
-
-def _extract_from_pdf(path: str) -> Tuple[Set[str], Set[str]]:
-    joined = _cached_pdf_text(path)
-    loose = set(extract_emails_loose(joined))
-    allowed = set(extract_clean_emails_from_text(joined))
-    return allowed, loose
-
-
-def _extract_from_docx(path: str) -> Tuple[Set[str], Set[str]]:
-    doc = Document(path)
-    full_text = "\n".join([para.text for para in doc.paragraphs])
-    loose = set(extract_emails_loose(full_text))
-    allowed = set(extract_clean_emails_from_text(full_text))
-    return allowed, loose
-
-
-def _extract_from_excel(path: str) -> Tuple[Set[str], Set[str]]:
-    emails_allowed, emails_loose = set(), set()
-    try:
-        df = pd.read_excel(path, dtype=str)
-        for col in df.columns:
-            for val in df[col].dropna():
-                s = str(val)
-                emails_allowed.update(extract_clean_emails_from_text(s))
-                emails_loose.update(extract_emails_loose(s))
-    except Exception as e:
-        log_error(f"extract_from_excel: {path}: {e}")
-    return emails_allowed, emails_loose
-
-
-def _extract_from_csv(path: str) -> Tuple[Set[str], Set[str]]:
-    emails_allowed, emails_loose = set(), set()
-    try:
-        df = pd.read_csv(path, header=None, dtype=str)
-        for col in df.columns:
-            for val in df[col].dropna():
-                s = str(val)
-                emails_allowed.update(extract_clean_emails_from_text(s))
-                emails_loose.update(extract_emails_loose(s))
-    except Exception as e:
-        log_error(f"extract_from_csv: {path}: {e}")
-    return emails_allowed, emails_loose
-
-
-def extract_from_uploaded_file(path: str) -> Tuple[Set[str], Set[str]]:
-    p = path.lower()
-    if p.endswith(".pdf"):
-        return _extract_from_pdf(path)
-    if p.endswith(".xlsx"):
-        return _extract_from_excel(path)
-    if p.endswith(".csv"):
-        return _extract_from_csv(path)
-    if p.endswith(".docx"):
-        return _extract_from_docx(path)
-    return set(), set()
-
-
-async def async_extract_emails_from_url(url: str, session, chat_id: int | None = None):
-    try:
-        async with session.get(url, timeout=20) as resp:
-            if resp.status >= 400:
-                log_error(f"async_extract_emails_from_url: {url}: HTTP {resp.status}")
-                return (url, [], [], [])
-            html_text = await resp.text()
-            allowed = extract_clean_emails_from_text(html_text)
-            loose = set(extract_emails_loose(html_text))
-            foreign = {e for e in loose if not is_allowed_tld(e)}
-            repairs = find_prefix_repairs(html_text)
-            return (url, list(allowed), list(foreign), repairs)
-    except Exception as e:
-        log_error(f"async_extract_emails_from_url: {url}: {e}")
-        return (url, [], [], [])
-
-
-# ---------- Repairs ----------
-def _remove_invisibles_keep_newlines(text: str) -> str:
-    if not text:
-        return ""
-    return remove_invisibles(text)
-
-
-def find_prefix_repairs(raw_text: str) -> List[tuple[str, str]]:
-    if not raw_text:
-        return []
-    s = _remove_invisibles_keep_newlines(raw_text)
-    pairs, seen = [], set()
-
-    for m in _PAT_A.finditer(s):
-        left, rest, dom = m.group(1).lower(), m.group(2).lower(), m.group(3).lower()
-        bad, good = f"{rest}@{dom}", f"{left}{rest}@{dom}"
-        if (bad, good) not in seen:
-            seen.add((bad, good))
-            pairs.append((bad, good))
-
-    for m in _PAT_B.finditer(s):
-        word, digits, dom = m.group(1).lower(), m.group(2), m.group(3).lower()
-        bad, good = f"{digits}@{dom}", f"{word}{digits}@{dom}"
-        if (bad, good) not in seen:
-            seen.add((bad, good))
-            pairs.append((bad, good))
-
-    return pairs
-
-
-def collect_repairs_from_files(file_paths: List[str]) -> List[tuple[str, str]]:
-    repairs: List[tuple[str, str]] = []
-    for path in file_paths:
-        p = path.lower()
-        try:
-            if p.endswith(".pdf"):
-                doc = fitz.open(path)
-                try:
-                    raw = "\n".join((pg.get_text() or "") for pg in doc)
-                finally:
-                    doc.close()
-                repairs.extend(find_prefix_repairs(raw))
-            elif p.endswith(".docx"):
-                doc = Document(path)
-                raw = "\n".join(para.text for para in doc.paragraphs)
-                repairs.extend(find_prefix_repairs(raw))
-        except Exception as e:
-            log_error(f"collect_repairs_from_files: {path}: {e}")
-    uniq = list(dict.fromkeys(repairs))
-    return uniq
-
-
-def extract_emails_multithreaded(file_paths: List[str]) -> Tuple[Set[str], Set[str]]:
-    allowed_all, loose_all = set(), set()
-
-    def process(file):
-        try:
-            return extract_from_uploaded_file(file)
-        except Exception as ex:
-            log_error(f"extract_emails_multithreaded:{file}: {ex}")
-            return set(), set()
-
-    max_workers = min(32, (os.cpu_count() or 1) * 2)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for allowed, loose in executor.map(process, file_paths):
-            allowed_all.update(allowed)
-            loose_all.update(loose)
-    return allowed_all, loose_all
-
-
-async def extract_emails_from_zip(
-    zip_path: str, progress_msg, download_dir: str
-) -> Tuple[Set[str], List[str], Set[str]]:
-    all_allowed: Set[str] = set()
-    all_loose: Set[str] = set()
-    extracted_files: List[str] = []
-    with zipfile.ZipFile(zip_path, "r") as z:
-        file_list = [
-            f
-            for f in z.namelist()
-            if f.lower().endswith((".pdf", ".xlsx", ".csv", ".docx"))
-        ]
-        total_files = len(file_list)
-        if total_files == 0:
-            if progress_msg:
-                await progress_msg.edit_text(
-                    "❌ В архиве не найдено поддерживаемых файлов."
-                )
-            return all_allowed, extracted_files, all_loose
-        if progress_msg:
-            await progress_msg.edit_text(
-                f"В архиве {total_files} файлов. Начинаем обработку..."
-            )
-        for idx, inner_file in enumerate(file_list, 1):
-            extracted_path = os.path.join(download_dir, inner_file)
-            os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
-            z.extract(inner_file, download_dir)
-            extracted_files.append(extracted_path)
-            allowed, loose = extract_from_uploaded_file(extracted_path)
-            all_allowed.update(allowed)
-            all_loose.update(loose)
-            if progress_msg:
-                await progress_msg.edit_text(
-                    f"🔄 Обработка файла {idx}/{total_files}:\n{inner_file}"
-                )
-    return all_allowed, extracted_files, all_loose
-
-
-__all__ = [
-    "normalize_email",
-    "is_allowed_tld",
-    "strip_html",
-    "sample_preview",
-    "extract_emails_loose",
-    "collapse_footnote_variants",
-    "extract_clean_emails_from_text",
-    "is_numeric_localpart",
-    "detect_numeric_truncations",
-    "apply_numeric_truncation_removal",
-    "extract_from_uploaded_file",
-    "async_extract_emails_from_url",
-    "find_prefix_repairs",
-    "collect_repairs_from_files",
-    "extract_emails_multithreaded",
-    "extract_emails_from_zip",
-]
