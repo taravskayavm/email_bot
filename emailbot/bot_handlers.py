@@ -93,6 +93,14 @@ from .messaging import (
 )
 from .smtp_client import SmtpClient
 from .utils import log_error
+from .messaging_utils import (
+    add_bounce,
+    is_foreign,
+    is_hard_bounce,
+    is_suppressed,
+    suppress_add,
+    was_sent_within,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1052,7 +1060,6 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         sent_count = 0
         errors: list[str] = []
-        bad_emails: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
@@ -1076,14 +1083,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     await asyncio.sleep(1.5)
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
-                    err = str(e).lower()
+                    code, msg = None, None
                     if (
-                        "invalid mailbox" in err
-                        or "user is terminated" in err
-                        or "non-local recipient verification failed" in err
+                        hasattr(e, "recipients")
+                        and isinstance(e.recipients, dict)
+                        and email_addr in e.recipients
                     ):
-                        add_blocked_email(email_addr)
-                        bad_emails.append(email_addr)
+                        code, msg = e.recipients[email_addr][0], e.recipients[email_addr][1]
+                    elif hasattr(e, "smtp_code"):
+                        code = getattr(e, "smtp_code", None)
+                        msg = getattr(e, "smtp_error", None)
+                    add_bounce(email_addr, code, str(msg or e), phase="send")
                     log_sent_email(
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
@@ -1094,10 +1104,6 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         else:
             await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-        if bad_emails:
-            await query.message.reply_text(
-                "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)
-            )
         if errors:
             await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
@@ -1128,28 +1134,37 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
 
-        try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
-            imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
-            sent_folder = get_preferred_sent_folder(imap)
-            imap.select(f'"{sent_folder}"')
-        except Exception as e:
-            log_error(f"imap connect: {e}")
-            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
-            return
+        blocked_foreign: List[str] = []
+        blocked_invalid: List[str] = []
+        skipped_recent: List[str] = []
+        to_send: List[str] = []
+        sent_ok: List[str] = []
 
-        emails_to_send: List[str] = []
-        for e in emails:
-            if e in blocked or e in sent_today:
-                continue
-            if was_emailed_recently(e, lookup_days, imap=imap, folder=sent_folder):
-                continue
-            emails_to_send.append(e)
-        if not emails_to_send:
+        initial = [e for e in emails if e not in blocked and e not in sent_today]
+        for e in initial:
+            if is_foreign(e):
+                blocked_foreign.append(e)
+            else:
+                to_send.append(e)
+
+        queue: List[str] = []
+        for e in to_send:
+            if is_suppressed(e):
+                blocked_invalid.append(e)
+            else:
+                queue.append(e)
+
+        to_send = []
+        for e in queue:
+            if was_sent_within(e, days=lookup_days):
+                skipped_recent.append(e)
+            else:
+                to_send.append(e)
+
+        if not to_send:
             await query.message.reply_text(
-                "❗ Все адреса уже есть в истории за 6 мес. или в блок-листе."
+                "❗ Все адреса уже есть в истории отправок или в блок-листах."
             )
-            imap.logout()
             return
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
@@ -1166,8 +1181,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             )
             return
-        if not is_force_send(chat_id) and len(emails_to_send) > available:
-            emails_to_send = emails_to_send[:available]
+        if not is_force_send(chat_id) and len(to_send) > available:
+            to_send = to_send[:available]
             await query.message.reply_text(
                 (
                     f"⚠️ Учитываю дневной лимит: будет отправлено "
@@ -1176,17 +1191,25 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
         await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(emails_to_send)} писем..."
+            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
         )
 
-        sent_count = 0
+        try:
+            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
+            sent_folder = get_preferred_sent_folder(imap)
+            imap.select(f'"{sent_folder}"')
+        except Exception as e:
+            log_error(f"imap connect: {e}")
+            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+            return
+
         errors: list[str] = []
-        bad_emails: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
-            for email_addr in emails_to_send:
+            for email_addr in to_send:
                 if cancel_event and cancel_event.is_set():
                     break
                 try:
@@ -1201,32 +1224,42 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         template_path,
                         unsubscribe_token=token,
                     )
-                    sent_count += 1
+                    sent_ok.append(email_addr)
                     await asyncio.sleep(1.5)
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
-                    error_text = str(e).lower()
+                    code, msg = None, None
                     if (
-                        "invalid mailbox" in error_text
-                        or "user is terminated" in error_text
-                        or "non-local recipient verification failed" in error_text
+                        hasattr(e, "recipients")
+                        and isinstance(e.recipients, dict)
+                        and email_addr in e.recipients
                     ):
-                        add_blocked_email(email_addr)
-                        bad_emails.append(email_addr)
+                        code, msg = e.recipients[email_addr][0], e.recipients[email_addr][1]
+                    elif hasattr(e, "smtp_code"):
+                        code = getattr(e, "smtp_code", None)
+                        msg = getattr(e, "smtp_error", None)
+                    add_bounce(email_addr, code, str(msg or e), phase="send")
+                    if is_hard_bounce(code, msg):
+                        suppress_add(email_addr, code, "hard bounce on send")
                     log_sent_email(
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
         imap.logout()
-        if cancel_event and cancel_event.is_set():
-            await query.message.reply_text(
-                f"Остановлено. Отправлено писем: {sent_count}"
-            )
-        else:
-            await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-        if bad_emails:
-            await query.message.reply_text(
-                "🚫 В блок-лист добавлены:\n" + "\n".join(bad_emails)
-            )
+
+        summary_lines: List[str] = []
+
+        def _fmt(title: str, items: List[str]) -> str:
+            line = f"{title}: {len(items)}"
+            if items:
+                line += "\n" + "\n".join(items)
+            return line
+
+        summary_lines.append(_fmt("🔒 В блок (иностранные)", blocked_foreign))
+        summary_lines.append(_fmt("⛔ В блок (неработающие)", blocked_invalid))
+        summary_lines.append(_fmt(f"⏳ Пропущены (<{lookup_days} дней)", skipped_recent))
+        summary_lines.append(f"✅ Отправлено: {len(sent_ok)}")
+
+        await query.message.reply_text("\n\n".join(summary_lines))
         if errors:
             await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
