@@ -98,9 +98,11 @@ from .messaging_utils import (
     add_bounce,
     is_foreign,
     is_hard_bounce,
+    is_soft_bounce,
     is_suppressed,
     suppress_add,
     was_sent_within,
+    BOUNCE_LOG_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,6 +440,47 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🔄 Добавлено в лог {added} новых адресов.")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
+
+
+async def retry_last_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Retry sending e-mails that previously soft-bounced."""
+
+    rows: list[dict] = []
+    if BOUNCE_LOG_PATH.exists():
+        with BOUNCE_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    if not rows:
+        await update.message.reply_text("Нет писем для ретрая")
+        return
+    last_ts = rows[-1]["ts"]
+    addrs: list[str] = []
+    for r in reversed(rows):
+        if r["ts"] != last_ts:
+            break
+        code = r.get("code") or None
+        try:
+            icode = int(code) if code else None
+        except Exception:
+            icode = None
+        if is_soft_bounce(icode, r.get("msg")):
+            email = (r.get("email") or "").lower().strip()
+            if email:
+                addrs.append(email)
+    unique = list(dict.fromkeys(addrs))
+    if not unique:
+        await update.message.reply_text("Нет писем для ретрая")
+        return
+    sent = 0
+    for addr in unique:
+        if is_suppressed(addr):
+            continue
+        try:
+            messaging.send_raw_smtp_with_retry("retry", addr)
+            log_sent_email(addr, "retry")
+            sent += 1
+        except Exception as e:
+            logger.warning("retry_last send failed for %s: %s", addr, e)
+    await update.message.reply_text(f"Повторно отправлено: {sent}")
 
 
 async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
