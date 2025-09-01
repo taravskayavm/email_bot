@@ -25,6 +25,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from . import messaging
+from . import extraction as _extraction
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import build_mass_report_text
 
@@ -37,8 +38,11 @@ def apply_numeric_truncation_removal(allowed):
     return allowed, []
 
 
-async def async_extract_emails_from_url(url, session):
-    return url, [], [], []
+async def async_extract_emails_from_url(url: str, session, chat_id=None):
+    emails, _stats = await asyncio.to_thread(_extraction.extract_from_url, url)
+    emails = set(e.lower().strip() for e in emails)
+    foreign = {e for e in emails if not is_allowed_tld(e)}
+    return url, emails, foreign, []
 
 
 def collapse_footnote_variants(emails):
@@ -49,16 +53,23 @@ def collect_repairs_from_files(files):
     return []
 
 
-def extract_emails_from_zip(path, *_, **__):
-    return set(), set()
+async def extract_emails_from_zip(path: str, *_, **__):
+    emails, _stats = await asyncio.to_thread(
+        _extraction.extract_emails_from_zip, path
+    )
+    emails = set(e.lower().strip() for e in emails)
+    extracted_files = [path]
+    return emails, extracted_files, set(emails)
 
 
 def extract_emails_loose(text):
     return set(smart_extract_emails(text))
 
 
-def extract_from_uploaded_file(path):
-    return set(), set()
+def extract_from_uploaded_file(path: str):
+    emails, _stats = _extraction.extract_any(path)
+    emails = set(e.lower().strip() for e in emails)
+    return emails, set(emails)
 
 
 def is_allowed_tld(email_addr: str) -> bool:
@@ -573,7 +584,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
 
     suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
-    filtered = [e for e in filtered if not is_numeric_localpart(e)]
 
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
@@ -599,27 +609,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         ]
     ]
-    if suspicious_numeric:
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    f"➕ Включить цифровые ({len(suspicious_numeric)})",
-                    callback_data="ask_include_numeric",
-                )
-            ]
-        )
-        extra_buttons.append(
-            [InlineKeyboardButton("🔢 Показать цифровые", callback_data="show_numeric")]
-        )
-    if state.foreign:
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    f"🌍 Показать иностранные ({len(state.foreign)})",
-                    callback_data="show_foreign",
-                )
-            ]
-        )
+    # No extra buttons for numeric or foreign preview
     if state.repairs:
         extra_buttons.append(
             [
@@ -749,9 +739,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if context.user_data.get("awaiting_manual_email"):
         found = extract_emails_manual(text)
-        filtered = [e for e in found if is_allowed_tld(e)]
-        filtered = [e for e in filtered if not any(tp in e for tp in TECH_PATTERNS)]
-        filtered = [e for e in filtered if not is_numeric_localpart(e)]
+        filtered = sorted(set(e.lower().strip() for e in found))
         logger.info(
             "Manual input parsing: raw=%r found=%r filtered=%r",
             text,
@@ -803,7 +791,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ]
         filtered = sorted(e for e in allowed_all if e not in technical_emails)
         suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
-        filtered = [e for e in filtered if not is_numeric_localpart(e)]
 
         state = get_state(context)
         current = set(state.to_send)
@@ -829,31 +816,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             ]
         ]
-        if suspicious_numeric:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"➕ Включить цифровые ({len(suspicious_numeric)})",
-                        callback_data="ask_include_numeric",
-                    )
-                ]
-            )
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🔢 Показать цифровые", callback_data="show_numeric"
-                    )
-                ]
-            )
-        if state.foreign:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"🌍 Показать иностранные ({len(state.foreign)})",
-                        callback_data="show_foreign",
-                    )
-                ]
-            )
+        # No extra buttons for numeric or foreign preview
         if state.repairs:
             extra_buttons.append(
                 [

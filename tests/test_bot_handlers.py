@@ -107,12 +107,12 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     run(handle_document(update, ctx))
 
     state = ctx.chat_data[SESSION_KEY]
-    assert state.all_emails == {"good@example.com"}
+    assert state.all_emails == {"good@example.com", "123@site.com"}
     assert state.suspect_numeric == ["123@site.com"]
     assert state.foreign == ["foreign@example.de"]
     report = update.message.replies[2]
     assert "Найдено адресов: 2" in report
-    assert "Уникальных (после очистки): 1" in report
+    assert "Уникальных (после очистки): 2" in report
 
 
 def test_handle_text_add_block(monkeypatch):
@@ -138,9 +138,17 @@ def test_handle_text_manual_emails():
 
     run(handle_text(update, ctx))
 
-    assert ctx.user_data["manual_emails"] == ["1test@site.com", "user@example.com"]
+    assert ctx.user_data["manual_emails"] == [
+        "123@site.com",
+        "1test@site.com",
+        "support@support.com",
+        "user@example.com",
+    ]
     assert ctx.user_data["awaiting_manual_email"] is False
-    assert "К отправке: 1test@site.com, user@example.com" in update.message.replies[0]
+    assert (
+        "К отправке: 123@site.com, 1test@site.com, support@support.com, user@example.com"
+        in update.message.replies[0]
+    )
 
 
 def test_prompt_manual_email_clears_previous_list():
