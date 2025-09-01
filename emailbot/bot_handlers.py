@@ -186,12 +186,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     init_state(context)
     keyboard = [
-        ["📤 Загрузить данные для поиска контактов", "🧹 Очистить список"],
-        ["📄 Показать исключения", "🚫 Добавить в исключения"],
-        ["✉️ Ручная рассылка", "🧾 О боте"],
+        ["📤 Массовая", "🛑 Стоп", "✉️ Ручная"],
+        ["🧹 Очистить список", "📄 Показать исключения"],
+        ["🚫 Добавить в исключения", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
-        ["⏹️ Стоп"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
