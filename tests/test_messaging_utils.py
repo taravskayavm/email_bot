@@ -35,3 +35,10 @@ def test_is_hard_bounce():
     assert not mu.is_hard_bounce(450, "err")
     assert mu.is_hard_bounce(None, "User Not Found")
     assert not mu.is_hard_bounce(None, "temporary failure")
+
+
+def test_is_soft_bounce():
+    assert mu.is_soft_bounce(450, "temporary failure")
+    assert mu.is_soft_bounce(None, "greylisted")
+    assert not mu.is_soft_bounce(550, "User not found")
+    assert not mu.is_soft_bounce(None, "permanent error")
