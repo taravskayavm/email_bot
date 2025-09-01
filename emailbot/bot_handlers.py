@@ -26,6 +26,7 @@ from telegram.ext import ContextTypes
 
 from . import messaging
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
+from .reporting import build_mass_report_text
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -1244,20 +1245,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
         imap.logout()
 
-        summary_lines: List[str] = []
+        report_text = build_mass_report_text(
+            sent_ok,
+            skipped_recent,
+            blocked_foreign,
+            blocked_invalid,
+        )
 
-        def _fmt(title: str, items: List[str]) -> str:
-            line = f"{title}: {len(items)}"
-            if items:
-                line += "\n" + "\n".join(items)
-            return line
-
-        summary_lines.append(_fmt("🔒 В блок (иностранные)", blocked_foreign))
-        summary_lines.append(_fmt("⛔ В блок (неработающие)", blocked_invalid))
-        summary_lines.append(_fmt(f"⏳ Пропущены (<{lookup_days} дней)", skipped_recent))
-        summary_lines.append(f"✅ Отправлено: {len(sent_ok)}")
-
-        await query.message.reply_text("\n\n".join(summary_lines))
+        await query.message.reply_text(report_text)
         if errors:
             await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
