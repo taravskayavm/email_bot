@@ -48,7 +48,7 @@ def collect_repairs_from_files(files):
     return []
 
 
-def extract_emails_from_zip(path):
+def extract_emails_from_zip(path, *_, **__):
     return set(), set()
 
 
@@ -469,17 +469,17 @@ async def _compose_report_and_save(
 
     report = (
         "✅ Анализ завершён.\n"
-        f"Найдено адресов (.ru/.com): {len(allowed_all)}\n"
-        f"Уникальных (после базовой очистки): {len(filtered)}\n"
-        f"Подозрительные (логин только из цифр, исключены): {len(suspicious_numeric)}\n"
-        f"Иностранные домены (исключены): {len(foreign)}"
+        f"Найдено адресов: {len(allowed_all)}\n"
+        f"Уникальных (после очистки): {len(filtered)}\n"
+        f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}\n"
+        f"Иностранные домены: {len(foreign)}"
     )
     if sample_allowed:
-        report += "\n\n🧪 Примеры (.ru/.com):\n" + "\n".join(sample_allowed)
+        report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
     if sample_numeric:
-        report += "\n\n🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric)
+        report += "\n\n🔢 Примеры цифровых:\n" + "\n".join(sample_numeric)
     if sample_foreign:
-        report += "\n\n🌍 Примеры иностранных (исключены):\n" + "\n".join(
+        report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(
             sample_foreign
         )
     return report
@@ -509,7 +509,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         if file_path.lower().endswith(".zip"):
             allowed_all, extracted_files, loose_all = await extract_emails_from_zip(
-                file_path, progress_msg, DOWNLOAD_DIR
+                file_path
             )
             repairs = collect_repairs_from_files(extracted_files)
         else:
@@ -626,13 +626,11 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     sample_foreign = sample_preview(foreign, PREVIEW_FOREIGN)
     report = []
     if sample_allowed:
-        report.append("🧪 Примеры (.ru/.com):\n" + "\n".join(sample_allowed))
+        report.append("🧪 Примеры:\n" + "\n".join(sample_allowed))
     if sample_numeric:
-        report.append("🔢 Примеры цифровых (исключены):\n" + "\n".join(sample_numeric))
+        report.append("🔢 Примеры цифровых:\n" + "\n".join(sample_numeric))
     if sample_foreign:
-        report.append(
-            "🌍 Примеры иностранных (исключены):\n" + "\n".join(sample_foreign)
-        )
+        report.append("🌍 Примеры иностранных:\n" + "\n".join(sample_foreign))
     await query.message.reply_text(
         "\n\n".join(report) if report else "Показать нечего."
     )
@@ -737,7 +735,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
-            await update.message.reply_text("❌ Не найдено ни одного email (.ru/.com).")
+            await update.message.reply_text("❌ Не найдено ни одного email.")
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -944,7 +942,7 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     for chunk in _chunk_list(foreign, 60):
         await query.message.reply_text(
-            "🌍 Иностранные домены (исключены):\n" + "\n".join(chunk)
+            "🌍 Иностранные домены:\n" + "\n".join(chunk)
         )
 
 
@@ -1026,7 +1024,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         to_send = [e for e in emails if e not in blocked]
 
         if not to_send:
-            await query.message.reply_text("❗ Все адреса уже есть в блок-листе.")
+            await query.message.reply_text("❗ Нет адресов для отправки.")
             context.user_data["manual_emails"] = []
             imap.logout()
             return

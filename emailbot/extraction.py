@@ -20,6 +20,13 @@ __all__ = [
     "extract_emails_manual",
     "smart_extract_emails",
     "normalize_email",
+    "extract_from_pdf",
+    "extract_from_docx",
+    "extract_from_xlsx",
+    "extract_from_csv_or_text",
+    "extract_emails_from_zip",
+    "extract_from_url",
+    "extract_any",
 ]
 
 
@@ -397,4 +404,295 @@ def extract_emails_manual(text: str) -> list[str]:
 # Чтобы сохранить обратную совместимость
 def extract_emails_document(text: str) -> list[str]:
     return smart_extract_emails(text)
+
+
+# ====================== ФАЙЛЫ И САЙТЫ ======================
+
+from typing import Dict, Iterable, Optional, Set
+
+
+def _dedupe(emails: Iterable[str]) -> list[str]:
+    seen: Set[str] = set()
+    out: list[str] = []
+    for e in emails:
+        n = normalize_email(e)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Извлечь e-mail-адреса из PDF."""
+
+    try:  # PyMuPDF
+        import fitz  # type: ignore
+    except Exception:  # pragma: no cover - fallback
+        try:
+            with open(path, "rb") as f:
+                text = f.read().decode("utf-8", "ignore")
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        return _dedupe(extract_emails_document(text)), {"pages": 0, "needs_ocr": True}
+
+    emails: Set[str] = set()
+    stats: Dict[str, int] = {"pages": 0}
+    doc = fitz.open(path)
+    for page in doc:
+        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            break
+        stats["pages"] += 1
+        text = page.get_text() or ""
+        emails.update(extract_emails_document(text))
+    doc.close()
+    return _dedupe(emails), stats
+
+
+def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Извлечь e-mail-адреса из DOCX."""
+
+    try:
+        import docx  # type: ignore
+
+        doc = docx.Document(path)
+        texts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    texts.append(cell.text)
+        text = "\n".join(texts)
+        stats = {"paragraphs": len(doc.paragraphs)}
+        return _dedupe(extract_emails_document(text)), stats
+    except Exception:
+        # Fallback: unzip and read XML
+        import zipfile
+        import re
+
+        try:
+            with zipfile.ZipFile(path) as z:
+                xml = z.read("word/document.xml").decode("utf-8", "ignore")
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        texts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", xml)
+        text = "\n".join(texts)
+        return _dedupe(extract_emails_document(text)), {"paragraphs": len(texts)}
+
+
+def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Извлечь e-mail-адреса из XLSX."""
+
+    try:
+        import openpyxl  # type: ignore
+
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        emails: Set[str] = set()
+        cells = 0
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    break
+                for val in row:
+                    cells += 1
+                    if isinstance(val, str):
+                        emails.update(extract_emails_document(val))
+        return _dedupe(emails), {"cells": cells}
+    except Exception:
+        # Fallback: parse XML inside zip
+        import zipfile
+        import re
+
+        emails: Set[str] = set()
+        cells = 0
+        try:
+            with zipfile.ZipFile(path) as z:
+                for name in z.namelist():
+                    if not name.startswith("xl/") or not name.endswith(".xml"):
+                        continue
+                    xml = z.read(name).decode("utf-8", "ignore")
+                    for txt in re.findall(r">([^<>]+)<", xml):
+                        cells += 1
+                        emails.update(extract_emails_document(txt))
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        return _dedupe(emails), {"cells": cells}
+
+
+def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Извлечь e-mail из CSV или текстового файла."""
+
+    import os
+    import csv
+
+    emails: Set[str] = set()
+    lines = 0
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".csv":
+            with open(path, newline="", encoding="utf-8", errors="ignore") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        break
+                    lines += 1
+                    for cell in row:
+                        s = str(cell)
+                        emails.update(
+                            re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", s)
+                        )
+        else:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        break
+                    lines += 1
+                    emails.update(
+                        re.findall(
+                            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", line
+                        )
+                    )
+    except Exception:
+        return [], {"errors": ["cannot open"]}
+    return _dedupe(emails), {"lines": lines}
+
+
+def _decode_cfemail(hexstr: str) -> str:
+    """Decode Cloudflare email obfuscation string."""
+
+    key = int(hexstr[:2], 16)
+    decoded = bytes(int(hexstr[i : i + 2], 16) ^ key for i in range(2, len(hexstr), 2))
+    return decoded.decode("utf-8", "ignore")
+
+
+def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Загрузить веб-страницу и извлечь e-mail-адреса."""
+
+    import re
+    import urllib.parse
+    import urllib.request
+
+    stats: Dict[str, int | list] = {"urls_scanned": 0, "cfemail_decoded": 0, "obfuscated_hits": 0, "errors": []}
+    emails: Set[str] = set()
+
+    def _fetch(u: str) -> str | None:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+                encoding = resp.headers.get_content_charset() or "utf-8"
+                return data.decode(encoding, "ignore")
+        except Exception as e:  # pragma: no cover - network errors
+            stats["errors"].append(str(e))
+            return None
+
+    def _process(html: str) -> None:
+        stats["urls_scanned"] += 1
+        for m in re.findall(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
+            addr = urllib.parse.unquote(m)
+            emails.add(addr)
+        for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
+            try:
+                emails.add(_decode_cfemail(cf))
+                stats["cfemail_decoded"] += 1
+            except Exception:
+                pass
+        text = strip_html(html)
+        emails.update(extract_emails_document(text))
+        obf_patterns = [
+            r'([\w.+-]+)\s*\[at\]\s*([\w.-]+)\s*\[dot\]\s*([A-Za-z]{2,})',
+            r'([\w.+-]+)\s*\(at\)\s*([\w.-]+)\s*\(dot\)\s*([A-Za-z]{2,})',
+            r'([\w.+-]+)\s+at\s+([\w.-]+)\s+dot\s+([A-Za-z]{2,})',
+            r'([\w.+-]+)\s+собака\s+([\w.-]+)\s+точка\s+([A-Za-z]{2,})',
+        ]
+        for pat in obf_patterns:
+            for m in re.findall(pat, text, flags=re.I):
+                stats["obfuscated_hits"] += 1
+                emails.add(f"{m[0]}@{m[1]}.{m[2]}")
+
+    html = _fetch(url)
+    if html:
+        _process(html)
+        links = re.findall(r'href=["\']([^"\']+)', html, flags=re.I)
+        if len(links) <= 30:
+            parsed0 = urllib.parse.urlparse(url)
+            for href in links:
+                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    break
+                if not re.search(r"contact|contacts|about|region|regiony|regions|контакт", href, re.I):
+                    continue
+                new = urllib.parse.urljoin(url, href)
+                parsed = urllib.parse.urlparse(new)
+                if parsed.netloc != parsed0.netloc:
+                    continue
+                html2 = _fetch(new)
+                if html2:
+                    _process(html2)
+
+    return _dedupe(emails), stats
+
+
+def extract_emails_from_zip(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Пройти по ZIP и извлечь e-mail из поддерживаемых файлов."""
+
+    import os
+    import zipfile
+    import tempfile
+
+    emails: Set[str] = set()
+    stats: Dict[str, int] = {}
+    try:
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    break
+                if name.endswith("/"):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".html", ".htm"}:
+                    continue
+                data = z.read(name)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(data)
+                    tmp_path = tmp.name
+                try:
+                    em, _ = extract_any(tmp_path, stop_event)
+                    emails.update(em)
+                    key = ext.lstrip(".")
+                    stats[key] = stats.get(key, 0) + 1
+                finally:
+                    os.remove(tmp_path)
+    except Exception:
+        return [], {"errors": ["cannot open"]}
+    return _dedupe(emails), stats
+
+
+def extract_any(source: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
+    """Определить тип источника и извлечь e-mail-адреса."""
+
+    import os
+    import re
+
+    if re.match(r"https?://", source, re.I):
+        return extract_from_url(source, stop_event)
+
+    ext = os.path.splitext(source)[1].lower()
+    if ext == ".pdf":
+        return extract_from_pdf(source, stop_event)
+    if ext == ".docx":
+        return extract_from_docx(source, stop_event)
+    if ext == ".xlsx":
+        return extract_from_xlsx(source, stop_event)
+    if ext in {".csv", ".txt"}:
+        return extract_from_csv_or_text(source, stop_event)
+    if ext == ".zip":
+        return extract_emails_from_zip(source, stop_event)
+    if ext in {".html", ".htm"}:
+        with open(source, encoding="utf-8", errors="ignore") as f:
+            html = f.read()
+        emails, stats = extract_from_url("file://" + source, stop_event)
+        return emails, stats
+
+    with open(source, encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+    return _dedupe(extract_emails_document(text)), {}
+
 

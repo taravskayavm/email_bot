@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import types
+import imaplib
+import pytest
 
 from telegram import InlineKeyboardMarkup
 
@@ -109,8 +111,8 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     assert state.suspect_numeric == ["123@site.com"]
     assert state.foreign == ["foreign@example.de"]
     report = update.message.replies[2]
-    assert "Найдено адресов (.ru/.com): 2" in report
-    assert "Уникальных (после базовой очистки): 1" in report
+    assert "Найдено адресов: 2" in report
+    assert "Уникальных (после очистки): 1" in report
 
 
 def test_handle_text_add_block(monkeypatch):
@@ -228,3 +230,38 @@ def test_manual_input_parsing_accepts_gmail(caplog):
     assert ctx.user_data["awaiting_manual_email"] is False
     assert isinstance(update.message.reply_markups[0], InlineKeyboardMarkup)
     assert any("Manual input parsing" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_send_manual_email_no_block_mentions(monkeypatch):
+    update = DummyUpdate(callback_data="manual_group_туризм")
+    ctx = DummyContext()
+    ctx.user_data["manual_emails"] = ["x@example.com"]
+
+    monkeypatch.setattr(bh, "TEMPLATE_MAP", {"туризм": "template.html"})
+    monkeypatch.setattr(bh, "get_blocked_emails", lambda: {"x@example.com"})
+    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+
+    class DummyImap:
+        def login(self, *a, **k):
+            return "OK", None
+
+        def list(self, *a, **k):
+            return "OK", []
+
+        def select(self, *a, **k):
+            return "OK", None
+
+        def logout(self):
+            return
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *a, **k: DummyImap())
+
+    monkeypatch.setattr(bh.messaging, "create_task_with_logging", lambda coro, _: asyncio.create_task(coro))
+
+    await bh.send_manual_email(update, ctx)
+    await asyncio.sleep(0)
+
+    text = "\n".join(update.callback_query.message.replies)
+    assert "блок" not in text
+    assert "180" not in text
