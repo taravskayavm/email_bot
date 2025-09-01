@@ -1014,7 +1014,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         group_code = query.data.split("_")[2]
         template_path = TEMPLATE_MAP[group_code]
 
-        blocked = get_blocked_emails()
+        # manual отправка не учитывает супресс-лист
+        get_blocked_emails()
         sent_today = get_sent_today()
 
         try:
@@ -1027,13 +1028,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        to_send = [e for e in emails if e not in blocked]
-
-        if not to_send:
-            await query.message.reply_text("❗ Нет адресов для отправки.")
-            context.user_data["manual_emails"] = []
-            imap.logout()
-            return
+        to_send = list(emails)
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
