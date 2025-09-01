@@ -88,7 +88,7 @@ def main() -> None:
         )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^⏹️"), bot_handlers.stop_process)
+        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
     )
 
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
