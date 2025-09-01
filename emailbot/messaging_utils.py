@@ -69,6 +69,42 @@ def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
     return any(p in m for p in patterns)
 
 
+def is_soft_bounce(code: int | None, msg: str | bytes | None) -> bool:
+    """Return True for temporary delivery failures."""
+    if is_hard_bounce(code, msg):
+        return False
+    icode = None
+    if code is not None:
+        try:
+            icode = int(code)
+        except Exception:
+            icode = None
+    if icode is not None:
+        if 400 <= icode < 500:
+            return True
+        if 500 <= icode < 600:
+            return False
+    m = (
+        (msg or b"")
+        .decode("utf-8", "ignore")
+        if isinstance(msg, (bytes, bytearray))
+        else (msg or "")
+    ).lower()
+    patterns = [
+        "temporary",
+        "try again later",
+        "greylist",
+        "graylist",
+        "timed out",
+        "timeout",
+        "rate limit",
+        "too many connections",
+        "temporarily deferred",
+        "temporarily unavailable",
+    ]
+    return any(p in m for p in patterns)
+
+
 def suppress_add(email: str, code: int | None, reason: str) -> None:
     email = (email or "").lower().strip()
     rows: dict[str, dict] = {}
@@ -128,6 +164,7 @@ __all__ = [
     "BOUNCE_LOG_PATH",
     "add_bounce",
     "is_hard_bounce",
+    "is_soft_bounce",
     "suppress_add",
     "is_suppressed",
     "is_foreign",
