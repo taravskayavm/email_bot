@@ -1,6 +1,7 @@
 import asyncio
 import csv
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import aiohttp
 from aiohttp import web
@@ -138,6 +139,24 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     msg2, _ = messaging.build_message(
         "r@example.com", str(html_file), "Subj"
     )
+    html2 = msg2.get_body("html").get_content()
+    assert "cid:logo" not in html2
+    assert "<img" not in html2
+
+
+@pytest.mark.parametrize("template_name", ["sport.html", "tourism.html", "medicine.html"])
+def test_repository_templates_logo_toggle(monkeypatch, template_name):
+    template_path = Path(__file__).resolve().parents[1] / "templates" / template_name
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+
+    monkeypatch.setenv("INLINE_LOGO", "1")
+    msg, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
+    html = msg.get_body("html").get_content()
+    assert html.count("cid:logo") == 1
+    assert html.count("<img") == 1
+
+    monkeypatch.setenv("INLINE_LOGO", "0")
+    msg2, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
     html2 = msg2.get_body("html").get_content()
     assert "cid:logo" not in html2
     assert "<img" not in html2
