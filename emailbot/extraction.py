@@ -12,7 +12,10 @@ from __future__ import annotations
 import re
 import unicodedata
 from html import unescape
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Iterable, Set, Optional
+
+from . import settings
+from .extraction_url import EmailHit, extract_obfuscated_hits
 
 __all__ = [
     "strip_html",
@@ -303,7 +306,9 @@ def smart_extract_emails(text: str) -> List[str]:
         email_v2 = email_v1
         left_char = text[left_idx] if left_idx >= 0 else None
 
-        if len(local) >= 2 and _is_left_boundary(left_char):
+        if local.isdigit():
+            choose_v2 = False
+        elif len(local) >= 2 and _is_left_boundary(left_char):
             prefix_char = local[0]
             local2 = local[1:]
             if _valid_local(local2) and (prefix_char.isdigit() or prefix_char.islower()):
@@ -570,8 +575,14 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
     import urllib.parse
     import urllib.request
 
-    stats: Dict[str, int | list] = {"urls_scanned": 0, "cfemail_decoded": 0, "obfuscated_hits": 0, "errors": []}
-    emails: Set[str] = set()
+    stats: Dict[str, int | list] = {
+        "urls_scanned": 0,
+        "cfemail_decoded": 0,
+        "obfuscated_hits": 0,
+        "numeric_from_obfuscation_dropped": 0,
+        "errors": [],
+    }
+    hits: List[EmailHit] = []
 
     def _fetch(u: str) -> str | None:
         try:
@@ -586,27 +597,29 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
 
     def _process(html: str) -> None:
         stats["urls_scanned"] += 1
-        for m in re.findall(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
-            addr = urllib.parse.unquote(m)
-            emails.add(addr)
+        for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
+            addr = urllib.parse.unquote(m.group(1))
+            hits.append(EmailHit(email=addr.lower(), source_ref=url, origin="mailto", pre="", post=""))
         for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
             try:
-                emails.add(_decode_cfemail(cf))
+                hits.append(
+                    EmailHit(
+                        email=_decode_cfemail(cf),
+                        source_ref=url,
+                        origin="cfemail",
+                        pre="",
+                        post="",
+                    )
+                )
                 stats["cfemail_decoded"] += 1
             except Exception:
                 pass
         text = strip_html(html)
-        emails.update(extract_emails_document(text))
-        obf_patterns = [
-            r'([\w.+-]+)\s*\[at\]\s*([\w.-]+)\s*\[dot\]\s*([A-Za-z]{2,})',
-            r'([\w.+-]+)\s*\(at\)\s*([\w.-]+)\s*\(dot\)\s*([A-Za-z]{2,})',
-            r'([\w.+-]+)\s+at\s+([\w.-]+)\s+dot\s+([A-Za-z]{2,})',
-            r'([\w.+-]+)\s+собака\s+([\w.-]+)\s+точка\s+([A-Za-z]{2,})',
-        ]
-        for pat in obf_patterns:
-            for m in re.findall(pat, text, flags=re.I):
-                stats["obfuscated_hits"] += 1
-                emails.add(f"{m[0]}@{m[1]}.{m[2]}")
+        for e in extract_emails_document(text):
+            hits.append(EmailHit(email=e, source_ref=url, origin="direct_at", pre="", post=""))
+        obf_hits = extract_obfuscated_hits(text, url)
+        stats["obfuscated_hits"] += len(obf_hits)
+        hits.extend(obf_hits)
 
     html = _fetch(url)
     if html:
@@ -627,7 +640,31 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
                 if html2:
                     _process(html2)
 
-    return _dedupe(emails), stats
+    filtered: List[EmailHit] = []
+    for h in hits:
+        if h.origin in {"mailto", "direct_at", "cfemail"}:
+            filtered.append(h)
+            continue
+        if h.origin == "obfuscation":
+            try:
+                local, domain = h.email.split("@", 1)
+            except ValueError:
+                continue
+            if not _valid_domain(domain):
+                continue
+            if local.isdigit():
+                window = (h.pre + h.post).lower()
+                if settings.STRICT_OBFUSCATION:
+                    if not re.search(r"email|e-mail|почта|эл\.почта", window):
+                        stats["numeric_from_obfuscation_dropped"] += 1
+                        continue
+                else:
+                    if not ("@" in window or "mailto" in window):
+                        stats["numeric_from_obfuscation_dropped"] += 1
+                        continue
+            filtered.append(h)
+
+    return _dedupe([h.email for h in filtered]), stats
 
 
 def extract_emails_from_zip(path: str, stop_event: Optional[object] = None) -> tuple[list[str], Dict]:
