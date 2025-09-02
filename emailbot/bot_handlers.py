@@ -28,6 +28,7 @@ from . import messaging
 from . import extraction as _extraction
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import build_mass_report_text
+from . import settings
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -148,6 +149,7 @@ class SessionState:
     repairs_sample: List[str] = field(default_factory=list)
     group: Optional[str] = None
     template: Optional[str] = None
+    footnote_dupes: int = 0
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -190,6 +192,23 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for key in ["awaiting_block_email", "awaiting_manual_email"]:
         context.user_data[key] = False
+
+
+async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to toggle experimental features."""
+
+    text = (update.message.text or "").strip()
+    m = re.match(r"/features\s+set\s+strict\s+(on|off)", text, re.I)
+    if m:
+        settings.STRICT_OBFUSCATION = m.group(1).lower() == "on"
+        settings.save()
+        await update.message.reply_text(
+            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
+        )
+        return
+    await update.message.reply_text(
+        f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -509,6 +528,7 @@ async def _compose_report_and_save(
     filtered: List[str],
     suspicious_numeric: List[str],
     foreign: List[str],
+    footnote_dupes: int = 0,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
@@ -516,6 +536,7 @@ async def _compose_report_and_save(
     state.preview_allowed_all = sorted(allowed_all)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
+    state.footnote_dupes = footnote_dupes
 
     sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
     sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
@@ -528,6 +549,8 @@ async def _compose_report_and_save(
         f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}\n"
         f"Иностранные домены: {len(foreign)}"
     )
+    if footnote_dupes:
+        report += f"\nВозможные сносочные дубликаты: {footnote_dupes}"
     if sample_allowed:
         report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
     if sample_numeric:
@@ -596,7 +619,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
 
     report = await _compose_report_and_save(
-        context, allowed_all, filtered, suspicious_numeric, foreign
+        context, allowed_all, filtered, suspicious_numeric, foreign, 0
     )
     if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
@@ -803,7 +826,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
         report = await _compose_report_and_save(
-            context, allowed_all, filtered, suspicious_numeric, foreign_all
+            context, allowed_all, filtered, suspicious_numeric, foreign_all, 0
         )
         if state.repairs_sample:
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
