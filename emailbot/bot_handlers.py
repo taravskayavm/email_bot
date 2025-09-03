@@ -40,8 +40,8 @@ def apply_numeric_truncation_removal(allowed):
 
 
 async def async_extract_emails_from_url(url: str, session, chat_id=None):
-    emails, _stats = await asyncio.to_thread(_extraction.extract_from_url, url)
-    emails = set(e.lower().strip() for e in emails)
+    hits, _stats = await asyncio.to_thread(_extraction.extract_from_url, url)
+    emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
     return url, emails, foreign, []
 
@@ -55,10 +55,10 @@ def collect_repairs_from_files(files):
 
 
 async def extract_emails_from_zip(path: str, *_, **__):
-    emails, _stats = await asyncio.to_thread(
+    hits, _stats = await asyncio.to_thread(
         _extraction.extract_emails_from_zip, path
     )
-    emails = set(e.lower().strip() for e in emails)
+    emails = set(h.email.lower().strip() for h in hits)
     extracted_files = [path]
     return emails, extracted_files, set(emails)
 
@@ -68,8 +68,8 @@ def extract_emails_loose(text):
 
 
 def extract_from_uploaded_file(path: str):
-    emails, _stats = _extraction.extract_any(path)
-    emails = set(e.lower().strip() for e in emails)
+    hits, _stats = _extraction.extract_any(path)
+    emails = set(h.email.lower().strip() for h in hits)
     return emails, set(emails)
 
 
