@@ -1,0 +1,134 @@
+"""PDF extraction helpers with optional layout and OCR features."""
+from __future__ import annotations
+
+import re
+import statistics
+import time
+from typing import Dict, List, Optional
+
+from . import settings
+from .extraction_common import preprocess_text
+
+_SUP_DIGITS = str.maketrans({
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+})
+
+_OCR_PAGE_LIMIT = 5
+_OCR_TIME_LIMIT = 30  # seconds
+
+
+def _page_text_layout(page) -> str:
+    """Return page text reconstructing layout and superscript digits."""
+
+    data = page.get_text("dict")
+    chars: List[tuple[str, float]] = []
+    sizes: List[float] = []
+    for block in data.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                size = float(span.get("size", 0))
+                text = span.get("text", "")
+                for ch in text:
+                    chars.append((ch, size))
+                    sizes.append(size)
+            chars.append(("\n", 0))
+    if chars and chars[-1][0] == "\n":
+        chars.pop()
+    median = statistics.median(sizes) if sizes else 0
+    out = []
+    for ch, size in chars:
+        if ch.isdigit() and median and size < median * 0.8:
+            out.append(_SUP_DIGITS.get(ch, ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _ocr_page(page) -> str:
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except Exception:
+        return ""
+    try:
+        pix = page.get_pixmap(dpi=200)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return pytesseract.image_to_string(img)
+    except Exception:
+        return ""
+
+
+def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
+    """Extract e-mail addresses from a PDF file."""
+
+    from .extraction import EmailHit, extract_emails_document, _dedupe
+
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        try:
+            with open(path, "rb") as f:
+                text = f.read().decode("utf-8", "ignore")
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        hits = [
+            EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
+            for e in extract_emails_document(text)
+        ]
+        return _dedupe(hits), {"pages": 0, "needs_ocr": True}
+
+    hits: List[EmailHit] = []
+    stats: Dict[str, int] = {"pages": 0}
+    doc = fitz.open(path)
+    ocr_pages = 0
+    ocr_start = time.time()
+    for page_idx, page in enumerate(doc, start=1):
+        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            break
+        stats["pages"] += 1
+        if settings.PDF_LAYOUT_AWARE:
+            try:
+                text = _page_text_layout(page)
+            except Exception:
+                text = page.get_text() or ""
+        else:
+            text = page.get_text() or ""
+        if not text.strip() and settings.ENABLE_OCR:
+            if (
+                ocr_pages < _OCR_PAGE_LIMIT
+                and time.time() - ocr_start < _OCR_TIME_LIMIT
+            ):
+                text = _ocr_page(page)
+                if text:
+                    ocr_pages += 1
+                    stats["ocr_pages"] = ocr_pages
+        text = preprocess_text(text)
+        low_text = text.lower()
+        for email in extract_emails_document(text):
+            for m in re.finditer(re.escape(email), low_text):
+                start, end = m.span()
+                pre = text[max(0, start - 16) : start]
+                post = text[end : end + 16]
+                hits.append(
+                    EmailHit(
+                        email=email,
+                        source_ref=f"pdf:{path}#page={page_idx}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+    doc.close()
+    return _dedupe(hits), stats
+
+
+__all__ = ["extract_from_pdf"]
