@@ -17,6 +17,8 @@ from typing import List, Tuple, Dict, Iterable, Set, Optional
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants
+from .extraction_common import normalize_email, normalize_text, preprocess_text
+from .extraction_pdf import extract_from_pdf
 
 __all__ = [
     "EmailHit",
@@ -44,45 +46,9 @@ class EmailHit:
     post: str = ""       # до 16 символов справа
 
 
-def normalize_email(s: str) -> str:
-    return (s or "").strip().lower()
-
-
-# ====================== НОРМАЛИЗАЦИЯ ТЕКСТА ======================
-
-_Z_SPACE_RE = re.compile(r"[\u2000-\u200A\u202F\u205F\u3000]")  # тонкие/узкие/идеографические пробелы
 _BULLETS = "•·⋅◦"
 _BRACKETS_OPEN = "([{〔【〈《"
 _BRACKETS_CLOSE = ")]}\u3015\u3011\u3009\u300B"
-
-def _normalize_typography(s: str) -> str:
-    # Юникодная нормализация
-    s = unicodedata.normalize("NFKC", s or "")
-    # Пробелы
-    s = s.replace("\u00A0", " ")  # NBSP
-    s = _Z_SPACE_RE.sub(" ", s)  # Z* пробелы -> обычный пробел
-    # Нулевой ширины, BOM, мягкий перенос
-    s = (s.replace("\u200B", "").replace("\u200C", "").replace("\u200D", "")
-           .replace("\uFEFF", "").replace("\u00AD", ""))
-    # Тире/минусы к ASCII '-'
-    s = (s.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-")
-           .replace("\u2013", "-").replace("\u2014", "-").replace("\u2015", "-")
-           .replace("\u2212", "-").replace("\u2043", "-").replace("\uFE63", "-")
-           .replace("\uFF0D", "-"))
-    # Апострофы/кавычки к ASCII "'"
-    s = (s.replace("\u2018", "'").replace("\u2019", "'").replace("\u2032", "'")
-           .replace("\uFF07", "'"))
-    # Полноширинные знаки
-    s = s.replace("\uFF20", "@").replace("\uFF0E", ".")
-    return s
-
-def _preprocess_text(text: str) -> str:
-    text = _normalize_typography(text)
-    # Склейка переносов внутри адресов (сохраняем дефис/точку и др. atext)
-    atext = "A-Za-z0-9!#$%&'*+/=?^_`{|}~.-"
-    text = re.sub(fr"([{atext}])-\n([{atext}])", r"\1-\2", text)
-    text = re.sub(fr"([{atext}])\n([{atext}])", r"\1\2", text)
-    return text
 
 # ====================== STRIP HTML ======================
 
@@ -103,7 +69,7 @@ def strip_html(html: str) -> str:
     """
     if not html:
         return ""
-    s = _normalize_typography(html)
+    s = normalize_text(html)
     s = _SCRIPT_STYLE_RE.sub("\n", s)
     s = _BR_RE.sub("\n", s)
     s = _LI_RE.sub("\n- ", s)
@@ -284,7 +250,7 @@ def smart_extract_emails(text: str) -> List[str]:
     - переносы строк и типографику внутри адресов.
     Не режет валидный local-part (поддержаны все символы RFC atext).
     """
-    text = _preprocess_text(text)
+    text = preprocess_text(text)
     low_text = text.lower()
     multi_mode = _multi_prefix_mode(text)
 
@@ -390,7 +356,7 @@ def extract_emails_manual(text: str) -> list[str]:
     if not text:
         return []
 
-    s = _preprocess_text(text)
+    s = preprocess_text(text)
     s_low = s.lower()
 
     found: list[str] = []
@@ -447,43 +413,6 @@ def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
                     )
                 )
     return out
-
-
-def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
-    """Извлечь e-mail-адреса из PDF."""
-
-    try:  # PyMuPDF
-        import fitz  # type: ignore
-    except Exception:  # pragma: no cover - fallback
-        try:
-            with open(path, "rb") as f:
-                text = f.read().decode("utf-8", "ignore")
-        except Exception:
-            return [], {"errors": ["cannot open"]}
-        hits = [
-            EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
-            for e in extract_emails_document(text)
-        ]
-        return _dedupe(hits), {"pages": 0, "needs_ocr": True}
-
-    hits: List[EmailHit] = []
-    stats: Dict[str, int] = {"pages": 0}
-    doc = fitz.open(path)
-    for page_idx, page in enumerate(doc, start=1):
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
-            break
-        stats["pages"] += 1
-        text = page.get_text() or ""
-        for e in extract_emails_document(text):
-            hits.append(
-                EmailHit(
-                    email=e,
-                    source_ref=f"pdf:{path}#page={page_idx}",
-                    origin="direct_at",
-                )
-            )
-    doc.close()
-    return _dedupe(hits), stats
 
 
 def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:

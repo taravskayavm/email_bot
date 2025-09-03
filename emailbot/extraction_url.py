@@ -6,6 +6,7 @@ import re
 from typing import Dict, List, Optional
 
 from .extraction import EmailHit, _valid_local, _valid_domain
+from .extraction_common import normalize_text
 
 _OBFUSCATED_RE = re.compile(
     r"(?P<local>[\w.+-]+)\s*(?P<at>@|\(at\)|\[at\]|at|собака)\s*(?P<domain>[\w-]+(?:\s*(?:\.|dot|\(dot\)|\[dot\]|точка)\s*[\w-]+)+)",
@@ -20,6 +21,7 @@ def extract_obfuscated_hits(
 ) -> List[EmailHit]:
     """Return all ``EmailHit`` objects found via obfuscation patterns."""
 
+    text = normalize_text(text)
     hits: List[EmailHit] = []
     for m in _OBFUSCATED_RE.finditer(text):
         local = m.group("local")
