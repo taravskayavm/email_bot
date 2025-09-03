@@ -540,21 +540,16 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
     return _dedupe(hits), {"lines": lines}
 
 
-def _decode_cfemail(hexstr: str) -> str:
-    """Decode Cloudflare email obfuscation string."""
-
-    key = int(hexstr[:2], 16)
-    decoded = bytes(int(hexstr[i : i + 2], 16) ^ key for i in range(2, len(hexstr), 2))
-    return decoded.decode("utf-8", "ignore")
+from .extraction_url import extract_obfuscated_hits, fetch_url, decode_cfemail
 
 
-def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
+def extract_from_url(
+    url: str, stop_event: Optional[object] = None, *, max_depth: int = 2
+) -> tuple[list[EmailHit], Dict]:
     """Загрузить веб-страницу и извлечь e-mail-адреса."""
 
     import re
     import urllib.parse
-    import urllib.request
-    from .extraction_url import extract_obfuscated_hits
 
     stats: Dict[str, int | list] = {
         "urls_scanned": 0,
@@ -565,17 +560,6 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
     }
     hits: List[EmailHit] = []
 
-    def _fetch(u: str) -> str | None:
-        try:
-            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
-                encoding = resp.headers.get_content_charset() or "utf-8"
-                return data.decode(encoding, "ignore")
-        except Exception as e:  # pragma: no cover - network errors
-            stats["errors"].append(str(e))
-            return None
-
     def _process(html: str, current_url: str) -> None:
         source_ref = f"url:{current_url}"
         stats["urls_scanned"] += 1
@@ -584,7 +568,7 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
             hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
         for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
             try:
-                email = _decode_cfemail(cf)
+                email = decode_cfemail(cf)
             except Exception:
                 continue
             hits.append(
@@ -602,24 +586,34 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
         stats["obfuscated_hits"] += len(obf_hits)
         hits.extend(obf_hits)
 
-    html = _fetch(url)
-    if html:
-        _process(html, url)
+    visited: set[str] = set()
+    parsed_root = urllib.parse.urlparse(url)
+
+    def _crawl(current_url: str, depth: int) -> None:
+        if depth < 0 or current_url in visited:
+            return
+        html = fetch_url(current_url, stop_event)
+        if not html:
+            return
+        visited.add(current_url)
+        _process(html, current_url)
+        if depth == 0:
+            return
         links = re.findall(r'href=["\']([^"\']+)', html, flags=re.I)
-        if len(links) <= 30:
-            parsed0 = urllib.parse.urlparse(url)
-            for href in links:
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                    break
-                if not re.search(r"contact|contacts|about|region|regiony|regions|контакт", href, re.I):
-                    continue
-                new = urllib.parse.urljoin(url, href)
-                parsed = urllib.parse.urlparse(new)
-                if parsed.netloc != parsed0.netloc:
-                    continue
-                html2 = _fetch(new)
-                if html2:
-                    _process(html2, new)
+        if len(links) > 30:
+            return
+        for href in links:
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                break
+            if not re.search(r"contact|contacts|about|region|regiony|regions|контакт", href, re.I):
+                continue
+            new = urllib.parse.urljoin(current_url, href)
+            parsed = urllib.parse.urlparse(new)
+            if parsed.netloc != parsed_root.netloc:
+                continue
+            _crawl(new, depth - 1)
+
+    _crawl(url, max_depth - 1)
     hits = merge_footnote_prefix_variants(hits, stats)
     return _dedupe(hits), stats
 
@@ -708,9 +702,33 @@ def extract_any(
     elif ext == ".zip":
         hits, stats = extract_emails_from_zip(source, stop_event)
     elif ext in {".html", ".htm"}:
+        import urllib.parse
         with open(source, encoding="utf-8", errors="ignore") as f:
             html = f.read()
-        hits, stats = extract_from_url("file://" + source, stop_event)
+        hits = []
+        stats = {
+            "urls_scanned": 1,
+            "cfemail_decoded": 0,
+            "obfuscated_hits": 0,
+            "numeric_from_obfuscation_dropped": 0,
+        }
+        source_ref = f"html:{source}"
+        for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
+            addr = urllib.parse.unquote(m.group(1))
+            hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
+        for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
+            try:
+                email = decode_cfemail(cf)
+            except Exception:
+                continue
+            hits.append(EmailHit(email=email, source_ref=source_ref, origin="cfemail"))
+            stats["cfemail_decoded"] += 1
+        text = strip_html(html)
+        for e in extract_emails_document(text):
+            hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+        obf_hits = extract_obfuscated_hits(text, source_ref, stats)
+        stats["obfuscated_hits"] = len(obf_hits)
+        hits.extend(obf_hits)
     else:
         with open(source, encoding="utf-8", errors="ignore") as f:
             text = f.read()
