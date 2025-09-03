@@ -19,6 +19,7 @@ from . import settings
 from .dedupe import merge_footnote_prefix_variants
 from .extraction_common import normalize_email, normalize_text, preprocess_text
 from .extraction_pdf import extract_from_pdf
+from .extraction_zip import extract_emails_from_zip
 
 __all__ = [
     "EmailHit",
@@ -416,41 +417,63 @@ def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
 
 
 def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
-    """Извлечь e-mail-адреса из DOCX."""
+    """Извлечь e-mail-адреса из DOCX, учитывая номера страниц."""
 
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    hits: List[EmailHit] = []
     try:
-        import docx  # type: ignore
-
-        doc = docx.Document(path)
-        texts = [p.text for p in doc.paragraphs]
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    texts.append(cell.text)
-        text = "\n".join(texts)
-        stats = {"paragraphs": len(doc.paragraphs)}
-        hits = [
-            EmailHit(email=e, source_ref=f"docx:{path}", origin="direct_at")
-            for e in extract_emails_document(text)
-        ]
-        return _dedupe(hits), stats
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml")
     except Exception:
-        # Fallback: unzip and read XML
-        import zipfile
-        import re
+        return [], {"errors": ["cannot open"]}
 
-        try:
-            with zipfile.ZipFile(path) as z:
-                xml = z.read("word/document.xml").decode("utf-8", "ignore")
-        except Exception:
-            return [], {"errors": ["cannot open"]}
-        texts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", xml)
-        text = "\n".join(texts)
-        hits = [
-            EmailHit(email=e, source_ref=f"docx:{path}", origin="direct_at")
-            for e in extract_emails_document(text)
-        ]
-        return _dedupe(hits), {"paragraphs": len(texts)}
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return [], {"errors": ["cannot open"]}
+
+    page = 1
+    text = ""
+    stats: Dict[str, int] = {"pages": 0}
+
+    def flush(page_text: str, page_no: int) -> None:
+        low = page_text.lower()
+        for email in extract_emails_document(page_text):
+            for m in re.finditer(re.escape(email), low):
+                start, end = m.span()
+                pre = page_text[max(0, start - 16) : start]
+                post = page_text[end : end + 16]
+                hits.append(
+                    EmailHit(
+                        email=email,
+                        source_ref=f"docx:{path}#page={page_no}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+
+    for elem in root.iter():
+        if elem.tag == ns + "br" and elem.attrib.get(ns + "type") == "page":
+            flush(text, page)
+            page += 1
+            text = ""
+        elif elem.tag == ns + "lastRenderedPageBreak":
+            flush(text, page)
+            page += 1
+            text = ""
+        elif elem.tag == ns + "t":
+            text += elem.text or ""
+        elif elem.tag == ns + "p":
+            text += "\n"
+
+    flush(text, page)
+    stats["pages"] = page
+    return _dedupe(hits), stats
 
 
 def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
@@ -463,14 +486,16 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
         hits: List[EmailHit] = []
         cells = 0
         for ws in wb.worksheets:
-            for row in ws.iter_rows(values_only=True):
+            for row in ws.iter_rows():
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     break
-                for val in row:
+                for cell in row:
                     cells += 1
+                    val = cell.value
                     if isinstance(val, str):
                         for e in extract_emails_document(val):
-                            hits.append(EmailHit(email=e, source_ref=f"xlsx:{path}", origin="direct_at"))
+                            ref = f"xlsx:{path}!{ws.title}:{cell.coordinate}"
+                            hits.append(EmailHit(email=e, source_ref=ref, origin="direct_at"))
         return _dedupe(hits), {"cells": cells}
     except Exception:
         # Fallback: parse XML inside zip
@@ -616,59 +641,6 @@ def extract_from_url(
     _crawl(url, max_depth - 1)
     hits = merge_footnote_prefix_variants(hits, stats)
     return _dedupe(hits), stats
-
-
-def extract_emails_from_zip(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
-    """Пройти по ZIP и извлечь e-mail из поддерживаемых файлов."""
-
-    import os
-    import zipfile
-    import tempfile
-
-    hits: List[EmailHit] = []
-    stats: Dict[str, int] = {}
-    try:
-        with zipfile.ZipFile(path) as z:
-            for name in z.namelist():
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                    break
-                if name.endswith("/"):
-                    continue
-                ext = os.path.splitext(name)[1].lower()
-                if ext not in {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".html", ".htm"}:
-                    continue
-                data = z.read(name)
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(data)
-                    tmp_path = tmp.name
-                try:
-                    inner_hits, inner_stats = extract_any(tmp_path, stop_event, _return_hits=True)
-                    for h in inner_hits:
-                        suffix = ""
-                        if "#" in h.source_ref:
-                            suffix = "#" + h.source_ref.split("#", 1)[1]
-                        new_ref = f"zip:{path}|{name}{suffix}"
-                        hits.append(
-                            EmailHit(
-                                email=h.email,
-                                source_ref=new_ref,
-                                origin=h.origin,
-                                pre=h.pre,
-                                post=h.post,
-                            )
-                        )
-                    key = ext.lstrip(".")
-                    stats[key] = stats.get(key, 0) + 1
-                    for k, v in inner_stats.items():
-                        if isinstance(v, int):
-                            stats[k] = stats.get(k, 0) + v
-                finally:
-                    os.remove(tmp_path)
-    except Exception:
-        return [], {"errors": ["cannot open"]}
-    hits = merge_footnote_prefix_variants(hits, stats)
-    return _dedupe(hits), stats
-
 
 def extract_any(
     source: str,
