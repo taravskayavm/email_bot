@@ -92,7 +92,11 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bh,
         "extract_from_uploaded_file",
-        lambda path: ({"good@example.com", "123@site.com"}, {"foreign@example.de"}),
+        lambda path: (
+            {"good@example.com", "123@site.com"},
+            {"foreign@example.de"},
+            {},
+        ),
     )
     monkeypatch.setattr(
         bh,

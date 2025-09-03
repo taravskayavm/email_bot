@@ -166,7 +166,7 @@ async def test_zip_handler_signature(monkeypatch, tmp_path: Path):
 
     async def fake(path):
         called["arg"] = path
-        return set(), [], set()
+        return set(), [], set(), {}
 
     monkeypatch.setattr(bh, "extract_emails_from_zip", fake)
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unicodedata
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from . import settings
-from .extraction import EmailHit
+
+if TYPE_CHECKING:  # pragma: no cover - for type checkers only
+    from .extraction import EmailHit
 
 
 def _is_superscript(ch: str) -> bool:
@@ -30,13 +32,13 @@ def _split_ref(ref: str) -> Tuple[str, int]:
     return base, page
 
 
-def merge_footnote_prefix_variants(hits: List[EmailHit], stats: Dict[str, int] | None = None) -> List[EmailHit]:
+def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int] | None = None) -> List["EmailHit"]:
     """Merge footnote-trimmed variants of the same e-mail within one source."""
 
     if stats is None:
         stats = {}
 
-    grouped: Dict[str, List[Tuple[int, EmailHit, int]]] = {}
+    grouped: Dict[str, List[Tuple[int, "EmailHit", int]]] = {}
     for idx, h in enumerate(hits):
         base, page = _split_ref(h.source_ref)
         grouped.setdefault(base, []).append((idx, h, page))

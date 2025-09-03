@@ -40,10 +40,10 @@ def apply_numeric_truncation_removal(allowed):
 
 
 async def async_extract_emails_from_url(url: str, session, chat_id=None):
-    hits, _stats = await asyncio.to_thread(_extraction.extract_from_url, url)
+    hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
     emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
-    return url, emails, foreign, []
+    return url, emails, foreign, [], stats
 
 
 def collapse_footnote_variants(emails):
@@ -55,12 +55,10 @@ def collect_repairs_from_files(files):
 
 
 async def extract_emails_from_zip(path: str, *_, **__):
-    hits, _stats = await asyncio.to_thread(
-        _extraction.extract_emails_from_zip, path
-    )
-    emails = set(h.email.lower().strip() for h in hits)
+    emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
+    emails = set(e.lower().strip() for e in emails)
     extracted_files = [path]
-    return emails, extracted_files, set(emails)
+    return emails, extracted_files, set(emails), stats
 
 
 def extract_emails_loose(text):
@@ -68,9 +66,9 @@ def extract_emails_loose(text):
 
 
 def extract_from_uploaded_file(path: str):
-    hits, _stats = _extraction.extract_any(path)
-    emails = set(h.email.lower().strip() for h in hits)
-    return emails, set(emails)
+    emails, stats = _extraction.extract_any(path)
+    emails = set(e.lower().strip() for e in emails)
+    return emails, set(emails), stats
 
 
 def is_allowed_tld(email_addr: str) -> bool:
@@ -206,8 +204,17 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
         )
         return
+    m = re.match(r"/features\s+set\s+footnote_radius\s+([0-2])", text, re.I)
+    if m:
+        settings.FOOTNOTE_RADIUS_PAGES = int(m.group(1))
+        settings.save()
+        await update.message.reply_text(
+            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
+        )
+        return
     await update.message.reply_text(
-        f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
+        f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}, "
+        f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
     )
 
 
@@ -539,7 +546,11 @@ async def _compose_report_and_save(
     state.footnote_dupes = footnote_dupes
 
     sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
+    sample_numeric = (
+        sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
+        if suspicious_numeric
+        else []
+    )
     sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
     report = (
@@ -550,7 +561,7 @@ async def _compose_report_and_save(
         f"Иностранные домены: {len(foreign)}"
     )
     if footnote_dupes:
-        report += f"\nВозможные сносочные дубликаты: {footnote_dupes}"
+        report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
     if sample_allowed:
         report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
     if sample_numeric:
@@ -582,19 +593,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
     repairs: List[tuple[str, str]] = []
+    footnote_dupes = 0
 
     try:
         if file_path.lower().endswith(".zip"):
-            allowed_all, extracted_files, loose_all = await extract_emails_from_zip(
+            allowed, extracted_files, loose, stats = await extract_emails_from_zip(
                 file_path
             )
+            allowed_all.update(allowed)
+            loose_all.update(loose)
             repairs = collect_repairs_from_files(extracted_files)
+            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
         else:
-            allowed, loose = extract_from_uploaded_file(file_path)
+            allowed, loose, stats = extract_from_uploaded_file(file_path)
             allowed_all.update(allowed)
             loose_all.update(loose)
             extracted_files.append(file_path)
             repairs = collect_repairs_from_files([file_path])
+            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
 
@@ -619,7 +635,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
 
     report = await _compose_report_and_save(
-        context, allowed_all, filtered, suspicious_numeric, foreign, 0
+        context, allowed_all, filtered, suspicious_numeric, foreign, footnote_dupes
     )
     if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
@@ -804,10 +820,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         allowed_all: Set[str] = set()
         foreign_all: Set[str] = set()
         repairs_all: List[tuple[str, str]] = []
-        for _, allowed, foreign, repairs in results:
+        footnote_dupes = 0
+        for _, allowed, foreign, repairs, stats in results:
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
+            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
 
         technical_emails = [
             e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
@@ -826,7 +844,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
         report = await _compose_report_and_save(
-            context, allowed_all, filtered, suspicious_numeric, foreign_all, 0
+            context, allowed_all, filtered, suspicious_numeric, foreign_all, footnote_dupes
         )
         if state.repairs_sample:
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
