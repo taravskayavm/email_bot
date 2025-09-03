@@ -1,5 +1,7 @@
+import fitz  # PyMuPDF
+
 from emailbot.dedupe import merge_footnote_prefix_variants
-from emailbot.extraction import EmailHit
+from emailbot.extraction import EmailHit, extract_any
 
 
 def make_hit(email: str, pre: str, source: str = "doc.pdf|1") -> EmailHit:
@@ -22,4 +24,23 @@ def test_different_addresses_not_merged():
     res = merge_footnote_prefix_variants([a, b], stats)
     assert {h.email for h in res} == {a.email, b.email}
     assert stats.get("footnote_trimmed_merged", 0) == 0
+
+
+def _make_pdf(path, text):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text, fontsize=12)
+    doc.save(str(path))
+    doc.close()
+
+
+def test_pdf_footnote_trimmed_is_merged(tmp_path):
+    pdf = tmp_path / "footnote.pdf"
+    text = "Контакты: ¹959536_vorobeva@mail.ru и 959536_vorobeva@mail.ru"
+    _make_pdf(pdf, text)
+
+    emails, stats = extract_any(str(pdf))
+    assert "959536_vorobeva@mail.ru" in emails
+    assert "59536_vorobeva@mail.ru" not in emails
+    assert stats.get("footnote_trimmed_merged", 0) >= 1
 
