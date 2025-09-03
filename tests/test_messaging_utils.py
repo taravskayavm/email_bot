@@ -1,5 +1,6 @@
 import csv
-from emailbot import messaging_utils as mu
+
+from emailbot import messaging_utils as mu, messaging
 
 
 def setup_paths(tmp_path, monkeypatch):
@@ -42,3 +43,15 @@ def test_is_soft_bounce():
     assert mu.is_soft_bounce(None, "greylisted")
     assert not mu.is_soft_bounce(550, "User not found")
     assert not mu.is_soft_bounce(None, "permanent error")
+
+
+def test_bounce_code_parsing():
+    assert mu.is_soft_bounce(None, "451 try again later")
+    assert mu.is_hard_bounce(None, "550 user unknown")
+
+
+def test_gmail_canonicalization_for_180_days(tmp_path, monkeypatch):
+    log = tmp_path / "log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    mu.log_sent("user.name+tag@gmail.com", "g")
+    assert mu.was_sent_within("username@gmail.com") is True
