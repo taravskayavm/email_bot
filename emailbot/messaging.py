@@ -11,6 +11,7 @@ import os
 import re
 import time
 import secrets
+import smtplib
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -20,6 +21,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
 from .utils import log_error
+from .messaging_utils import add_bounce, is_soft_bounce, is_hard_bounce, suppress_add
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,10 @@ EMAIL_PASSWORD = ""
 
 IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
+_last_domain_send: Dict[str, float] = {}
+_DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
+_sent_idempotency: Set[str] = set()
+
 
 def _read_template_file(path: str) -> str:
     if not os.path.exists(path):
@@ -93,6 +99,32 @@ def _extract_fonts(html: str) -> tuple[str, int]:
     return font_family, font_size
 
 
+def _rate_limit_domain(recipient: str) -> None:
+    """Simple per-domain rate limiter."""
+
+    domain = recipient.rsplit("@", 1)[-1].lower()
+    now = time.monotonic()
+    last = _last_domain_send.get(domain)
+    if last is not None:
+        elapsed = now - last
+        if elapsed < _DOMAIN_RATE_LIMIT:
+            time.sleep(_DOMAIN_RATE_LIMIT - elapsed)
+            now = last + _DOMAIN_RATE_LIMIT
+    _last_domain_send[domain] = now
+
+
+def _register_send(recipient: str, batch_id: str | None) -> bool:
+    """Register send attempt and enforce idempotency inside a batch."""
+
+    if not batch_id:
+        return True
+    key = f"{normalize_email(recipient)}|{batch_id}"
+    if key in _sent_idempotency:
+        return False
+    _sent_idempotency.add(key)
+    return True
+
+
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     """Return the preferred "Sent" folder, validating it on the server."""
 
@@ -112,8 +144,9 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
 
 
 def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
-    last_exc = None
-    for _ in range(max_tries):
+    last_exc: Exception | None = None
+    for attempt in range(max_tries):
+        _rate_limit_domain(recipient)
         try:
             with SmtpClient(
                 "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
@@ -121,11 +154,29 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent to %s", recipient)
             return
+        except smtplib.SMTPResponseException as e:
+            code = getattr(e, "smtp_code", None)
+            msg = getattr(e, "smtp_error", b"")
+            add_bounce(recipient, code, msg, "send")
+            if is_soft_bounce(code, msg) and attempt < max_tries - 1:
+                delay = 2**attempt
+                logger.info(
+                    "Soft bounce for %s (%s), retrying in %s s", recipient, code, delay
+                )
+                time.sleep(delay)
+                last_exc = e
+                continue
+            if is_hard_bounce(code, msg):
+                suppress_add(recipient, code, "hard bounce")
+            last_exc = e
+            break
         except Exception as e:
             last_exc = e
             logger.warning("SMTP send failed to %s: %s", recipient, e)
-            time.sleep(2)
-    raise last_exc
+            if attempt < max_tries - 1:
+                time.sleep(2**attempt)
+    if last_exc:
+        raise last_exc
 
 
 def save_to_sent_folder(
@@ -223,8 +274,12 @@ def send_email(
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     notify_func=None,
+    batch_id: str | None = None,
 ):
     try:
+        if not _register_send(recipient, batch_id):
+            logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+            return ""
         msg, token = build_message(recipient, html_path, subject)
         raw = msg.as_string()
         send_raw_smtp_with_retry(raw, recipient, max_tries=3)
@@ -274,7 +329,11 @@ def send_email_with_sessions(
     recipient: str,
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
+    batch_id: str | None = None,
 ):
+    if not _register_send(recipient, batch_id):
+        logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+        return ""
     msg, token = build_message(recipient, html_path, subject)
     raw = msg.as_string()
     client.send(EMAIL_ADDRESS, recipient, raw)
