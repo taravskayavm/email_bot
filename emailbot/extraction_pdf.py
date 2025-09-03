@@ -71,6 +71,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     """Extract e-mail addresses from a PDF file."""
 
     from .extraction import EmailHit, extract_emails_document, _dedupe
+    settings.load()
 
     try:
         import fitz  # type: ignore

@@ -49,17 +49,17 @@ def test_requires_at_token():
 
 
 def test_obfuscation_with_at():
-    html = "<html><body>121536 at gmail dot com</body></html>"
+    html = "<html><body>foo at gmail dot com</body></html>"
     server, url = _serve(html)
     try:
         hits, _ = extract_from_url(url)
     finally:
         server.shutdown()
     emails = [h.email for h in hits]
-    assert "121536@gmail.com" in emails
+    assert "foo@gmail.com" in emails
 
 
-def test_numeric_local_kept():
+def test_numeric_local_dropped():
     html = "<html><body>2@mail.ru and 2 at mail dot ru</body></html>"
     server, url = _serve(html)
     try:
@@ -68,5 +68,6 @@ def test_numeric_local_kept():
         server.shutdown()
     emails = [h.email for h in hits]
     assert "2@mail.ru" in emails
-    assert stats["obfuscated_hits"] >= 1
+    assert stats["obfuscated_hits"] == 0
+    assert stats.get("numeric_from_obfuscation_dropped", 0) >= 1
 
