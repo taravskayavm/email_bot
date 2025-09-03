@@ -1,6 +1,7 @@
 """PDF extraction helpers with optional layout and OCR features."""
 from __future__ import annotations
 
+import logging
 import re
 import statistics
 import time
@@ -22,8 +23,10 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
-_OCR_PAGE_LIMIT = 5
+_OCR_PAGE_LIMIT = 10
 _OCR_TIME_LIMIT = 30  # seconds
+
+logger = logging.getLogger(__name__)
 
 
 def _page_text_layout(page) -> str:
@@ -128,7 +131,11 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                         post=post,
                     )
                 )
+        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            break
     doc.close()
+    if settings.ENABLE_OCR:
+        logger.debug("ocr_pages=%d", ocr_pages)
     return _dedupe(hits), stats
 
 

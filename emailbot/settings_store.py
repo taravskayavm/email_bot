@@ -28,7 +28,16 @@ def get(name: str, default: Any | None = None) -> Any:
 
 
 def set(name: str, value: Any) -> None:
-    """Persist a setting value to :data:`SETTINGS_PATH`."""
+    """Persist a setting value to :data:`SETTINGS_PATH` with validation."""
+
+    allowed = {
+        "STRICT_OBFUSCATION": {True, False},
+        "FOOTNOTE_RADIUS_PAGES": {0, 1, 2},
+        "PDF_LAYOUT_AWARE": {True, False},
+        "ENABLE_OCR": {True, False},
+    }
+    if name in allowed and value not in allowed[name]:
+        raise ValueError("invalid value")
     data = _load()
     data[name] = value
     try:
