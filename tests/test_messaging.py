@@ -1,5 +1,7 @@
 import asyncio
 import csv
+import logging
+import smtplib
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import pytest
 
 from emailbot import messaging
 from emailbot import unsubscribe
+from emailbot import messaging_utils as mu
 
 
 @pytest.fixture(autouse=True)
@@ -292,3 +295,128 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
     with open(log_path, encoding="utf-8") as f:
         row = next(csv.reader(f))
     assert row[8] == "1"
+
+
+def test_send_email_idempotent(tmp_path, monkeypatch):
+    html = tmp_path / "t.html"
+    html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
+    sent: list[str] = []
+
+    class DummySmtp:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def send(self, *a, **kw):
+            sent.append("1")
+
+    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
+
+    messaging.send_email("u@example.com", str(html), batch_id="b1")
+    messaging.send_email("u@example.com", str(html), batch_id="b1")
+    assert len(sent) == 1
+
+
+def test_domain_rate_limit(monkeypatch):
+    times = [0, 0]
+
+    def fake_monotonic():
+        return times.pop(0)
+
+    sleeps: list[float] = []
+
+    def fake_sleep(sec):
+        sleeps.append(sec)
+
+    class DummySmtp:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def send(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(messaging.time, "sleep", fake_sleep)
+    messaging._last_domain_send.clear()
+
+    messaging.send_raw_smtp_with_retry("m", "a@example.com")
+    messaging.send_raw_smtp_with_retry("m", "b@example.com")
+    assert sleeps and sleeps[0] >= messaging._DOMAIN_RATE_LIMIT
+
+
+def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
+    calls = {"n": 0}
+
+    class DummySmtp:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def send(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise smtplib.SMTPResponseException(451, b"try again")
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(messaging.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
+    monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
+
+    suppressed: list[str] = []
+    monkeypatch.setattr(mu, "suppress_add", lambda *a, **k: suppressed.append("x"))
+
+    with caplog.at_level(logging.INFO):
+        messaging.send_raw_smtp_with_retry("m", "a@example.com", max_tries=2)
+
+    assert calls["n"] == 2
+    assert suppressed == []
+    assert sleeps and sleeps[0] == 1
+    assert any("Soft bounce" in rec.message for rec in caplog.records)
+
+
+def test_hard_bounce_triggers_suppress(monkeypatch):
+    class DummySmtp:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def send(self, *a, **kw):
+            raise smtplib.SMTPResponseException(550, b"user unknown")
+
+    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
+    monkeypatch.setattr(messaging.time, "sleep", lambda s: None)
+
+    called: list[str] = []
+    monkeypatch.setattr(messaging, "suppress_add", lambda *a, **k: called.append("x"))
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
+
+    with pytest.raises(smtplib.SMTPResponseException):
+        messaging.send_raw_smtp_with_retry("m", "a@example.com", max_tries=1)
+    assert called == ["x"]

@@ -1,9 +1,8 @@
 import csv
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
-
-from .messaging import was_sent_within as was_sent_within, log_sent_email as log_sent
 
 SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
 BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
@@ -23,6 +22,38 @@ def _ensure_headers(p: Path, headers: List[str]):
     return f, w
 
 
+def _canon_180(email: str) -> str:
+    """Normalize e-mail for 180-day duplicate detection.
+
+    Gmail addresses are canonicalized by removing dots from the local part and
+    stripping anything after a ``+`` tag. The domain is lowercased. For other
+    domains we simply lower-case and trim the address.
+    """
+
+    email = (email or "").strip().lower()
+    local, sep, domain = email.partition("@")
+    if sep and domain in {"gmail.com", "googlemail.com"}:
+        local = local.split("+", 1)[0].replace(".", "")
+        email = f"{local}@{domain}"
+    return email
+
+
+def log_sent(email: str, *args, **kwargs):
+    """Wrapper around :func:`messaging.log_sent_email` with Gmail canon."""
+
+    from . import messaging as _messaging
+
+    return _messaging.log_sent_email(_canon_180(email), *args, **kwargs)
+
+
+def was_sent_within(email: str, days: int = 180) -> bool:
+    """Check recent sends using Gmail canonicalization."""
+
+    from . import messaging as _messaging
+
+    return _messaging.was_sent_within(_canon_180(email), days=days)
+
+
 def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
     f, w = _ensure_headers(BOUNCE_LOG_PATH, ["ts", "email", "code", "msg", "phase"])
     with f:
@@ -37,18 +68,34 @@ def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
         )
 
 
-def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
-    """Return True for permanent delivery failures."""
+def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
+    """Best effort extraction of SMTP status code."""
+
     if code is not None:
         try:
-            icode = int(code)
+            return int(code)
         except Exception:
-            icode = None
-        if icode is not None:
-            if 500 <= icode < 600:
-                return True
-            if 400 <= icode < 500:
-                return False
+            pass
+    if msg:
+        text = msg.decode("utf-8", "ignore") if isinstance(msg, (bytes, bytearray)) else str(msg)
+        m = re.search(r"\b(\d{3})\b", text)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                pass
+    return None
+
+
+def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
+    """Return True for permanent delivery failures."""
+
+    icode = _extract_code(code, msg)
+    if icode is not None:
+        if 500 <= icode < 600:
+            return True
+        if 400 <= icode < 500:
+            return False
     m = (
         (msg or b"")
         .decode("utf-8", "ignore")
@@ -71,19 +118,17 @@ def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
 
 def is_soft_bounce(code: int | None, msg: str | bytes | None) -> bool:
     """Return True for temporary delivery failures."""
+
     if is_hard_bounce(code, msg):
         return False
-    icode = None
-    if code is not None:
-        try:
-            icode = int(code)
-        except Exception:
-            icode = None
+
+    icode = _extract_code(code, msg)
     if icode is not None:
         if 400 <= icode < 500:
             return True
         if 500 <= icode < 600:
             return False
+
     m = (
         (msg or b"")
         .decode("utf-8", "ignore")
