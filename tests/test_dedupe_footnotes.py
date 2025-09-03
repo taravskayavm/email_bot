@@ -1,5 +1,5 @@
 from emailbot.dedupe import merge_footnote_prefix_variants
-from emailbot.extraction_url import EmailHit
+from emailbot.extraction import EmailHit
 
 
 def make_hit(email: str, pre: str, source: str = "doc.pdf|1") -> EmailHit:
