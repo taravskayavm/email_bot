@@ -152,7 +152,7 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
                 "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
             ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
-            logger.info("Email sent to %s", recipient)
+            logger.info("Email sent", extra={"event": "send", "email": recipient})
             return
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", None)
