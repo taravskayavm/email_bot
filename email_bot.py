@@ -100,6 +100,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
+    app.add_handler(CommandHandler("features", bot_handlers.features))
 
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
@@ -177,6 +178,9 @@ def main() -> None:
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.features_callback, pattern="^feature_")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
