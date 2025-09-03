@@ -1,4 +1,5 @@
 import csv
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +7,30 @@ from typing import List
 
 SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
 BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
+
+logger = logging.getLogger(__name__)
+
+
+class SecretFilter(logging.Filter):
+    """Logging filter that masks sensitive values in records."""
+
+    def __init__(self, secrets: List[str]):
+        super().__init__()
+        self._secrets = [s for s in secrets if s]
+
+    def _mask(self, value: str) -> str:
+        for s in self._secrets:
+            value = value.replace(s, "***")
+        return value
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        if isinstance(record.msg, str):
+            record.msg = self._mask(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {k: self._mask(str(v)) for k, v in record.args.items()}
+        elif isinstance(record.args, tuple):
+            record.args = tuple(self._mask(str(a)) for a in record.args)
+        return True
 
 
 def _now() -> str:
@@ -66,6 +91,10 @@ def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
                 "phase": phase,
             }
         )
+    logger.info(
+        "bounce recorded",
+        extra={"event": "bounce", "email": (email or "").lower().strip(), "code": code, "phase": phase},
+    )
 
 
 def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
@@ -215,4 +244,5 @@ __all__ = [
     "is_foreign",
     "was_sent_within",
     "log_sent",
+    "SecretFilter",
 ]
