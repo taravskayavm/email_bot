@@ -16,6 +16,7 @@ from html import unescape
 from typing import List, Tuple, Dict, Iterable, Set, Optional
 
 from . import settings
+from .dedupe import merge_footnote_prefix_variants
 
 __all__ = [
     "EmailHit",
@@ -654,16 +655,17 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
             hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
         for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
             try:
-                hits.append(
-                    EmailHit(
-                        email=_decode_cfemail(cf),
-                        source_ref=source_ref,
-                        origin="cfemail",
-                    )
-                )
-                stats["cfemail_decoded"] += 1
+                email = _decode_cfemail(cf)
             except Exception:
-                pass
+                continue
+            hits.append(
+                EmailHit(
+                    email=email,
+                    source_ref=source_ref,
+                    origin="cfemail",
+                )
+            )
+            stats["cfemail_decoded"] += 1
         text = strip_html(html)
         for e in extract_emails_document(text):
             hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
@@ -689,7 +691,7 @@ def extract_from_url(url: str, stop_event: Optional[object] = None) -> tuple[lis
                 html2 = _fetch(new)
                 if html2:
                     _process(html2, new)
-
+    hits = merge_footnote_prefix_variants(hits, stats)
     return _dedupe(hits), stats
 
 
@@ -717,7 +719,7 @@ def extract_emails_from_zip(path: str, stop_event: Optional[object] = None) -> t
                     tmp.write(data)
                     tmp_path = tmp.name
                 try:
-                    inner_hits, _ = extract_any(tmp_path, stop_event)
+                    inner_hits, inner_stats = extract_any(tmp_path, stop_event, _return_hits=True)
                     for h in inner_hits:
                         suffix = ""
                         if "#" in h.source_ref:
@@ -734,44 +736,65 @@ def extract_emails_from_zip(path: str, stop_event: Optional[object] = None) -> t
                         )
                     key = ext.lstrip(".")
                     stats[key] = stats.get(key, 0) + 1
+                    for k, v in inner_stats.items():
+                        if isinstance(v, int):
+                            stats[k] = stats.get(k, 0) + v
                 finally:
                     os.remove(tmp_path)
     except Exception:
         return [], {"errors": ["cannot open"]}
+    hits = merge_footnote_prefix_variants(hits, stats)
     return _dedupe(hits), stats
 
 
-def extract_any(source: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
-    """Определить тип источника и извлечь e-mail-адреса."""
+def extract_any(
+    source: str,
+    stop_event: Optional[object] = None,
+    _return_hits: bool = False,
+) -> tuple[list[EmailHit] | list[str], Dict]:
+    """Определить тип источника и извлечь e-mail-адреса.
+
+    Если ``_return_hits`` истинно, функция возвращает список ``EmailHit``;
+    иначе возвращает отсортированный список уникальных адресов.
+    """
 
     import os
     import re
 
     if re.match(r"https?://", source, re.I):
-        return extract_from_url(source, stop_event)
+        hits, stats = extract_from_url(source, stop_event)
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
 
     ext = os.path.splitext(source)[1].lower()
     if ext == ".pdf":
-        return extract_from_pdf(source, stop_event)
-    if ext == ".docx":
-        return extract_from_docx(source, stop_event)
-    if ext == ".xlsx":
-        return extract_from_xlsx(source, stop_event)
-    if ext in {".csv", ".txt"}:
-        return extract_from_csv_or_text(source, stop_event)
-    if ext == ".zip":
-        return extract_emails_from_zip(source, stop_event)
-    if ext in {".html", ".htm"}:
+        hits, stats = extract_from_pdf(source, stop_event)
+    elif ext == ".docx":
+        hits, stats = extract_from_docx(source, stop_event)
+    elif ext == ".xlsx":
+        hits, stats = extract_from_xlsx(source, stop_event)
+    elif ext in {".csv", ".txt"}:
+        hits, stats = extract_from_csv_or_text(source, stop_event)
+    elif ext == ".zip":
+        hits, stats = extract_emails_from_zip(source, stop_event)
+    elif ext in {".html", ".htm"}:
         with open(source, encoding="utf-8", errors="ignore") as f:
             html = f.read()
-        return extract_from_url("file://" + source, stop_event)
+        hits, stats = extract_from_url("file://" + source, stop_event)
+    else:
+        with open(source, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        hits = [
+            EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
+            for e in extract_emails_document(text)
+        ]
+        stats = {}
 
-    with open(source, encoding="utf-8", errors="ignore") as f:
-        text = f.read()
-    hits = [
-        EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
-        for e in extract_emails_document(text)
-    ]
-    return _dedupe(hits), {}
+    hits = merge_footnote_prefix_variants(hits, stats)
+    hits = _dedupe(hits)
+    if _return_hits:
+        return hits, stats
+    return sorted({h.email for h in hits}), stats
 
 

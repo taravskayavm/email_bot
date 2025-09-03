@@ -30,12 +30,6 @@ def extract_obfuscated_hits(
         email = f"{local}@{domain}".lower()
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
-        if local.isdigit() and at_token != "@":
-            if stats is not None:
-                stats["numeric_from_obfuscation_dropped"] = stats.get(
-                    "numeric_from_obfuscation_dropped", 0
-                ) + 1
-            continue
         start, end = m.span()
         pre = text[max(0, start - 16) : start]
         post = text[end : end + 16]
