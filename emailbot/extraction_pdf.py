@@ -7,7 +7,8 @@ import statistics
 import time
 from typing import Dict, List, Optional
 
-from . import settings
+from emailbot import settings
+from emailbot.settings_store import get
 from .extraction_common import preprocess_text
 
 _SUP_DIGITS = str.maketrans({
@@ -75,6 +76,10 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     from .extraction import EmailHit, extract_emails_document, _dedupe
     settings.load()
+    strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
+    radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
+    layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
+    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
 
     try:
         import fitz  # type: ignore
@@ -99,14 +104,14 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         if stop_event and getattr(stop_event, "is_set", lambda: False)():
             break
         stats["pages"] += 1
-        if settings.PDF_LAYOUT_AWARE:
+        if layout:
             try:
                 text = _page_text_layout(page)
             except Exception:
                 text = page.get_text() or ""
         else:
             text = page.get_text() or ""
-        if not text.strip() and settings.ENABLE_OCR:
+        if not text.strip() and ocr:
             if (
                 ocr_pages < _OCR_PAGE_LIMIT
                 and time.time() - ocr_start < _OCR_TIME_LIMIT
@@ -134,7 +139,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         if stop_event and getattr(stop_event, "is_set", lambda: False)():
             break
     doc.close()
-    if settings.ENABLE_OCR:
+    if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
     return _dedupe(hits), stats
 
