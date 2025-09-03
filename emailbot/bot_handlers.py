@@ -43,6 +43,10 @@ async def async_extract_emails_from_url(url: str, session, chat_id=None):
     hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
     emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
+    logger.info(
+        "extraction complete",
+        extra={"event": "extract", "source": url, "count": len(emails)},
+    )
     return url, emails, foreign, [], stats
 
 
@@ -58,6 +62,10 @@ async def extract_emails_from_zip(path: str, *_, **__):
     emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
     emails = set(e.lower().strip() for e in emails)
     extracted_files = [path]
+    logger.info(
+        "extraction complete",
+        extra={"event": "extract", "source": path, "count": len(emails)},
+    )
     return emails, extracted_files, set(emails), stats
 
 
@@ -68,6 +76,10 @@ def extract_emails_loose(text):
 def extract_from_uploaded_file(path: str):
     emails, stats = _extraction.extract_any(path)
     emails = set(e.lower().strip() for e in emails)
+    logger.info(
+        "extraction complete",
+        extra={"event": "extract", "source": path, "count": len(emails)},
+    )
     return emails, set(emails), stats
 
 
@@ -101,6 +113,7 @@ from .messaging import (
     send_email_with_sessions,
     sync_log_with_imap,
     was_emailed_recently,
+    count_sent_today,
 )
 from .smtp_client import SmtpClient
 from .utils import log_error
@@ -116,6 +129,12 @@ from .messaging_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+ADMIN_IDS = {
+    int(x)
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip().isdigit()
+}
 
 PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
@@ -216,6 +235,65 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}, "
         f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
     )
+
+
+async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin diagnostic command with runtime information."""
+
+    user = update.effective_user
+    if not user or user.id not in ADMIN_IDS:
+        return
+
+    import sys
+    import csv
+    import telegram
+    import aiohttp
+    from datetime import datetime
+
+    from .messaging_utils import BOUNCE_LOG_PATH
+
+    versions = {
+        "python": sys.version.split()[0],
+        "telegram": telegram.__version__,
+        "aiohttp": aiohttp.__version__,
+    }
+    bounce_today = 0
+    if BOUNCE_LOG_PATH.exists():
+        today = datetime.utcnow().date()
+        with BOUNCE_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    dt = datetime.fromisoformat(row.get("ts", ""))
+                    if dt.date() == today:
+                        bounce_today += 1
+                except Exception:
+                    pass
+
+    flags = {
+        "STRICT_OBFUSCATION": settings.STRICT_OBFUSCATION,
+        "PDF_LAYOUT_AWARE": settings.PDF_LAYOUT_AWARE,
+        "ENABLE_OCR": settings.ENABLE_OCR,
+    }
+
+    lines = [
+        "Versions:",
+        f"  Python: {versions['python']}",
+        f"  telegram: {versions['telegram']}",
+        f"  aiohttp: {versions['aiohttp']}",
+        "Limits:",
+        f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
+        "Flags:",
+    ]
+    for k, v in flags.items():
+        lines.append(f"  {k}: {v}")
+    lines.extend(
+        [
+            "Counters:",
+            f"  sent_today: {count_sent_today()}",
+            f"  bounces_today: {bounce_today}",
+        ]
+    )
+    await update.message.reply_text("\n".join(lines))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1334,6 +1412,7 @@ __all__ = [
     "report_callback",
     "sync_imap_command",
     "reset_email_list",
+    "diag",
     "handle_document",
     "refresh_preview",
     "proceed_to_group",
