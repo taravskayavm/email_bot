@@ -214,27 +214,117 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to toggle experimental features."""
 
-    text = (update.message.text or "").strip()
-    m = re.match(r"/features\s+set\s+strict\s+(on|off)", text, re.I)
-    if m:
-        settings.STRICT_OBFUSCATION = m.group(1).lower() == "on"
-        settings.save()
-        await update.message.reply_text(
-            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
-        )
+    user = update.effective_user
+    if not user or user.id not in ADMIN_IDS:
         return
-    m = re.match(r"/features\s+set\s+footnote_radius\s+([0-2])", text, re.I)
-    if m:
-        settings.FOOTNOTE_RADIUS_PAGES = int(m.group(1))
-        settings.save()
-        await update.message.reply_text(
-            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
+
+    settings.load()
+
+    def _status() -> str:
+        return (
+            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}\n"
+            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}\n"
+            f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}\n"
+            f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
         )
+
+    def _keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"Обфускации: {'строгий' if settings.STRICT_OBFUSCATION else 'обычный'} ⏼",
+                        callback_data="feature_strict",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"Сноски: радиус {settings.FOOTNOTE_RADIUS_PAGES}",
+                        callback_data="feature_footnote",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"PDF-layout {'on' if settings.PDF_LAYOUT_AWARE else 'off'} ⏼",
+                        callback_data="feature_pdf",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
+                        callback_data="feature_ocr",
+                    )
+                ],
+            ]
+        )
+
+    await update.message.reply_text(_status(), reply_markup=_keyboard())
+
+
+async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle feature toggle button callbacks."""
+
+    query = update.callback_query
+    if not query:
         return
-    await update.message.reply_text(
-        f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}, "
-        f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
-    )
+    user = query.from_user
+    if not user or user.id not in ADMIN_IDS:
+        await query.answer()
+        return
+
+    settings.load()
+
+    data = query.data or ""
+    if data == "feature_strict":
+        settings.STRICT_OBFUSCATION = not settings.STRICT_OBFUSCATION
+    elif data == "feature_footnote":
+        settings.FOOTNOTE_RADIUS_PAGES = (settings.FOOTNOTE_RADIUS_PAGES + 1) % 3
+    elif data == "feature_pdf":
+        settings.PDF_LAYOUT_AWARE = not settings.PDF_LAYOUT_AWARE
+    elif data == "feature_ocr":
+        settings.ENABLE_OCR = not settings.ENABLE_OCR
+    settings.save()
+
+    def _status() -> str:
+        return (
+            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}\n"
+            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}\n"
+            f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}\n"
+            f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
+        )
+
+    def _keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"Обфускации: {'строгий' if settings.STRICT_OBFUSCATION else 'обычный'} ⏼",
+                        callback_data="feature_strict",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"Сноски: радиус {settings.FOOTNOTE_RADIUS_PAGES}",
+                        callback_data="feature_footnote",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"PDF-layout {'on' if settings.PDF_LAYOUT_AWARE else 'off'} ⏼",
+                        callback_data="feature_pdf",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
+                        callback_data="feature_ocr",
+                    )
+                ],
+            ]
+        )
+
+    await query.answer()
+    await query.edit_message_text(_status(), reply_markup=_keyboard())
 
 
 async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

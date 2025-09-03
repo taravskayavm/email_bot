@@ -573,6 +573,8 @@ def extract_from_url(
 ) -> tuple[list[EmailHit], Dict]:
     """Загрузить веб-страницу и извлечь e-mail-адреса."""
 
+    settings.load()
+
     import re
     import urllib.parse
 
@@ -652,6 +654,8 @@ def extract_any(
     Если ``_return_hits`` истинно, функция возвращает список ``EmailHit``;
     иначе возвращает отсортированный список уникальных адресов.
     """
+
+    settings.load()
 
     import os
     import re
