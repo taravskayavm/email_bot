@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+import time
+import urllib.parse
+import urllib.request
+from typing import Dict, List, Optional, Tuple
 
 from .extraction import EmailHit, _valid_local, _valid_domain
 from .extraction_common import normalize_text
@@ -14,6 +17,74 @@ _OBFUSCATED_RE = re.compile(
 )
 
 _DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|точка)\s*", re.I)
+
+_CACHE: Dict[str, Tuple[float, str]] = {}
+_READ_CHUNK = 128 * 1024
+
+
+def decode_cfemail(hexstr: str) -> str:
+    """Decode Cloudflare email obfuscation string."""
+
+    key = int(hexstr[:2], 16)
+    decoded = bytes(int(hexstr[i : i + 2], 16) ^ key for i in range(2, len(hexstr), 2))
+    return decoded.decode("utf-8", "ignore")
+
+
+def fetch_url(
+    url: str,
+    stop_event: Optional[object] = None,
+    *,
+    ttl: int = 300,
+    timeout: int = 15,
+    max_size: int = 1_000_000,
+    allowed_schemes: Tuple[str, ...] = ("http", "https"),
+    allowed_tlds: Optional[set[str]] = None,
+) -> Optional[str]:
+    """Fetch ``url`` and return decoded text respecting several limits."""
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in allowed_schemes:
+        return None
+    if allowed_tlds and parsed.hostname:
+        tld = parsed.hostname.rsplit(".", 1)[-1].lower()
+        if tld not in allowed_tlds:
+            return None
+    now = time.time()
+    cached = _CACHE.get(url)
+    if cached and cached[0] > now:
+        return cached[1]
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
+            final_parsed = urllib.parse.urlparse(final_url)
+            if final_parsed.scheme not in allowed_schemes:
+                return None
+            if parsed.netloc and final_parsed.netloc and parsed.netloc != final_parsed.netloc:
+                return None
+            if allowed_tlds and final_parsed.hostname:
+                tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
+                if tld not in allowed_tlds:
+                    return None
+            encoding = resp.headers.get_content_charset() or "utf-8"
+            chunks: List[bytes] = []
+            total = 0
+            while True:
+                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    return None
+                chunk = resp.read(_READ_CHUNK)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= max_size:
+                    break
+            data = b"".join(chunks)
+            text = data.decode(encoding, "ignore")
+    except Exception:  # pragma: no cover - network errors
+        return None
+    _CACHE[url] = (now + ttl, text)
+    return text
 
 
 def extract_obfuscated_hits(
@@ -41,5 +112,5 @@ def extract_obfuscated_hits(
     return hits
 
 
-__all__ = ["extract_obfuscated_hits"]
+__all__ = ["extract_obfuscated_hits", "fetch_url", "decode_cfemail"]
 
