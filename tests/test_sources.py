@@ -77,7 +77,8 @@ def test_extract_emails_from_zip(tmp_path: Path):
         for f in [pdf, docx, xlsx, csv]:
             z.write(f, f.name)
 
-    emails, stats = extraction.extract_emails_from_zip(str(zip_path))
+    hits, stats = extraction.extract_emails_from_zip(str(zip_path))
+    emails = [h.email for h in hits]
     assert set(emails) == {
         "pdf@example.com",
         "docx@example.com",
@@ -110,7 +111,8 @@ def test_extract_from_url(tmp_path: Path):
     }
     server, port = _run_server(pages)
     try:
-        emails, stats = extraction.extract_from_url(f"http://localhost:{port}/")
+        hits, stats = extraction.extract_from_url(f"http://localhost:{port}/")
+        emails = [h.email for h in hits]
         assert "hello@site.ru" in emails
         assert "user@domain.ru" in emails
         assert "user@example.com" in emails
@@ -120,10 +122,10 @@ def test_extract_from_url(tmp_path: Path):
         assert stats["obfuscated_hits"] >= 2
         assert stats["urls_scanned"] == 2
 
-        emails_empty, stats_empty = extraction.extract_from_url(
+        hits_empty, stats_empty = extraction.extract_from_url(
             f"http://localhost:{port}/empty"
         )
-        assert emails_empty == []
+        assert hits_empty == []
         assert stats_empty["urls_scanned"] == 1
     finally:
         server.shutdown()
@@ -139,10 +141,14 @@ def test_extract_from_documents(tmp_path: Path):
     _create_xlsx(xlsx, "c@xlsx.com")
     txt.write_text("d@text.com", encoding="utf-8")
 
-    assert extraction.extract_from_pdf(str(pdf))[0] == ["a@pdf.com"]
-    assert extraction.extract_from_docx(str(docx))[0] == ["b@docx.com"]
-    assert extraction.extract_from_xlsx(str(xlsx))[0] == ["c@xlsx.com"]
-    assert extraction.extract_from_csv_or_text(str(txt))[0] == ["d@text.com"]
+    hits_pdf, _ = extraction.extract_from_pdf(str(pdf))
+    hits_docx, _ = extraction.extract_from_docx(str(docx))
+    hits_xlsx, _ = extraction.extract_from_xlsx(str(xlsx))
+    hits_txt, _ = extraction.extract_from_csv_or_text(str(txt))
+    assert [h.email for h in hits_pdf] == ["a@pdf.com"]
+    assert [h.email for h in hits_docx] == ["b@docx.com"]
+    assert [h.email for h in hits_xlsx] == ["c@xlsx.com"]
+    assert [h.email for h in hits_txt] == ["d@text.com"]
 
 
 @pytest.mark.asyncio

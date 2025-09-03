@@ -6,7 +6,7 @@ import unicodedata
 from typing import Dict, List, Tuple
 
 from . import settings
-from .extraction_url import EmailHit
+from .extraction import EmailHit
 
 
 def _is_superscript(ch: str) -> bool:
