@@ -217,6 +217,7 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     if not user or user.id not in ADMIN_IDS:
+        await update.message.reply_text("Команда доступна только администратору.")
         return
 
     settings.load()
@@ -234,26 +235,25 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             [
                 [
                     InlineKeyboardButton(
-                        f"Обфускации: {'строгий' if settings.STRICT_OBFUSCATION else 'обычный'} ⏼",
-                        callback_data="feature_strict",
+                        f"Обфускации: {'Строгий' if settings.STRICT_OBFUSCATION else 'Обычный'} ⏼",
+                        callback_data="feat:strict:toggle",
                     )
                 ],
                 [
-                    InlineKeyboardButton(
-                        f"Сноски: радиус {settings.FOOTNOTE_RADIUS_PAGES}",
-                        callback_data="feature_footnote",
-                    )
+                    InlineKeyboardButton("Сноски: радиус 0", callback_data="feat:radius:0"),
+                    InlineKeyboardButton("1", callback_data="feat:radius:1"),
+                    InlineKeyboardButton("2", callback_data="feat:radius:2"),
                 ],
                 [
                     InlineKeyboardButton(
                         f"PDF-layout {'on' if settings.PDF_LAYOUT_AWARE else 'off'} ⏼",
-                        callback_data="feature_pdf",
+                        callback_data="feat:layout:toggle",
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
-                        callback_data="feature_ocr",
+                        callback_data="feat:ocr:toggle",
                     )
                 ],
             ]
@@ -276,15 +276,43 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     settings.load()
 
     data = query.data or ""
-    if data == "feature_strict":
-        settings.STRICT_OBFUSCATION = not settings.STRICT_OBFUSCATION
-    elif data == "feature_footnote":
-        settings.FOOTNOTE_RADIUS_PAGES = (settings.FOOTNOTE_RADIUS_PAGES + 1) % 3
-    elif data == "feature_pdf":
-        settings.PDF_LAYOUT_AWARE = not settings.PDF_LAYOUT_AWARE
-    elif data == "feature_ocr":
-        settings.ENABLE_OCR = not settings.ENABLE_OCR
-    settings.save()
+    hint = ""
+    try:
+        if data == "feat:strict:toggle":
+            settings.STRICT_OBFUSCATION = not settings.STRICT_OBFUSCATION
+            hint = (
+                "🛡️ Строгий режим включён. Парсер принимает обфускации только с явными “at/dot”. "
+                "Ложные «121536@gmail.com» с чисел не появятся. На реальные адреса с @/mailto это не влияет."
+                if settings.STRICT_OBFUSCATION
+                else "⚠️ Строгий режим выключен. Парсер будет пытаться восстановить адреса из менее явных обфускаций. Возможен рост ложных совпадений на «число + домен»."
+            )
+        elif data.startswith("feat:radius:"):
+            n = int(data.rsplit(":", 1)[-1])
+            if n not in {0, 1, 2}:
+                raise ValueError
+            settings.FOOTNOTE_RADIUS_PAGES = n
+            hint = (
+                f"📝 Радиус сносок: {n}. Дубликаты «урезанных» адресов будут склеиваться в пределах той же страницы и ±{n} стр. того же файла."
+            )
+        elif data == "feat:layout:toggle":
+            settings.PDF_LAYOUT_AWARE = not settings.PDF_LAYOUT_AWARE
+            hint = (
+                "📄 Учёт макета PDF включён. Надстрочные (сноски) обрабатываются точнее. Может работать медленнее на больших PDF."
+                if settings.PDF_LAYOUT_AWARE
+                else "📄 Учёт макета PDF выключен. Используется стандартное извлечение текста."
+            )
+        elif data == "feat:ocr:toggle":
+            settings.ENABLE_OCR = not settings.ENABLE_OCR
+            hint = (
+                "🔍 OCR включён. Будем распознавать e-mail в скан-PDF. Анализ станет медленнее. Ограничения: до 10 страниц, таймаут 30 сек."
+                if settings.ENABLE_OCR
+                else "🔍 OCR выключен. Скан-PDF без текста пропускаются без распознавания."
+            )
+        else:
+            raise ValueError
+        settings.save()
+    except Exception:
+        hint = "⛔ Недопустимое значение."
 
     def _status() -> str:
         return (
@@ -299,33 +327,32 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [
                 [
                     InlineKeyboardButton(
-                        f"Обфускации: {'строгий' if settings.STRICT_OBFUSCATION else 'обычный'} ⏼",
-                        callback_data="feature_strict",
+                        f"Обфускации: {'Строгий' if settings.STRICT_OBFUSCATION else 'Обычный'} ⏼",
+                        callback_data="feat:strict:toggle",
                     )
                 ],
                 [
-                    InlineKeyboardButton(
-                        f"Сноски: радиус {settings.FOOTNOTE_RADIUS_PAGES}",
-                        callback_data="feature_footnote",
-                    )
+                    InlineKeyboardButton("Сноски: радиус 0", callback_data="feat:radius:0"),
+                    InlineKeyboardButton("1", callback_data="feat:radius:1"),
+                    InlineKeyboardButton("2", callback_data="feat:radius:2"),
                 ],
                 [
                     InlineKeyboardButton(
                         f"PDF-layout {'on' if settings.PDF_LAYOUT_AWARE else 'off'} ⏼",
-                        callback_data="feature_pdf",
+                        callback_data="feat:layout:toggle",
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
-                        callback_data="feature_ocr",
+                        callback_data="feat:ocr:toggle",
                     )
                 ],
             ]
         )
 
     await query.answer()
-    await query.edit_message_text(_status(), reply_markup=_keyboard())
+    await query.edit_message_text(f"{_status()}\n\n{hint}", reply_markup=_keyboard())
 
 
 async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
