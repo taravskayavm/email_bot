@@ -20,6 +20,7 @@ from .dedupe import merge_footnote_prefix_variants
 from .extraction_common import normalize_email, normalize_text, preprocess_text
 from .extraction_pdf import extract_from_pdf
 from .extraction_zip import extract_emails_from_zip
+from .settings_store import get
 
 __all__ = [
     "EmailHit",
@@ -573,7 +574,10 @@ def extract_from_url(
 ) -> tuple[list[EmailHit], Dict]:
     """Загрузить веб-страницу и извлечь e-mail-адреса."""
 
-    settings.load()
+    settings.STRICT_OBFUSCATION = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
+    settings.FOOTNOTE_RADIUS_PAGES = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
+    settings.PDF_LAYOUT_AWARE = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
+    settings.ENABLE_OCR = get("ENABLE_OCR", settings.ENABLE_OCR)
 
     import re
     import urllib.parse
@@ -655,7 +659,10 @@ def extract_any(
     иначе возвращает отсортированный список уникальных адресов.
     """
 
-    settings.load()
+    settings.STRICT_OBFUSCATION = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
+    settings.FOOTNOTE_RADIUS_PAGES = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
+    settings.PDF_LAYOUT_AWARE = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
+    settings.ENABLE_OCR = get("ENABLE_OCR", settings.ENABLE_OCR)
 
     import os
     import re

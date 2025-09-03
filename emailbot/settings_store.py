@@ -4,6 +4,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+
+DEFAULTS = {
+    "STRICT_OBFUSCATION": True,
+    "FOOTNOTE_RADIUS_PAGES": 1,
+    "PDF_LAYOUT_AWARE": False,
+    "ENABLE_OCR": False,
+}
+
 SETTINGS_PATH = Path("/mnt/data/settings.json")
 _cache: dict[str, Any] | None = None
 _mtime: float = 0.0
@@ -22,9 +30,31 @@ def _load() -> dict[str, Any]:
     return _cache
 
 
+def _ensure_defaults() -> dict[str, Any]:
+    data = _load()
+    changed = False
+    for k, v in DEFAULTS.items():
+        if k not in data:
+            data[k] = v
+            changed = True
+    if changed:
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SETTINGS_PATH.write_text(json.dumps(data), encoding="utf-8")
+            stat = SETTINGS_PATH.stat()
+            global _mtime, _cache
+            _mtime = stat.st_mtime
+            _cache = data
+        except Exception:
+            pass
+    return data
+
+
 def get(name: str, default: Any | None = None) -> Any:
-    """Return a setting value reloading the file when it changes."""
-    return _load().get(name, default)
+    """Return a setting value ensuring defaults are persisted."""
+
+    data = _ensure_defaults()
+    return data.get(name, default)
 
 
 def set(name: str, value: Any) -> None:
@@ -47,4 +77,4 @@ def set(name: str, value: Any) -> None:
         pass
 
 
-__all__ = ["get", "set"]
+__all__ = ["get", "set", "DEFAULTS"]
