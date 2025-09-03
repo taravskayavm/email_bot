@@ -10,7 +10,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .extraction import EmailHit, _valid_local, _valid_domain
 from .extraction_common import normalize_text
-from . import settings
+from emailbot import settings
+from emailbot.settings_store import get
 
 _OBFUSCATED_RE = re.compile(
     r"(?P<local>[\w.+-]+)\s*(?P<at>@|\(at\)|\[at\]|at|собака)\s*(?P<domain>[\w-]+(?:\s*(?:\.|dot|\(dot\)|\[dot\]|точка)\s*[\w-]+)+)",
@@ -93,7 +94,10 @@ def extract_obfuscated_hits(
 ) -> List[EmailHit]:
     """Return all ``EmailHit`` objects found via obfuscation patterns."""
 
-    settings.load()
+    strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
+    radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
+    layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
+    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
     text = normalize_text(text)
     hits: List[EmailHit] = []
     for m in _OBFUSCATED_RE.finditer(text):
@@ -105,7 +109,7 @@ def extract_obfuscated_hits(
         email = f"{local}@{domain}".lower()
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
-        if settings.STRICT_OBFUSCATION and local.isdigit():
+        if strict and local.isdigit():
             if stats is not None:
                 stats["numeric_from_obfuscation_dropped"] = stats.get(
                     "numeric_from_obfuscation_dropped", 0

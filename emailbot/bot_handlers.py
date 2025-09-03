@@ -30,6 +30,7 @@ from .extraction import normalize_email, smart_extract_emails, extract_emails_ma
 from .reporting import build_mass_report_text
 from . import settings
 from . import mass_state
+from .settings_store import DEFAULTS
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -223,12 +224,24 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings.load()
 
     def _status() -> str:
-        return (
-            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}\n"
-            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}\n"
-            f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}\n"
-            f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
-        )
+        lines = []
+        line = f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
+        if settings.STRICT_OBFUSCATION == DEFAULTS["STRICT_OBFUSCATION"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
+        if settings.FOOTNOTE_RADIUS_PAGES == DEFAULTS["FOOTNOTE_RADIUS_PAGES"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}"
+        if settings.PDF_LAYOUT_AWARE == DEFAULTS["PDF_LAYOUT_AWARE"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
+        if settings.ENABLE_OCR == DEFAULTS["ENABLE_OCR"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        return "\n".join(lines)
 
     def _keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
@@ -256,10 +269,22 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         callback_data="feat:ocr:toggle",
                     )
                 ],
+                [
+                    InlineKeyboardButton(
+                        "Сбросить к рекомендованным",
+                        callback_data="feat:reset:defaults",
+                    )
+                ],
             ]
         )
 
-    await update.message.reply_text(_status(), reply_markup=_keyboard())
+    def _doc() -> str:
+        return (
+            "ℹ️ Рекомендуемые настройки: строгие обфускации — ON, радиус сносок — 1, "
+            "PDF-layout — OFF, OCR — OFF."
+        )
+
+    await update.message.reply_text(f"{_status()}\n\n{_doc()}", reply_markup=_keyboard())
 
 
 async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -308,6 +333,12 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if settings.ENABLE_OCR
                 else "🔍 OCR выключен. Скан-PDF без текста пропускаются без распознавания."
             )
+        elif data == "feat:reset:defaults":
+            settings.STRICT_OBFUSCATION = DEFAULTS["STRICT_OBFUSCATION"]
+            settings.FOOTNOTE_RADIUS_PAGES = DEFAULTS["FOOTNOTE_RADIUS_PAGES"]
+            settings.PDF_LAYOUT_AWARE = DEFAULTS["PDF_LAYOUT_AWARE"]
+            settings.ENABLE_OCR = DEFAULTS["ENABLE_OCR"]
+            hint = "↩️ Сброшено к рекомендованным настройкам."
         else:
             raise ValueError
         settings.save()
@@ -315,12 +346,24 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         hint = "⛔ Недопустимое значение."
 
     def _status() -> str:
-        return (
-            f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}\n"
-            f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}\n"
-            f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}\n"
-            f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
-        )
+        lines = []
+        line = f"STRICT_OBFUSCATION={'on' if settings.STRICT_OBFUSCATION else 'off'}"
+        if settings.STRICT_OBFUSCATION == DEFAULTS["STRICT_OBFUSCATION"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"FOOTNOTE_RADIUS_PAGES={settings.FOOTNOTE_RADIUS_PAGES}"
+        if settings.FOOTNOTE_RADIUS_PAGES == DEFAULTS["FOOTNOTE_RADIUS_PAGES"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}"
+        if settings.PDF_LAYOUT_AWARE == DEFAULTS["PDF_LAYOUT_AWARE"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        line = f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
+        if settings.ENABLE_OCR == DEFAULTS["ENABLE_OCR"]:
+            line += " (рекомендуется)"
+        lines.append(line)
+        return "\n".join(lines)
 
     def _keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
@@ -348,11 +391,25 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         callback_data="feat:ocr:toggle",
                     )
                 ],
+                [
+                    InlineKeyboardButton(
+                        "Сбросить к рекомендованным",
+                        callback_data="feat:reset:defaults",
+                    )
+                ],
             ]
         )
 
+    def _doc() -> str:
+        return (
+            "ℹ️ Рекомендуемые настройки: строгие обфускации — ON, радиус сносок — 1, "
+            "PDF-layout — OFF, OCR — OFF."
+        )
+
     await query.answer()
-    await query.edit_message_text(f"{_status()}\n\n{hint}", reply_markup=_keyboard())
+    await query.edit_message_text(
+        f"{_status()}\n\n{hint}\n\n{_doc()}", reply_markup=_keyboard()
+    )
 
 
 async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

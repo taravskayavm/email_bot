@@ -89,6 +89,7 @@ def test_features_admin_flow(monkeypatch):
         "feat:radius:2",
         "feat:layout:toggle",
         "feat:ocr:toggle",
+        "feat:reset:defaults",
     ]
 
     # Toggle strict
