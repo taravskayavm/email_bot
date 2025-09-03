@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .extraction import EmailHit, _valid_local, _valid_domain
 from .extraction_common import normalize_text
+from . import settings
 
 _OBFUSCATED_RE = re.compile(
     r"(?P<local>[\w.+-]+)\s*(?P<at>@|\(at\)|\[at\]|at|собака)\s*(?P<domain>[\w-]+(?:\s*(?:\.|dot|\(dot\)|\[dot\]|точка)\s*[\w-]+)+)",
@@ -92,6 +93,7 @@ def extract_obfuscated_hits(
 ) -> List[EmailHit]:
     """Return all ``EmailHit`` objects found via obfuscation patterns."""
 
+    settings.load()
     text = normalize_text(text)
     hits: List[EmailHit] = []
     for m in _OBFUSCATED_RE.finditer(text):
@@ -102,6 +104,12 @@ def extract_obfuscated_hits(
         domain = ".".join(parts)
         email = f"{local}@{domain}".lower()
         if not (_valid_local(local) and _valid_domain(domain)):
+            continue
+        if settings.STRICT_OBFUSCATION and local.isdigit():
+            if stats is not None:
+                stats["numeric_from_obfuscation_dropped"] = stats.get(
+                    "numeric_from_obfuscation_dropped", 0
+                ) + 1
             continue
         start, end = m.span()
         pre = text[max(0, start - 16) : start]
