@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+SETTINGS_PATH = Path("/mnt/data/settings.json")
+_cache: dict[str, Any] | None = None
+_mtime: float = 0.0
+
+
+def _load() -> dict[str, Any]:
+    global _cache, _mtime
+    try:
+        stat = SETTINGS_PATH.stat()
+        if _cache is None or stat.st_mtime != _mtime:
+            _cache = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            _mtime = stat.st_mtime
+    except Exception:
+        _cache = {}
+        _mtime = 0.0
+    return _cache
+
+
+def get(name: str, default: Any | None = None) -> Any:
+    """Return a setting value reloading the file when it changes."""
+    return _load().get(name, default)
+
+
+def set(name: str, value: Any) -> None:
+    """Persist a setting value to :data:`SETTINGS_PATH`."""
+    data = _load()
+    data[name] = value
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        pass
+
+
+__all__ = ["get", "set"]
