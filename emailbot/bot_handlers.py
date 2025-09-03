@@ -29,6 +29,7 @@ from . import extraction as _extraction
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import build_mass_report_text
 from . import settings
+from . import mass_state
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -98,6 +99,8 @@ def sample_preview(items, k: int):
     if len(lst) <= k:
         return lst
     return lst[:k]
+
+
 from .messaging import (
     DOWNLOAD_DIR,
     LOG_FILE,
@@ -131,9 +134,7 @@ from .messaging_utils import (
 logger = logging.getLogger(__name__)
 
 ADMIN_IDS = {
-    int(x)
-    for x in os.getenv("ADMIN_IDS", "").split(",")
-    if x.strip().isdigit()
+    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 
 PREVIEW_ALLOWED = 10
@@ -646,7 +647,9 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
 
 
-async def retry_last_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def retry_last_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Retry sending e-mails that previously soft-bounced."""
 
     rows: list[dict] = []
@@ -721,13 +724,18 @@ async def _compose_report_and_save(
     )
     sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
-    report = (
-        "✅ Анализ завершён.\n"
-        f"Найдено адресов: {len(allowed_all)}\n"
-        f"Уникальных (после очистки): {len(filtered)}\n"
-        f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}\n"
-        f"Иностранные домены: {len(foreign)}"
-    )
+    report_lines = [
+        "✅ Анализ завершён.",
+        f"Найдено адресов: {len(allowed_all)}",
+        f"Уникальных (после очистки): {len(filtered)}",
+    ]
+    if suspicious_numeric:
+        report_lines.append(
+            f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}"
+        )
+    if foreign:
+        report_lines.append(f"Иностранные домены: {len(foreign)}")
+    report = "\n".join(report_lines)
     if footnote_dupes:
         report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
     if sample_allowed:
@@ -735,9 +743,7 @@ async def _compose_report_and_save(
     if sample_numeric:
         report += "\n\n🔢 Примеры цифровых:\n" + "\n".join(sample_numeric)
     if sample_foreign:
-        report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(
-            sample_foreign
-        )
+        report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(sample_foreign)
     return report
 
 
@@ -796,14 +802,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
     state = get_state(context)
-    state.all_emails = set(filtered)
-    state.all_files = extracted_files
-    state.to_send = sorted(set(filtered))
-    state.repairs = repairs
+    state.all_emails.update(allowed_all)
+    state.all_files.extend(extracted_files)
+    current = set(state.to_send)
+    current.update(filtered)
+    state.to_send = sorted(current)
+    state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
+    all_allowed = state.all_emails
+    foreign_total = set(state.foreign) | set(foreign)
+    suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
+    total_footnote = state.footnote_dupes + footnote_dupes
 
     report = await _compose_report_and_save(
-        context, allowed_all, filtered, suspicious_numeric, foreign, footnote_dupes
+        context,
+        all_allowed,
+        state.to_send,
+        suspicious_total,
+        sorted(foreign_total),
+        total_footnote,
     )
     if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
@@ -1002,17 +1019,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
 
         state = get_state(context)
+        state.all_emails.update(allowed_all)
         current = set(state.to_send)
         current.update(filtered)
         state.to_send = sorted(current)
-        state.foreign = sorted(foreign_all)
+        foreign_total = set(state.foreign) | set(foreign_all)
         state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
         state.repairs_sample = sample_preview(
             [f"{b} → {g}" for (b, g) in state.repairs], 6
         )
+        suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
+        total_footnote = state.footnote_dupes + footnote_dupes
 
         report = await _compose_report_and_save(
-            context, allowed_all, filtered, suspicious_numeric, foreign_all, footnote_dupes
+            context,
+            state.all_emails,
+            state.to_send,
+            suspicious_total,
+            sorted(foreign_total),
+            total_footnote,
         )
         if state.repairs_sample:
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
@@ -1156,9 +1181,7 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     await query.answer()
     for chunk in _chunk_list(foreign, 60):
-        await query.message.reply_text(
-            "🌍 Иностранные домены:\n" + "\n".join(chunk)
-        )
+        await query.message.reply_text("🌍 Иностранные домены:\n" + "\n".join(chunk))
 
 
 async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1297,7 +1320,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         and isinstance(e.recipients, dict)
                         and email_addr in e.recipients
                     ):
-                        code, msg = e.recipients[email_addr][0], e.recipients[email_addr][1]
+                        code, msg = (
+                            e.recipients[email_addr][0],
+                            e.recipients[email_addr][1],
+                        )
                     elif hasattr(e, "smtp_code"):
                         code = getattr(e, "smtp_code", None)
                         msg = getattr(e, "smtp_error", None)
@@ -1326,10 +1352,16 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send all prepared e-mails respecting limits."""
 
     query = update.callback_query
-    state = get_state(context)
-    emails = state.to_send
-    group_code = state.group
-    template_path = state.template
+    saved = mass_state.load_state()
+    if saved and saved.get("pending"):
+        emails = saved.get("pending", [])
+        group_code = saved.get("group")
+        template_path = saved.get("template")
+    else:
+        state = get_state(context)
+        emails = state.to_send
+        group_code = state.group
+        template_path = state.template
     if not emails or not group_code or not template_path:
         await query.answer("Нет данных для отправки", show_alert=True)
         return
@@ -1342,32 +1374,52 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
 
-        blocked_foreign: List[str] = []
-        blocked_invalid: List[str] = []
-        skipped_recent: List[str] = []
-        to_send: List[str] = []
-        sent_ok: List[str] = []
+        saved_state = mass_state.load_state()
+        if saved_state and saved_state.get("pending"):
+            blocked_foreign = saved_state.get("blocked_foreign", [])
+            blocked_invalid = saved_state.get("blocked_invalid", [])
+            skipped_recent = saved_state.get("skipped_recent", [])
+            sent_ok = saved_state.get("sent_ok", [])
+            to_send = saved_state.get("pending", [])
+        else:
+            blocked_foreign: List[str] = []
+            blocked_invalid: List[str] = []
+            skipped_recent: List[str] = []
+            to_send: List[str] = []
+            sent_ok: List[str] = []
 
-        initial = [e for e in emails if e not in blocked and e not in sent_today]
-        for e in initial:
-            if is_foreign(e):
-                blocked_foreign.append(e)
-            else:
-                to_send.append(e)
+            initial = [e for e in emails if e not in blocked and e not in sent_today]
+            for e in initial:
+                if is_foreign(e):
+                    blocked_foreign.append(e)
+                else:
+                    to_send.append(e)
 
-        queue: List[str] = []
-        for e in to_send:
-            if is_suppressed(e):
-                blocked_invalid.append(e)
-            else:
-                queue.append(e)
+            queue: List[str] = []
+            for e in to_send:
+                if is_suppressed(e):
+                    blocked_invalid.append(e)
+                else:
+                    queue.append(e)
 
-        to_send = []
-        for e in queue:
-            if was_sent_within(e, days=lookup_days):
-                skipped_recent.append(e)
-            else:
-                to_send.append(e)
+            to_send = []
+            for e in queue:
+                if was_sent_within(e, days=lookup_days):
+                    skipped_recent.append(e)
+                else:
+                    to_send.append(e)
+
+            mass_state.save_state(
+                {
+                    "group": group_code,
+                    "template": template_path,
+                    "pending": to_send,
+                    "sent_ok": sent_ok,
+                    "blocked_foreign": blocked_foreign,
+                    "blocked_invalid": blocked_invalid,
+                    "skipped_recent": skipped_recent,
+                }
+            )
 
         if not to_send:
             await query.message.reply_text(
@@ -1397,6 +1449,17 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"{available} адресов из списка."
                 )
             )
+            mass_state.save_state(
+                {
+                    "group": group_code,
+                    "template": template_path,
+                    "pending": to_send,
+                    "sent_ok": sent_ok,
+                    "blocked_foreign": blocked_foreign,
+                    "blocked_invalid": blocked_invalid,
+                    "skipped_recent": skipped_recent,
+                }
+            )
 
         await query.message.reply_text(
             f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
@@ -1417,9 +1480,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
-            for email_addr in to_send:
+            while to_send:
                 if cancel_event and cancel_event.is_set():
                     break
+                email_addr = to_send.pop(0)
                 try:
                     token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
@@ -1442,7 +1506,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         and isinstance(e.recipients, dict)
                         and email_addr in e.recipients
                     ):
-                        code, msg = e.recipients[email_addr][0], e.recipients[email_addr][1]
+                        code, msg = (
+                            e.recipients[email_addr][0],
+                            e.recipients[email_addr][1],
+                        )
                     elif hasattr(e, "smtp_code"):
                         code = getattr(e, "smtp_code", None)
                         msg = getattr(e, "smtp_error", None)
@@ -1452,7 +1519,20 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     log_sent_email(
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
+                mass_state.save_state(
+                    {
+                        "group": group_code,
+                        "template": template_path,
+                        "pending": to_send,
+                        "sent_ok": sent_ok,
+                        "blocked_foreign": blocked_foreign,
+                        "blocked_invalid": blocked_invalid,
+                        "skipped_recent": skipped_recent,
+                    }
+                )
         imap.logout()
+        if not to_send:
+            mass_state.clear_state()
 
         report_text = build_mass_report_text(
             sent_ok,
