@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Iterable, Tuple, Literal
 
+from .tld_registry import tld_of
+
 SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
 BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
 SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
@@ -497,54 +499,51 @@ def is_suppressed(email: str) -> bool:
 
 
 DOMESTIC_CCTLD = {
-    "ru",
-    "su",
-    "рф",
-    "xn--p1ai",
-    "by",
-    "kz",
-    "ua",
-    "uz",
-    "kg",
-    "am",
-    "az",
-    "ge",
+    "RU",
+    "SU",
+    "XN--P1AI",
+    "BY",
+    "KZ",
+    "UA",
+    "UZ",
+    "KG",
+    "AM",
+    "AZ",
+    "GE",
 }
 
 GENERIC_GTLD = {
-    "com",
-    "org",
-    "net",
-    "info",
-    "biz",
-    "edu",
-    "gov",
-    "io",
-    "ai",
-    "app",
-    "dev",
-    "pro",
-    "name",
-    "club",
-    "site",
-    "online",
-    "xyz",
-    "top",
-    "store",
-    "tech",
+    "COM",
+    "ORG",
+    "NET",
+    "INFO",
+    "BIZ",
+    "EDU",
+    "GOV",
+    "IO",
+    "AI",
+    "APP",
+    "DEV",
+    "PRO",
+    "NAME",
+    "CLUB",
+    "SITE",
+    "ONLINE",
+    "XYZ",
+    "TOP",
+    "STORE",
+    "TECH",
 }
 
 
 def classify_tld(email: str) -> Literal["domestic", "foreign", "generic"]:
-    email = (email or "").strip().lower()
+    email = (email or "").strip()
     if "@" not in email:
         return "foreign"
     domain = email.split("@", 1)[1]
-    try:
-        domain = domain.encode("idna").decode("ascii")
-    except Exception:
-        domain = domain.encode("ascii", "ignore").decode("ascii")
-    tld = domain.rsplit(".", 1)[-1]
+    tld = tld_of(domain)
+    if tld is None:
+        return "foreign"
     if tld in DOMESTIC_CCTLD:
         return "domestic"
     if tld in GENERIC_GTLD:

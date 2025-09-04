@@ -4,10 +4,13 @@ import logging
 import os
 import tempfile
 import zipfile
+import time
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional
 
 from emailbot import settings
+from .extraction_common import filter_invalid_tld
+from .reporting import log_extract_digest
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,7 @@ def extract_emails_from_zip(
         _dedupe,
     )
 
+    start = time.monotonic()
     if _depth > MAX_DEPTH:
         logger.warning("zip depth exceeded for %s", path)
         return [], {"errors": ["max depth exceeded"]}
@@ -165,7 +169,21 @@ def extract_emails_from_zip(
             "footnote_singletons_repaired", 0
         ) + fixed
     hits = _dedupe(hits)
-
+    emails, extra = filter_invalid_tld([h.email for h in hits])
+    stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
+    if extra.get("invalid_tld"):
+        allowed = set(emails)
+        hits = [h for h in hits if h.email in allowed]
+    stats["unique_after_cleanup"] = len(hits)
+    suspicious = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
+    if suspicious:
+        stats["suspicious_numeric_localpart"] = stats.get(
+            "suspicious_numeric_localpart", 0
+        ) + suspicious
+    stats["mode"] = "file"
+    stats["entry"] = path
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
     return hits, stats
 
 
