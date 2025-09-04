@@ -8,8 +8,8 @@ from emailbot.extraction import smart_extract_emails
     [
         ("\u00b9ivanov@uni.edu", ["ivanov@uni.edu"]),
         ("1petrov@uni.edu", ["petrov@uni.edu"]),
-        ("apetrov@uni.edu", ["petrov@uni.edu"]),
-        ("aivanov@uni.edu", ["ivanov@uni.edu"]),
+        ("apetrov@uni.edu", ["apetrov@uni.edu"]),
+        ("aivanov@uni.edu", ["aivanov@uni.edu"]),
         ("name-name@dept.domain.co.uk", ["name-name@dept.domain.co.uk"]),
         (
             "user+tag_2024%eq=ok/part'one~x@sub-domain.xn--80asehdb",

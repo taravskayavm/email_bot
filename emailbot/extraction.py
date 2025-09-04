@@ -298,33 +298,19 @@ def smart_extract_emails(text: str) -> List[str]:
         elif len(local) >= 2 and _is_left_boundary(left_char):
             prefix_char = local[0]
             local2 = local[1:]
-            if _valid_local(local2) and (prefix_char.isdigit() or prefix_char.islower()):
+            if _valid_local(local2):
                 email_v2 = f"{local2}@{domain}".lower()
-                # --- скоринг ---
-                score_v1 = 0
-                score_v2 = 0
 
-                email_raw = f"{local}@{domain_raw}".lower()
-                if email_raw in seen_in_text: score_v1 += 2
-                if email_v2 in seen_in_text: score_v2 += 2
-
-                if email_v2 in emails: score_v2 += 3       # уже видели без префикса -> сильный сигнал
-                if prefix_char.isdigit():
-                    score_v2 += 4    # цифры чаще сноски
-                elif prefix_char.lower() in {"a", "b", "c"}:
-                    score_v2 += 3    # буквенные сноски a/b/c
-
-                # проверим шаблон списка непосредственно слева
                 left_slice_start = max(0, at - len(local) - 4)
                 left_slice = text[left_slice_start: at - len(local)]
-                if _LIST_MARKER_RE.search(left_slice):
-                    score_v2 += 4
+                list_context = bool(_LIST_MARKER_RE.search(left_slice))
 
-                if multi_mode: score_v2 += 2               # «ряд префиксов» по документу
-                if len(local2) >= 2: score_v2 += 1
-                if len(local)  >= 2: score_v1 += 1
-
-                choose_v2 = score_v2 > score_v1
+                if prefix_char.isdigit():
+                    choose_v2 = True  # цифра-сноска — всегда
+                elif prefix_char.lower() in {"a", "b", "c"} and (
+                    list_context or multi_mode
+                ):
+                    choose_v2 = True  # a/b/c только при явном контексте
 
         final_email = email_v2 if choose_v2 else email_v1
         loc, dom = final_email.split("@", 1)
