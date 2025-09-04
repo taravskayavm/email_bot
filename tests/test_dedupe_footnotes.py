@@ -47,28 +47,64 @@ def test_pdf_footnote_trimmed_is_merged(tmp_path):
 
 def test_singleton_digit_repaired():
     h = make_hit("1dergal@yandex.ru", pre="¹", source="pdf:doc.pdf")
-    res, fixed = repair_footnote_singletons([h])
+    res, stats = repair_footnote_singletons([h])
     assert [x.email for x in res] == ["dergal@yandex.ru"]
-    assert fixed == 1
+    assert stats["footnote_singletons_repaired"] == 1
 
 
 def test_singleton_two_digits_repaired():
     h = make_hit("196soul@mail.ru", pre="¹", source="pdf:doc.pdf")
-    res, fixed = repair_footnote_singletons([h])
+    res, stats = repair_footnote_singletons([h])
     assert [x.email for x in res] == ["96soul@mail.ru"]
-    assert fixed == 1
+    assert stats["footnote_singletons_repaired"] == 1
 
 
 def test_singleton_without_superscript_not_repaired():
     h = make_hit("1dergal@yandex.ru", pre="1", source="pdf:doc.pdf")
-    res, fixed = repair_footnote_singletons([h])
+    res, stats = repair_footnote_singletons([h])
     assert [x.email for x in res] == ["1dergal@yandex.ru"]
-    assert fixed == 0
+    assert stats["footnote_singletons_repaired"] == 0
+
+
+def test_guard_skip_mismatched_digit():
+    h = make_hit("96soul@mail.ru", pre="¹", source="pdf:doc.pdf")
+    res, stats = repair_footnote_singletons([h])
+    assert [x.email for x in res] == ["96soul@mail.ru"]
+    assert stats["footnote_guard_skips"] == 1
 
 
 def test_real_address_not_repaired():
     h = make_hit("20yaik11@mail.ru", pre="", source="pdf:doc.pdf")
-    res, fixed = repair_footnote_singletons([h])
+    res, stats = repair_footnote_singletons([h])
     assert [x.email for x in res] == ["20yaik11@mail.ru"]
-    assert fixed == 0
+    assert stats["footnote_singletons_repaired"] == 0
+
+
+def test_numeric_login_not_repaired():
+    h = make_hit("6soul@mail.ru", pre="", source="pdf:doc.pdf")
+    res, stats = repair_footnote_singletons([h])
+    assert [x.email for x in res] == ["6soul@mail.ru"]
+    assert stats["footnote_singletons_repaired"] == 0
+
+
+def test_long_numeric_not_repaired():
+    h = make_hit("8912476@test.ru", pre="", source="pdf:doc.pdf")
+    res, stats = repair_footnote_singletons([h])
+    assert [x.email for x in res] == ["8912476@test.ru"]
+    assert stats["footnote_singletons_repaired"] == 0
+
+
+def test_ambiguous_kept_counts():
+    h = make_hit("1alex@yandex.ru", pre="1", source="pdf:doc.pdf")
+    _, stats = repair_footnote_singletons([h])
+    assert stats["footnote_ambiguous_kept"] == 1
+
+
+def test_ambiguous_removed_if_full_exists():
+    h1 = make_hit("1alex@yandex.ru", pre="1", source="pdf:doc.pdf")
+    h2 = make_hit("alex@yandex.ru", pre="", source="pdf:doc.pdf")
+    res, stats = repair_footnote_singletons([h1, h2])
+    emails = [x.email for x in res]
+    assert "1alex@yandex.ru" not in emails
+    assert "alex@yandex.ru" in emails
 

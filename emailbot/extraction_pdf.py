@@ -145,11 +145,10 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         logger.debug("ocr_pages=%d", ocr_pages)
 
     hits = merge_footnote_prefix_variants(hits, stats)
-    hits, fixed = repair_footnote_singletons(hits, layout)
-    if fixed:
-        stats["footnote_singletons_repaired"] = stats.get(
-            "footnote_singletons_repaired", 0
-        ) + fixed
+    hits, fstats = repair_footnote_singletons(hits, layout)
+    for k, v in fstats.items():
+        if v:
+            stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
 
     return hits, stats
@@ -231,11 +230,10 @@ def extract_from_pdf_stream(
         logger.debug("ocr_pages=%d", ocr_pages)
 
     hits = merge_footnote_prefix_variants(hits, stats)
-    hits, fixed = repair_footnote_singletons(hits, layout)
-    if fixed:
-        stats["footnote_singletons_repaired"] = stats.get(
-            "footnote_singletons_repaired", 0
-        ) + fixed
+    hits, fstats = repair_footnote_singletons(hits, layout)
+    for k, v in fstats.items():
+        if v:
+            stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
 
     return hits, stats

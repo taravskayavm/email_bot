@@ -49,13 +49,12 @@ def normalize_text(s: str) -> str:
     s = s.replace("\u00A0", " ")  # NBSP
     s = _Z_SPACE_RE.sub(" ", s)
 
-    # Zero-width and soft hyphen characters
+    # Zero-width characters
     s = (
         s.replace("\u200B", "")
         .replace("\u200C", "")
         .replace("\u200D", "")
         .replace("\uFEFF", "")
-        .replace("\u00AD", "")
     )
 
     # Various dashes/minuses -> ASCII '-'
@@ -119,11 +118,10 @@ def preprocess_text(text: str) -> str:
 
     text = normalize_text(text)
 
-    # Glue hyphenated line breaks and plain line breaks inside addresses,
-    # but only for alphabetic segments beyond the first character so that
-    # leading digits aren't accidentally concatenated.
-    text = re.sub(r"([A-Za-z])-\n([A-Za-z])", r"\1-\2", text)
-    text = re.sub(r"([A-Za-z])\n([A-Za-z.])", r"\1\2", text)
+    # Glue hyphenated/soft hyphen line breaks inside addresses starting from
+    # the second local-part character so that leading digits aren't lost.
+    text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
+    text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
     return text
 
 

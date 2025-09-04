@@ -14,8 +14,14 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
 _SUPER_DIGITS = set("⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
+def is_superscript_digit(ch: str) -> bool:
+    """Return ``True`` if ``ch`` is a Unicode superscript digit."""
+
+    return ch in _SUPER_DIGITS
+
+
 def _is_superscript(ch: str) -> bool:
-    return ch in _SUPER_DIGITS or "SUPERSCRIPT" in unicodedata.name(ch, "")
+    return is_superscript_digit(ch) or "SUPERSCRIPT" in unicodedata.name(ch, "")
 
 
 def _last_visible(s: str) -> str:
@@ -83,86 +89,78 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
 
 def repair_footnote_singletons(
     hits: List["EmailHit"], layout_aware: bool = False
-) -> Tuple[List["EmailHit"], int]:
-    """Fix leading footnote digits duplicated in the local part.
-
-    Works only for PDF-derived hits where ``pre`` ends with a superscript digit
-    (``¹²³⁴⁵⁶⁷⁸⁹⁰``).  If the local part begins with the same digit (or letter),
-    removes exactly one leading character provided the remaining part looks like
-    a plausible address (length ≥ 3 and contains at least one ASCII letter).
-
-    When ``layout_aware`` is true, a regular digit to the left also qualifies as
-    a footnote marker.
-    """
+) -> Tuple[List["EmailHit"], Dict[str, int]]:
+    """Repair or guard against stray footnote markers inside e-mails."""
 
     from .extraction import EmailHit  # local import to avoid circular deps
 
+    stats: Dict[str, int] = {
+        "footnote_singletons_repaired": 0,
+        "footnote_guard_skips": 0,
+        "footnote_ambiguous_kept": 0,
+    }
+    all_emails = {h.email for h in hits}
     out: List[EmailHit] = []
-    fixed = 0
     for h in hits:
-        if h.origin == "footnote_repaired":
+        if h.meta.get("repaired"):
             out.append(h)
             continue
-        ref = h.source_ref.lower()
-        if ref.startswith("zip:"):
-            if "|" not in ref:
-                out.append(h)
-                continue
-
-            inner = ref.split("|", 1)[1].split("#", 1)[0].lower()
-
-            if not inner.endswith(".pdf"):
-                out.append(h)
-                continue
-        elif not ref.startswith("pdf:"):
-            out.append(h)
-            continue
-
         prev = _last_visible(h.pre)
-
         if not prev:
             out.append(h)
             continue
-        if prev not in _SUPER_DIGITS:
-            if not (layout_aware and prev.isdigit()):
-                out.append(h)
-                continue
-
         local, dom = h.email.split("@", 1)
-        if not local or not local[0].isalnum():
 
-            out.append(h)
-            continue
-
-        first = local[0]
-
-        if prev in _SUPER_DIGITS or prev.isdigit():
+        if is_superscript_digit(prev):
+            if not local:
+                out.append(h)
+                stats["footnote_guard_skips"] += 1
+                continue
+            first = local[0]
             try:
                 if unicodedata.digit(prev) != unicodedata.digit(first):
                     out.append(h)
+                    stats["footnote_guard_skips"] += 1
                     continue
             except Exception:
                 out.append(h)
+                stats["footnote_guard_skips"] += 1
                 continue
-
-        rest = local[1:]
-        if len(rest) < 3 or not any("A" <= c <= "Z" or "a" <= c <= "z" for c in rest):
-
-            out.append(h)
+            rest = local[1:]
+            if len(rest) < 3 or not any(c.isalpha() for c in rest):
+                out.append(h)
+                stats["footnote_guard_skips"] += 1
+                continue
+            new_meta = dict(h.meta)
+            new_meta["repaired"] = True
+            out.append(
+                EmailHit(
+                    email=f"{rest}@{dom}",
+                    source_ref=h.source_ref,
+                    origin="footnote_repaired",
+                    pre=h.pre,
+                    post=h.post,
+                    meta=new_meta,
+                )
+            )
+            stats["footnote_singletons_repaired"] += 1
             continue
 
-        new_email = f"{rest}@{dom}"
-        out.append(
-            EmailHit(
-                email=new_email,
-                source_ref=h.source_ref,
-                origin="footnote_repaired",
-                pre=h.pre,
-                post=h.post,
-            )
-        )
-        fixed += 1
-    return out, fixed
+        if not layout_aware and prev.isalnum():
+            if len(local) >= 2:
+                trimmed = f"{local[1:]}@{dom}"
+                if trimmed in all_emails:
+                    continue
+            out.append(h)
+            stats["footnote_ambiguous_kept"] += 1
+            continue
 
-__all__ = ["merge_footnote_prefix_variants", "repair_footnote_singletons"]
+        out.append(h)
+    return out, stats
+
+__all__ = [
+    "merge_footnote_prefix_variants",
+    "repair_footnote_singletons",
+    "is_superscript_digit",
+]
 
