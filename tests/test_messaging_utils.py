@@ -64,7 +64,23 @@ def test_canonical_for_history_gmail_variants():
     )
 
 
-def test_upsert_sent_log_idempotent(tmp_path):
+def test_schema_migration_from_legacy_headers(tmp_path):
+    path = tmp_path / "sent_log.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["address", "timestamp"])
+        w.writerow(["User@Example.com", "2023-01-01"])
+    fields = mu.ensure_sent_log_schema(str(path))
+    assert fields[:5] == mu.REQUIRED_FIELDS
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == mu.REQUIRED_FIELDS
+        rows = list(reader)
+    assert rows[0]["last_sent_at"] == "2023-01-01T00:00:00"
+    assert rows[0]["email"] == "User@Example.com"
+
+
+def test_upsert_idempotent(tmp_path):
     path = tmp_path / "sent_log.csv"
     ts = datetime(2023, 1, 1)
     ins, upd = mu.upsert_sent_log(path, "Test@Example.com", ts, "src")
