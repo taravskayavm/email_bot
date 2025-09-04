@@ -87,8 +87,7 @@ def extract_from_uploaded_file(path: str):
 
 
 def is_allowed_tld(email_addr: str) -> bool:
-    tld = email_addr.rsplit(".", 1)[-1].lower()
-    return tld in {"ru", "com"}
+    return mu.classify_tld(email_addr) != "foreign"
 
 
 def is_numeric_localpart(email_addr: str) -> bool:
@@ -815,7 +814,7 @@ async def _compose_report_and_save(
     """Compose a summary report and store samples in session state."""
 
     state = get_state(context)
-    state.preview_allowed_all = sorted(allowed_all)
+    state.preview_allowed_all = sorted(filtered)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
@@ -1119,7 +1118,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         technical_emails = [
             e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
         ]
-        filtered = sorted(e for e in allowed_all if e not in technical_emails)
+        filtered = sorted(
+            e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
+        )
         suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
 
         state = get_state(context)

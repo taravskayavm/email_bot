@@ -8,7 +8,7 @@ import shutil
 import email.utils
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Iterable, Tuple
+from typing import List, Dict, Iterable, Tuple, Literal
 
 SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
 BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
@@ -496,14 +496,65 @@ def is_suppressed(email: str) -> bool:
     return False
 
 
-_ALLOWED_TLDS = {"ru", "com"}
+DOMESTIC_CCTLD = {
+    "ru",
+    "su",
+    "рф",
+    "xn--p1ai",
+    "by",
+    "kz",
+    "ua",
+    "uz",
+    "kg",
+    "am",
+    "az",
+    "ge",
+}
+
+GENERIC_GTLD = {
+    "com",
+    "org",
+    "net",
+    "info",
+    "biz",
+    "edu",
+    "gov",
+    "io",
+    "ai",
+    "app",
+    "dev",
+    "pro",
+    "name",
+    "club",
+    "site",
+    "online",
+    "xyz",
+    "top",
+    "store",
+    "tech",
+}
+
+
+def classify_tld(email: str) -> Literal["domestic", "foreign", "generic"]:
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return "foreign"
+    domain = email.split("@", 1)[1]
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except Exception:
+        domain = domain.encode("ascii", "ignore").decode("ascii")
+    tld = domain.rsplit(".", 1)[-1]
+    if tld in DOMESTIC_CCTLD:
+        return "domestic"
+    if tld in GENERIC_GTLD:
+        return "generic"
+    return "foreign"
+
 
 def is_foreign(email: str) -> bool:
-    """Return True if the e-mail has a TLD outside the allowed set."""
-    if not email:
-        return True
-    tld = email.rsplit(".", 1)[-1].lower()
-    return tld not in _ALLOWED_TLDS
+    """Return True if the e-mail has a TLD outside allowed/domestic/generic sets."""
+    return classify_tld(email) == "foreign"
 
 
 __all__ = [
@@ -521,6 +572,9 @@ __all__ = [
     "is_soft_bounce",
     "suppress_add",
     "is_suppressed",
+    "classify_tld",
+    "DOMESTIC_CCTLD",
+    "GENERIC_GTLD",
     "is_foreign",
     "was_sent_within",
     "log_sent",
