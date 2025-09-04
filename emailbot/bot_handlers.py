@@ -10,6 +10,7 @@ import os
 import re
 import time
 import urllib.parse
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional, Set
@@ -27,6 +28,7 @@ from telegram.ext import ContextTypes
 from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
+from . import extraction_url as _extraction_url
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import build_mass_report_text, log_mass_filter_digest
 from . import settings
@@ -42,7 +44,9 @@ def apply_numeric_truncation_removal(allowed):
     return allowed, []
 
 
-async def async_extract_emails_from_url(url: str, session, chat_id=None):
+async def async_extract_emails_from_url(
+    url: str, session, chat_id=None, batch_id: str | None = None
+):
     hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
     emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
@@ -796,8 +800,12 @@ async def retry_last_command(
 async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear stored e-mails and reset the session state."""
 
+    chat_id = update.effective_chat.id
     init_state(context)
     context.user_data.pop("manual_emails", None)
+    context.chat_data["batch_id"] = None
+    mass_state.clear_batch(chat_id)
+    context.chat_data["extract_lock"] = asyncio.Lock()
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
@@ -1023,9 +1031,40 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     emails = state.to_send
     state.group = group_code
     state.template = template_path
+    chat_id = query.message.chat.id
+    ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+        messaging.prepare_mass_mailing(emails)
+    )
+    log_mass_filter_digest(
+        {
+            **digest,
+            "batch_id": context.chat_data.get("batch_id"),
+            "chat_id": chat_id,
+            "entry_url": context.chat_data.get("entry_url"),
+        }
+    )
+    state.to_send = ready
+    mass_state.save_chat_state(
+        chat_id,
+        {
+            "group": group_code,
+            "template": template_path,
+            "pending": ready,
+            "blocked_foreign": blocked_foreign,
+            "blocked_invalid": blocked_invalid,
+            "skipped_recent": skipped_recent,
+            "batch_id": context.chat_data.get("batch_id"),
+        },
+    )
+    if not ready:
+        await query.message.reply_text(
+            "Все адреса уже в истории за 180 дней или в блок-листах.",
+            reply_markup=None,
+        )
+        return
     await query.message.reply_text(
         (
-            f"✉️ Готово к отправке {len(emails)} писем.\n"
+            f"✉️ Готово к отправке {len(ready)} писем.\n"
             "Для запуска рассылки нажмите кнопку ниже."
         ),
         reply_markup=InlineKeyboardMarkup(
@@ -1098,13 +1137,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     urls = re.findall(r"https?://\S+", text)
     if urls:
+        lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
+        if lock.locked():
+            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
+            return
+        now = time.monotonic()
+        last = context.chat_data.get("last_url")
+        if last and last.get("urls") == urls and now - last.get("ts", 0) < 10:
+            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
+            return
+        context.chat_data["last_url"] = {"urls": urls, "ts": now}
+        batch_id = secrets.token_hex(8)
+        context.chat_data["batch_id"] = batch_id
+        mass_state.set_batch(chat_id, batch_id)
+        _extraction_url.set_batch(batch_id)
+        context.chat_data["entry_url"] = urls[0]
         await update.message.reply_text("🌐 Загружаем страницы...")
         results = []
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                async_extract_emails_from_url(url, session, chat_id) for url in urls
-            ]
-            results = await asyncio.gather(*tasks)
+        async with lock:
+            async with aiohttp.ClientSession() as session:
+                tasks = [
+                    async_extract_emails_from_url(url, session, chat_id, batch_id)
+                    for url in sorted(urls)
+                ]
+                results = await asyncio.gather(*tasks)
+        if batch_id != context.chat_data.get("batch_id"):
+            return
         allowed_all: Set[str] = set()
         foreign_all: Set[str] = set()
         repairs_all: List[tuple[str, str]] = []
@@ -1457,7 +1515,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send all prepared e-mails respecting limits."""
 
     query = update.callback_query
-    saved = mass_state.load_state()
+    chat_id = query.message.chat.id
+    saved = mass_state.load_chat_state(chat_id)
     if saved and saved.get("pending"):
         emails = saved.get("pending", [])
         group_code = saved.get("group")
@@ -1474,12 +1533,11 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.message.reply_text("Запущено — выполняю в фоне...")
 
     async def long_job() -> None:
-        chat_id = query.message.chat.id
         lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
 
-        saved_state = mass_state.load_state()
+        saved_state = mass_state.load_chat_state(chat_id)
         if saved_state and saved_state.get("pending"):
             blocked_foreign = saved_state.get("blocked_foreign", [])
             blocked_invalid = saved_state.get("blocked_invalid", [])
@@ -1537,7 +1595,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 }
             )
 
-            mass_state.save_state(
+            mass_state.save_chat_state(
+                chat_id,
                 {
                     "group": group_code,
                     "template": template_path,
@@ -1546,7 +1605,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
-                }
+                },
             )
 
         if not to_send:
@@ -1577,7 +1636,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"{available} адресов из списка."
                 )
             )
-            mass_state.save_state(
+            mass_state.save_chat_state(
+                chat_id,
                 {
                     "group": group_code,
                     "template": template_path,
@@ -1586,7 +1646,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
-                }
+                },
             )
 
         await query.message.reply_text(
@@ -1647,7 +1707,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     log_sent_email(
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
-                mass_state.save_state(
+                mass_state.save_chat_state(
+                    chat_id,
                     {
                         "group": group_code,
                         "template": template_path,
@@ -1656,11 +1717,11 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
                         "skipped_recent": skipped_recent,
-                    }
+                    },
                 )
         imap.logout()
         if not to_send:
-            mass_state.clear_state()
+            mass_state.clear_chat_state(chat_id)
 
         report_text = build_mass_report_text(
             sent_ok,

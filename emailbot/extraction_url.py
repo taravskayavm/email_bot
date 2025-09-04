@@ -24,6 +24,7 @@ _DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto
 
 _CACHE: Dict[str, Tuple[float, str]] = {}
 _CACHE_BYTES: Dict[str, Tuple[float, bytes]] = {}
+_CURRENT_BATCH: str | None = None
 _READ_CHUNK = 128 * 1024
 _SIMPLE_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
@@ -34,6 +35,16 @@ def decode_cfemail(hexstr: str) -> str:
     key = int(hexstr[:2], 16)
     decoded = bytes(int(hexstr[i : i + 2], 16) ^ key for i in range(2, len(hexstr), 2))
     return decoded.decode("utf-8", "ignore")
+
+
+def set_batch(batch_id: str | None) -> None:
+    """Switch caches when a new extraction batch starts."""
+
+    global _CURRENT_BATCH
+    if batch_id != _CURRENT_BATCH:
+        _CACHE.clear()
+        _CACHE_BYTES.clear()
+        _CURRENT_BATCH = batch_id
 
 
 def fetch_url(
