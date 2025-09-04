@@ -27,11 +27,14 @@ from .messaging_utils import (
     ensure_sent_log_schema,
     is_soft_bounce,
     is_hard_bounce,
+    is_foreign,
+    is_suppressed,
     suppress_add,
     upsert_sent_log,
     load_sent_log,
     load_seen_events,
     save_seen_events,
+    was_sent_within,
     SYNC_SEEN_EVENTS_PATH,
 )
 
@@ -633,6 +636,74 @@ def count_sent_today() -> int:
     return len(get_sent_today())
 
 
+def prepare_mass_mailing(emails: list[str]):
+    """Apply all mass-mailing filters and return ready e-mails.
+
+    Returns a tuple ``(ready, blocked_foreign, blocked_invalid, skipped_recent, digest)``
+    where ``ready`` is the list of addresses allowed to send, ``blocked_foreign`` are
+    addresses filtered due to foreign TLDs, ``blocked_invalid`` – suppressed or
+    blocked addresses, and ``skipped_recent`` – addresses found in the 180 day
+    history. ``digest`` contains counters for logging.
+    """
+
+    blocked = get_blocked_emails()
+    sent_today = get_sent_today()
+    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+
+    blocked_foreign: list[str] = []
+    blocked_invalid: list[str] = []
+    skipped_recent: list[str] = []
+
+    queue: list[str] = []
+    for e in emails:
+        if e in blocked or e in sent_today:
+            continue
+        if is_foreign(e):
+            blocked_foreign.append(e)
+        else:
+            queue.append(e)
+
+    queue2: list[str] = []
+    for e in queue:
+        if is_suppressed(e):
+            blocked_invalid.append(e)
+        else:
+            queue2.append(e)
+
+    queue3: list[str] = []
+    for e in queue2:
+        if was_sent_within(e, days=lookup_days):
+            skipped_recent.append(e)
+        else:
+            queue3.append(e)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    dup_skipped = 0
+    for e in queue3:
+        norm = normalize_email(e)
+        if norm in seen:
+            dup_skipped += 1
+        else:
+            seen.add(norm)
+            deduped.append(e)
+
+    digest = {
+        "input_total": len(emails),
+        "after_suppress": len(queue2),
+        "foreign_blocked": len(blocked_foreign),
+        "after_180d": len(queue3),
+        "sent_planned": len(deduped),
+        "skipped_by_dup_in_batch": dup_skipped,
+        "unique_ready_to_send": len(deduped),
+        "skipped_suppress": len(blocked_invalid),
+        "skipped_180d": len(skipped_recent),
+        "skipped_foreign": len(blocked_foreign),
+    }
+
+    return deduped, blocked_foreign, blocked_invalid, skipped_recent, digest
+
+
 def sync_log_with_imap() -> Dict[str, int]:
     imap = None
     stats = {
@@ -753,6 +824,7 @@ __all__ = [
     "clear_recent_sent_cache",
     "get_sent_today",
     "count_sent_today",
+    "prepare_mass_mailing",
     "sync_log_with_imap",
     "periodic_unsubscribe_check",
     "check_env_vars",
