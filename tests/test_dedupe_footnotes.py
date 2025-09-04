@@ -14,7 +14,7 @@ def test_trimmed_variant_removed():
     stats = {}
     res = merge_footnote_prefix_variants([long, short], stats)
     assert res == [long]
-    assert stats.get("footnote_trimmed_merged") == 1
+    assert stats.get("footnote_pairs_merged") == 1
 
 
 def test_different_addresses_not_merged():
@@ -23,7 +23,7 @@ def test_different_addresses_not_merged():
     stats = {}
     res = merge_footnote_prefix_variants([a, b], stats)
     assert {h.email for h in res} == {a.email, b.email}
-    assert stats.get("footnote_trimmed_merged", 0) == 0
+    assert stats.get("footnote_pairs_merged", 0) == 0
 
 
 def _make_pdf(path, text):
@@ -42,7 +42,7 @@ def test_pdf_footnote_trimmed_is_merged(tmp_path):
     emails, stats = extract_any(str(pdf))
     assert "959536_vorobeva@mail.ru" in emails
     assert "59536_vorobeva@mail.ru" not in emails
-    assert stats.get("footnote_trimmed_merged", 0) >= 1
+    assert stats.get("footnote_pairs_merged", 0) >= 1
 
 
 def test_singleton_digit_repaired():

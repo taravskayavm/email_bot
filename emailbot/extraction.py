@@ -9,18 +9,31 @@
 """
 
 from __future__ import annotations
+import logging
 import re
 import unicodedata
+import time
+from collections import Counter
 from dataclasses import dataclass
 from html import unescape
 from typing import List, Tuple, Dict, Iterable, Set, Optional
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
-from .extraction_common import normalize_email, normalize_text, preprocess_text
-from .extraction_pdf import extract_from_pdf, extract_from_pdf_stream
+from .extraction_common import (
+    normalize_email,
+    normalize_text,
+    preprocess_text,
+    is_valid_domain,
+    filter_invalid_tld,
+)
+from .extraction_pdf import (
+    extract_from_pdf as _extract_from_pdf,
+    extract_from_pdf_stream as _extract_from_pdf_stream,
+)
 from .extraction_zip import extract_emails_from_zip
 from .settings_store import get
+from .reporting import log_extract_digest
 
 __all__ = [
     "EmailHit",
@@ -38,6 +51,9 @@ __all__ = [
     "extract_any",
     "extract_any_stream",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -101,19 +117,7 @@ def _valid_local(local: str) -> bool:
     return all(_is_local_char(c) for c in local)
 
 def _valid_domain(domain: str) -> bool:
-    parts = domain.split(".")
-    if len(parts) < 2:
-        return False
-    for label in parts:
-        if not label or label[0] == "-" or label[-1] == "-":
-            return False
-        # доменная метка — ASCII alnum или '-'
-        if not all(c.isalnum() or c == "-" for c in label):
-            return False
-    tld = parts[-1]
-    if tld.startswith("xn--"):
-        return 4 <= len(tld) <= 63
-    return tld.isalpha() and 2 <= len(tld) <= 63
+    return is_valid_domain(domain)
 
 def _scan_local_left(text: str, at_idx: int) -> Tuple[str, int]:
     i = at_idx - 1
@@ -159,6 +163,8 @@ _COMMON_TLDS = {
     "za","ng","ke"
 }
 
+_TLD_TRIM_BLACKLIST = {"message", "promocode"}
+
 def _longest_known_tld_prefix(s: str) -> str | None:
     s = s.lower()
     best = None
@@ -180,7 +186,7 @@ def _trim_appended_word(domain: str) -> str:
         return domain
 
     t = last.lower()
-    if t in _COMMON_TLDS:
+    if t in _COMMON_TLDS or t in _TLD_TRIM_BLACKLIST:
         return domain
 
     # Повтор TLD (2+ раза): comcom[com], ruru, comcomcom
@@ -194,11 +200,11 @@ def _trim_appended_word(domain: str) -> str:
     if m:
         base = m.group(1)
         pref = _longest_known_tld_prefix(base)
-        if pref:
+        if pref and pref == base:
             parts[-1] = pref
             return ".".join(parts)
 
-    # Максимальный известный префикс (onlinebiz -> online)
+    # Максимальный известный префикс (onlinebiz -> online, rurussia -> ru)
     pref = _longest_known_tld_prefix(t)
     if pref:
         parts[-1] = pref
@@ -419,13 +425,64 @@ def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
 
 
 def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[EmailHit]:
+    stats["total_found"] = stats.get("total_found", 0) + len(hits)
+    origin_counts = Counter(h.origin for h in hits)
+    mapping = {
+        "mailto": "hits_mailto",
+        "direct_at": "hits_direct_at",
+        "obfuscation": "hits_obfuscation",
+        "ldjson": "hits_ldjson",
+        "bundle": "hits_bundle",
+        "document": "hits_document",
+        "cfemail": "hits_cfemail",
+    }
+    for origin, count in origin_counts.items():
+        key = mapping.get(origin)
+        if key:
+            stats[key] = stats.get(key, 0) + count
     hits = merge_footnote_prefix_variants(hits, stats)
     fixed_hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
     if fixed:
         stats["footnote_singletons_repaired"] = stats.get(
             "footnote_singletons_repaired", 0
         ) + fixed
-    return _dedupe(fixed_hits)
+    hits = _dedupe(fixed_hits)
+    emails, extra = filter_invalid_tld([h.email for h in hits])
+    stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
+    logger.debug("filtered invalid TLD: %s", stats.get("invalid_tld"))
+    if extra.get("invalid_tld"):
+        allowed = set(emails)
+        hits = [h for h in hits if h.email in allowed]
+    stats["unique_after_cleanup"] = len(hits)
+    suspicious = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
+    if suspicious:
+        stats["suspicious_numeric_localpart"] = stats.get(
+            "suspicious_numeric_localpart", 0
+        ) + suspicious
+    return hits
+
+
+def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
+    """Extract e-mail addresses from a PDF file."""
+
+    start = time.monotonic()
+    hits, stats = _extract_from_pdf(path, stop_event)
+    hits = _postprocess_hits(hits, stats)
+    stats["mode"] = "file"
+    stats["entry"] = path
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
+    return hits, stats
+
+
+def extract_from_pdf_stream(
+    data: bytes, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list[EmailHit], Dict]:
+    """Extract e-mail addresses from PDF bytes."""
+
+    hits, stats = _extract_from_pdf_stream(data, source_ref, stop_event)
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 
 def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
@@ -435,6 +492,7 @@ def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[l
     import zipfile
     import xml.etree.ElementTree as ET
 
+    start = time.monotonic()
     hits: List[EmailHit] = []
     try:
         with zipfile.ZipFile(path) as z:
@@ -487,13 +545,16 @@ def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[l
     stats["pages"] = page
 
     hits = _postprocess_hits(hits, stats)
-
+    stats["mode"] = "file"
+    stats["entry"] = path
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
     return hits, stats
 
 
 def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
     """Извлечь e-mail-адреса из XLSX."""
-
+    start = time.monotonic()
     try:
         import openpyxl  # type: ignore
         from openpyxl.utils import get_column_letter  # type: ignore
@@ -521,10 +582,7 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
             except Exception:
                 pass
         stats = {"cells": cells}
-
         hits = _postprocess_hits(hits, stats)
-
-        return hits, stats
     except Exception:
         # Fallback: parse XML inside zip
         import zipfile
@@ -545,10 +603,13 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
         except Exception:
             return [], {"errors": ["cannot open"]}
         stats = {"cells": cells}
-
         hits = _postprocess_hits(hits, stats)
 
-        return hits, stats
+    stats["mode"] = "file"
+    stats["entry"] = path
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
+    return hits, stats
 
 
 def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
@@ -557,6 +618,7 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
     import os
     import csv
 
+    start = time.monotonic()
     hits: List[EmailHit] = []
     lines = 0
     ext = os.path.splitext(path)[1].lower()
@@ -595,9 +657,11 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
     except Exception:
         return [], {"errors": ["cannot open"]}
     stats = {"lines": lines}
-
     hits = _postprocess_hits(hits, stats)
-
+    stats["mode"] = "file"
+    stats["entry"] = path
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
     return hits, stats
 
 
@@ -821,14 +885,13 @@ def extract_from_url(
     import re
     import urllib.parse
 
+    start = time.monotonic()
     stats: Dict[str, int | list] = {
         "urls_scanned": 0,
         "cfemail_decoded": 0,
         "obfuscated_hits": 0,
         "numeric_from_obfuscation_dropped": 0,
         "errors": [],
-        "hits_ldjson": 0,
-        "hits_bundle": 0,
         "hits_sitemap": 0,
         "hits_api": 0,
         "docs_parsed": 0,
@@ -899,7 +962,10 @@ def extract_from_url(
         )
 
     hits = _postprocess_hits(hits, stats)
-
+    stats["mode"] = "url"
+    stats["entry"] = url
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
     return hits, stats
 
 def extract_any(
@@ -930,16 +996,33 @@ def extract_any(
     ext = os.path.splitext(source)[1].lower()
     if ext == ".pdf":
         hits, stats = extract_from_pdf(source, stop_event)
-    elif ext == ".docx":
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
+    if ext == ".docx":
         hits, stats = extract_from_docx(source, stop_event)
-    elif ext == ".xlsx":
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
+    if ext == ".xlsx":
         hits, stats = extract_from_xlsx(source, stop_event)
-    elif ext in {".csv", ".txt"}:
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
+    if ext in {".csv", ".txt"}:
         hits, stats = extract_from_csv_or_text(source, stop_event)
-    elif ext == ".zip":
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
+    if ext == ".zip":
         hits, stats = extract_emails_from_zip(source, stop_event)
-    elif ext in {".html", ".htm"}:
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
+    if ext in {".html", ".htm"}:
+        start = time.monotonic()
         import urllib.parse
+
         with open(source, encoding="utf-8", errors="ignore") as f:
             html = f.read()
         hits = []
@@ -966,17 +1049,28 @@ def extract_any(
         obf_hits = extract_obfuscated_hits(text, source_ref, stats)
         stats["obfuscated_hits"] = len(obf_hits)
         hits.extend(obf_hits)
-    else:
-        with open(source, encoding="utf-8", errors="ignore") as f:
-            text = f.read()
-        hits = [
-            EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
-            for e in extract_emails_document(text)
-        ]
-        stats = {}
+        hits = _postprocess_hits(hits, stats)
+        stats["mode"] = "file"
+        stats["entry"] = source
+        stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+        log_extract_digest(stats)
+        if _return_hits:
+            return hits, stats
+        return sorted({h.email for h in hits}), stats
 
+    start = time.monotonic()
+    with open(source, encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+    hits = [
+        EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
+        for e in extract_emails_document(text)
+    ]
+    stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
-
+    stats["mode"] = "file"
+    stats["entry"] = source
+    stats["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+    log_extract_digest(stats)
     if _return_hits:
         return hits, stats
     return sorted({h.email for h in hits}), stats
@@ -993,25 +1087,23 @@ def extract_any_stream(
 
     ext = ext.lower()
     if ext == ".pdf":
-        hits, stats = extract_from_pdf_stream(data, source_ref, stop_event)
-    elif ext == ".docx":
-        hits, stats = extract_from_docx_stream(data, source_ref, stop_event)
-    elif ext == ".xlsx":
-        hits, stats = extract_from_xlsx_stream(data, source_ref, stop_event)
-    elif ext in {".csv", ".txt"}:
-        hits, stats = extract_from_csv_or_text_stream(data, ext, source_ref, stop_event)
-    elif ext in {".html", ".htm"}:
-        hits, stats = extract_from_html_stream(data, source_ref, stop_event)
-    else:
-        text = data.decode("utf-8", "ignore")
-        hits = [
-            EmailHit(email=e, source_ref=source_ref, origin="direct_at")
-            for e in extract_emails_document(text)
-        ]
-        stats = {}
+        return extract_from_pdf_stream(data, source_ref, stop_event)
+    if ext == ".docx":
+        return extract_from_docx_stream(data, source_ref, stop_event)
+    if ext == ".xlsx":
+        return extract_from_xlsx_stream(data, source_ref, stop_event)
+    if ext in {".csv", ".txt"}:
+        return extract_from_csv_or_text_stream(data, ext, source_ref, stop_event)
+    if ext in {".html", ".htm"}:
+        return extract_from_html_stream(data, source_ref, stop_event)
 
+    text = data.decode("utf-8", "ignore")
+    hits = [
+        EmailHit(email=e, source_ref=source_ref, origin="direct_at")
+        for e in extract_emails_document(text)
+    ]
+    stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
-
     return hits, stats
 
 

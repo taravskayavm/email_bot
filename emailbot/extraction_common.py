@@ -7,11 +7,15 @@ import re
 import unicodedata
 from html import unescape
 
+from .tld_registry import tld_of, is_known_tld
+
 __all__ = [
     "normalize_text",
     "preprocess_text",
     "normalize_email",
     "maybe_decode_base64",
+    "is_valid_domain",
+    "filter_invalid_tld",
 ]
 
 # Mapping of Cyrillic homoglyphs to their Latin counterparts
@@ -127,3 +131,47 @@ def normalize_email(s: str) -> str:
     """Normalize an e-mail address for comparison/deduplication."""
 
     return normalize_text(s).strip().lower()
+
+
+def is_valid_domain(domain: str) -> bool:
+    """Return ``True`` if ``domain`` is syntactically valid and has a known TLD."""
+
+    if not domain or len(domain) > 253:
+        return False
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+    except Exception:
+        return False
+    labels = ascii_domain.split(".")
+    if len(labels) < 2:
+        return False
+    for label in labels:
+        if not (1 <= len(label) <= 63):
+            return False
+        if label[0] == "-" or label[-1] == "-":
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9-]+", label):
+            return False
+    tld = tld_of(ascii_domain)
+    return tld is not None and is_known_tld(tld)
+
+
+def filter_invalid_tld(emails: list[str]) -> tuple[list[str], dict]:
+    """Filter out e-mails with unknown or malformed TLDs.
+
+    Returns a tuple ``(valid, stats)`` where ``stats['invalid_tld']`` is the
+    number of addresses removed.
+    """
+
+    valid: list[str] = []
+    dropped = 0
+    for e in emails:
+        if "@" not in e:
+            dropped += 1
+            continue
+        domain = e.split("@", 1)[1]
+        if is_valid_domain(domain):
+            valid.append(e)
+        else:
+            dropped += 1
+    return valid, {"invalid_tld": dropped}

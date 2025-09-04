@@ -28,7 +28,7 @@ from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
-from .reporting import build_mass_report_text
+from .reporting import build_mass_report_text, log_mass_filter_digest
 from . import settings
 from . import mass_state
 from .settings_store import DEFAULTS
@@ -880,14 +880,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             allowed_all.update(allowed)
             loose_all.update(loose)
             repairs = collect_repairs_from_files(extracted_files)
-            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
+            footnote_dupes += stats.get("footnote_pairs_merged", 0)
         else:
             allowed, loose, stats = extract_from_uploaded_file(file_path)
             allowed_all.update(allowed)
             loose_all.update(loose)
             extracted_files.append(file_path)
             repairs = collect_repairs_from_files([file_path])
-            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
+            footnote_dupes += stats.get("footnote_pairs_merged", 0)
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
 
@@ -1113,7 +1113,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
-            footnote_dupes += stats.get("footnote_trimmed_merged", 0)
+            footnote_dupes += stats.get("footnote_pairs_merged", 0)
 
         technical_emails = [
             e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
@@ -1513,6 +1513,29 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     skipped_recent.append(e)
                 else:
                     to_send.append(e)
+
+            deduped: List[str] = []
+            seen_norm: Set[str] = set()
+            dup_skipped = 0
+            for e in to_send:
+                norm = normalize_email(e)
+                if norm in seen_norm:
+                    dup_skipped += 1
+                else:
+                    seen_norm.add(norm)
+                    deduped.append(e)
+            to_send = deduped
+
+            log_mass_filter_digest(
+                {
+                    "input_total": len(emails),
+                    "after_suppress": len(queue),
+                    "foreign_blocked": len(blocked_foreign),
+                    "after_180d": len(to_send),
+                    "sent_planned": len(to_send),
+                    "skipped_by_dup_in_batch": dup_skipped,
+                }
+            )
 
             mass_state.save_state(
                 {
