@@ -163,11 +163,10 @@ def extract_emails_from_zip(
 
     z.close()
     hits = merge_footnote_prefix_variants(hits, stats)
-    hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
-    if fixed:
-        stats["footnote_singletons_repaired"] = stats.get(
-            "footnote_singletons_repaired", 0
-        ) + fixed
+    hits, fstats = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
+    for k, v in fstats.items():
+        if v:
+            stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
     emails, extra = filter_invalid_tld([h.email for h in hits])
     stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
