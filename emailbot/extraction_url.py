@@ -194,8 +194,6 @@ def extract_ldjson_hits(html: str, base_url: str, stats: Dict[str, int]) -> List
         except Exception:
             continue
         hits.extend(_extract_from_json(data, f"url:{base_url}", stats))
-    if hits:
-        stats["hits_ldjson"] = stats.get("hits_ldjson", 0) + len(hits)
     return hits
 
 
@@ -241,8 +239,6 @@ def extract_bundle_hits(
             if decoded:
                 for e in _SIMPLE_EMAIL_RE.findall(decoded):
                     hits.append(EmailHit(email=e.lower(), source_ref=source_ref, origin="bundle"))
-    if hits:
-        stats["hits_bundle"] = stats.get("hits_bundle", 0) + len(hits)
     return hits
 
 
@@ -278,6 +274,7 @@ def extract_sitemap_hits(
         if not data:
             continue
         seen += 1
+        stats["sitemap_urls_scanned"] = stats.get("sitemap_urls_scanned", 0) + 1
         try:
             from xml.etree import ElementTree as ET
 
