@@ -18,7 +18,7 @@ from typing import List, Tuple, Dict, Iterable, Set, Optional
 from . import settings
 from .dedupe import merge_footnote_prefix_variants
 from .extraction_common import normalize_email, normalize_text, preprocess_text
-from .extraction_pdf import extract_from_pdf
+from .extraction_pdf import extract_from_pdf, extract_from_pdf_stream
 from .extraction_zip import extract_emails_from_zip
 from .settings_store import get
 
@@ -36,6 +36,7 @@ __all__ = [
     "extract_emails_from_zip",
     "extract_from_url",
     "extract_any",
+    "extract_any_stream",
 ]
 
 
@@ -482,21 +483,30 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
 
     try:
         import openpyxl  # type: ignore
+        from openpyxl.utils import get_column_letter  # type: ignore
 
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         hits: List[EmailHit] = []
         cells = 0
-        for ws in wb.worksheets:
-            for row in ws.iter_rows():
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                    break
-                for cell in row:
-                    cells += 1
-                    val = cell.value
-                    if isinstance(val, str):
-                        for e in extract_emails_document(val):
-                            ref = f"xlsx:{path}!{ws.title}:{cell.coordinate}"
-                            hits.append(EmailHit(email=e, source_ref=ref, origin="direct_at"))
+        try:
+            for ws in wb.worksheets:
+                for r_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        break
+                    for c_idx, val in enumerate(row, 1):
+                        cells += 1
+                        if isinstance(val, str):
+                            for e in extract_emails_document(val):
+                                coord = f"{get_column_letter(c_idx)}{r_idx}"
+                                ref = f"xlsx:{path}!{ws.title}:{coord}"
+                                hits.append(
+                                    EmailHit(email=e, source_ref=ref, origin="direct_at")
+                                )
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
         return _dedupe(hits), {"cells": cells}
     except Exception:
         # Fallback: parse XML inside zip
@@ -566,7 +576,187 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
     return _dedupe(hits), {"lines": lines}
 
 
+def extract_from_docx_stream(
+    data: bytes, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list[EmailHit], Dict]:
+    import io
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    hits: List[EmailHit] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            xml = z.read("word/document.xml")
+    except Exception:
+        return [], {"errors": ["cannot open"]}
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return [], {"errors": ["cannot open"]}
+
+    page = 1
+    text = ""
+    stats: Dict[str, int] = {"pages": 0}
+
+    def flush(page_text: str, page_no: int) -> None:
+        low = page_text.lower()
+        for email in extract_emails_document(page_text):
+            for m in re.finditer(re.escape(email), low):
+                start, end = m.span()
+                pre = page_text[max(0, start - 16) : start]
+                post = page_text[end : end + 16]
+                hits.append(
+                    EmailHit(
+                        email=email,
+                        source_ref=f"{source_ref}#page={page_no}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+
+    for elem in root.iter():
+        if elem.tag == ns + "br" and elem.attrib.get(ns + "type") == "page":
+            flush(text, page)
+            page += 1
+            text = ""
+        elif elem.tag == ns + "lastRenderedPageBreak":
+            flush(text, page)
+            page += 1
+            text = ""
+        elif elem.tag == ns + "t":
+            text += elem.text or ""
+        elif elem.tag == ns + "p":
+            text += "\n"
+
+    flush(text, page)
+    stats["pages"] = page
+    return _dedupe(hits), stats
+
+
+def extract_from_xlsx_stream(
+    data: bytes, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list[EmailHit], Dict]:
+    import io
+
+    try:
+        import openpyxl  # type: ignore
+        from openpyxl.utils import get_column_letter  # type: ignore
+
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        hits: List[EmailHit] = []
+        cells = 0
+        try:
+            for ws in wb.worksheets:
+                for r_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        break
+                    for c_idx, val in enumerate(row, 1):
+                        cells += 1
+                        if isinstance(val, str):
+                            for e in extract_emails_document(val):
+                                coord = f"{get_column_letter(c_idx)}{r_idx}"
+                                ref = f"{source_ref}!{ws.title}:{coord}"
+                                hits.append(
+                                    EmailHit(email=e, source_ref=ref, origin="direct_at")
+                                )
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+        return _dedupe(hits), {"cells": cells}
+    except Exception:
+        import re
+        import zipfile
+
+        hits: List[EmailHit] = []
+        cells = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for name in z.namelist():
+                    if not name.startswith("xl/") or not name.endswith(".xml"):
+                        continue
+                    xml = z.read(name).decode("utf-8", "ignore")
+                    for txt in re.findall(r">([^<>]+)<", xml):
+                        cells += 1
+                        for e in extract_emails_document(txt):
+                            hits.append(
+                                EmailHit(email=e, source_ref=source_ref, origin="direct_at")
+                            )
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        return _dedupe(hits), {"cells": cells}
+
+
+def extract_from_csv_or_text_stream(
+    data: bytes, ext: str, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list[EmailHit], Dict]:
+    import csv
+    import io
+    import re
+
+    pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    hits: List[EmailHit] = []
+    lines = 0
+    text = data.decode("utf-8", "ignore")
+    if ext == ".csv":
+        reader = csv.reader(io.StringIO(text))
+        for row in reader:
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                break
+            lines += 1
+            for cell in row:
+                s = str(cell)
+                for e in re.findall(pattern, s):
+                    hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+    else:
+        for line in io.StringIO(text):
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                break
+            lines += 1
+            for e in re.findall(pattern, line):
+                hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+    return _dedupe(hits), {"lines": lines}
+
+
 from .extraction_url import extract_obfuscated_hits, fetch_url, decode_cfemail
+
+
+def extract_from_html_stream(
+    data: bytes, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list[EmailHit], Dict]:
+    import re
+    import urllib.parse
+
+    html = data.decode("utf-8", "ignore")
+    hits: List[EmailHit] = []
+    stats: Dict[str, int] = {
+        "urls_scanned": 1,
+        "cfemail_decoded": 0,
+        "obfuscated_hits": 0,
+        "numeric_from_obfuscation_dropped": 0,
+    }
+    for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
+        addr = urllib.parse.unquote(m.group(1))
+        hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
+    for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
+        try:
+            email = decode_cfemail(cf)
+        except Exception:
+            continue
+        hits.append(EmailHit(email=email, source_ref=source_ref, origin="cfemail"))
+        stats["cfemail_decoded"] += 1
+    text = strip_html(html)
+    for e in extract_emails_document(text):
+        hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+    obf_hits = extract_obfuscated_hits(text, source_ref, stats)
+    stats["obfuscated_hits"] = len(obf_hits)
+    hits.extend(obf_hits)
+    return hits, stats
 
 
 def extract_from_url(
@@ -726,5 +916,37 @@ def extract_any(
     if _return_hits:
         return hits, stats
     return sorted({h.email for h in hits}), stats
+
+
+def extract_any_stream(
+    data: bytes,
+    ext: str,
+    *,
+    source_ref: str,
+    stop_event: Optional[object] = None,
+) -> tuple[list[EmailHit], Dict]:
+    """Определить тип источника по расширению и извлечь e-mail из байтов."""
+
+    ext = ext.lower()
+    if ext == ".pdf":
+        hits, stats = extract_from_pdf_stream(data, source_ref, stop_event)
+    elif ext == ".docx":
+        hits, stats = extract_from_docx_stream(data, source_ref, stop_event)
+    elif ext == ".xlsx":
+        hits, stats = extract_from_xlsx_stream(data, source_ref, stop_event)
+    elif ext in {".csv", ".txt"}:
+        hits, stats = extract_from_csv_or_text_stream(data, ext, source_ref, stop_event)
+    elif ext in {".html", ".htm"}:
+        hits, stats = extract_from_html_stream(data, source_ref, stop_event)
+    else:
+        text = data.decode("utf-8", "ignore")
+        hits = [
+            EmailHit(email=e, source_ref=source_ref, origin="direct_at")
+            for e in extract_emails_document(text)
+        ]
+        stats = {}
+    hits = merge_footnote_prefix_variants(hits, stats)
+    hits = _dedupe(hits)
+    return hits, stats
 
 
