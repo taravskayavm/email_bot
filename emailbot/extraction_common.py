@@ -78,10 +78,11 @@ def preprocess_text(text: str) -> str:
 
     text = normalize_text(text)
 
-    atext = "A-Za-z0-9!#$%&'*+/=?^_`{|}~.-"
-    # Glue hyphenated line breaks and plain line breaks inside addresses
-    text = re.sub(fr"([{atext}])-\n([{atext}])", r"\1-\2", text)
-    text = re.sub(fr"([{atext}])\n([{atext}])", r"\1\2", text)
+    # Glue hyphenated line breaks and plain line breaks inside addresses,
+    # but only for alphabetic segments beyond the first character so that
+    # leading digits aren't accidentally concatenated.
+    text = re.sub(r"([A-Za-z])-\n([A-Za-z])", r"\1-\2", text)
+    text = re.sub(r"([A-Za-z])\n([A-Za-z.])", r"\1\2", text)
     return text
 
 
