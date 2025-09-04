@@ -78,5 +78,82 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
     return [h for idx, h in enumerate(hits) if idx not in removed]
 
 
-__all__ = ["merge_footnote_prefix_variants"]
+def repair_footnote_singletons(
+    hits: List["EmailHit"], stats: Dict[str, int] | None = None
+) -> List["EmailHit"]:
+    """Remove leading footnote digits duplicated from context.
+
+    For PDF-based sources the text sometimes includes a superscript digit
+    immediately before an e-mail address.  The digit is accidentally captured as
+    the first character of the local part (e.g. ``1dergal@yandex.ru``).  When the
+    character immediately to the left of the match is the same digit in
+    superscript form and the remainder of the local part looks like a real
+    address, this function trims the digit and records the fix.
+    """
+
+    if stats is None:
+        stats = {}
+
+    from .extraction import EmailHit  # local import to avoid circular deps
+
+    out: List[EmailHit] = []
+    for h in hits:
+        ref = h.source_ref.lower()
+        if ref.startswith("zip:"):
+            if "|" not in ref:
+                out.append(h)
+                continue
+            inner = ref.split("|", 1)[1].split("#", 1)[0]
+            if not inner.endswith(".pdf"):
+                out.append(h)
+                continue
+        elif not ref.startswith("pdf:"):
+            out.append(h)
+            continue
+
+        prev = _last_visible(h.pre)
+        if not prev or not (prev.isdigit() or _is_superscript(prev)):
+            out.append(h)
+            continue
+
+        local, dom = h.email.split("@", 1)
+        if not local:
+            out.append(h)
+            continue
+
+        first = local[0]
+        try:
+            if unicodedata.digit(prev) != unicodedata.digit(first):
+                out.append(h)
+                continue
+        except Exception:
+            out.append(h)
+            continue
+
+        rest = local[1:]
+        if len(rest) < 3 or not any(c.isalpha() for c in rest):
+            out.append(h)
+            continue
+        if rest and (rest[0].isdigit() or _is_superscript(rest[0])):
+            out.append(h)
+            continue
+
+        new_email = f"{rest}@{dom}"
+        out.append(
+            EmailHit(
+                email=new_email,
+                source_ref=h.source_ref,
+                origin="footnote_repaired",
+                pre=h.pre,
+                post=h.post,
+            )
+        )
+        stats["footnote_singletons_repaired"] = (
+            stats.get("footnote_singletons_repaired", 0) + 1
+        )
+
+    return out
+
+
+__all__ = ["merge_footnote_prefix_variants", "repair_footnote_singletons"]
 
