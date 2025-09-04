@@ -1,6 +1,9 @@
 import asyncio
 import csv
 import types
+from email.message import EmailMessage
+from datetime import datetime
+import email.utils
 
 import emailbot.bot_handlers as bh
 from emailbot import messaging_utils as mu, messaging
@@ -93,3 +96,45 @@ def test_retry_last_no_soft(monkeypatch, tmp_path):
     assert sent_addrs == []
     assert not sent.exists()
     assert update.message.replies[-1] == "Нет писем для ретрая"
+
+
+def test_sync_skips_seen_events(monkeypatch, tmp_path):
+    log = tmp_path / "sent_log.csv"
+    seen = tmp_path / "seen.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    monkeypatch.setattr(mu, "SYNC_SEEN_EVENTS_PATH", seen)
+    monkeypatch.setattr(messaging, "SYNC_SEEN_EVENTS_PATH", seen)
+
+    msg = EmailMessage()
+    msg["To"] = "User <u@example.com>"
+    msg["Message-ID"] = "<id1>"
+    msg["Date"] = email.utils.format_datetime(datetime.utcnow())
+    raw = msg.as_bytes()
+
+    class DummyImap:
+        def login(self, *a, **k):
+            pass
+
+        def select(self, folder):
+            return "OK", [None]
+
+        def list(self, *a, **k):
+            return "OK", [b"Sent"]
+
+        def search(self, charset, criteria):
+            return "OK", [b"1"]
+
+        def fetch(self, num, what):
+            return "OK", [(b"", raw)]
+
+        def logout(self):
+            pass
+
+    monkeypatch.setattr(messaging, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()))
+
+    stats1 = messaging.sync_log_with_imap()
+    stats2 = messaging.sync_log_with_imap()
+
+    assert stats1["new_contacts"] == 1
+    assert stats2["new_contacts"] == 0
+    assert stats2["skipped_duplicates"] == 1
