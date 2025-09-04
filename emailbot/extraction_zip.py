@@ -165,6 +165,7 @@ def extract_emails_from_zip(
             "footnote_singletons_repaired", 0
         ) + fixed
     hits = _dedupe(hits)
+
     return hits, stats
 
 
