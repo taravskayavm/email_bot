@@ -144,4 +144,79 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     return _dedupe(hits), stats
 
 
-__all__ = ["extract_from_pdf"]
+def extract_from_pdf_stream(
+    data: bytes, source_ref: str, stop_event: Optional[object] = None
+) -> tuple[list["EmailHit"], Dict]:
+    """Extract e-mail addresses from PDF bytes."""
+
+    from .extraction import EmailHit, extract_emails_document, _dedupe
+
+    settings.load()
+    strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
+    radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
+    layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
+    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        try:
+            text = data.decode("utf-8", "ignore")
+        except Exception:
+            return [], {"errors": ["cannot open"]}
+        hits = [
+            EmailHit(email=e, source_ref=source_ref, origin="direct_at")
+            for e in extract_emails_document(text)
+        ]
+        return _dedupe(hits), {"pages": 0, "needs_ocr": True}
+
+    hits: List[EmailHit] = []
+    stats: Dict[str, int] = {"pages": 0}
+    doc = fitz.open(stream=data, filetype="pdf")
+    ocr_pages = 0
+    ocr_start = time.time()
+    for page_idx, page in enumerate(doc, start=1):
+        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            break
+        stats["pages"] += 1
+        if layout:
+            try:
+                text = _page_text_layout(page)
+            except Exception:
+                text = page.get_text() or ""
+        else:
+            text = page.get_text() or ""
+        if not text.strip() and ocr:
+            if (
+                ocr_pages < _OCR_PAGE_LIMIT
+                and time.time() - ocr_start < _OCR_TIME_LIMIT
+            ):
+                text = _ocr_page(page)
+                if text:
+                    ocr_pages += 1
+                    stats["ocr_pages"] = ocr_pages
+        text = preprocess_text(text)
+        low_text = text.lower()
+        for email in extract_emails_document(text):
+            for m in re.finditer(re.escape(email), low_text):
+                start, end = m.span()
+                pre = text[max(0, start - 16) : start]
+                post = text[end : end + 16]
+                hits.append(
+                    EmailHit(
+                        email=email,
+                        source_ref=f"{source_ref}#page={page_idx}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            break
+    doc.close()
+    if ocr:
+        logger.debug("ocr_pages=%d", ocr_pages)
+    return _dedupe(hits), stats
+
+
+__all__ = ["extract_from_pdf", "extract_from_pdf_stream"]

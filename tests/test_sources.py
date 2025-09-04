@@ -151,6 +151,13 @@ def test_extract_from_documents(tmp_path: Path):
     assert [h.email for h in hits_txt] == ["d@text.com"]
 
 
+def test_xlsx_no_handle_leak(tmp_path: Path):
+    path = tmp_path / "leak.xlsx"
+    _create_xlsx(path, "leak@example.com")
+    extraction.extract_from_xlsx(str(path))
+    os.remove(path)
+
+
 @pytest.mark.asyncio
 async def test_zip_handler_signature(monkeypatch, tmp_path: Path):
     from tests.test_bot_handlers import DummyContext, DummyDocument, DummyUpdate
