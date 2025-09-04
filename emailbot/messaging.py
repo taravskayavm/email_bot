@@ -24,6 +24,7 @@ from .utils import log_error
 from .messaging_utils import (
     add_bounce,
     canonical_for_history,
+    ensure_sent_log_schema,
     is_soft_bounce,
     is_hard_bounce,
     suppress_add,
@@ -468,7 +469,6 @@ def log_sent_email(
     if status not in {"ok", "sent", "success"}:
         return
     extra = {
-        "status": status,
         "user_id": user_id or "",
         "filename": filename or "",
         "error_msg": error_msg or "",
@@ -476,7 +476,14 @@ def log_sent_email(
         "unsubscribed": unsubscribed,
         "unsubscribed_at": unsubscribed_at,
     }
-    upsert_sent_log(LOG_FILE, normalize_email(email_addr), datetime.utcnow(), group, extra)
+    upsert_sent_log(
+        LOG_FILE,
+        normalize_email(email_addr),
+        datetime.utcnow(),
+        group,
+        status=status,
+        extra=extra,
+    )
     global _log_cache
     _log_cache = None
 
@@ -629,12 +636,12 @@ def count_sent_today() -> int:
 def sync_log_with_imap() -> Dict[str, int]:
     imap = None
     stats = {
-        "scanned_messages": 0,
-        "recipients_seen": 0,
         "new_contacts": 0,
         "updated_contacts": 0,
-        "skipped_duplicates": 0,
+        "skipped_events": 0,
+        "total_rows_after": 0,
     }
+    ensure_sent_log_schema(LOG_FILE)
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -646,11 +653,9 @@ def sync_log_with_imap() -> Dict[str, int]:
             imap.select(f'"{sent_folder}"')
         date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
-        sent_log_cache = load_sent_log(Path(LOG_FILE))
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
         for num in data[0].split() if data and data[0] else []:
-            stats["scanned_messages"] += 1
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
@@ -661,10 +666,9 @@ def sync_log_with_imap() -> Dict[str, int]:
             for _, addr in addresses:
                 if not addr:
                     continue
-                stats["recipients_seen"] += 1
                 key = canonical_for_history(addr)
                 if msgid and (msgid, key) in seen_events:
-                    stats["skipped_duplicates"] += 1
+                    stats["skipped_events"] += 1
                     continue
                 try:
                     dt = email.utils.parsedate_to_datetime(msg.get("Date"))
@@ -679,19 +683,18 @@ def sync_log_with_imap() -> Dict[str, int]:
                     normalize_email(addr),
                     dt or datetime.utcnow(),
                     "imap_sync",
-                    {"status": "external"},
+                    status="external",
                 )
                 if inserted:
                     stats["new_contacts"] += 1
-                    sent_log_cache[key] = dt or datetime.utcnow()
                 elif updated:
                     stats["updated_contacts"] += 1
-                    sent_log_cache[key] = dt or datetime.utcnow()
                 if msgid:
                     seen_events.add((msgid, key))
                     changed_events = True
         if changed_events:
             save_seen_events(SYNC_SEEN_EVENTS_PATH, seen_events)
+        stats["total_rows_after"] = len(load_sent_log(Path(LOG_FILE)))
         return stats
     except Exception as e:
         log_error(f"sync_log_with_imap: {e}")
