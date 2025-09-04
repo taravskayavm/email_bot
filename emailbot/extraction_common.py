@@ -1,10 +1,18 @@
 """Common helpers for e-mail extraction and normalization."""
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 import unicodedata
+from html import unescape
 
-__all__ = ["normalize_text", "preprocess_text", "normalize_email"]
+__all__ = [
+    "normalize_text",
+    "preprocess_text",
+    "normalize_email",
+    "maybe_decode_base64",
+]
 
 # Mapping of Cyrillic homoglyphs to their Latin counterparts
 _CYR_TO_LATIN = str.maketrans({
@@ -30,6 +38,7 @@ def normalize_text(s: str) -> str:
     """Return ``s`` normalized for e-mail extraction."""
 
     s = unicodedata.normalize("NFKC", s or "")
+    s = unescape(s)
     s = s.translate(_CYR_TO_LATIN)
 
     # Spaces
@@ -71,6 +80,34 @@ def normalize_text(s: str) -> str:
     s = s.replace("\uFF20", "@").replace("\uFF0E", ".")
 
     return s
+
+
+_B64_ALLOWED = re.compile(r"^[A-Za-z0-9+/=\n\r\s]+$")
+
+
+def maybe_decode_base64(s: str) -> str | None:
+    """Return decoded base64 ``s`` if it looks like an e-mail container.
+
+    ``s`` is decoded only if it is short enough and contains only base64
+    characters.  If decoding fails or the result does not contain the ``@``
+    character, ``None`` is returned.
+    """
+
+    if not s:
+        return None
+    s = s.strip()
+    if len(s) < 8 or len(s) > 200:
+        return None
+    if not _B64_ALLOWED.match(s):
+        return None
+    try:
+        decoded = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    text = decoded.decode("utf-8", "ignore")
+    if "@" not in text:
+        return None
+    return text
 
 
 def preprocess_text(text: str) -> str:

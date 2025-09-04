@@ -763,7 +763,16 @@ def extract_from_csv_or_text_stream(
     return hits, stats
 
 
-from .extraction_url import extract_obfuscated_hits, fetch_url, decode_cfemail
+from .extraction_url import (
+    extract_obfuscated_hits,
+    fetch_url,
+    fetch_bytes,
+    decode_cfemail,
+    extract_ldjson_hits,
+    extract_bundle_hits,
+    extract_sitemap_hits,
+    extract_api_hits,
+)
 
 
 def extract_from_html_stream(
@@ -818,63 +827,76 @@ def extract_from_url(
         "obfuscated_hits": 0,
         "numeric_from_obfuscation_dropped": 0,
         "errors": [],
+        "hits_ldjson": 0,
+        "hits_bundle": 0,
+        "hits_sitemap": 0,
+        "hits_api": 0,
+        "docs_parsed": 0,
+        "assets_scanned": 0,
+        "stop_interrupts": 0,
     }
     hits: List[EmailHit] = []
 
-    def _process(html: str, current_url: str) -> None:
-        source_ref = f"url:{current_url}"
-        stats["urls_scanned"] += 1
-        for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
-            addr = urllib.parse.unquote(m.group(1))
-            hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
-        for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
-            try:
-                email = decode_cfemail(cf)
-            except Exception:
-                continue
-            hits.append(
-                EmailHit(
-                    email=email,
-                    source_ref=source_ref,
-                    origin="cfemail",
-                )
+    html = fetch_url(url, stop_event)
+    if not html:
+        return hits, stats
+    source_ref = f"url:{url}"
+    stats["urls_scanned"] = 1
+
+    for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', html, flags=re.I):
+        addr = urllib.parse.unquote(m.group(1))
+        hits.append(EmailHit(email=addr.lower(), source_ref=source_ref, origin="mailto"))
+    for cf in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
+        try:
+            email = decode_cfemail(cf)
+        except Exception:
+            continue
+        hits.append(
+            EmailHit(
+                email=email,
+                source_ref=source_ref,
+                origin="cfemail",
             )
-            stats["cfemail_decoded"] += 1
-        text = strip_html(html)
-        for e in extract_emails_document(text):
-            hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
-        obf_hits = extract_obfuscated_hits(text, source_ref, stats)
-        stats["obfuscated_hits"] += len(obf_hits)
-        hits.extend(obf_hits)
+        )
+        stats["cfemail_decoded"] += 1
+    text = strip_html(html)
+    for e in extract_emails_document(text):
+        hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+    obf_hits = extract_obfuscated_hits(text, source_ref, stats)
+    stats["obfuscated_hits"] += len(obf_hits)
+    hits.extend(obf_hits)
 
-    visited: set[str] = set()
-    parsed_root = urllib.parse.urlparse(url)
-
-    def _crawl(current_url: str, depth: int) -> None:
-        if depth < 0 or current_url in visited:
-            return
-        html = fetch_url(current_url, stop_event)
-        if not html:
-            return
-        visited.add(current_url)
-        _process(html, current_url)
-        if depth == 0:
-            return
-        links = re.findall(r'href=["\']([^"\']+)', html, flags=re.I)
-        if len(links) > 30:
-            return
-        for href in links:
-            if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                break
-            if not re.search(r"contact|contacts|about|region|regiony|regions|контакт", href, re.I):
-                continue
-            new = urllib.parse.urljoin(current_url, href)
-            parsed = urllib.parse.urlparse(new)
-            if parsed.netloc != parsed_root.netloc:
-                continue
-            _crawl(new, depth - 1)
-
-    _crawl(url, max_depth - 1)
+    if not hits:
+        hits.extend(extract_ldjson_hits(html, url, stats))
+    if not hits:
+        hits.extend(
+            extract_bundle_hits(
+                html,
+                url,
+                stats,
+                stop_event=stop_event,
+                max_assets=get("MAX_ASSETS", 8),
+            )
+        )
+    if not hits:
+        hits.extend(
+            extract_api_hits(
+                html,
+                url,
+                stats,
+                stop_event=stop_event,
+                max_docs=get("MAX_DOCS", 30),
+            )
+        )
+        hits.extend(
+            extract_sitemap_hits(
+                url,
+                stats,
+                stop_event=stop_event,
+                max_urls=get("MAX_SITEMAP_URLS", 200),
+                max_docs=get("MAX_DOCS", 30),
+            )
+        )
 
     hits = _postprocess_hits(hits, stats)
 
