@@ -103,8 +103,7 @@ def repair_footnote_singletons(
         if h.origin == "footnote_repaired":
             out.append(h)
             continue
-
-            ref = h.source_ref.lower()
+        ref = h.source_ref.lower()
         if ref.startswith("zip:"):
             if "|" not in ref:
                 out.append(h)

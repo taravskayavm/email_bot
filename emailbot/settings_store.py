@@ -10,6 +10,11 @@ DEFAULTS = {
     "FOOTNOTE_RADIUS_PAGES": 1,
     "PDF_LAYOUT_AWARE": False,
     "ENABLE_OCR": False,
+    "MAX_ASSETS": 8,
+    "MAX_SITEMAP_URLS": 200,
+    "MAX_DOCS": 30,
+    "PER_REQUEST_TIMEOUT": 15,
+    "EXTERNAL_SOURCES": {},
 }
 
 SETTINGS_PATH = Path("/mnt/data/settings.json")
