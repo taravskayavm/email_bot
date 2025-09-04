@@ -21,7 +21,18 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
 from .utils import log_error
-from .messaging_utils import add_bounce, is_soft_bounce, is_hard_bounce, suppress_add
+from .messaging_utils import (
+    add_bounce,
+    canonical_for_history,
+    is_soft_bounce,
+    is_hard_bounce,
+    suppress_add,
+    upsert_sent_log,
+    load_sent_log,
+    load_seen_events,
+    save_seen_events,
+    SYNC_SEEN_EVENTS_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,31 +411,44 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
         return False
     email_norm = normalize_email(email_addr)
     with open(LOG_FILE, encoding="utf-8") as f:
-        reader = csv.reader(f)
+        reader = csv.DictReader(f)
         for row in reader:
-            if len(row) >= 8 and row[1] == email_norm and row[7] == token:
+            if row.get("email") == email_norm and row.get("unsubscribe_token") == token:
                 return True
     return False
 
 
 def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
     email_norm = normalize_email(email_addr)
-    rows = []
+    p = Path(LOG_FILE)
+    rows: list[dict] = []
     changed = False
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) < 10:
-                    row.extend([""] * (10 - len(row)))
-                if row[1] == email_norm and (token is None or row[7] == token):
-                    row[8] = "1"
-                    row[9] = datetime.utcnow().isoformat()
-                    changed = True
-                rows.append(row)
+    if p.exists():
+        with p.open(encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        for row in rows:
+            if row.get("email") == email_norm and (token is None or row.get("unsubscribe_token") == token):
+                row["unsubscribed"] = "1"
+                row["unsubscribed_at"] = datetime.utcnow().isoformat()
+                changed = True
     if changed:
-        with open(LOG_FILE, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
+        headers = rows[0].keys() if rows else [
+            "key",
+            "email",
+            "last_sent_at",
+            "source",
+            "status",
+            "user_id",
+            "filename",
+            "error_msg",
+            "unsubscribe_token",
+            "unsubscribed",
+            "unsubscribed_at",
+        ]
+        with p.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(headers))
+            writer.writeheader()
             writer.writerows(rows)
     add_blocked_email(email_norm)
     return changed
@@ -443,24 +467,16 @@ def log_sent_email(
 ):
     if status not in {"ok", "sent", "success"}:
         return
-    os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
-    with open(LOG_FILE, "a", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                datetime.utcnow().isoformat(),
-                normalize_email(email_addr),
-                group,
-                status,
-                user_id if user_id else "",
-                filename if filename else "",
-                error_msg if error_msg else "",
-                unsubscribe_token,
-                unsubscribed,
-                unsubscribed_at,
-            ]
-        )
-        f.flush()
+    extra = {
+        "status": status,
+        "user_id": user_id or "",
+        "filename": filename or "",
+        "error_msg": error_msg or "",
+        "unsubscribe_token": unsubscribe_token,
+        "unsubscribed": unsubscribed,
+        "unsubscribed_at": unsubscribed_at,
+    }
+    upsert_sent_log(LOG_FILE, normalize_email(email_addr), datetime.utcnow(), group, extra)
     global _log_cache
     _log_cache = None
 
@@ -492,24 +508,12 @@ def detect_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
 _log_cache: dict[str, List[datetime]] | None = None
 
 
-def _load_sent_log() -> dict[str, List[datetime]]:
+def _load_sent_log() -> Dict[str, datetime]:
     global _log_cache
     if _log_cache is not None:
         return _log_cache
-    cache: Dict[str, List[datetime]] = {}
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) < 2:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(row[0])
-                    if dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
-                except Exception:
-                    continue
-                cache.setdefault(normalize_email(row[1]), []).append(dt)
+    p = Path(LOG_FILE)
+    cache = load_sent_log(p)
     _log_cache = cache
     return cache
 
@@ -518,11 +522,12 @@ def was_sent_within(email: str, days: int = 180) -> bool:
     """Return True if ``email`` was sent to within ``days`` days."""
     cutoff = datetime.utcnow() - timedelta(days=days)
     cache = _load_sent_log()
-    lst = cache.get(normalize_email(email), [])
-    if any(dt >= cutoff for dt in lst):
+    key = canonical_for_history(email)
+    dt = cache.get(key)
+    if dt and dt >= cutoff:
         return True
     recent = get_recently_contacted_emails_cached()
-    return normalize_email(email) in recent
+    return key in recent
 
 
 def was_emailed_recently(
@@ -533,8 +538,9 @@ def was_emailed_recently(
 ) -> bool:
     cutoff = datetime.utcnow() - timedelta(days=since_days)
     cache = _load_sent_log()
-    lst = cache.get(normalize_email(email_addr), [])
-    if any(dt >= cutoff for dt in lst):
+    key = canonical_for_history(email_addr)
+    dt = cache.get(key)
+    if dt and dt >= cutoff:
         return True
     try:
         close = False
@@ -568,18 +574,14 @@ def get_recent_6m_union() -> Set[str]:
     result: Set[str] = set()
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
-            reader = csv.reader(f)
+            reader = csv.DictReader(f)
             for row in reader:
-                if len(row) < 2:
-                    continue
                 try:
-                    dt = datetime.fromisoformat(row[0])
-                    if dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
+                    dt = datetime.fromisoformat(row["last_sent_at"])
                 except Exception:
                     continue
                 if dt >= cutoff:
-                    result.add(normalize_email(row[1]))
+                    result.add(row["key"])
     return result
 
 
@@ -606,18 +608,17 @@ def get_sent_today() -> Set[str]:
     today = datetime.utcnow().date()
     sent = set()
     with open(LOG_FILE, encoding="utf-8") as f:
-        reader = csv.reader(f)
+        reader = csv.DictReader(f)
         for row in reader:
-            if len(row) < 4 or row[3] not in {"ok", "sent", "success"}:
+            status = row.get("status", "ok")
+            if status not in {"ok", "sent", "success"}:
                 continue
             try:
-                dt = datetime.fromisoformat(row[0])
-                if dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)
+                dt = datetime.fromisoformat(row["last_sent_at"])
             except Exception:
                 continue
             if dt.date() == today:
-                sent.add(normalize_email(row[1]))
+                sent.add(row["email"].lower())
     return sent
 
 
@@ -625,8 +626,15 @@ def count_sent_today() -> int:
     return len(get_sent_today())
 
 
-def sync_log_with_imap() -> int:
+def sync_log_with_imap() -> Dict[str, int]:
     imap = None
+    stats = {
+        "scanned_messages": 0,
+        "recipients_seen": 0,
+        "new_contacts": 0,
+        "updated_contacts": 0,
+        "skipped_duplicates": 0,
+    }
     try:
         imap = imaplib.IMAP4_SSL("imap.mail.ru")
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -636,46 +644,55 @@ def sync_log_with_imap() -> int:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        existing = get_recent_6m_union()
         date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
-        added = 0
+        sent_log_cache = load_sent_log(Path(LOG_FILE))
+        seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
+        changed_events = False
         for num in data[0].split() if data and data[0] else []:
+            stats["scanned_messages"] += 1
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
-            to_addr = email.utils.parseaddr(msg.get("To"))[1]
-            if not to_addr:
-                continue
-            if normalize_email(to_addr) in existing:
-                continue
-            try:
-                dt = email.utils.parsedate_to_datetime(msg.get("Date"))
-                if dt and dt.tzinfo:
-                    dt = dt.replace(tzinfo=None)
-                if dt and dt < datetime.utcnow() - timedelta(days=180):
+            msgid = msg.get("Message-ID", "").strip()
+            addresses = []
+            for hdr in ["To", "Cc", "Bcc"]:
+                addresses.extend(email.utils.getaddresses([msg.get(hdr) or ""]))
+            for _, addr in addresses:
+                if not addr:
                     continue
-            except Exception:
-                dt = None
-            with open(LOG_FILE, "a", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        (dt or datetime.utcnow()).isoformat(),
-                        normalize_email(to_addr),
-                        "imap_sync",
-                        "external",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                    ]
+                stats["recipients_seen"] += 1
+                key = canonical_for_history(addr)
+                if msgid and (msgid, key) in seen_events:
+                    stats["skipped_duplicates"] += 1
+                    continue
+                try:
+                    dt = email.utils.parsedate_to_datetime(msg.get("Date"))
+                    if dt and dt.tzinfo:
+                        dt = dt.replace(tzinfo=None)
+                    if dt and dt < datetime.utcnow() - timedelta(days=180):
+                        continue
+                except Exception:
+                    dt = None
+                inserted, updated = upsert_sent_log(
+                    LOG_FILE,
+                    normalize_email(addr),
+                    dt or datetime.utcnow(),
+                    "imap_sync",
+                    {"status": "external"},
                 )
-                f.flush()
-            added += 1
-        return added
+                if inserted:
+                    stats["new_contacts"] += 1
+                    sent_log_cache[key] = dt or datetime.utcnow()
+                elif updated:
+                    stats["updated_contacts"] += 1
+                    sent_log_cache[key] = dt or datetime.utcnow()
+                if msgid:
+                    seen_events.add((msgid, key))
+                    changed_events = True
+        if changed_events:
+            save_seen_events(SYNC_SEEN_EVENTS_PATH, seen_events)
+        return stats
     except Exception as e:
         log_error(f"sync_log_with_imap: {e}")
         raise

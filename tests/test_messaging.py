@@ -87,12 +87,14 @@ def test_log_sent_email_records_entries(temp_files):
         "USER@example.com", "group1", status="error", error_msg="boom"
     )
     with open(log_path, encoding="utf-8") as f:
-        rows = list(csv.reader(f))
+        rows = list(csv.DictReader(f))
     assert len(rows) == 1
-    assert len(rows[0]) == 10
-    ts = datetime.fromisoformat(rows[0][0])
+    row = rows[0]
+    ts = datetime.fromisoformat(row["last_sent_at"])
     assert abs((datetime.utcnow() - ts).total_seconds()) < 5
-    assert rows[0][1:4] == ["user@example.com", "group1", "ok"]
+    assert row["email"] == "user@example.com"
+    assert row["source"] == "group1"
+    assert row["status"] == "ok"
 
 
 def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
@@ -170,10 +172,29 @@ def test_count_sent_today_ignores_external(tmp_path, monkeypatch):
     today = datetime.utcnow()
     yesterday = today - timedelta(days=1)
     with open(log, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([today.isoformat(), "a@example.com", "g", "external"])
-        w.writerow([today.isoformat(), "b@example.com", "g", "ok"])
-        w.writerow([yesterday.isoformat(), "c@example.com", "g", "ok"])
+        w = csv.DictWriter(f, fieldnames=["key", "email", "last_sent_at", "source", "status"])
+        w.writeheader()
+        w.writerow({
+            "key": mu.canonical_for_history("a@example.com"),
+            "email": "a@example.com",
+            "last_sent_at": today.isoformat(),
+            "source": "g",
+            "status": "external",
+        })
+        w.writerow({
+            "key": mu.canonical_for_history("b@example.com"),
+            "email": "b@example.com",
+            "last_sent_at": today.isoformat(),
+            "source": "g",
+            "status": "ok",
+        })
+        w.writerow({
+            "key": mu.canonical_for_history("c@example.com"),
+            "email": "c@example.com",
+            "last_sent_at": yesterday.isoformat(),
+            "source": "g",
+            "status": "ok",
+        })
     assert messaging.count_sent_today() == 1
     assert messaging.get_sent_today() == {"b@example.com"}
 
@@ -183,9 +204,17 @@ def test_limit_not_triggered_by_external(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
     today = datetime.utcnow()
     with open(log, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+        w = csv.DictWriter(f, fieldnames=["key", "email", "last_sent_at", "source", "status"])
+        w.writeheader()
         for i in range(3000):
-            w.writerow([today.isoformat(), f"ext{i}@e.com", "g", "external"])
+            email = f"ext{i}@e.com"
+            w.writerow({
+                "key": mu.canonical_for_history(email),
+                "email": email,
+                "last_sent_at": today.isoformat(),
+                "source": "g",
+                "status": "external",
+            })
     sent_today = messaging.get_sent_today()
     available = max(0, messaging.MAX_EMAILS_PER_DAY - len(sent_today))
     assert available == messaging.MAX_EMAILS_PER_DAY
@@ -196,9 +225,17 @@ def test_limit_triggered_after_200_sent(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
     today = datetime.utcnow()
     with open(log, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+        w = csv.DictWriter(f, fieldnames=["key", "email", "last_sent_at", "source", "status"])
+        w.writeheader()
         for i in range(200):
-            w.writerow([today.isoformat(), f"ok{i}@e.com", "g", "ok"])
+            email = f"ok{i}@e.com"
+            w.writerow({
+                "key": mu.canonical_for_history(email),
+                "email": email,
+                "last_sent_at": today.isoformat(),
+                "source": "g",
+                "status": "ok",
+            })
     sent_today = messaging.get_sent_today()
     available = max(0, messaging.MAX_EMAILS_PER_DAY - len(sent_today))
     assert available == 0
@@ -255,8 +292,8 @@ def test_mark_unsubscribed_updates_log(temp_files):
     )
     assert messaging.mark_unsubscribed("user@example.com", "tok123")
     with open(log_path, encoding="utf-8") as f:
-        row = next(csv.reader(f))
-    assert row[8] == "1" and row[7] == "tok123"
+        row = next(csv.DictReader(f))
+    assert row["unsubscribed"] == "1" and row["unsubscribe_token"] == "tok123"
 
 
 async def _start_app(app):
@@ -293,8 +330,8 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
         assert "Вы отписаны" in html2
     await runner.cleanup()
     with open(log_path, encoding="utf-8") as f:
-        row = next(csv.reader(f))
-    assert row[8] == "1"
+        row = next(csv.DictReader(f))
+    assert row["unsubscribed"] == "1"
 
 
 def test_send_email_idempotent(tmp_path, monkeypatch):
