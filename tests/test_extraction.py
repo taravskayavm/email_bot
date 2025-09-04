@@ -40,3 +40,10 @@ def test_positive(raw, expected):
 )
 def test_negative(raw):
     assert smart_extract_emails(raw) == []
+
+
+def test_preprocess_preserves_digits():
+    from emailbot.extraction_common import preprocess_text
+
+    assert preprocess_text("9\n6soul@mail.ru").startswith("9\n6soul")
+    assert preprocess_text("name-\nname@domain.ru").startswith("name-name@domain.ru")

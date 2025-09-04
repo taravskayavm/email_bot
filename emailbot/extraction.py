@@ -16,7 +16,7 @@ from html import unescape
 from typing import List, Tuple, Dict, Iterable, Set, Optional
 
 from . import settings
-from .dedupe import merge_footnote_prefix_variants
+from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
 from .extraction_common import normalize_email, normalize_text, preprocess_text
 from .extraction_pdf import extract_from_pdf, extract_from_pdf_stream
 from .extraction_zip import extract_emails_from_zip
@@ -418,6 +418,16 @@ def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
     return out
 
 
+def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[EmailHit]:
+    hits = merge_footnote_prefix_variants(hits, stats)
+    fixed_hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
+    if fixed:
+        stats["footnote_singletons_repaired"] = stats.get(
+            "footnote_singletons_repaired", 0
+        ) + fixed
+    return _dedupe(fixed_hits)
+
+
 def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
     """Извлечь e-mail-адреса из DOCX, учитывая номера страниц."""
 
@@ -475,7 +485,8 @@ def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[l
 
     flush(text, page)
     stats["pages"] = page
-    return _dedupe(hits), stats
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 
 def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
@@ -507,7 +518,9 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
                 wb.close()
             except Exception:
                 pass
-        return _dedupe(hits), {"cells": cells}
+        stats = {"cells": cells}
+        hits = _postprocess_hits(hits, stats)
+        return hits, stats
     except Exception:
         # Fallback: parse XML inside zip
         import zipfile
@@ -527,7 +540,9 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
                             hits.append(EmailHit(email=e, source_ref=f"xlsx:{path}", origin="direct_at"))
         except Exception:
             return [], {"errors": ["cannot open"]}
-        return _dedupe(hits), {"cells": cells}
+        stats = {"cells": cells}
+        hits = _postprocess_hits(hits, stats)
+        return hits, stats
 
 
 def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
@@ -573,7 +588,9 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
                         )
     except Exception:
         return [], {"errors": ["cannot open"]}
-    return _dedupe(hits), {"lines": lines}
+    stats = {"lines": lines}
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 
 def extract_from_docx_stream(
@@ -634,7 +651,8 @@ def extract_from_docx_stream(
 
     flush(text, page)
     stats["pages"] = page
-    return _dedupe(hits), stats
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 
 def extract_from_xlsx_stream(
@@ -668,7 +686,9 @@ def extract_from_xlsx_stream(
                 wb.close()
             except Exception:
                 pass
-        return _dedupe(hits), {"cells": cells}
+        stats = {"cells": cells}
+        hits = _postprocess_hits(hits, stats)
+        return hits, stats
     except Exception:
         import re
         import zipfile
@@ -689,7 +709,9 @@ def extract_from_xlsx_stream(
                             )
         except Exception:
             return [], {"errors": ["cannot open"]}
-        return _dedupe(hits), {"cells": cells}
+        stats = {"cells": cells}
+        hits = _postprocess_hits(hits, stats)
+        return hits, stats
 
 
 def extract_from_csv_or_text_stream(
@@ -720,7 +742,9 @@ def extract_from_csv_or_text_stream(
             lines += 1
             for e in re.findall(pattern, line):
                 hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
-    return _dedupe(hits), {"lines": lines}
+    stats = {"lines": lines}
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 
 from .extraction_url import extract_obfuscated_hits, fetch_url, decode_cfemail
@@ -835,8 +859,8 @@ def extract_from_url(
             _crawl(new, depth - 1)
 
     _crawl(url, max_depth - 1)
-    hits = merge_footnote_prefix_variants(hits, stats)
-    return _dedupe(hits), stats
+    hits = _postprocess_hits(hits, stats)
+    return hits, stats
 
 def extract_any(
     source: str,
@@ -911,8 +935,7 @@ def extract_any(
         ]
         stats = {}
 
-    hits = merge_footnote_prefix_variants(hits, stats)
-    hits = _dedupe(hits)
+    hits = _postprocess_hits(hits, stats)
     if _return_hits:
         return hits, stats
     return sorted({h.email for h in hits}), stats
@@ -945,8 +968,7 @@ def extract_any_stream(
             for e in extract_emails_document(text)
         ]
         stats = {}
-    hits = merge_footnote_prefix_variants(hits, stats)
-    hits = _dedupe(hits)
+    hits = _postprocess_hits(hits, stats)
     return hits, stats
 
 
