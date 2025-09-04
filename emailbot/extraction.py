@@ -14,9 +14,9 @@ import re
 import unicodedata
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import unescape
-from typing import List, Tuple, Dict, Iterable, Set, Optional
+from typing import List, Tuple, Dict, Iterable, Set, Optional, Any
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
@@ -63,6 +63,7 @@ class EmailHit:
     origin: str          # 'mailto' | 'direct_at' | 'obfuscation' | 'cfemail'
     pre: str = ""        # до 16 символов слева от совпадения в исходном тексте
     post: str = ""       # до 16 символов справа
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 _BULLETS = "•·⋅◦"
@@ -441,11 +442,10 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
         if key:
             stats[key] = stats.get(key, 0) + count
     hits = merge_footnote_prefix_variants(hits, stats)
-    fixed_hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
-    if fixed:
-        stats["footnote_singletons_repaired"] = stats.get(
-            "footnote_singletons_repaired", 0
-        ) + fixed
+    fixed_hits, fstats = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
+    for k, v in fstats.items():
+        if v:
+            stats[k] = stats.get(k, 0) + v
     hits = _dedupe(fixed_hits)
     emails, extra = filter_invalid_tld([h.email for h in hits])
     stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
