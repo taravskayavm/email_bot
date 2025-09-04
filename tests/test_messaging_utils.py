@@ -90,3 +90,13 @@ def test_upsert_idempotent(tmp_path):
     with path.open() as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
+
+
+def test_classify_tld():
+    assert mu.classify_tld("user@gmail.com") == "generic"
+    assert mu.classify_tld("user@ncfu.ru") == "domestic"
+    assert mu.classify_tld("user@gmail.com.br") == "foreign"
+    assert mu.classify_tld("user@edu.br") == "foreign"
+    assert mu.classify_tld("user@ufjf.br") == "foreign"
+    assert mu.classify_tld("user@ufmg.br") == "foreign"
+    assert mu.classify_tld("user@ufop.edu.br") == "foreign"
