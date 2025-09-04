@@ -277,3 +277,27 @@ async def test_send_manual_email_no_block_mentions(monkeypatch):
     text = "\n".join(update.callback_query.message.replies)
     assert "блок" not in text
     assert "180" not in text
+
+
+def test_preview_separates_foreign():
+    ctx = DummyContext()
+    allowed_all = {
+        "user@ncfu.ru",
+        "user@gmail.com",
+        "user@gmail.com.br",
+    }
+    filtered = ["user@ncfu.ru", "user@gmail.com"]
+    foreign = ["user@gmail.com.br"]
+    run(
+        bh._compose_report_and_save(
+            ctx,
+            allowed_all,
+            filtered,
+            [],
+            foreign,
+            0,
+        )
+    )
+    state = ctx.chat_data[SESSION_KEY]
+    assert "user@gmail.com.br" in state.foreign
+    assert "user@gmail.com.br" not in state.preview_allowed_all
