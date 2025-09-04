@@ -19,7 +19,15 @@ def test_extract_digest_logging(tmp_path, caplog):
     assert len(recs) == 1
     data = json.loads(recs[0].message)
     assert data["component"] == "extract"
-    for key in ("total_found", "invalid_tld", "elapsed_ms", "entry"):
+    for key in (
+        "total_found",
+        "invalid_tld",
+        "elapsed_ms",
+        "entry",
+        "left_guard_skips",
+        "prefix_expanded",
+        "footnote_singletons_repaired",
+    ):
         assert key in data
     assert "@" not in recs[0].message
 
@@ -35,7 +43,15 @@ def test_extract_digest_logging(tmp_path, caplog):
     assert len(recs) == 1
     data = json.loads(recs[0].message)
     assert data["component"] == "extract"
-    for key in ("total_found", "invalid_tld", "elapsed_ms", "entry"):
+    for key in (
+        "total_found",
+        "invalid_tld",
+        "elapsed_ms",
+        "entry",
+        "left_guard_skips",
+        "prefix_expanded",
+        "footnote_singletons_repaired",
+    ):
         assert key in data
     assert "@" not in recs[0].message
 
@@ -60,7 +76,7 @@ def test_mass_filter_digest_logging(caplog):
     assert "@" not in recs[0].message
 
 
-def test_build_mass_report_text_ignores_blocked():
+def test_build_mass_report_text_counts_only():
     sent_ok = ["a@example.com", "b@example.com"]
     skipped = ["c@example.com"]
     blocked_foreign = ["foreign@example.de"]
@@ -68,11 +84,9 @@ def test_build_mass_report_text_ignores_blocked():
 
     text = build_mass_report_text(sent_ok, skipped, blocked_foreign, blocked_invalid)
 
-    assert "В блок" not in text
-    assert "иностранные" not in text
-    assert "неработающие" not in text
+    assert "@" not in text
     assert "✅ Отправлено: 2" in text
     assert "⏳ Пропущены (<180 дней): 1" in text
-    assert "• a@example.com" in text
-    assert "• c@example.com" in text
+    assert "🚫 В блок-листе/недоступны: 1" in text
+    assert "🌍 Иностранные (отложены): 1" in text
 

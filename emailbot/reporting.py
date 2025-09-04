@@ -25,6 +25,8 @@ def log_extract_digest(stats: dict) -> None:
         "footnote_singletons_repaired": stats.get("footnote_singletons_repaired", 0),
         "footnote_guard_skips": stats.get("footnote_guard_skips", 0),
         "footnote_ambiguous_kept": stats.get("footnote_ambiguous_kept", 0),
+        "left_guard_skips": stats.get("left_guard_skips", 0),
+        "prefix_expanded": stats.get("prefix_expanded", 0),
     }
     data.update(stats)
     _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))
@@ -46,24 +48,19 @@ def build_mass_report_text(
 ) -> str:
     """Build summary text for mass mailing.
 
-    Only the ``sent_ok`` and ``skipped_recent`` sections are returned to the user.
-    ``blocked_foreign`` and ``blocked_invalid`` are accepted for compatibility but
-    ignored in the output so that calling code does not need to change its
-    interface.
+    The function returns only aggregate counts without revealing individual
+    e‑mail addresses. ``blocked_foreign`` and ``blocked_invalid`` are accepted for
+    backward compatibility and counted in the summary.
     """
 
-    def lines(title: str, items: Iterable[str]) -> str:
-        items_list = list(items)
-        if not items_list:
-            return f"{title}: 0\n"
-        unique_sorted = sorted(set(items_list))
-        return (
-            f"{title}: {len(items_list)}\n" +
-            "\n".join(f"• {e}" for e in unique_sorted) +
-            "\n"
-        )
+    sent_cnt = len(list(sent_ok))
+    recent_cnt = len(list(skipped_recent))
+    blocked_cnt = len(list(blocked_invalid or []))
+    foreign_cnt = len(list(blocked_foreign or []))
 
-    text: List[str] = []
-    text.append(lines("✅ Отправлено", sent_ok))
-    text.append(lines("⏳ Пропущены (<180 дней)", skipped_recent))
-    return "\n".join(text).strip()
+    return (
+        f"✅ Отправлено: {sent_cnt}\n"
+        f"⏳ Пропущены (<180 дней): {recent_cnt}\n"
+        f"🚫 В блок-листе/недоступны: {blocked_cnt}\n"
+        f"🌍 Иностранные (отложены): {foreign_cnt}"
+    ).strip()
