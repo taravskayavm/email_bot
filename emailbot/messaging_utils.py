@@ -3,7 +3,6 @@ import logging
 import os
 import re
 import time
-import unicodedata
 import shutil
 import email.utils
 from datetime import datetime, timezone
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Iterable, Tuple, Literal
 
 from .tld_registry import tld_of
+from .extraction_common import normalize_email as _normalize_email
 
 SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
 BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
@@ -43,9 +43,6 @@ class SecretFilter(logging.Filter):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-_ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
 
 
 REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
@@ -93,22 +90,15 @@ class FileLock:
 
 
 def canonical_for_history(email: str) -> str:
-    """Return canonical key for history deduplication."""
+    """Return canonical key for history deduplication.
 
-    email = (email or "").strip().strip("'\"")
-    email = _ZERO_WIDTH_RE.sub("", email)
-    email = unicodedata.normalize("NFKC", email).lower()
-    local, sep, domain = email.partition("@")
-    if not sep:
-        return email
-    try:
-        domain = domain.encode("idna").decode("ascii")
-    except Exception:
-        domain = domain.encode("ascii", "ignore").decode("ascii")
-    if domain in {"gmail.com", "googlemail.com"}:
-        domain = "gmail.com"
-        local = local.split("+", 1)[0].replace(".", "")
-    return f"{local}@{domain}"
+    Historically ``messaging_utils`` implemented its own normalisation rules
+    for comparing e‑mail addresses.  The logic now lives in
+    :func:`emailbot.extraction_common.normalize_email`; this thin wrapper keeps
+    the old function name for backward compatibility.
+    """
+
+    return _normalize_email(email)
 
 
 def _normalize_ts(value: str) -> str:
