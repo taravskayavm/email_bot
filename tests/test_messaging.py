@@ -12,6 +12,7 @@ import pytest
 from emailbot import messaging
 from emailbot import unsubscribe
 from emailbot import messaging_utils as mu
+from emailbot.reporting import build_mass_report_text
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +96,20 @@ def test_log_sent_email_records_entries(temp_files):
     assert row["email"] == "user@example.com"
     assert row["source"] == "group1"
     assert row["status"] == "ok"
+
+
+def test_mass_report_has_no_addresses():
+    text = build_mass_report_text(
+        ["a@example.com"],
+        ["b@example.com"],
+        ["c@example.de"],
+        ["d@example.com"],
+    )
+    assert "@" not in text
+    assert "✅ Отправлено: 1" in text
+    assert "⏳ Пропущены (<180 дней): 1" in text
+    assert "🚫 В блок-листе/недоступны: 1" in text
+    assert "🌍 Иностранные (отложены): 1" in text
 
 
 def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
