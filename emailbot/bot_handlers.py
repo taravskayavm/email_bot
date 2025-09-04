@@ -25,6 +25,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from . import messaging
+from . import messaging_utils as mu
 from . import extraction as _extraction
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import build_mass_report_text
@@ -471,6 +472,21 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def dedupe_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to deduplicate sent log."""
+
+    user = update.effective_user
+    if not user or user.id not in ADMIN_IDS:
+        return
+    if context.args and context.args[0].lower() in {"yes", "y"}:
+        result = mu.dedupe_sent_log_inplace(messaging.LOG_FILE)
+        await update.message.reply_text(str(result))
+    else:
+        await update.message.reply_text(
+            "⚠️ Это действие перезапишет sent_log.csv. Запустите /dedupe_log yes для подтверждения."
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the main menu and initialize state."""
 
@@ -724,9 +740,14 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "⏳ Сканируем папку «Отправленные» (последние 180 дней)..."
     )
     try:
-        added = sync_log_with_imap()
+        stats = sync_log_with_imap()
         clear_recent_sent_cache()
-        await update.message.reply_text(f"🔄 Добавлено в лог {added} новых адресов.")
+        await update.message.reply_text(
+            "🔄 "
+            f"Писем: {stats['scanned_messages']}, получателей: {stats['recipients_seen']}, "
+            f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
+            f"дубликатов: {stats['skipped_duplicates']}"
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
 
@@ -1640,10 +1661,13 @@ async def autosync_imap_with_message(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.reply_text("🔄 Синхронизация истории отправки с сервером...")
     loop = asyncio.get_running_loop()
-    added = await loop.run_in_executor(None, sync_log_with_imap)
+    stats = await loop.run_in_executor(None, sync_log_with_imap)
     clear_recent_sent_cache()
     await query.message.reply_text(
-        f"✅ Синхронизация завершена. В лог добавлено новых адресов: {added}.\n"
+        "✅ Синхронизация завершена. "
+        f"Писем: {stats['scanned_messages']}, получателей: {stats['recipients_seen']}, "
+        f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
+        f"дубликатов: {stats['skipped_duplicates']}.\n"
         f"История отправки обновлена на последние 6 месяцев."
     )
 
@@ -1667,6 +1691,7 @@ __all__ = [
     "sync_imap_command",
     "reset_email_list",
     "diag",
+    "dedupe_log_command",
     "handle_document",
     "refresh_preview",
     "proceed_to_group",

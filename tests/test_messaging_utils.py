@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime
 
 from emailbot import messaging_utils as mu, messaging
 
@@ -55,3 +56,21 @@ def test_gmail_canonicalization_for_180_days(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
     mu.log_sent("user.name+tag@gmail.com", "g")
     assert mu.was_sent_within("username@gmail.com") is True
+
+
+def test_canonical_for_history_gmail_variants():
+    assert mu.canonical_for_history("User.Name+tag@googlemail.com") == mu.canonical_for_history(
+        "username@gmail.com"
+    )
+
+
+def test_upsert_sent_log_idempotent(tmp_path):
+    path = tmp_path / "sent_log.csv"
+    ts = datetime(2023, 1, 1)
+    ins, upd = mu.upsert_sent_log(path, "Test@Example.com", ts, "src")
+    assert (ins, upd) == (True, False)
+    ins2, upd2 = mu.upsert_sent_log(path, "test@example.com", ts, "src")
+    assert (ins2, upd2) == (False, False)
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
