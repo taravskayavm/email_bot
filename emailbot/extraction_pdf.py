@@ -76,6 +76,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
+
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
@@ -142,6 +143,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
+
     hits = merge_footnote_prefix_variants(hits, stats)
     hits, fixed = repair_footnote_singletons(hits, layout)
     if fixed:
@@ -149,6 +151,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             "footnote_singletons_repaired", 0
         ) + fixed
     hits = _dedupe(hits)
+
     return hits, stats
 
 
@@ -156,6 +159,7 @@ def extract_from_pdf_stream(
     data: bytes, source_ref: str, stop_event: Optional[object] = None
 ) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from PDF bytes."""
+
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
@@ -225,6 +229,7 @@ def extract_from_pdf_stream(
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
+
     hits = merge_footnote_prefix_variants(hits, stats)
     hits, fixed = repair_footnote_singletons(hits, layout)
     if fixed:
@@ -232,6 +237,7 @@ def extract_from_pdf_stream(
             "footnote_singletons_repaired", 0
         ) + fixed
     hits = _dedupe(hits)
+
     return hits, stats
 
 

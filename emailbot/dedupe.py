@@ -104,12 +104,14 @@ def repair_footnote_singletons(
             out.append(h)
             continue
 
-        ref = h.source_ref.lower()
+            ref = h.source_ref.lower()
         if ref.startswith("zip:"):
             if "|" not in ref:
                 out.append(h)
                 continue
+
             inner = ref.split("|", 1)[1].split("#", 1)[0].lower()
+
             if not inner.endswith(".pdf"):
                 out.append(h)
                 continue
@@ -118,6 +120,7 @@ def repair_footnote_singletons(
             continue
 
         prev = _last_visible(h.pre)
+
         if not prev:
             out.append(h)
             continue
@@ -128,10 +131,12 @@ def repair_footnote_singletons(
 
         local, dom = h.email.split("@", 1)
         if not local or not local[0].isalnum():
+
             out.append(h)
             continue
 
         first = local[0]
+
         if prev in _SUPER_DIGITS or prev.isdigit():
             try:
                 if unicodedata.digit(prev) != unicodedata.digit(first):
@@ -143,6 +148,7 @@ def repair_footnote_singletons(
 
         rest = local[1:]
         if len(rest) < 3 or not any("A" <= c <= "Z" or "a" <= c <= "z" for c in rest):
+
             out.append(h)
             continue
 
@@ -157,9 +163,7 @@ def repair_footnote_singletons(
             )
         )
         fixed += 1
-
     return out, fixed
-
 
 __all__ = ["merge_footnote_prefix_variants", "repair_footnote_singletons"]
 
