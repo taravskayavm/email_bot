@@ -11,8 +11,11 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .extraction import EmailHit
 
 
+_SUPER_DIGITS = set("⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
 def _is_superscript(ch: str) -> bool:
-    return "SUPERSCRIPT" in unicodedata.name(ch, "")
+    return ch in _SUPER_DIGITS or "SUPERSCRIPT" in unicodedata.name(ch, "")
 
 
 def _last_visible(s: str) -> str:
@@ -79,31 +82,36 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
 
 
 def repair_footnote_singletons(
-    hits: List["EmailHit"], stats: Dict[str, int] | None = None
-) -> List["EmailHit"]:
-    """Remove leading footnote digits duplicated from context.
+    hits: List["EmailHit"], layout_aware: bool = False
+) -> Tuple[List["EmailHit"], int]:
+    """Fix leading footnote digits duplicated in the local part.
 
-    For PDF-based sources the text sometimes includes a superscript digit
-    immediately before an e-mail address.  The digit is accidentally captured as
-    the first character of the local part (e.g. ``1dergal@yandex.ru``).  When the
-    character immediately to the left of the match is the same digit in
-    superscript form and the remainder of the local part looks like a real
-    address, this function trims the digit and records the fix.
+    Works only for PDF-derived hits where ``pre`` ends with a superscript digit
+    (``¹²³⁴⁵⁶⁷⁸⁹⁰``).  If the local part begins with the same digit (or letter),
+    removes exactly one leading character provided the remaining part looks like
+    a plausible address (length ≥ 3 and contains at least one ASCII letter).
+
+    When ``layout_aware`` is true, a regular digit to the left also qualifies as
+    a footnote marker.
     """
-
-    if stats is None:
-        stats = {}
 
     from .extraction import EmailHit  # local import to avoid circular deps
 
     out: List[EmailHit] = []
+    fixed = 0
     for h in hits:
-        ref = h.source_ref.lower()
+        if h.origin == "footnote_repaired":
+            out.append(h)
+            continue
+
+            ref = h.source_ref.lower()
         if ref.startswith("zip:"):
             if "|" not in ref:
                 out.append(h)
                 continue
-            inner = ref.split("|", 1)[1].split("#", 1)[0]
+
+            inner = ref.split("|", 1)[1].split("#", 1)[0].lower()
+
             if not inner.endswith(".pdf"):
                 out.append(h)
                 continue
@@ -112,29 +120,35 @@ def repair_footnote_singletons(
             continue
 
         prev = _last_visible(h.pre)
-        if not prev or not (prev.isdigit() or _is_superscript(prev)):
+
+        if not prev:
             out.append(h)
             continue
+        if prev not in _SUPER_DIGITS:
+            if not (layout_aware and prev.isdigit()):
+                out.append(h)
+                continue
 
         local, dom = h.email.split("@", 1)
-        if not local:
+        if not local or not local[0].isalnum():
+
             out.append(h)
             continue
 
         first = local[0]
-        try:
-            if unicodedata.digit(prev) != unicodedata.digit(first):
+
+        if prev in _SUPER_DIGITS or prev.isdigit():
+            try:
+                if unicodedata.digit(prev) != unicodedata.digit(first):
+                    out.append(h)
+                    continue
+            except Exception:
                 out.append(h)
                 continue
-        except Exception:
-            out.append(h)
-            continue
 
         rest = local[1:]
-        if len(rest) < 3 or not any(c.isalpha() for c in rest):
-            out.append(h)
-            continue
-        if rest and (rest[0].isdigit() or _is_superscript(rest[0])):
+        if len(rest) < 3 or not any("A" <= c <= "Z" or "a" <= c <= "z" for c in rest):
+
             out.append(h)
             continue
 
@@ -148,12 +162,8 @@ def repair_footnote_singletons(
                 post=h.post,
             )
         )
-        stats["footnote_singletons_repaired"] = (
-            stats.get("footnote_singletons_repaired", 0) + 1
-        )
-
-    return out
-
+        fixed += 1
+    return out, fixed
 
 __all__ = ["merge_footnote_prefix_variants", "repair_footnote_singletons"]
 

@@ -24,5 +24,5 @@ def test_no_stubs_connected():
         assert "return set(), set()" not in s
         assert "return set()" not in s
         assert "pass" not in s
-    assert "merge_footnote_prefix_variants" in src4
-    assert "merge_footnote_prefix_variants" in src5
+    assert "merge_footnote_prefix_variants" in src4 or "_postprocess_hits" in src4
+    assert "merge_footnote_prefix_variants" in src5 or "_postprocess_hits" in src5

@@ -418,6 +418,16 @@ def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
     return out
 
 
+def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[EmailHit]:
+    hits = merge_footnote_prefix_variants(hits, stats)
+    fixed_hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
+    if fixed:
+        stats["footnote_singletons_repaired"] = stats.get(
+            "footnote_singletons_repaired", 0
+        ) + fixed
+    return _dedupe(fixed_hits)
+
+
 def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
     """Извлечь e-mail-адреса из DOCX, учитывая номера страниц."""
 
@@ -475,8 +485,9 @@ def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[l
 
     flush(text, page)
     stats["pages"] = page
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 
@@ -510,8 +521,9 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
             except Exception:
                 pass
         stats = {"cells": cells}
-        hits = _dedupe(hits)
-        hits = repair_footnote_singletons(hits, stats)
+
+        hits = _postprocess_hits(hits, stats)
+
         return hits, stats
     except Exception:
         # Fallback: parse XML inside zip
@@ -533,8 +545,9 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
         except Exception:
             return [], {"errors": ["cannot open"]}
         stats = {"cells": cells}
-        hits = _dedupe(hits)
-        hits = repair_footnote_singletons(hits, stats)
+
+        hits = _postprocess_hits(hits, stats)
+
         return hits, stats
 
 
@@ -582,8 +595,9 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
     except Exception:
         return [], {"errors": ["cannot open"]}
     stats = {"lines": lines}
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 
@@ -645,8 +659,9 @@ def extract_from_docx_stream(
 
     flush(text, page)
     stats["pages"] = page
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 
@@ -682,8 +697,9 @@ def extract_from_xlsx_stream(
             except Exception:
                 pass
         stats = {"cells": cells}
-        hits = _dedupe(hits)
-        hits = repair_footnote_singletons(hits, stats)
+
+        hits = _postprocess_hits(hits, stats)
+
         return hits, stats
     except Exception:
         import re
@@ -706,8 +722,9 @@ def extract_from_xlsx_stream(
         except Exception:
             return [], {"errors": ["cannot open"]}
         stats = {"cells": cells}
-        hits = _dedupe(hits)
-        hits = repair_footnote_singletons(hits, stats)
+
+        hits = _postprocess_hits(hits, stats)
+
         return hits, stats
 
 
@@ -740,8 +757,9 @@ def extract_from_csv_or_text_stream(
             for e in re.findall(pattern, line):
                 hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
     stats = {"lines": lines}
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 
@@ -857,9 +875,9 @@ def extract_from_url(
             _crawl(new, depth - 1)
 
     _crawl(url, max_depth - 1)
-    hits = merge_footnote_prefix_variants(hits, stats)
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 def extract_any(
@@ -935,9 +953,8 @@ def extract_any(
         ]
         stats = {}
 
-    hits = merge_footnote_prefix_variants(hits, stats)
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+    hits = _postprocess_hits(hits, stats)
+
     if _return_hits:
         return hits, stats
     return sorted({h.email for h in hits}), stats
@@ -970,9 +987,9 @@ def extract_any_stream(
             for e in extract_emails_document(text)
         ]
         stats = {}
-    hits = merge_footnote_prefix_variants(hits, stats)
-    hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
+    hits = _postprocess_hits(hits, stats)
+
     return hits, stats
 
 

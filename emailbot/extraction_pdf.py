@@ -74,12 +74,9 @@ def _ocr_page(page) -> str:
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from a PDF file."""
 
-    from .extraction import (
-        EmailHit,
-        extract_emails_document,
-        repair_footnote_singletons,
-        _dedupe,
-    )
+    from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
+    from .extraction import EmailHit, extract_emails_document, _dedupe
+
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
@@ -146,8 +143,15 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
+
+    hits = merge_footnote_prefix_variants(hits, stats)
+    hits, fixed = repair_footnote_singletons(hits, layout)
+    if fixed:
+        stats["footnote_singletons_repaired"] = stats.get(
+            "footnote_singletons_repaired", 0
+        ) + fixed
     hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
     return hits, stats
 
 
@@ -156,12 +160,9 @@ def extract_from_pdf_stream(
 ) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 
-    from .extraction import (
-        EmailHit,
-        extract_emails_document,
-        repair_footnote_singletons,
-        _dedupe,
-    )
+
+    from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
+    from .extraction import EmailHit, extract_emails_document, _dedupe
 
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
@@ -228,8 +229,15 @@ def extract_from_pdf_stream(
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
+
+    hits = merge_footnote_prefix_variants(hits, stats)
+    hits, fixed = repair_footnote_singletons(hits, layout)
+    if fixed:
+        stats["footnote_singletons_repaired"] = stats.get(
+            "footnote_singletons_repaired", 0
+        ) + fixed
     hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
     return hits, stats
 
 
