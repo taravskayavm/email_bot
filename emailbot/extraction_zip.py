@@ -9,6 +9,24 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_unlink(path: str, attempts: int = 6, delay: float = 0.2) -> bool:
+    import os, time, logging
+
+    log = logging.getLogger(__name__)
+    for i in range(attempts):
+        try:
+            os.remove(path)
+            return True
+        except PermissionError:
+            time.sleep(delay * (i + 1))
+        except FileNotFoundError:
+            return True
+        except Exception:
+            log.exception("unlink failed for %s", path)
+            break
+    return False
+
 ALLOWED_EXTS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".html", ".htm", ".zip"}
 DENY_EXTS = {
     ".exe",
@@ -44,7 +62,7 @@ def extract_emails_from_zip(
 ) -> tuple[list["EmailHit"], Dict]:
     from .extraction import (
         EmailHit,
-        extract_any,
+        extract_any_stream,
         merge_footnote_prefix_variants,
         _dedupe,
     )
@@ -117,37 +135,24 @@ def extract_emails_from_zip(
                     if isinstance(v, int):
                         stats[k] = stats.get(k, 0) + v
             finally:
-                os.remove(tmp_path)
+                if not _safe_unlink(tmp_path):
+                    logger.warning("temp file still locked, skip delete: %s", tmp_path)
             continue
         if ext not in ALLOWED_EXTS:
             continue
         data = z.read(info)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp.write(data)
-            tmp_path = tmp.name
-        try:
-            inner_hits, inner_stats = extract_any(tmp_path, stop_event, _return_hits=True)
-            for h in inner_hits:
-                suffix = ""
-                if "#" in h.source_ref:
-                    suffix = "#" + h.source_ref.split("#", 1)[1]
-                new_ref = f"zip:{path}|{name}{suffix}"
-                hits.append(
-                    EmailHit(
-                        email=h.email,
-                        source_ref=new_ref,
-                        origin=h.origin,
-                        pre=h.pre,
-                        post=h.post,
-                    )
-                )
-            key = ext.lstrip(".")
-            stats[key] = stats.get(key, 0) + 1
-            for k, v in inner_stats.items():
-                if isinstance(v, int):
-                    stats[k] = stats.get(k, 0) + v
-        finally:
-            os.remove(tmp_path)
+        inner_hits, inner_stats = extract_any_stream(
+            data,
+            ext,
+            source_ref=f"zip:{path}|{name}",
+            stop_event=stop_event,
+        )
+        hits.extend(inner_hits)
+        key = ext.lstrip(".")
+        stats[key] = stats.get(key, 0) + 1
+        for k, v in inner_stats.items():
+            if isinstance(v, int):
+                stats[k] = stats.get(k, 0) + v
 
     z.close()
     hits = merge_footnote_prefix_variants(hits, stats)
