@@ -98,7 +98,7 @@ def test_retry_last_no_soft(monkeypatch, tmp_path):
     assert update.message.replies[-1] == "Нет писем для ретрая"
 
 
-def test_sync_skips_seen_events(monkeypatch, tmp_path):
+def test_sync_uses_upsert_and_no_duplicates(monkeypatch, tmp_path):
     log = tmp_path / "sent_log.csv"
     seen = tmp_path / "seen.csv"
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
@@ -137,4 +137,4 @@ def test_sync_skips_seen_events(monkeypatch, tmp_path):
 
     assert stats1["new_contacts"] == 1
     assert stats2["new_contacts"] == 0
-    assert stats2["skipped_duplicates"] == 1
+    assert stats2["skipped_events"] == 1

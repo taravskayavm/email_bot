@@ -744,9 +744,8 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         clear_recent_sent_cache()
         await update.message.reply_text(
             "🔄 "
-            f"Писем: {stats['scanned_messages']}, получателей: {stats['recipients_seen']}, "
             f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
-            f"дубликатов: {stats['skipped_duplicates']}"
+            f"пропущено: {stats['skipped_events']}, всего: {stats['total_rows_after']}"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
@@ -1665,9 +1664,8 @@ async def autosync_imap_with_message(query: CallbackQuery) -> None:
     clear_recent_sent_cache()
     await query.message.reply_text(
         "✅ Синхронизация завершена. "
-        f"Писем: {stats['scanned_messages']}, получателей: {stats['recipients_seen']}, "
         f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
-        f"дубликатов: {stats['skipped_duplicates']}.\n"
+        f"пропущено: {stats['skipped_events']}, всего: {stats['total_rows_after']}.\n"
         f"История отправки обновлена на последние 6 месяцев."
     )
 

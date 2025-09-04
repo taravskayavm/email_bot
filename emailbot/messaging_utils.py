@@ -4,6 +4,8 @@ import os
 import re
 import time
 import unicodedata
+import shutil
+import email.utils
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Iterable, Tuple
@@ -42,6 +44,17 @@ def _now() -> str:
 
 
 _ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
+
+
+REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
+LEGACY_MAP = {
+    "address": "email",
+    "mail": "email",
+    "ts": "last_sent_at",
+    "timestamp": "last_sent_at",
+    "date": "last_sent_at",
+    "result": "status",
+}
 
 
 class FileLock:
@@ -96,10 +109,75 @@ def canonical_for_history(email: str) -> str:
     return f"{local}@{domain}"
 
 
+def _normalize_ts(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        try:
+            dt = email.utils.parsedate_to_datetime(value)
+            if dt.tzinfo:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            try:
+                dt = datetime.fromtimestamp(float(value))
+            except Exception:
+                return value
+    return dt.isoformat()
+
+
+def ensure_sent_log_schema(path: str) -> List[str]:
+    """Ensure ``sent_log.csv`` has the required schema and migrate legacy names."""
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        with p.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(REQUIRED_FIELDS)
+        return list(REQUIRED_FIELDS)
+
+    with p.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = reader.fieldnames or []
+
+    mapped_headers = [LEGACY_MAP.get(h, h) for h in headers]
+    all_fields: List[str] = []
+    for h in REQUIRED_FIELDS + mapped_headers:
+        if h not in all_fields:
+            all_fields.append(h)
+
+    migrated: List[Dict[str, str]] = []
+    for row in rows:
+        new_row: Dict[str, str] = {}
+        for k, v in row.items():
+            k2 = LEGACY_MAP.get(k, k)
+            if k2 == "last_sent_at":
+                v = _normalize_ts(v)
+            new_row[k2] = v
+        for field in all_fields:
+            new_row.setdefault(field, "")
+        migrated.append(new_row)
+
+    bak = p.with_suffix(p.suffix + ".bak")
+    if not bak.exists():
+        shutil.copy2(p, bak)
+    tmp_rows: Iterable[Dict[str, str]] = migrated
+    try:
+        _atomic_write(p, tmp_rows, all_fields)
+    except Exception:
+        if bak.exists():
+            shutil.copy2(bak, p)
+        raise
+    return all_fields
+
+
 def _atomic_write(path: Path, rows: Iterable[Dict[str, str]], headers: List[str]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=headers)
+        w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -124,49 +202,78 @@ def upsert_sent_log(
     email: str,
     ts: datetime,
     source: str,
+    status: str = "synced",
     extra: Dict[str, str] | None = None,
 ) -> Tuple[bool, bool]:
     """Insert or update ``sent_log`` row."""
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ensure_sent_log_schema(str(p))
     key = canonical_for_history(email)
     inserted = False
     updated = False
     with FileLock(p):
-        current = load_sent_log(p)
-        existing = current.get(key)
-        if existing is None:
-            inserted = True
-        elif ts > existing:
-            updated = True
-        else:
-            return False, False
-        rows_data: List[Dict[str, str]] = []
+        rows: List[Dict[str, str]] = []
         if p.exists():
-            with p.open(encoding="utf-8") as f:
-                rows_data = list(csv.DictReader(f))
-        if inserted:
-            row = {"key": key, "email": email.strip(), "last_sent_at": ts.isoformat(), "source": source}
-            if extra:
-                row.update({k: str(v) for k, v in extra.items()})
-            rows_data.append(row)
+            with p.open("r", newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        for row in rows:
+            if row.get("key") == key:
+                existing_ts = row.get("last_sent_at", "")
+                try:
+                    existing_dt = datetime.fromisoformat(existing_ts)
+                except Exception:
+                    existing_dt = None
+                if existing_dt and ts <= existing_dt:
+                    return False, False
+                row.update(
+                    {
+                        "email": email.strip(),
+                        "last_sent_at": ts.isoformat(),
+                        "source": source,
+                        "status": status,
+                    }
+                )
+                if extra:
+                    for k, v in extra.items():
+                        row[k] = str(v)
+                        if k not in fieldnames:
+                            fieldnames.append(k)
+                updated = True
+                break
         else:
-            for row in rows_data:
-                if row.get("key") == key:
-                    row["email"] = email.strip()
-                    row["last_sent_at"] = ts.isoformat()
-                    row["source"] = source
-                    if extra:
-                        row.update({k: str(v) for k, v in extra.items()})
-        headers = rows_data[0].keys() if rows_data else ["key", "email", "last_sent_at", "source"]
-        _atomic_write(p, rows_data, list(headers))
+            new_row = {
+                "key": key,
+                "email": email.strip(),
+                "last_sent_at": ts.isoformat(),
+                "source": source,
+                "status": status,
+            }
+            if extra:
+                for k, v in extra.items():
+                    new_row[k] = str(v)
+                    if k not in fieldnames:
+                        fieldnames.append(k)
+            rows.append(new_row)
+            inserted = True
+
+        bak = p.with_suffix(p.suffix + ".bak")
+        if p.exists() and not bak.exists():
+            shutil.copy2(p, bak)
+        try:
+            _atomic_write(p, rows, fieldnames)
+        except Exception:
+            if bak.exists():
+                shutil.copy2(bak, p)
+            raise
     return inserted, updated
 
 
 def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     p = Path(path)
-    rows = []
+    ensure_sent_log_schema(str(p))
+    rows: List[Dict[str, str]] = []
     if p.exists():
         with p.open(encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
@@ -188,8 +295,16 @@ def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     if best:
         extra_fields = set().union(*(r.keys() for r in best.values()))
         headers = [h for h in headers if h in extra_fields] + [h for h in extra_fields if h not in headers]
+    bak = p.with_suffix(p.suffix + ".bak")
+    if p.exists() and not bak.exists():
+        shutil.copy2(p, bak)
     with FileLock(p):
-        _atomic_write(p, best.values(), headers)
+        try:
+            _atomic_write(p, best.values(), headers)
+        except Exception:
+            if bak.exists():
+                shutil.copy2(bak, p)
+            raise
     return {"before": before, "after": after, "removed": before - after}
 
 
@@ -394,6 +509,13 @@ def is_foreign(email: str) -> bool:
 __all__ = [
     "SUPPRESS_PATH",
     "BOUNCE_LOG_PATH",
+    "SYNC_SEEN_EVENTS_PATH",
+    "REQUIRED_FIELDS",
+    "LEGACY_MAP",
+    "ensure_sent_log_schema",
+    "canonical_for_history",
+    "upsert_sent_log",
+    "dedupe_sent_log_inplace",
     "add_bounce",
     "is_hard_bounce",
     "is_soft_bounce",
