@@ -7,6 +7,8 @@ import zipfile
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional
 
+from emailbot import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,8 +159,13 @@ def extract_emails_from_zip(
 
     z.close()
     hits = merge_footnote_prefix_variants(hits, stats)
+    hits, fixed = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
+    if fixed:
+        stats["footnote_singletons_repaired"] = stats.get(
+            "footnote_singletons_repaired", 0
+        ) + fixed
     hits = _dedupe(hits)
-    hits = repair_footnote_singletons(hits, stats)
+
     return hits, stats
 
 
