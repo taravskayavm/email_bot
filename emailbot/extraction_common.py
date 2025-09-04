@@ -126,9 +126,46 @@ def preprocess_text(text: str) -> str:
 
 
 def normalize_email(s: str) -> str:
-    """Normalize an e-mail address for comparison/deduplication."""
+    """Normalize an e-mail address for comparison and deduplication.
 
-    return normalize_text(s).strip().lower()
+    The function performs a number of transformations so that semantically
+    identical addresses map to the same representation:
+
+    * The input is fully normalised with :func:`normalize_text` which removes
+      zero‑width characters and canonicalises homoglyphs.
+    * The domain part is converted to punycode (IDNA) and lower‑cased.
+    * Gmail/Googlemail addresses are canonicalised by removing dots from the
+      local part and stripping ``+tag`` suffixes.
+
+    Parameters
+    ----------
+    s:
+        Raw e‑mail address.
+
+    Returns
+    -------
+    str
+        Normalised address suitable for comparisons and lookups.
+    """
+
+    s = (normalize_text(s or "").strip().strip("'\""))
+    if "@" not in s:
+        return s.lower()
+    local, domain = s.rsplit("@", 1)
+
+    # Convert domain to ASCII using IDNA; fall back to best-effort ASCII.
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except Exception:
+        domain = domain.encode("ascii", "ignore").decode("ascii")
+    domain = domain.lower()
+
+    # Gmail canonicalisation: ignore dots and "+tag" in the local part.
+    if domain in {"gmail.com", "googlemail.com"}:
+        domain = "gmail.com"
+        local = local.split("+", 1)[0].replace(".", "")
+
+    return f"{local.lower()}@{domain}"
 
 
 def is_valid_domain(domain: str) -> bool:
