@@ -64,6 +64,7 @@ def extract_emails_from_zip(
         EmailHit,
         extract_any_stream,
         merge_footnote_prefix_variants,
+        repair_footnote_singletons,
         _dedupe,
     )
 
@@ -156,7 +157,9 @@ def extract_emails_from_zip(
 
     z.close()
     hits = merge_footnote_prefix_variants(hits, stats)
-    return _dedupe(hits), stats
+    hits = _dedupe(hits)
+    hits = repair_footnote_singletons(hits, stats)
+    return hits, stats
 
 
 __all__ = ["extract_emails_from_zip"]

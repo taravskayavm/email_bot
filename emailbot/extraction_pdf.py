@@ -74,7 +74,12 @@ def _ocr_page(page) -> str:
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from a PDF file."""
 
-    from .extraction import EmailHit, extract_emails_document, _dedupe
+    from .extraction import (
+        EmailHit,
+        extract_emails_document,
+        repair_footnote_singletons,
+        _dedupe,
+    )
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
@@ -141,7 +146,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
-    return _dedupe(hits), stats
+    hits = _dedupe(hits)
+    hits = repair_footnote_singletons(hits, stats)
+    return hits, stats
 
 
 def extract_from_pdf_stream(
@@ -149,7 +156,12 @@ def extract_from_pdf_stream(
 ) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 
-    from .extraction import EmailHit, extract_emails_document, _dedupe
+    from .extraction import (
+        EmailHit,
+        extract_emails_document,
+        repair_footnote_singletons,
+        _dedupe,
+    )
 
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
@@ -216,7 +228,9 @@ def extract_from_pdf_stream(
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
-    return _dedupe(hits), stats
+    hits = _dedupe(hits)
+    hits = repair_footnote_singletons(hits, stats)
+    return hits, stats
 
 
 __all__ = ["extract_from_pdf", "extract_from_pdf_stream"]
