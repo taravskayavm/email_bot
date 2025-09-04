@@ -2,7 +2,33 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from datetime import datetime
 from typing import Iterable, List, Optional
+
+
+def _now_ts() -> str:
+    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+
+_DIGEST_LOGGER = logging.getLogger("emailbot.digest")
+
+
+def log_extract_digest(stats: dict) -> None:
+    """Log a one-line JSON digest for extraction statistics."""
+
+    data = {"ts": _now_ts(), "level": "INFO", "component": "extract"}
+    data.update(stats)
+    _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))
+
+
+def log_mass_filter_digest(ctx: dict) -> None:
+    """Log a one-line JSON digest for mass-mail filter statistics."""
+
+    data = {"ts": _now_ts(), "level": "INFO", "component": "mass_filter"}
+    data.update(ctx)
+    _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))
 
 
 def build_mass_report_text(

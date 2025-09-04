@@ -76,7 +76,7 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
                 if not cond:
                     continue
                 removed.add(idx_short)
-                stats["footnote_trimmed_merged"] = stats.get("footnote_trimmed_merged", 0) + 1
+                stats["footnote_pairs_merged"] = stats.get("footnote_pairs_merged", 0) + 1
 
     return [h for idx, h in enumerate(hits) if idx not in removed]
 
