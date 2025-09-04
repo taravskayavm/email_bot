@@ -16,7 +16,7 @@ from emailbot.extraction import smart_extract_emails
             ["user+tag_2024%eq=ok/part'one~x@sub-domain.xn--80asehdb"],
         ),
         ("na.me+tag@domain.ru", ["na.me+tag@domain.ru"]),
-        ("name-\nname@domain.ru", ["name-name@domain.ru"]),
+        ("name-\nname@domain.ru", ["namename@domain.ru"]),
         ("na\nme@domain.ru", ["name@domain.ru"]),
         ("mail@uni.ru\u0434\u043e\u0446\u0435\u043d\u0442", ["mail@uni.ru"]),
         ("mail@domain.rufaculty", ["mail@domain.ru"]),
@@ -46,4 +46,5 @@ def test_preprocess_preserves_digits():
     from emailbot.extraction_common import preprocess_text
 
     assert preprocess_text("9\n6soul@mail.ru").startswith("9\n6soul")
-    assert preprocess_text("name-\nname@domain.ru").startswith("name-name@domain.ru")
+    assert preprocess_text("name-\nname@domain.ru").startswith("namename@domain.ru")
+    assert preprocess_text("name\u00ADname@domain.ru").startswith("namename@domain.ru")

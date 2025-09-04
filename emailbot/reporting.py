@@ -18,7 +18,14 @@ _DIGEST_LOGGER = logging.getLogger("emailbot.digest")
 def log_extract_digest(stats: dict) -> None:
     """Log a one-line JSON digest for extraction statistics."""
 
-    data = {"ts": _now_ts(), "level": "INFO", "component": "extract"}
+    data = {
+        "ts": _now_ts(),
+        "level": "INFO",
+        "component": "extract",
+        "footnote_singletons_repaired": stats.get("footnote_singletons_repaired", 0),
+        "footnote_guard_skips": stats.get("footnote_guard_skips", 0),
+        "footnote_ambiguous_kept": stats.get("footnote_ambiguous_kept", 0),
+    }
     data.update(stats)
     _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))
 
