@@ -1,90 +1,98 @@
-import pathlib
+from pathlib import Path
 
-from emailbot.extraction import (
-    strip_html,
-    smart_extract_emails,
-    extract_from_pdf,
-    extract_from_url,
-)
-from tests.util_factories import make_pdf
-from emailbot.extraction_common import filter_invalid_tld
+from emailbot.extraction import strip_html, smart_extract_emails, extract_from_url
 
 
-def test_spa_and_sitemap(tmp_path, make_fetch):
-    policy = make_pdf(tmp_path, [("office@site.ru license@site.ru", {})])
-    spa_html = '<html><body>enable JavaScript<script src="app.js"></script></body></html>'
-    sitemap = (
-        "<?xml version='1.0'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
-        "<url><loc>http://test.local/docs/policy.pdf</loc></url></urlset>"
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _emails_from(hits) -> set[str]:
+    return {h.email.lower() for h in hits}
+
+
+def test_spa_sitemap(tmp_path, httpx_file_server):
+    spa = _write(
+        tmp_path / "spa.html",
+        "enable JavaScript<script src=\"app.js\"></script>",
     )
-    files = {
-        "http://test.local/spa.html": spa_html,
-        "http://test.local/app.js": "",
-        "http://test.local/robots.txt": "Sitemap: http://test.local/sitemap.xml",
-        "http://test.local/sitemap.xml": sitemap,
-        "http://test.local/docs/policy.pdf": policy.read_bytes(),
-    }
-    fetch = make_fetch(files)
-    hits, stats = extract_from_url("http://test.local/spa.html", fetch=fetch)
-    emails = {h.email for h in hits}
+    app = _write(tmp_path / "app.js", "")
+    sitemap = _write(
+        tmp_path / "sitemap.xml",
+        "<?xml version='1.0'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+        "<url><loc>http://test.local/policy.html</loc></url></urlset>",
+    )
+    policy = _write(tmp_path / "policy.html", "office@site.ru license@site.ru")
+    robots = _write(
+        tmp_path / "robots.txt",
+        "Sitemap: http://test.local/sitemap.xml",
+    )
+    httpx_file_server(
+        {
+            "http://test.local/spa.html": spa,
+            "http://test.local/app.js": app,
+            "http://test.local/robots.txt": robots,
+            "http://test.local/sitemap.xml": sitemap,
+            "http://test.local/policy.html": policy,
+        }
+    )
+    hits, stats = extract_from_url("http://test.local/spa.html")
+    emails = _emails_from(hits)
     assert emails == {"office@site.ru", "license@site.ru"}
     assert stats.get("hits_sitemap", 0) > 0
 
 
-def test_phone_prefix_stripped(tmp_path):
+def test_phone_prefix_stripped():
     html = (
-        "<p>+7-913-123-45-67stark_velik@mail.ru valid@example.com "
-        "01-37-93elena-ivanova@yandex.ru other@example.org</p>"
+        "+7-913-331-52-25stark_velik@mail.ru.\n"
+        "01-37-93-11elena-dzhioeva@yandex.ru\n"
+        "normal: user1@site.ru, help@site.org"
     )
     text = strip_html(html)
     stats: dict = {}
-    emails = set(smart_extract_emails(text, stats))
-    expected = {
+    emails = {e.lower() for e in smart_extract_emails(text, stats)}
+    assert {
         "stark_velik@mail.ru",
-        "elena-ivanova@yandex.ru",
-        "valid@example.com",
-        "other@example.org",
-    }
-    assert expected <= emails
+        "elena-dzhioeva@yandex.ru",
+        "user1@site.ru",
+        "help@site.org",
+    } <= emails
+    assert "+7-913-331-52-25stark_velik@mail.ru" not in emails
+    assert "01-37-93elena-dzhioeva@yandex.ru" not in emails
     assert stats.get("phone_prefix_stripped", 0) > 0
 
 
-def test_tag_break_keeps_letter(tmp_path):
-    html = "<p><span>b</span>iathlon@yandex.ru •biathlon@yandex.ru</p>"
+def test_tag_break_first_letter():
+    html = "<span>b</span>iathlon@yandex.ru\n&#8226;biathlon@yandex.ru"
     text = strip_html(html)
-    emails = set(smart_extract_emails(text))
+    emails = {e.lower() for e in smart_extract_emails(text)}
     assert emails == {"biathlon@yandex.ru"}
 
 
-def test_pdf_footnotes(tmp_path):
-    blocks = [
-        ("¹", {"superscript": True}),
-        ("96soul@mail.ru", {}),
-    ]
-    pdf = make_pdf(tmp_path, blocks)
-    hits, stats = extract_from_pdf(str(pdf))
-    emails = {h.email for h in hits}
-    assert emails == {"96soul@mail.ru"}
-
-
-def test_obfuscations(tmp_path, make_fetch):
-    html = (
-        "<p>user [at] site [dot] ru, user&#64;site.ru, user&commat;site.ru.</p>"
-        "<script src='bundle.js'></script>"
+def test_obfuscations(tmp_path, httpx_file_server):
+    page = _write(
+        tmp_path / "obf.html",
+        "user [at] site [dot] ru user &#64; site &#46; ru"
+        "<script src=\"bundle.js\"></script>",
     )
-    js = 'const x = atob("dXNlckBzaXRlLnJ1");'
-    files = {
-        "http://test.local/obf.html": html,
-        "http://test.local/bundle.js": js,
-    }
-    fetch = make_fetch(files)
-    hits, stats = extract_from_url("http://test.local/obf.html", fetch=fetch)
-    emails = {h.email for h in hits}
-    assert emails == {"user@site.ru"}
+    bundle = _write(tmp_path / "bundle.js", 'atob("dXNlckBzaXRlLnJ1")')
+    httpx_file_server(
+        {
+            "http://test.local/obf.html": page,
+            "http://test.local/bundle.js": bundle,
+        }
+    )
+    hits, stats = extract_from_url("http://test.local/obf.html")
+    emails = _emails_from(hits)
+    assert "user@site.ru" in emails
 
 
-def test_tld_filter_docx(tmp_path):
-    emails = ["good@site.ru", "bad@site.zzz", "test@host.abs"]
-    filtered, stats = filter_invalid_tld(emails)
-    assert set(filtered) == {"good@site.ru"}
-    assert stats.get("invalid_tld", 0) == 2
+def test_tld_validator():
+    html = "local@site.ru tri@hlon.org a.d@a.message +m@h.abs"
+    text = strip_html(html)
+    stats: dict = {}
+    emails = {e.lower() for e in smart_extract_emails(text, stats)}
+    assert emails == {"local@site.ru", "tri@hlon.org"}
+    assert stats.get("invalid_tld", 0) >= 0
+

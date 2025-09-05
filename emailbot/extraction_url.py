@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
-import urllib.request
 from typing import Dict, List, Optional, Tuple, Callable, Protocol
 import json
 import os
+import httpx
 
 from .extraction import EmailHit, _valid_local, _valid_domain, extract_emails_document
 from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
@@ -29,6 +29,14 @@ _READ_CHUNK = 128 * 1024
 _SIMPLE_EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
+
+
+def _fetch_get(url: str):
+    return httpx.get(url, timeout=15)
+
+
+def _fetch_stream(method: str, url: str):
+    return httpx.stream(method, url, timeout=15)
 
 
 class ResponseLike(Protocol):
@@ -85,10 +93,9 @@ def fetch_url(
     cached = _CACHE.get(url)
     if cached and cached[0] > now:
         return cached[1]
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            final_url = resp.geturl()
+        with _fetch_stream("GET", url) as resp:
+            final_url = str(getattr(resp, "url", url))
             final_parsed = urllib.parse.urlparse(final_url)
             if final_parsed.scheme not in allowed_schemes:
                 return None
@@ -98,15 +105,12 @@ def fetch_url(
                 tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
                 if tld not in allowed_tlds:
                     return None
-            encoding = resp.headers.get_content_charset() or "utf-8"
+            encoding = getattr(resp, "encoding", None) or "utf-8"
             chunks: List[bytes] = []
             total = 0
-            while True:
+            for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     return None
-                chunk = resp.read(_READ_CHUNK)
-                if not chunk:
-                    break
                 chunks.append(chunk)
                 total += len(chunk)
                 if total >= max_size:
@@ -143,17 +147,13 @@ def fetch_bytes(
     cached = _CACHE_BYTES.get(url)
     if cached and cached[0] > now:
         return cached[1]
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _fetch_stream("GET", url) as resp:
             chunks: List[bytes] = []
             total = 0
-            while True:
+            for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     return None
-                chunk = resp.read(_READ_CHUNK)
-                if not chunk:
-                    break
                 chunks.append(chunk)
                 total += len(chunk)
                 if total >= max_size:
@@ -281,7 +281,7 @@ def extract_bundle_hits(
     return hits
 
 
-_DOC_EXTS = {".pdf", ".docx", ".xlsx", ".csv", ".txt"}
+_DOC_EXTS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".html", ".htm"}
 
 
 def extract_sitemap_hits(
