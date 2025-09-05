@@ -93,7 +93,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             return [], {"errors": ["cannot open"]}
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
-            for e in extract_emails_document(text)
+            for e in extract_emails_document(text, stats)
         ]
         return _dedupe(hits), {"pages": 0, "needs_ocr": True}
 
@@ -122,9 +122,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
-        text = preprocess_text(text)
+        text = preprocess_text(text, stats)
         low_text = text.lower()
-        for email in extract_emails_document(text):
+        for email in extract_emails_document(text, stats):
             for m in re.finditer(re.escape(email), low_text):
                 start, end = m.span()
                 pre = text[max(0, start - 16) : start]
@@ -178,7 +178,7 @@ def extract_from_pdf_stream(
             return [], {"errors": ["cannot open"]}
         hits = [
             EmailHit(email=e, source_ref=source_ref, origin="direct_at")
-            for e in extract_emails_document(text)
+            for e in extract_emails_document(text, stats)
         ]
         return _dedupe(hits), {"pages": 0, "needs_ocr": True}
 
@@ -207,9 +207,9 @@ def extract_from_pdf_stream(
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
-        text = preprocess_text(text)
+        text = preprocess_text(text, stats)
         low_text = text.lower()
-        for email in extract_emails_document(text):
+        for email in extract_emails_document(text, stats):
             for m in re.finditer(re.escape(email), low_text):
                 start, end = m.span()
                 pre = text[max(0, start - 16) : start]

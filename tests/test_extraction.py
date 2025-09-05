@@ -48,3 +48,20 @@ def test_preprocess_preserves_digits():
     assert preprocess_text("9\n6soul@mail.ru").startswith("9\n6soul")
     assert preprocess_text("name-\nname@domain.ru").startswith("namename@domain.ru")
     assert preprocess_text("name\u00ADname@domain.ru").startswith("namename@domain.ru")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("+7-913-331-52-25stark_velik@mail.ru", ["stark_velik@mail.ru"]),
+        ("01-37-93elena-dzhioeva@yandex.ru", ["elena-dzhioeva@yandex.ru"]),
+        ("18-24-40pavelshabalin@mail.ru", ["pavelshabalin@mail.ru"]),
+        ("\u00b9biathlon@yandex.ru", ["biathlon@yandex.ru"]),
+        ("bi@hlonrus.com", ["bi@hlonrus.com"]),
+        ("20yaik11@mail.ru", ["20yaik11@mail.ru"]),
+        ("6soul@mail.ru", ["6soul@mail.ru"]),
+        ("89124768555@mail.ru", ["89124768555@mail.ru"]),
+    ],
+)
+def test_phone_prefix_and_superscript(raw, expected):
+    assert smart_extract_emails(raw) == expected

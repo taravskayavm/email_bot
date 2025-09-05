@@ -113,16 +113,49 @@ def maybe_decode_base64(s: str) -> str | None:
     return text
 
 
-def preprocess_text(text: str) -> str:
-    """Pre-process text before running e-mail extraction regexes."""
+def preprocess_text(text: str, stats: dict | None = None) -> str:
+    """Pre-process text before running e-mail extraction regexes.
+
+    ``stats['left_guard_skips']`` counts situations where a potential
+    hyphenated line break was detected immediately after the first character of
+    the local part and therefore was *not* glued to avoid losing that character.
+    """
 
     text = normalize_text(text)
+
+    # Count occurrences where the guard prevented removal
+    if stats is not None:
+        m1 = re.findall(r"(?<=\w)-?\s*\n(?=[\w.])", text)
+        m2 = re.findall(r"(?<=\w\w)-?\s*\n(?=[\w.])", text)
+        m3 = re.findall(r"(?<=\w)\u00AD(?=[\w.])", text)
+        m4 = re.findall(r"(?<=\w\w)\u00AD(?=[\w.])", text)
+        skips = len(m1) - len(m2) + len(m3) - len(m4)
+        if skips:
+            stats["left_guard_skips"] = stats.get("left_guard_skips", 0) + skips
 
     # Glue hyphenated/soft hyphen line breaks inside addresses starting from
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
     return text
+
+
+_PHONE_PREFIX_RE = re.compile(r"^(?:\+?\d[\d\- ]{6,}\d)(?=[A-Za-z])")
+
+
+def strip_phone_prefix(local: str, stats: dict | None = None) -> tuple[str, bool]:
+    """Remove a long phone number prefix stuck to the left of ``local``.
+
+    Returns a tuple ``(new_local, changed)``. ``stats['phone_prefix_stripped']``
+    is incremented when a prefix is removed.
+    """
+
+    m = _PHONE_PREFIX_RE.match(local)
+    if m:
+        if stats is not None:
+            stats["phone_prefix_stripped"] = stats.get("phone_prefix_stripped", 0) + 1
+        return local[m.end() :], True
+    return local, False
 
 
 def normalize_email(s: str) -> str:
