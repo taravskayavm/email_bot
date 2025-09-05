@@ -26,6 +26,7 @@ def test_extract_digest_logging(tmp_path, caplog):
         "entry",
         "left_guard_skips",
         "prefix_expanded",
+        "phone_prefix_stripped",
         "footnote_singletons_repaired",
     ):
         assert key in data
@@ -50,6 +51,7 @@ def test_extract_digest_logging(tmp_path, caplog):
         "entry",
         "left_guard_skips",
         "prefix_expanded",
+        "phone_prefix_stripped",
         "footnote_singletons_repaired",
     ):
         assert key in data
