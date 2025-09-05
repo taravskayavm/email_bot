@@ -11,13 +11,24 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .extraction import EmailHit
 
 
-_SUPER_DIGITS = set("⁰¹²³⁴⁵⁶⁷⁸⁹")
+_SUPER_TO_DIGIT = {
+    "\u00b9": "1",
+    "\u00b2": "2",
+    "\u00b3": "3",
+    "\u2070": "0",
+    "\u2074": "4",
+    "\u2075": "5",
+    "\u2076": "6",
+    "\u2077": "7",
+    "\u2078": "8",
+    "\u2079": "9",
+}
 
 
 def is_superscript_digit(ch: str) -> bool:
     """Return ``True`` if ``ch`` is a Unicode superscript digit."""
 
-    return ch in _SUPER_DIGITS
+    return ch in _SUPER_TO_DIGIT
 
 
 def _is_superscript(ch: str) -> bool:
@@ -112,24 +123,26 @@ def repair_footnote_singletons(
         local, dom = h.email.split("@", 1)
 
         if is_superscript_digit(prev):
-            if not local:
-                out.append(h)
-                stats["footnote_guard_skips"] += 1
-                continue
-            rest = local[1:]
-            new_meta = dict(h.meta)
-            new_meta["repaired"] = True
-            out.append(
-                EmailHit(
-                    email=f"{rest}@{dom}",
-                    source_ref=h.source_ref,
-                    origin="footnote_repaired",
-                    pre=h.pre,
-                    post=h.post,
-                    meta=new_meta,
-                )
-            )
-            stats["footnote_singletons_repaired"] += 1
+            digit = _SUPER_TO_DIGIT.get(prev, "")
+            if local and local[0] == digit:
+                rest = local[1:]
+                if len(rest) >= 3 and any(c.isalpha() for c in rest):
+                    new_meta = dict(h.meta)
+                    new_meta["repaired"] = True
+                    out.append(
+                        EmailHit(
+                            email=f"{rest}@{dom}",
+                            source_ref=h.source_ref,
+                            origin="footnote_repaired",
+                            pre=h.pre,
+                            post=h.post,
+                            meta=new_meta,
+                        )
+                    )
+                    stats["footnote_singletons_repaired"] += 1
+                    continue
+            stats["footnote_guard_skips"] += 1
+            out.append(h)
             continue
 
         if not layout_aware and prev.isalnum():
