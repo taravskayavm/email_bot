@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple, Callable, Protocol
 import json
 import os
 import httpx
+import urllib.request
 
 from .extraction import EmailHit, _valid_local, _valid_domain, extract_emails_document
 from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
@@ -94,8 +95,9 @@ def fetch_url(
     if cached and cached[0] > now:
         return cached[1]
     try:
-        with _fetch_stream("GET", url) as resp:
-            final_url = str(getattr(resp, "url", url))
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = getattr(resp, "geturl", lambda: url)()
             final_parsed = urllib.parse.urlparse(final_url)
             if final_parsed.scheme not in allowed_schemes:
                 return None
@@ -105,20 +107,53 @@ def fetch_url(
                 tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
                 if tld not in allowed_tlds:
                     return None
-            encoding = getattr(resp, "encoding", None) or "utf-8"
+            headers = getattr(resp, "headers", None)
+            encoding = "utf-8"
+            if headers and hasattr(headers, "get_content_charset"):
+                encoding = headers.get_content_charset() or "utf-8"
             chunks: List[bytes] = []
             total = 0
-            for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
+            while True:
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     return None
+                chunk = resp.read(_READ_CHUNK)
+                if not chunk:
+                    break
                 chunks.append(chunk)
                 total += len(chunk)
                 if total >= max_size:
                     break
             data = b"".join(chunks)
             text = data.decode(encoding, "ignore")
-    except Exception:  # pragma: no cover - network errors
+    except TimeoutError:
         return None
+    except Exception:
+        try:
+            with _fetch_stream("GET", url) as resp:
+                final_url = str(getattr(resp, "url", url))
+                final_parsed = urllib.parse.urlparse(final_url)
+                if final_parsed.scheme not in allowed_schemes:
+                    return None
+                if parsed.netloc and final_parsed.netloc and parsed.netloc != final_parsed.netloc:
+                    return None
+                if allowed_tlds and final_parsed.hostname:
+                    tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
+                    if tld not in allowed_tlds:
+                        return None
+                encoding = getattr(resp, "encoding", None) or "utf-8"
+                chunks = []
+                total = 0
+                for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        return None
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= max_size:
+                        break
+                data = b"".join(chunks)
+                text = data.decode(encoding, "ignore")
+        except Exception:  # pragma: no cover - network errors
+            return None
     _CACHE[url] = (now + ttl, text)
     return text
 
@@ -148,19 +183,38 @@ def fetch_bytes(
     if cached and cached[0] > now:
         return cached[1]
     try:
-        with _fetch_stream("GET", url) as resp:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             chunks: List[bytes] = []
             total = 0
-            for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
+            while True:
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     return None
+                chunk = resp.read(_READ_CHUNK)
+                if not chunk:
+                    break
                 chunks.append(chunk)
                 total += len(chunk)
                 if total >= max_size:
                     break
             data = b"".join(chunks)
-    except Exception:  # pragma: no cover - network errors
+    except TimeoutError:
         return None
+    except Exception:
+        try:
+            with _fetch_stream("GET", url) as resp:
+                chunks = []
+                total = 0
+                for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
+                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                        return None
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= max_size:
+                        break
+                data = b"".join(chunks)
+        except Exception:  # pragma: no cover - network errors
+            return None
     _CACHE_BYTES[url] = (now + ttl, data)
     return data
 
