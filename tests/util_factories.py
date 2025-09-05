@@ -3,47 +3,32 @@ from __future__ import annotations
 from pathlib import Path
 import csv
 import zipfile
+import io
 
 import fitz  # PyMuPDF
 from docx import Document
 from openpyxl import Workbook
 
 
-def make_pdf(tmp_path: Path, blocks: list[tuple[str, dict]]) -> Path:
-    """Create a PDF file with ``blocks`` written sequentially.
-
-    Each block is a ``(text, options)`` tuple.  Supported options:
-
-    ``{"superscript": True}`` – render text in a smaller font shifted up.
-    ``{"newline": True}`` – move cursor to the next line before rendering.
-    """
-
+def make_pdf(path: Path, blocks):
     doc = fitz.open()
     page = doc.new_page()
-    x, y = 72, 72
-    fontsize = 12
-    line_height = fontsize + 2
+    x, y = 50, 72
     for text, opts in blocks:
-        sup = opts.get("superscript")
-        parts = text.split("\n")
-        for idx, part in enumerate(parts):
-            if sup:
-                size = fontsize * 0.7
-                page.insert_text((x, y - size * 0.3), part, fontsize=size)
-                width = size * 0.6 * len(part)
-            else:
-                page.insert_text((x, y), part, fontsize=fontsize)
-                width = fontsize * 0.6 * len(part)
-            x += width
-            if idx < len(parts) - 1:
-                y += line_height
-                x = 72
+        opts = opts or {}
         if opts.get("newline"):
-            y += line_height
-            x = 72
-    path = tmp_path / "temp.pdf"
-    doc.save(path)
+            page.insert_text((x, y), " ", fontsize=12)
+            x += 7
+            continue
+        sup = bool(opts.get("superscript"))
+        size = 8 if sup else 12
+        dy = -4 if sup else 0
+        page.insert_text((x, y + dy), text, fontsize=size)
+        x += size * 0.6 * len(text) + 6
+    out = io.BytesIO()
+    doc.save(out)
     doc.close()
+    path.write_bytes(out.getvalue())
     return path
 
 
