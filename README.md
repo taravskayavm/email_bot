@@ -51,6 +51,17 @@ GitHub Actions проверяет:
 
 Статус сборки: ![CI](https://github.com/taravskayavm/email_bot/actions/workflows/ci.yml/badge.svg)
 
+### Pre-commit офлайн
+Если нет доступа к GitHub (403 CONNECT), используйте локовую конфигурацию:
+1) Установите инструменты: `pip install -r requirements-dev.txt`
+2) Запуск на всех файлах:
+   - Bash: `pre-commit run --all-files --config .pre-commit-config.local.yaml`
+   - PowerShell: `pre-commit run --all-files --config .pre-commit-config.local.yaml`
+3) Точечный запуск:
+   `pre-commit run --files path/to/file.py --config .pre-commit-config.local.yaml`
+
+Локовая конфигурация не делает сетевых запросов и использует уже установленные пакеты.
+
 ---
 
 ⚠️ **License: All Rights Reserved**  
