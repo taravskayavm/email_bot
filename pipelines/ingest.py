@@ -6,7 +6,7 @@ def ingest(all_extracted_emails: list[str]) -> tuple[list[str], str]:
 
     before = set(all_extracted_emails)              # до sanitize+dedupe
     after = set(emails)                             # после sanitize+dedupe
-
+    # приблизительная оценка «сносочных» — сколько адресов пропали лишь из-за варианта с ведущими цифрами
     def _key(e: str) -> str:
         local, domain = e.split('@', 1)
         return f"{_strip_leading_footnote(local)}@{domain}"
