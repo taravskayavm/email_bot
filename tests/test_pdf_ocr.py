@@ -20,7 +20,7 @@ def test_ocr_toggle(monkeypatch, tmp_path: Path):
     _create_blank_pdf(pdf)
 
     monkeypatch.setattr(ep, "_ocr_page", lambda page: "scan@example.com")
-    monkeypatch.setattr(ep, "preprocess_text", lambda t: t)
+    monkeypatch.setattr(ep, "preprocess_text", lambda t, stats=None: t)
 
     settings = types.SimpleNamespace(
         PDF_LAYOUT_AWARE=False,

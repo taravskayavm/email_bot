@@ -27,6 +27,7 @@ def log_extract_digest(stats: dict) -> None:
         "footnote_ambiguous_kept": stats.get("footnote_ambiguous_kept", 0),
         "left_guard_skips": stats.get("left_guard_skips", 0),
         "prefix_expanded": stats.get("prefix_expanded", 0),
+        "phone_prefix_stripped": stats.get("phone_prefix_stripped", 0),
     }
     data.update(stats)
     _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))

@@ -11,7 +11,7 @@ import json
 import os
 
 from .extraction import EmailHit, _valid_local, _valid_domain, extract_emails_document
-from .extraction_common import normalize_text, maybe_decode_base64
+from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
 from emailbot import settings
 from emailbot.settings_store import get
 
@@ -26,7 +26,9 @@ _CACHE: Dict[str, Tuple[float, str]] = {}
 _CACHE_BYTES: Dict[str, Tuple[float, bytes]] = {}
 _CURRENT_BATCH: str | None = None
 _READ_CHUNK = 128 * 1024
-_SIMPLE_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_SIMPLE_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
 
 
 def decode_cfemail(hexstr: str) -> str:
@@ -159,7 +161,9 @@ def _extract_from_json(obj, source_ref: str, stats: Dict[str, int]) -> List[Emai
             text_candidates.append(decoded)
         for text in text_candidates:
             for e in _SIMPLE_EMAIL_RE.findall(text):
-                hits.append(EmailHit(email=e.lower(), source_ref=source_ref, origin="ldjson"))
+                email = e.lower()
+                email, _ = strip_phone_prefix(email, stats)
+                hits.append(EmailHit(email=email, source_ref=source_ref, origin="ldjson"))
             hits.extend(extract_obfuscated_hits(text, source_ref, stats))
     return hits
 
@@ -235,21 +239,25 @@ def extract_bundle_hits(
         stats["assets_scanned"] = stats.get("assets_scanned", 0) + 1
         source_ref = f"url:{url}"
         text = normalize_text(js)
-        for e in extract_emails_document(text):
+        for e in extract_emails_document(text, stats):
             hits.append(EmailHit(email=e, source_ref=source_ref, origin="bundle"))
         hits.extend(extract_obfuscated_hits(text, source_ref, stats))
         for b64 in re.findall(r'atob\(["\']([^"\']+)["\']\)', js):
             decoded = maybe_decode_base64(b64)
             if decoded:
                 for e in _SIMPLE_EMAIL_RE.findall(decoded):
-                    hits.append(EmailHit(email=e.lower(), source_ref=source_ref, origin="bundle"))
+                    email = e.lower()
+                    email, _ = strip_phone_prefix(email, stats)
+                    hits.append(EmailHit(email=email, source_ref=source_ref, origin="bundle"))
         for b64 in re.findall(
             r'Buffer\.from\(["\']([^"\']+)["\'],\s*["\']base64["\']\)', js
         ):
             decoded = maybe_decode_base64(b64)
             if decoded:
                 for e in _SIMPLE_EMAIL_RE.findall(decoded):
-                    hits.append(EmailHit(email=e.lower(), source_ref=source_ref, origin="bundle"))
+                    email = e.lower()
+                    email, _ = strip_phone_prefix(email, stats)
+                    hits.append(EmailHit(email=email, source_ref=source_ref, origin="bundle"))
     return hits
 
 
