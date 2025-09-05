@@ -1,5 +1,4 @@
 import random
-import time
 
 def build_examples(emails: list[str], k: int = 10) -> list[str]:
     # крипто-рандом, чтобы телеграм-кэш и однаковый вход давали разные примеры
