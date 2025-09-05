@@ -69,8 +69,9 @@ def test_singleton_without_superscript_not_repaired():
 def test_guard_skip_mismatched_digit():
     h = make_hit("96soul@mail.ru", pre="¹", source="pdf:doc.pdf")
     res, stats = repair_footnote_singletons([h])
-    assert [x.email for x in res] == ["6soul@mail.ru"]
-    assert stats["footnote_singletons_repaired"] == 1
+    assert [x.email for x in res] == ["96soul@mail.ru"]
+    assert stats["footnote_singletons_repaired"] == 0
+    assert stats["footnote_guard_skips"] == 1
 
 
 def test_real_address_not_repaired():
