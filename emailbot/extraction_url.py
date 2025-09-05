@@ -6,7 +6,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable, Protocol
 import json
 import os
 
@@ -29,6 +29,13 @@ _READ_CHUNK = 128 * 1024
 _SIMPLE_EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
+
+
+class ResponseLike(Protocol):
+    """Minimal protocol for mocked HTTP responses."""
+
+    text: str
+    content: bytes
 
 
 def decode_cfemail(hexstr: str) -> str:
@@ -58,6 +65,7 @@ def fetch_url(
     max_size: int = 1_000_000,
     allowed_schemes: Tuple[str, ...] = ("http", "https"),
     allowed_tlds: Optional[set[str]] = None,
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> Optional[str]:
     """Fetch ``url`` and return decoded text respecting several limits."""
 
@@ -67,6 +75,11 @@ def fetch_url(
     if allowed_tlds and parsed.hostname:
         tld = parsed.hostname.rsplit(".", 1)[-1].lower()
         if tld not in allowed_tlds:
+            return None
+    if fetch is not None:
+        try:
+            return fetch(url).text
+        except Exception:
             return None
     now = time.time()
     cached = _CACHE.get(url)
@@ -114,12 +127,18 @@ def fetch_bytes(
     timeout: int = 15,
     max_size: int = 1_000_000,
     allowed_schemes: Tuple[str, ...] = ("http", "https"),
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> Optional[bytes]:
     """Fetch ``url`` and return raw bytes with caching."""
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in allowed_schemes:
         return None
+    if fetch is not None:
+        try:
+            return fetch(url).content
+        except Exception:
+            return None
     now = time.time()
     cached = _CACHE_BYTES.get(url)
     if cached and cached[0] > now:
@@ -219,6 +238,7 @@ def extract_bundle_hits(
     *,
     stop_event: Optional[object] = None,
     max_assets: int = 8,
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> List[EmailHit]:
     """Fetch JS bundle assets referenced in ``html`` and extract emails."""
 
@@ -232,7 +252,7 @@ def extract_bundle_hits(
             stats["stop_interrupts"] = stats.get("stop_interrupts", 0) + 1
             break
         url = urllib.parse.urljoin(base_url, src)
-        js = fetch_url(url, stop_event)
+        js = fetch_url(url, stop_event, fetch=fetch)
         if not js:
             continue
         count += 1
@@ -271,13 +291,14 @@ def extract_sitemap_hits(
     stop_event: Optional[object] = None,
     max_urls: int = 200,
     max_docs: int = 30,
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> List[EmailHit]:
     """Fetch sitemap URLs and extract emails from listed documents."""
 
     hits: List[EmailHit] = []
     parsed_root = urllib.parse.urlparse(base_url)
     robots_url = urllib.parse.urljoin(base_url, "/robots.txt")
-    robots = fetch_url(robots_url, stop_event)
+    robots = fetch_url(robots_url, stop_event, fetch=fetch)
     sitemap_urls: List[str] = []
     if robots:
         for line in robots.splitlines():
@@ -289,7 +310,7 @@ def extract_sitemap_hits(
     for sm in sitemap_urls:
         if seen >= max_urls:
             break
-        data = fetch_bytes(sm, stop_event)
+        data = fetch_bytes(sm, stop_event, fetch=fetch)
         if not data:
             continue
         seen += 1
@@ -313,7 +334,7 @@ def extract_sitemap_hits(
                 continue
             if stats.get("docs_parsed", 0) >= max_docs:
                 break
-            data_doc = fetch_bytes(url, stop_event)
+            data_doc = fetch_bytes(url, stop_event, fetch=fetch)
             if not data_doc:
                 continue
             stats["docs_parsed"] = stats.get("docs_parsed", 0) + 1
@@ -336,6 +357,7 @@ def extract_api_hits(
     *,
     stop_event: Optional[object] = None,
     max_docs: int = 30,
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> List[EmailHit]:
     """Scan heuristic document endpoints in ``html`` and extract emails."""
 
@@ -354,7 +376,7 @@ def extract_api_hits(
         ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
         if ext not in _DOC_EXTS:
             continue
-        data = fetch_bytes(url, stop_event)
+        data = fetch_bytes(url, stop_event, fetch=fetch)
         if not data:
             continue
         count += 1
@@ -410,6 +432,7 @@ __all__ = [
     "extract_obfuscated_hits",
     "fetch_url",
     "fetch_bytes",
+    "ResponseLike",
     "decode_cfemail",
     "extract_ldjson_hits",
     "extract_bundle_hits",
