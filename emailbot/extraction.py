@@ -16,7 +16,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from html import unescape
-from typing import List, Tuple, Dict, Iterable, Set, Optional, Any
+from typing import List, Tuple, Dict, Iterable, Set, Optional, Any, Callable
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
@@ -27,6 +27,8 @@ from .extraction_common import (
     is_valid_domain,
     filter_invalid_tld,
     strip_phone_prefix,
+    score_candidate,
+    CANDIDATE_SCORE_THRESHOLD,
 )
 from .extraction_pdf import (
     extract_from_pdf as _extract_from_pdf,
@@ -279,6 +281,20 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
 
         local, left_idx = _scan_local_left(text, at)
         local, _ = strip_phone_prefix(local, stats)
+
+        # Expand left by a single alphabetic character if a tag break inserted
+        # a space before the first letter of the local part.
+        if left_idx >= 0 and text[left_idx] == " ":
+            if left_idx >= 1:
+                prev = text[left_idx - 1]
+                prev_prev = text[left_idx - 2] if left_idx >= 2 else " "
+                if prev.isalpha() and not prev_prev.isalnum():
+                    local = prev + local
+                    left_idx -= 1
+                    if stats is not None:
+                        stats["left_char_expanded"] = stats.get(
+                            "left_char_expanded", 0
+                        ) + 1
         domain_raw = _scan_domain_right(text, at)
         domain = domain_raw
         if not local or not domain:
@@ -319,8 +335,18 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
 
         final_email = email_v2 if choose_v2 else email_v1
         loc, dom = final_email.split("@", 1)
-        if _valid_local(loc) and _valid_domain(dom):
-            emails.append(final_email)
+        local_ok = _valid_local(loc)
+        domain_ok = _valid_domain(dom)
+        features = {"tld_known": domain_ok}
+        if local_ok and domain_ok:
+            if score_candidate(features) >= CANDIDATE_SCORE_THRESHOLD:
+                emails.append(final_email)
+            else:
+                if stats is not None:
+                    stats["quarantined"] = stats.get("quarantined", 0) + 1
+        else:
+            if stats is not None:
+                stats["quarantined"] = stats.get("quarantined", 0) + 1
 
         i = at + 1
 
@@ -833,6 +859,7 @@ from .extraction_url import (
     extract_bundle_hits,
     extract_sitemap_hits,
     extract_api_hits,
+    ResponseLike,
 )
 
 
@@ -870,7 +897,11 @@ def extract_from_html_stream(
 
 
 def extract_from_url(
-    url: str, stop_event: Optional[object] = None, *, max_depth: int = 2
+    url: str,
+    stop_event: Optional[object] = None,
+    *,
+    max_depth: int = 2,
+    fetch: Callable[[str], ResponseLike] | None = None,
 ) -> tuple[list[EmailHit], Dict]:
     """Загрузить веб-страницу и извлечь e-mail-адреса."""
 
@@ -897,7 +928,7 @@ def extract_from_url(
     }
     hits: List[EmailHit] = []
 
-    html = fetch_url(url, stop_event)
+    html = fetch_url(url, stop_event, fetch=fetch)
     if not html:
         return hits, stats
     source_ref = f"url:{url}"
@@ -936,6 +967,7 @@ def extract_from_url(
                 stats,
                 stop_event=stop_event,
                 max_assets=get("MAX_ASSETS", 8),
+                fetch=fetch,
             )
         )
     if not hits:
@@ -946,6 +978,7 @@ def extract_from_url(
                 stats,
                 stop_event=stop_event,
                 max_docs=get("MAX_DOCS", 30),
+                fetch=fetch,
             )
         )
         hits.extend(
@@ -955,6 +988,7 @@ def extract_from_url(
                 stop_event=stop_event,
                 max_urls=get("MAX_SITEMAP_URLS", 200),
                 max_docs=get("MAX_DOCS", 30),
+                fetch=fetch,
             )
         )
 

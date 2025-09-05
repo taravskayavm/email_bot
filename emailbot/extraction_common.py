@@ -16,6 +16,8 @@ __all__ = [
     "maybe_decode_base64",
     "is_valid_domain",
     "filter_invalid_tld",
+    "score_candidate",
+    "CANDIDATE_SCORE_THRESHOLD",
 ]
 
 # Mapping of Cyrillic homoglyphs to their Latin counterparts
@@ -243,3 +245,36 @@ def filter_invalid_tld(emails: list[str]) -> tuple[list[str], dict]:
         else:
             dropped += 1
     return valid, {"invalid_tld": dropped}
+
+
+def score_candidate(features: dict) -> int:
+    """Compute a simple score for a candidate e-mail address.
+
+    The score is a sum of feature weights.  Currently only a handful of
+    lightweight heuristics is implemented which allows the caller to decide
+    whether the candidate should be accepted or placed into quarantine.
+
+    Parameters
+    ----------
+    features:
+        Mapping describing properties of the candidate.  Supported keys:
+
+        ``tld_known`` (bool)
+            ``True`` if the domain has a known TLD.
+
+    Returns
+    -------
+    int
+        Calculated score.
+    """
+
+    score = 0
+    if features.get("tld_known"):
+        score += 1
+    return score
+
+
+# Minimal score required for a candidate to be accepted.  Lower-scored
+# addresses are put into a quarantine bucket and are not returned by the
+# extractor.
+CANDIDATE_SCORE_THRESHOLD = 1

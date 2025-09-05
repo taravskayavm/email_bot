@@ -6,3 +6,5 @@ repos:
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace
+      - id: forbid-binary
+        files: "\\.(pdf|docx|xlsx|zip)$"
