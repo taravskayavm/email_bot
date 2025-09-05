@@ -26,6 +26,7 @@ from .extraction_common import (
     preprocess_text,
     is_valid_domain,
     filter_invalid_tld,
+    strip_phone_prefix,
 )
 from .extraction_pdf import (
     extract_from_pdf as _extract_from_pdf,
@@ -252,7 +253,7 @@ def _multi_prefix_mode(text: str) -> bool:
 
 # ====================== ОСНОВНАЯ ФУНКЦИЯ ======================
 
-def smart_extract_emails(text: str) -> List[str]:
+def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
     """
     Возвращает список e-mail из «грязного» текста (PDF/ZIP), очищая:
     - префиксные сноски (1/a/б/… без скобок) перед адресами;
@@ -260,7 +261,7 @@ def smart_extract_emails(text: str) -> List[str]:
     - переносы строк и типографику внутри адресов.
     Не режет валидный local-part (поддержаны все символы RFC atext).
     """
-    text = preprocess_text(text)
+    text = preprocess_text(text, stats)
     low_text = text.lower()
     multi_mode = _multi_prefix_mode(text)
 
@@ -277,6 +278,7 @@ def smart_extract_emails(text: str) -> List[str]:
             break
 
         local, left_idx = _scan_local_left(text, at)
+        local, _ = strip_phone_prefix(local, stats)
         domain_raw = _scan_domain_right(text, at)
         domain = domain_raw
         if not local or not domain:
@@ -306,7 +308,10 @@ def smart_extract_emails(text: str) -> List[str]:
                 list_context = bool(_LIST_MARKER_RE.search(left_slice))
 
                 if prefix_char.isdigit():
-                    choose_v2 = True  # цифра-сноска — всегда
+                    if prefix_char == "1":
+                        choose_v2 = True
+                    elif prefix_char == "2" and not local2[:1].isdigit():
+                        choose_v2 = True
                 elif prefix_char.lower() in {"a", "b", "c"} and (
                     list_context or multi_mode
                 ):
@@ -380,8 +385,8 @@ def extract_emails_manual(text: str) -> list[str]:
 
 
 # Чтобы сохранить обратную совместимость
-def extract_emails_document(text: str) -> list[str]:
-    return smart_extract_emails(text)
+def extract_emails_document(text: str, stats: Dict[str, int] | None = None) -> list[str]:
+    return smart_extract_emails(text, stats)
 
 
 # ====================== ФАЙЛЫ И САЙТЫ ======================
@@ -498,7 +503,7 @@ def extract_from_docx(path: str, stop_event: Optional[object] = None) -> tuple[l
 
     def flush(page_text: str, page_no: int) -> None:
         low = page_text.lower()
-        for email in extract_emails_document(page_text):
+        for email in extract_emails_document(page_text, stats):
             for m in re.finditer(re.escape(email), low):
                 start, end = m.span()
                 pre = page_text[max(0, start - 16) : start]
@@ -547,16 +552,16 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
 
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         hits: List[EmailHit] = []
-        cells = 0
+        stats: Dict[str, int] = {"cells": 0}
         try:
             for ws in wb.worksheets:
                 for r_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
                     if stop_event and getattr(stop_event, "is_set", lambda: False)():
                         break
                     for c_idx, val in enumerate(row, 1):
-                        cells += 1
+                        stats["cells"] += 1
                         if isinstance(val, str):
-                            for e in extract_emails_document(val):
+                            for e in extract_emails_document(val, stats):
                                 coord = f"{get_column_letter(c_idx)}{r_idx}"
                                 ref = f"xlsx:{path}!{ws.title}:{coord}"
                                 hits.append(
@@ -567,7 +572,6 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
                 wb.close()
             except Exception:
                 pass
-        stats = {"cells": cells}
         hits = _postprocess_hits(hits, stats)
     except Exception:
         # Fallback: parse XML inside zip
@@ -575,7 +579,7 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
         import re
 
         hits: List[EmailHit] = []
-        cells = 0
+        stats = {"cells": 0}
         try:
             with zipfile.ZipFile(path) as z:
                 for name in z.namelist():
@@ -583,12 +587,11 @@ def extract_from_xlsx(path: str, stop_event: Optional[object] = None) -> tuple[l
                         continue
                     xml = z.read(name).decode("utf-8", "ignore")
                     for txt in re.findall(r">([^<>]+)<", xml):
-                        cells += 1
-                        for e in extract_emails_document(txt):
+                        stats["cells"] += 1
+                        for e in extract_emails_document(txt, stats):
                             hits.append(EmailHit(email=e, source_ref=f"xlsx:{path}", origin="direct_at"))
         except Exception:
             return [], {"errors": ["cannot open"]}
-        stats = {"cells": cells}
         hits = _postprocess_hits(hits, stats)
 
     stats["mode"] = "file"
@@ -606,7 +609,7 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
 
     start = time.monotonic()
     hits: List[EmailHit] = []
-    lines = 0
+    stats: Dict[str, int] = {"lines": 0}
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == ".csv":
@@ -615,13 +618,18 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
                 for row in reader:
                     if stop_event and getattr(stop_event, "is_set", lambda: False)():
                         break
-                    lines += 1
+                    stats["lines"] += 1
                     for cell in row:
                         s = str(cell)
-                        for e in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", s):
+                        for e in re.findall(
+                            r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                            s,
+                        ):
+                            email = e
+                            email, _ = strip_phone_prefix(email, stats)
                             hits.append(
                                 EmailHit(
-                                    email=e,
+                                    email=email,
                                     source_ref=f"{ext.lstrip('.')}:{path}",
                                     origin="direct_at",
                                 )
@@ -631,18 +639,22 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
                 for line in f:
                     if stop_event and getattr(stop_event, "is_set", lambda: False)():
                         break
-                    lines += 1
-                    for e in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", line):
+                    stats["lines"] += 1
+                    for e in re.findall(
+                        r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                        line,
+                    ):
+                        email = e
+                        email, _ = strip_phone_prefix(email, stats)
                         hits.append(
                             EmailHit(
-                                email=e,
+                                email=email,
                                 source_ref=f"{ext.lstrip('.')}:{path}",
                                 origin="direct_at",
                             )
                         )
     except Exception:
         return [], {"errors": ["cannot open"]}
-    stats = {"lines": lines}
     hits = _postprocess_hits(hits, stats)
     stats["mode"] = "file"
     stats["entry"] = path
@@ -678,7 +690,7 @@ def extract_from_docx_stream(
 
     def flush(page_text: str, page_no: int) -> None:
         low = page_text.lower()
-        for email in extract_emails_document(page_text):
+        for email in extract_emails_document(page_text, stats):
             for m in re.finditer(re.escape(email), low):
                 start, end = m.span()
                 pre = page_text[max(0, start - 16) : start]
@@ -726,16 +738,16 @@ def extract_from_xlsx_stream(
 
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         hits: List[EmailHit] = []
-        cells = 0
+        stats: Dict[str, int] = {"cells": 0}
         try:
             for ws in wb.worksheets:
                 for r_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
                     if stop_event and getattr(stop_event, "is_set", lambda: False)():
                         break
                     for c_idx, val in enumerate(row, 1):
-                        cells += 1
+                        stats["cells"] += 1
                         if isinstance(val, str):
-                            for e in extract_emails_document(val):
+                            for e in extract_emails_document(val, stats):
                                 coord = f"{get_column_letter(c_idx)}{r_idx}"
                                 ref = f"{source_ref}!{ws.title}:{coord}"
                                 hits.append(
@@ -746,8 +758,6 @@ def extract_from_xlsx_stream(
                 wb.close()
             except Exception:
                 pass
-        stats = {"cells": cells}
-
         hits = _postprocess_hits(hits, stats)
 
         return hits, stats
@@ -756,7 +766,7 @@ def extract_from_xlsx_stream(
         import zipfile
 
         hits: List[EmailHit] = []
-        cells = 0
+        stats = {"cells": 0}
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 for name in z.namelist():
@@ -764,15 +774,13 @@ def extract_from_xlsx_stream(
                         continue
                     xml = z.read(name).decode("utf-8", "ignore")
                     for txt in re.findall(r">([^<>]+)<", xml):
-                        cells += 1
-                        for e in extract_emails_document(txt):
+                        stats["cells"] += 1
+                        for e in extract_emails_document(txt, stats):
                             hits.append(
                                 EmailHit(email=e, source_ref=source_ref, origin="direct_at")
                             )
         except Exception:
             return [], {"errors": ["cannot open"]}
-        stats = {"cells": cells}
-
         hits = _postprocess_hits(hits, stats)
 
         return hits, stats
@@ -785,28 +793,31 @@ def extract_from_csv_or_text_stream(
     import io
     import re
 
-    pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    pattern = r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     hits: List[EmailHit] = []
-    lines = 0
+    stats: Dict[str, int] = {"lines": 0}
     text = data.decode("utf-8", "ignore")
     if ext == ".csv":
         reader = csv.reader(io.StringIO(text))
         for row in reader:
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 break
-            lines += 1
+            stats["lines"] += 1
             for cell in row:
                 s = str(cell)
                 for e in re.findall(pattern, s):
-                    hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
+                    email = e
+                    email, _ = strip_phone_prefix(email, stats)
+                    hits.append(EmailHit(email=email, source_ref=source_ref, origin="direct_at"))
     else:
         for line in io.StringIO(text):
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 break
-            lines += 1
+            stats["lines"] += 1
             for e in re.findall(pattern, line):
-                hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
-    stats = {"lines": lines}
+                email = e
+                email, _ = strip_phone_prefix(email, stats)
+                hits.append(EmailHit(email=email, source_ref=source_ref, origin="direct_at"))
 
     hits = _postprocess_hits(hits, stats)
 
@@ -850,7 +861,7 @@ def extract_from_html_stream(
         hits.append(EmailHit(email=email, source_ref=source_ref, origin="cfemail"))
         stats["cfemail_decoded"] += 1
     text = strip_html(html)
-    for e in extract_emails_document(text):
+    for e in extract_emails_document(text, stats):
         hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
     obf_hits = extract_obfuscated_hits(text, source_ref, stats)
     stats["obfuscated_hits"] = len(obf_hits)
@@ -909,7 +920,7 @@ def extract_from_url(
         )
         stats["cfemail_decoded"] += 1
     text = strip_html(html)
-    for e in extract_emails_document(text):
+    for e in extract_emails_document(text, stats):
         hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
     obf_hits = extract_obfuscated_hits(text, source_ref, stats)
     stats["obfuscated_hits"] += len(obf_hits)
@@ -1030,7 +1041,7 @@ def extract_any(
             hits.append(EmailHit(email=email, source_ref=source_ref, origin="cfemail"))
             stats["cfemail_decoded"] += 1
         text = strip_html(html)
-        for e in extract_emails_document(text):
+        for e in extract_emails_document(text, stats):
             hits.append(EmailHit(email=e, source_ref=source_ref, origin="direct_at"))
         obf_hits = extract_obfuscated_hits(text, source_ref, stats)
         stats["obfuscated_hits"] = len(obf_hits)
@@ -1049,7 +1060,7 @@ def extract_any(
         text = f.read()
     hits = [
         EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
-        for e in extract_emails_document(text)
+        for e in extract_emails_document(text, stats)
     ]
     stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
@@ -1086,7 +1097,7 @@ def extract_any_stream(
     text = data.decode("utf-8", "ignore")
     hits = [
         EmailHit(email=e, source_ref=source_ref, origin="direct_at")
-        for e in extract_emails_document(text)
+        for e in extract_emails_document(text, stats)
     ]
     stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)

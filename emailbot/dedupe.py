@@ -116,21 +116,7 @@ def repair_footnote_singletons(
                 out.append(h)
                 stats["footnote_guard_skips"] += 1
                 continue
-            first = local[0]
-            try:
-                if unicodedata.digit(prev) != unicodedata.digit(first):
-                    out.append(h)
-                    stats["footnote_guard_skips"] += 1
-                    continue
-            except Exception:
-                out.append(h)
-                stats["footnote_guard_skips"] += 1
-                continue
             rest = local[1:]
-            if len(rest) < 3 or not any(c.isalpha() for c in rest):
-                out.append(h)
-                stats["footnote_guard_skips"] += 1
-                continue
             new_meta = dict(h.meta)
             new_meta["repaired"] = True
             out.append(
