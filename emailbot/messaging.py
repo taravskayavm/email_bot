@@ -6,13 +6,15 @@ import asyncio
 import csv
 import email
 import imaplib
+import json
 import logging
 import os
 import re
 import time
 import secrets
 import smtplib
-from datetime import datetime, timedelta
+import hashlib
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
@@ -78,6 +80,11 @@ IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
+_batch_idempotency: Set[str] = set()
+
+# Persistent idempotency storage (24h)
+MODULE_DIR = Path(__file__).resolve().parent
+SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
 _sent_idempotency: Set[str] = set()
 
 
@@ -153,10 +160,99 @@ def _register_send(recipient: str, batch_id: str | None) -> bool:
     if not batch_id:
         return True
     key = f"{normalize_email(recipient)}|{batch_id}"
-    if key in _sent_idempotency:
+    if key in _batch_idempotency:
         return False
-    _sent_idempotency.add(key)
+    _batch_idempotency.add(key)
     return True
+
+
+# === Blocklist helper ===
+_DEFAULT_BLOCK_PARTS = [
+    "no-reply",
+    "noreply",
+    "do-not-reply",
+    "mailer-daemon",
+    "postmaster",
+    "webmaster",
+    "admin@",
+]
+
+
+def _is_blocklisted(email: str) -> bool:
+    e = (email or "").lower()
+    parts = set(_DEFAULT_BLOCK_PARTS)
+    if os.getenv("FILTER_SUPPORT", "0") == "1":
+        parts.add("support@")
+    extra = os.getenv("FILTER_BLOCKLIST", "")
+    if extra:
+        for token in extra.split(","):
+            token = token.strip().lower()
+            if token:
+                parts.add(token)
+    return any(p in e for p in parts)
+
+
+# === Idempotency (24h persist) ===
+
+
+def _make_send_key(msg) -> str:
+    """Return stable key for a message for the current day."""
+
+    from_ = (msg.get("From") or "").strip().lower()
+    to_ = (msg.get("To") or "").strip().lower()
+    subj = (msg.get("Subject") or "").strip().lower()
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    raw = f"{from_}|{to_}|{subj}|{day}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_sent_ids() -> Set[str]:
+    ids: Set[str] = set()
+    if SENT_IDS_FILE.exists():
+        try:
+            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        key = obj.get("key")
+                        ts = float(obj.get("ts", 0))
+                        if (
+                            datetime.now(timezone.utc).timestamp() - ts
+                        ) <= 86400 and key:
+                            ids.add(key)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    return ids
+
+
+def _persist_sent_key(key: str) -> None:
+    try:
+        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps({"key": key, "ts": datetime.now(timezone.utc).timestamp()})
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+def was_sent_recently(msg) -> bool:
+    global _sent_idempotency
+    if not _sent_idempotency:
+        _sent_idempotency = _load_sent_ids()
+    key = _make_send_key(msg)
+    return key in _sent_idempotency
+
+
+def mark_sent(msg) -> None:
+    key = _make_send_key(msg)
+    _sent_idempotency.add(key)
+    _persist_sent_key(key)
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
