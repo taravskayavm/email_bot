@@ -180,6 +180,38 @@ FORCE_SEND_CHAT_IDS: set[int] = set()
 SESSION_KEY = "state"
 
 
+# === Конфиг для ручной рассылки (правило 180 дней) ===
+def _manual_cfg():
+    import os
+
+    enforce = os.getenv("MANUAL_ENFORCE_180", "1") == "1"
+    try:
+        days = int(os.getenv("MANUAL_DAYS", "180"))
+    except Exception:
+        days = 180
+    allow_override = os.getenv("MANUAL_ALLOW_OVERRIDE", "1") == "1"
+    return enforce, days, allow_override
+
+
+def _filter_by_180(
+    emails: list[str], group: str, days: int
+) -> tuple[list[str], list[str]]:
+    """Разделяет список на разрешённые и отклонённые по правилу N дней."""
+
+    allowed: list[str] = []
+    rejected: list[str] = []
+    for e in emails:
+        try:
+            if was_sent_within(e, days=days):  # True если было письмо за N дней
+                rejected.append(e)
+            else:
+                allowed.append(e)
+        except Exception:
+            # в случае ошибки проверки — перестрахуемся и разрешим
+            allowed.append(e)
+    return allowed, rejected
+
+
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
     """Initialize session state for the current chat."""
     state = SessionState()
@@ -803,7 +835,7 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     chat_id = update.effective_chat.id
     init_state(context)
-    context.user_data.pop("manual_emails", None)
+    context.chat_data.pop("manual_all_emails", None)
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
@@ -1080,7 +1112,12 @@ async def prompt_manual_email(
     """Ask the user to enter e-mail addresses manually."""
 
     clear_all_awaiting(context)
-    context.user_data.pop("manual_emails", None)
+    context.chat_data.pop("manual_all_emails", None)
+    context.chat_data.pop("manual_send_mode", None)
+    context.chat_data.pop("manual_allowed_preview", None)
+    context.chat_data.pop("manual_rejected_preview", None)
+    context.chat_data.pop("manual_selected_group", None)
+    context.chat_data.pop("manual_selected_emails", None)
     await update.message.reply_text(
         (
             "Введите email или список email-адресов "
@@ -1107,20 +1144,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if context.user_data.get("awaiting_manual_email"):
         emails = parse_manual_input(text)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
-        if emails:
-            context.user_data["manual_emails"] = emails
-            context.user_data["awaiting_manual_email"] = False
-            keyboard = [
-                [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
-                [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
-                [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
-            ]
-            await update.message.reply_text(
-                f"К отправке: {', '.join(emails)}\n\n⬇️ Выберите направление письма:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
+        if not emails:
             await update.message.reply_text("❌ Не найдено ни одного email.")
+            return
+
+        # Скрываем список адресов: считаем только количества
+        context.user_data["awaiting_manual_email"] = False
+        context.chat_data["manual_all_emails"] = emails
+        context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
+
+        group_kb = [
+            [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
+            [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
+            [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
+        ]
+
+        enforce, days, allow_override = _manual_cfg()
+        if enforce:
+            allowed, rejected = _filter_by_180(emails, group="", days=days)
+        else:
+            allowed, rejected = (emails, [])
+
+        context.chat_data["manual_allowed_preview"] = allowed
+        context.chat_data["manual_rejected_preview"] = rejected
+        lines = ["Адреса получены.", f"К отправке (предварительно): {len(allowed)}"]
+        if rejected:
+            lines.append(f"Отфильтровано по правилу {days} дней: {len(rejected)}")
+
+        mode_row = []
+        if allow_override and rejected:
+            mode_row = [
+                InlineKeyboardButton(
+                    "Отправить только разрешённым", callback_data="manual_mode_allowed"
+                ),
+                InlineKeyboardButton(
+                    "Отправить всем", callback_data="manual_mode_all"
+                ),
+            ]
+        keyboard = [*group_kb]
+        if mode_row:
+            keyboard.append(mode_row)
+        keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
+
+        await update.message.reply_text(
+            "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -1380,21 +1449,70 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.message.reply_text("🧩 Возможные исправления:\n" + "\n".join(chunk))
 
 
+async def manual_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выбор режима отправки в ручной рассылке."""
+
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    context.chat_data["manual_send_mode"] = (
+        "allowed" if data.endswith("allowed") else "all"
+    )
+    await query.message.reply_text(
+        "Режим установлен: "
+        + (
+            "только разрешённым ✅"
+            if data.endswith("allowed")
+            else "всем (игнорировать 180 дней) ⚠️"
+        )
+    )
+
+
+async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сброс состояния ручной рассылки."""
+
+    query = update.callback_query
+    await query.answer()
+    clear_all_awaiting(context)
+    init_state(context)
+    await query.message.reply_text(
+        "Сброшено. Нажмите /manual для новой ручной рассылки."
+    )
+
+
 async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send e-mails entered manually by the user."""
 
     query = update.callback_query
     await query.answer()
-    emails = context.user_data.get("manual_emails", [])
+    emails = context.chat_data.get("manual_all_emails") or []
+    mode = context.chat_data.get("manual_send_mode", "allowed")
+    group_code = query.data.split("_")[2]
+
+    enforce, days, _ = _manual_cfg()
+    if enforce and mode == "allowed":
+        allowed, rejected = _filter_by_180(list(emails), group_code, days)
+        to_send = allowed
+    else:
+        to_send = list(emails)
+        rejected = []
+
     if not emails:
         await query.message.reply_text("❗ Список email пуст.")
         return
 
+    await query.message.reply_text(
+        f"Направление: {group_code}\nК отправке: {len(to_send)}"
+        + (
+            f"\nОтфильтровано по правилу {days} дней: {len(rejected)}"
+            if rejected
+            else ""
+        )
+    )
     await query.message.reply_text("Запущено — выполняю в фоне...")
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
-        group_code = query.data.split("_")[2]
         template_path = TEMPLATE_MAP[group_code]
 
         # manual отправка не учитывает супресс-лист
@@ -1411,7 +1529,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        to_send = list(emails)
+        to_send_local = list(to_send)
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
@@ -1427,8 +1545,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
             )
             return
-        if not is_force_send(chat_id) and len(to_send) > available:
-            to_send = to_send[:available]
+        if not is_force_send(chat_id) and len(to_send_local) > available:
+            to_send_local = to_send_local[:available]
             await query.message.reply_text(
                 (
                     f"⚠️ Учитываю дневной лимит: будет отправлено "
@@ -1437,7 +1555,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
 
         await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+            f"✉️ Рассылка начата. Отправляем {len(to_send_local)} писем..."
         )
 
         sent_count = 0
@@ -1446,7 +1564,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
-            for email_addr in to_send:
+            for email_addr in to_send_local:
                 if cancel_event and cancel_event.is_set():
                     break
                 try:
@@ -1492,7 +1610,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if errors:
             await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
 
-        context.user_data["manual_emails"] = []
+        context.chat_data["manual_all_emails"] = []
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
@@ -1776,6 +1894,8 @@ __all__ = [
     "show_foreign_list",
     "apply_repairs",
     "show_repairs",
+    "manual_mode",
+    "manual_reset",
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",
