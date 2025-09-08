@@ -36,6 +36,7 @@ from .messaging_utils import (
     save_seen_events,
     was_sent_within,
     SYNC_SEEN_EVENTS_PATH,
+    detect_sent_folder,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,22 @@ def _read_template_file(path: str) -> str:
         return f.read()
 
 
+def log_domain_rate_limit(domain: str, sleep_s: float) -> None:
+    """Log diagnostic message for per-domain rate limiting.
+
+    The real sending code sleeps for ``sleep_s`` seconds; in tests we pass
+    ``0`` to avoid delays and simply verify that the log entry is emitted.
+    """
+
+    try:
+        sleep_s = float(sleep_s)
+    except Exception:
+        sleep_s = 0.0
+    logging.getLogger(__name__).info(
+        "rate-limit: sleeping %.3fs for domain %s", sleep_s, domain
+    )
+
+
 def _extract_fonts(html: str) -> tuple[str, int]:
     """Return font-family and base font-size from the HTML template.
 
@@ -124,7 +141,7 @@ def _rate_limit_domain(recipient: str) -> None:
         elapsed = now - last
         if elapsed < _DOMAIN_RATE_LIMIT:
             pause = _DOMAIN_RATE_LIMIT - elapsed
-            logger.info("Domain %s rate limit: sleeping %.2fs", domain, pause)
+            log_domain_rate_limit(domain, pause)
             time.sleep(pause)
             now = last + _DOMAIN_RATE_LIMIT
     _last_domain_send[domain] = now
