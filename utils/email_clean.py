@@ -80,9 +80,6 @@ def sanitize_email(email: str) -> str:
 
     local, domain = s.split('@', 1)
     local = local.replace(',', '.')   # ошибки OCR: запятая вместо точки
-    for part in local.split('.'):
-        if any(part.startswith(tld) and len(part) > len(tld) for tld in _TLD_PREFIXES):
-            return ""
     # убираем сноску в начале
     cleaned = _strip_leading_footnote(local)
     # убираем мусорные тире/точки по краям, оставшиеся от переносов
