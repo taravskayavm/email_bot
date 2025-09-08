@@ -1106,28 +1106,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if context.user_data.get("awaiting_manual_email"):
         emails = parse_manual_input(text)
-        logger.info(
-            "Manual input parsing: raw=%r emails=%r",
-            text,
-            emails,
-        )
+        logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if emails:
             context.user_data["manual_emails"] = emails
             context.user_data["awaiting_manual_email"] = False
             keyboard = [
                 [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
                 [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
-                [
-                    InlineKeyboardButton(
-                        "🩺 Медицина", callback_data="manual_group_медицина"
-                    )
-                ],
+                [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
             ]
             await update.message.reply_text(
-                (
-                    f"К отправке: {', '.join(emails)}\n\n"
-                    "⬇️ Выберите направление письма:"
-                ),
+                f"К отправке: {', '.join(emails)}\n\n⬇️ Выберите направление письма:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
