@@ -75,6 +75,7 @@ SIGNATURE_TEXT = (
 )
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 
 IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
@@ -738,6 +739,26 @@ def get_sent_today() -> Set[str]:
 
 def count_sent_today() -> int:
     return len(get_sent_today())
+
+
+def start_manual_mass_send(group: str, emails: List[str], *args, **kwargs) -> None:
+    logger.info("Manual mass send: group=%s count=%d", group, len(emails))
+    # Guard от пустых рассылок
+    if not emails:
+        logger.info("Manual mass send skipped: empty recipient list")
+        notify_user("Отправка не запущена: нет адресов для отправки.")
+        return
+    notify_user("Запущено — выполняю в фоне...")
+    notify_user(f"✉️ Рассылка начата. Отправляем {len(emails)} писем...")
+
+    messages = kwargs.get("messages", [])
+    sent = _send_batch(
+        messages,
+        host=SMTP_HOST,
+        user=EMAIL_ADDRESS,
+        password=EMAIL_PASSWORD,
+    )
+    notify_user(f"✅ Отправлено писем: {sent}")
 
 
 def prepare_mass_mailing(emails: list[str]):
