@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+import base64
 import csv
+import email.utils
+import imaplib  # noqa: F401
 import logging
 import os
 import re
-import time
 import shutil
-import email.utils
-import base64
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Iterable, Tuple, Literal
+from typing import Dict, Iterable, List, Literal, Tuple
 
-from .tld_registry import tld_of
 from .extraction_common import normalize_email as _normalize_email
+from .tld_registry import tld_of
 
-SUPPRESS_PATH = Path("/mnt/data/suppress_list.csv")  # e-mail, code, reason, first_seen, last_seen, hits
-BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")   # ts, email, code, msg, phase
+SUPPRESS_PATH = Path(
+    "/mnt/data/suppress_list.csv"
+)  # e-mail, code, reason, first_seen, last_seen, hits
+BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")  # ts, email, code, msg, phase
 SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
 
 logger = logging.getLogger(__name__)
@@ -70,9 +73,7 @@ def _decode_modified_utf7(s: str) -> str:
             else:
                 chunk = s[i + 1 : j].replace(",", "/")
                 pad = "=" * (-len(chunk) % 4)
-                res.append(
-                    base64.b64decode(chunk + pad).decode("utf-16-be", "ignore")
-                )
+                res.append(base64.b64decode(chunk + pad).decode("utf-16-be", "ignore"))
             i = j + 1
         else:
             res.append(c)
@@ -88,9 +89,12 @@ def _encode_modified_utf7(s: str) -> str:
         if ord(part[0]) < 128:
             res.append(part.replace("&", "&-"))
         else:
-            b = base64.b64encode(part.encode("utf-16-be")).decode("ascii").replace(
-                "/", ","
-            ).rstrip("=")
+            b = (
+                base64.b64encode(part.encode("utf-16-be"))
+                .decode("ascii")
+                .replace("/", ",")
+                .rstrip("=")
+            )
             res.append("&" + b + "-")
     return "".join(res)
 
@@ -175,6 +179,7 @@ def detect_sent_folder(imap) -> str:
         status, data = imap.list()
         if status == "OK" and data:
             for raw in data:
+                # В IMAP имена ящиков в modified UTF-7
                 try:
                     line = raw.decode("imap4-utf-7", "ignore")
                 except LookupError:
@@ -186,18 +191,13 @@ def detect_sent_folder(imap) -> str:
     # Prefer a folder explicitly flagged as Sent
     for line in candidates:
         if "\\Sent" in line:
+            # Формат: (<flags>) "<sep>" "<mailbox>"
             name = line.rsplit('"', 2)[1] if '"' in line else line.split()[-1]
             try:
-                encoded = name.encode("imap4-utf-7", "ignore").decode(
-                    "ascii", "ignore"
-                )
-            except LookupError:
-                encoded = _encode_modified_utf7(name)
-            try:
-                SENT_CACHE_FILE.write_text(encoded, encoding="utf-8")
+                SENT_CACHE_FILE.write_text(name, encoding="utf-8")
             except Exception:
                 pass
-            return encoded
+            return name
 
     # Common fallbacks (English and Russian variants)
     COMMON = ["Sent", "Отправленные", "Отправленные письма"]
@@ -205,16 +205,10 @@ def detect_sent_folder(imap) -> str:
         for name in COMMON:
             if f'"{name}"' in line or line.endswith(name):
                 try:
-                    encoded = name.encode("imap4-utf-7", "ignore").decode(
-                        "ascii", "ignore"
-                    )
-                except LookupError:
-                    encoded = _encode_modified_utf7(name)
-                try:
-                    SENT_CACHE_FILE.write_text(encoded, encoding="utf-8")
+                    SENT_CACHE_FILE.write_text(name, encoding="utf-8")
                 except Exception:
                     pass
-                return encoded
+                return name
 
     # Last resort
     fallback = "Sent"
@@ -225,19 +219,17 @@ def detect_sent_folder(imap) -> str:
     return fallback
 
 
-def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> Tuple[str, object]:
-    """Append a message to the given IMAP *mailbox*.
-
-    It is a very small wrapper around ``imap.append`` that returns the
-    ``(status, data)`` tuple and logs failures instead of propagating
-    exceptions.
+def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> tuple[str, object]:
+    """Выполняет IMAP APPEND в указанную папку 'Отправленные'.
+    Возвращает (status, data).
     """
 
     try:
-        return imap.append(mailbox, "(\\Seen)", None, msg_bytes)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("APPEND to %s failed: %s", mailbox, exc)
-        return "NO", exc
+        # Флаг прочитанности указываем в стандартном виде
+        return imap.append(mailbox, r"(\Seen)", None, msg_bytes)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("APPEND to %s failed: %s", mailbox, e)
+        return "NO", e
 
 
 def _normalize_ts(value: str) -> str:
@@ -305,7 +297,9 @@ def ensure_sent_log_schema(path: str) -> List[str]:
     return all_fields
 
 
-def _atomic_write(path: Path, rows: Iterable[Dict[str, str]], headers: List[str]) -> None:
+def _atomic_write(
+    path: Path, rows: Iterable[Dict[str, str]], headers: List[str]
+) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
@@ -425,7 +419,9 @@ def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     headers = ["key", "email", "last_sent_at", "source"]
     if best:
         extra_fields = set().union(*(r.keys() for r in best.values()))
-        headers = [h for h in headers if h in extra_fields] + [h for h in extra_fields if h not in headers]
+        headers = [h for h in headers if h in extra_fields] + [
+            h for h in extra_fields if h not in headers
+        ]
     bak = p.with_suffix(p.suffix + ".bak")
     if p.exists() and not bak.exists():
         shutil.copy2(p, bak)
@@ -497,7 +493,12 @@ def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
         )
     logger.info(
         "bounce recorded",
-        extra={"event": "bounce", "email": (email or "").lower().strip(), "code": code, "phase": phase},
+        extra={
+            "event": "bounce",
+            "email": (email or "").lower().strip(),
+            "code": code,
+            "phase": phase,
+        },
     )
 
 
@@ -510,7 +511,11 @@ def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
         except Exception:
             pass
     if msg:
-        text = msg.decode("utf-8", "ignore") if isinstance(msg, (bytes, bytearray)) else str(msg)
+        text = (
+            msg.decode("utf-8", "ignore")
+            if isinstance(msg, (bytes, bytearray))
+            else str(msg)
+        )
         m = re.search(r"\b(\d{3})\b", text)
         if m:
             try:
@@ -530,8 +535,7 @@ def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
         if 400 <= icode < 500:
             return False
     m = (
-        (msg or b"")
-        .decode("utf-8", "ignore")
+        (msg or b"").decode("utf-8", "ignore")
         if isinstance(msg, (bytes, bytearray))
         else (msg or "")
     ).lower()
@@ -563,8 +567,7 @@ def is_soft_bounce(code: int | None, msg: str | bytes | None) -> bool:
             return False
 
     m = (
-        (msg or b"")
-        .decode("utf-8", "ignore")
+        (msg or b"").decode("utf-8", "ignore")
         if isinstance(msg, (bytes, bytearray))
         else (msg or "")
     ).lower()
