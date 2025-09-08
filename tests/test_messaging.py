@@ -376,7 +376,7 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     assert len(sent) == 1
 
 
-def test_domain_rate_limit(monkeypatch):
+def test_domain_rate_limit(monkeypatch, caplog):
     times = [0, 0]
 
     def fake_monotonic():
@@ -405,9 +405,12 @@ def test_domain_rate_limit(monkeypatch):
     monkeypatch.setattr(messaging.time, "sleep", fake_sleep)
     messaging._last_domain_send.clear()
 
-    messaging.send_raw_smtp_with_retry("m", "a@example.com")
-    messaging.send_raw_smtp_with_retry("m", "b@example.com")
+    with caplog.at_level(logging.INFO):
+        messaging.send_raw_smtp_with_retry("m", "a@example.com")
+        messaging.send_raw_smtp_with_retry("m", "b@example.com")
+
     assert sleeps and sleeps[0] >= messaging._DOMAIN_RATE_LIMIT
+    assert any("rate limit" in r.message for r in caplog.records)
 
 
 def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
