@@ -1,4 +1,19 @@
-<<<<<<< HEAD
+# локальная конфигурация/секреты
+.env
+*.env
+blocked_emails.txt
+imap_sent_folder.txt
+emailbot/sent_ids.jsonl
+bot_errors.log
+sent_log.csv
+downloads/*
+!downloads/.gitkeep
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -206,19 +221,3 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-=======
-.env
-blocked_emails.txt
-bot_errors.log
-sent_log.csv
-downloads/*
-!downloads/.gitkeep
-__pycache__/
-*.pyc
-.venv/
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.log
->>>>>>> 51d698b (Initial commit)
