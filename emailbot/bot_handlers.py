@@ -1487,9 +1487,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
-    group_code = query.data.split("_")[2]
+    group_code = query.data.split("manual_group_", 1)[-1]
 
-    enforce, days, _ = _manual_cfg()
+    enforce, days, allow_override = _manual_cfg()
     if enforce and mode == "allowed":
         allowed, rejected = _filter_by_180(list(emails), group_code, days)
         to_send = allowed
@@ -1497,18 +1497,40 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         to_send = list(emails)
         rejected = []
 
+    # Если вообще нет исходных адресов — подскажем и выйдем
     if not emails:
-        await query.message.reply_text("❗ Список email пуст.")
+        await query.message.reply_text(
+            "Список адресов пуст. Нажмите /manual и введите адреса."
+        )
         return
 
+    # Сообщение без раскрытия адресов — только счётчики
     await query.message.reply_text(
         f"Направление: {group_code}\nК отправке: {len(to_send)}"
         + (
-            f"\nОтфильтровано по правилу {days} дней: {len(rejected)}"
+            f"\nОтфильтровано по правилу 180 дней: {len(rejected)}"
             if rejected
             else ""
         )
     )
+
+    # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
+    if len(to_send) == 0:
+        if allow_override and len(rejected) > 0:
+            await query.message.reply_text(
+                "Все адреса были отфильтрованы правилом 180 дней.\n"
+                "Вы можете нажать «Отправить всем» для игнорирования правила."
+            )
+        else:
+            await query.message.reply_text(
+                "Все адреса были отфильтрованы правилом 180 дней. Отправка не запущена."
+            )
+        return
+
+    # Сохраняем выбранный набор; дальнейшая логика подхватит эти значения
+    context.chat_data["manual_selected_group"] = group_code
+    context.chat_data["manual_selected_emails"] = to_send
+
     await query.message.reply_text("Запущено — выполняю в фоне...")
 
     async def long_job() -> None:
