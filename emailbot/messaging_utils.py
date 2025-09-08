@@ -7,6 +7,7 @@ import re
 import time
 import shutil
 import email.utils
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Iterable, Tuple, Literal
@@ -53,6 +54,45 @@ class SecretFilter(logging.Filter):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _decode_modified_utf7(s: str) -> str:
+    res: list[str] = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "&":
+            j = i + 1
+            while j < len(s) and s[j] != "-":
+                j += 1
+            if j == i + 1:
+                res.append("&")
+            else:
+                chunk = s[i + 1 : j].replace(",", "/")
+                pad = "=" * (-len(chunk) % 4)
+                res.append(
+                    base64.b64decode(chunk + pad).decode("utf-16-be", "ignore")
+                )
+            i = j + 1
+        else:
+            res.append(c)
+            i += 1
+    return "".join(res)
+
+
+def _encode_modified_utf7(s: str) -> str:
+    res: list[str] = []
+    for part in re.split(r"([\u0080-\uFFFF]+)", s):
+        if not part:
+            continue
+        if ord(part[0]) < 128:
+            res.append(part.replace("&", "&-"))
+        else:
+            b = base64.b64encode(part.encode("utf-16-be")).decode("ascii").replace(
+                "/", ","
+            ).rstrip("=")
+            res.append("&" + b + "-")
+    return "".join(res)
 
 
 REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
@@ -135,7 +175,10 @@ def detect_sent_folder(imap) -> str:
         status, data = imap.list()
         if status == "OK" and data:
             for raw in data:
-                line = raw.decode("utf-8", "ignore")
+                try:
+                    line = raw.decode("imap4-utf-7", "ignore")
+                except LookupError:
+                    line = _decode_modified_utf7(raw.decode("ascii", "ignore"))
                 candidates.append(line)
     except Exception:
         candidates = []
@@ -145,10 +188,16 @@ def detect_sent_folder(imap) -> str:
         if "\\Sent" in line:
             name = line.rsplit('"', 2)[1] if '"' in line else line.split()[-1]
             try:
-                SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+                encoded = name.encode("imap4-utf-7", "ignore").decode(
+                    "ascii", "ignore"
+                )
+            except LookupError:
+                encoded = _encode_modified_utf7(name)
+            try:
+                SENT_CACHE_FILE.write_text(encoded, encoding="utf-8")
             except Exception:
                 pass
-            return name
+            return encoded
 
     # Common fallbacks (English and Russian variants)
     COMMON = ["Sent", "Отправленные", "Отправленные письма"]
@@ -156,10 +205,16 @@ def detect_sent_folder(imap) -> str:
         for name in COMMON:
             if f'"{name}"' in line or line.endswith(name):
                 try:
-                    SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+                    encoded = name.encode("imap4-utf-7", "ignore").decode(
+                        "ascii", "ignore"
+                    )
+                except LookupError:
+                    encoded = _encode_modified_utf7(name)
+                try:
+                    SENT_CACHE_FILE.write_text(encoded, encoding="utf-8")
                 except Exception:
                     pass
-                return name
+                return encoded
 
     # Last resort
     fallback = "Sent"
@@ -179,7 +234,7 @@ def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> Tuple[str, object]:
     """
 
     try:
-        return imap.append(mailbox, None, None, msg_bytes)
+        return imap.append(mailbox, "(\\Seen)", None, msg_bytes)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("APPEND to %s failed: %s", mailbox, exc)
         return "NO", exc

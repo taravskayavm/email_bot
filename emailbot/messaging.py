@@ -39,6 +39,7 @@ from .messaging_utils import (
     was_sent_within,
     SYNC_SEEN_EVENTS_PATH,
     detect_sent_folder,
+    append_to_sent,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,12 +262,12 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     if IMAP_FOLDER_FILE.exists():
         name = IMAP_FOLDER_FILE.read_text(encoding="utf-8").strip()
         if name:
-            status, _ = imap.select(f'"{name}"')
+            status, _ = imap.select(name)
             if status == "OK":
                 return name
             logger.warning("Stored sent folder %s not selectable, falling back", name)
     detected = detect_sent_folder(imap)
-    status, _ = imap.select(f'"{detected}"')
+    status, _ = imap.select(detected)
     if status == "OK":
         return detected
     logger.warning("Detected sent folder %s not selectable, using Sent", detected)
@@ -317,17 +318,13 @@ def save_to_sent_folder(
     try:
         close = False
         if imap is None:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            IMAP_HOST = os.getenv("IMAP_HOST")
+            IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
+            EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+            EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+            imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
             imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             close = True
-        if folder is None:
-            folder = get_preferred_sent_folder(imap)
-        status, _ = imap.select(folder)
-        if status != "OK":
-            logger.warning("select %s failed (%s), using Sent", folder, status)
-            folder = "Sent"
-            imap.select(folder)
-
         if isinstance(raw_message, EmailMessage):
             msg_bytes = raw_message.as_bytes()
         elif isinstance(raw_message, bytes):
@@ -335,13 +332,9 @@ def save_to_sent_folder(
         else:
             msg_bytes = raw_message.encode("utf-8")
 
-        res = imap.append(
-            folder,
-            "\\Seen",
-            imaplib.Time2Internaldate(time.time()),
-            msg_bytes,
-        )
-        logger.info("imap.append to %s: %s", folder, res)
+        sent_mb = folder or detect_sent_folder(imap)
+        res = append_to_sent(imap, sent_mb, msg_bytes)
+        logger.info("imap.append to %s: %s", sent_mb, res)
     except Exception as e:
         log_error(f"save_to_sent_folder: {e}")
     finally:
@@ -606,46 +599,6 @@ def log_sent_email(
     _log_cache = None
 
 
-def _parse_list_line(line: bytes):
-    s = line.decode(errors="ignore")
-    m = re.match(r'^\((?P<flags>[^)]*)\)\s+"(?P<delim>[^"]*)"\s+"?(?P<name>.+?)"?$', s)
-    if not m:
-        return None, ""
-    return m.group("name"), m.group("flags")
-
-
-def detect_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
-    status, data = imap.list()
-    folder = "Sent"
-    if status == "OK" and data:
-        candidates: list[str] = []
-        for line in data:
-            name, flags = _parse_list_line(line)
-            if not name:
-                continue
-            lname = name.lower()
-            if "\\Sent" in flags or "\\sent" in flags:
-                candidates.append(name)
-                continue
-            last = re.split(r"[/.]", lname)[-1]
-            if last in {
-                "sent",
-                "sent items",
-                "sent mail",
-                "sent messages",
-                "outbox",
-                "отправленные",
-                "отправленные письма",
-                "исходящие",
-            }:
-                candidates.append(name)
-        if candidates:
-            folder = candidates[0]
-    try:
-        IMAP_FOLDER_FILE.write_text(folder, encoding="utf-8")
-    except Exception:
-        logger.warning("could not write %s", IMAP_FOLDER_FILE, exc_info=True)
-    return folder
 
 
 _log_cache: dict[str, List[datetime]] | None = None
