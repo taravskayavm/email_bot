@@ -144,13 +144,13 @@ def test_handle_text_manual_emails():
 
     assert ctx.user_data["manual_emails"] == [
         "123@site.com",
-        "1test@site.com",
         "support@support.com",
+        "test@site.com",
         "user@example.com",
     ]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert (
-        "К отправке: 123@site.com, 1test@site.com, support@support.com, user@example.com"
+        "К отправке: 123@site.com, support@support.com, test@site.com, user@example.com"
         in update.message.replies[0]
     )
 
