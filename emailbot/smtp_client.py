@@ -14,7 +14,7 @@ class SmtpClient:
         username: str,
         password: str,
         use_ssl: Optional[bool] = None,
-        timeout: int = 15,
+        timeout: Optional[float] = None,
     ):
         self.host = host
         self.port = port
@@ -23,6 +23,11 @@ class SmtpClient:
         if use_ssl is None:
             use_ssl = os.getenv("SMTP_SSL", "0") == "1"
         self.use_ssl = use_ssl
+        if timeout is None:
+            try:
+                timeout = float(os.getenv("SMTP_TIMEOUT", "30"))
+            except Exception:
+                timeout = 30.0
         self.timeout = timeout
         self._server: Optional[smtplib.SMTP] = None
 
