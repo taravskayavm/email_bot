@@ -17,4 +17,5 @@ def test_append_to_sent_calls_imap_append():
     assert imap.append_calls, "APPEND must be called exactly once"
     mb, flags, ts, msg = imap.append_calls[0]
     assert mb == "Sent"
+    assert flags == "(\\Seen)"
     assert b"Body" in msg

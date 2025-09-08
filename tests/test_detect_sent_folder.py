@@ -10,7 +10,7 @@ class DummyImap:
         self._mailboxes = mailboxes
 
     def list(self):
-        return "OK", [mb.encode("utf-8") for mb in self._mailboxes]
+        return "OK", self._mailboxes
 
 
 def test_detect_sent_folder_prefers_flagged_sent(tmp_path, monkeypatch):
@@ -18,27 +18,30 @@ def test_detect_sent_folder_prefers_flagged_sent(tmp_path, monkeypatch):
     monkeypatch.setattr("emailbot.messaging_utils.SENT_CACHE_FILE", tmp_path / "imap_sent_folder.txt")
     imap = DummyImap(
         [
-            '(\\HasNoChildren) "/" "INBOX"',
-            '(\\HasNoChildren \\Sent) "/" "Sent"',
-            '(\\HasNoChildren) "/" "Отправленные"',
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren \\Sent) "/" "Sent"',
+            b'(\\HasNoChildren) "/" "&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-"',
         ]
     )
     sent = detect_sent_folder(imap)
     assert sent == "Sent"
     # и кэш должен сохраниться
-    assert (tmp_path / "imap_sent_folder.txt").read_text(encoding="utf-8").strip() == "Sent"
+    assert (
+        (tmp_path / "imap_sent_folder.txt").read_text(encoding="utf-8").strip()
+        == "Sent"
+    )
 
 
 def test_detect_sent_folder_localized_ru(tmp_path, monkeypatch):
     monkeypatch.setattr("emailbot.messaging_utils.SENT_CACHE_FILE", tmp_path / "imap_sent_folder.txt")
     imap = DummyImap(
         [
-            '(\\HasNoChildren) "/" "INBOX"',
-            '(\\HasNoChildren) "/" "Отправленные"',
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren) "/" "&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-"',
         ]
     )
     sent = detect_sent_folder(imap)
-    assert sent == "Отправленные"
+    assert sent == "&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-"
 
 
 def test_detect_sent_folder_uses_cache(tmp_path, monkeypatch):

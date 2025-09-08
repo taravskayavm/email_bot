@@ -261,9 +261,6 @@ def test_save_to_sent_folder_serializes_string():
         def __init__(self):
             self.append_args = None
 
-        def select(self, folder):
-            return "OK", []
-
         def append(self, folder, flags, internaldate, msg_bytes):
             self.append_args = (folder, flags, internaldate, msg_bytes)
             return "OK", []
@@ -277,15 +274,13 @@ def test_save_to_sent_folder_serializes_string():
     messaging.save_to_sent_folder(raw, imap=imap, folder="Sent")
     assert isinstance(imap.append_args[3], bytes)
     assert imap.append_args[3] == raw.encode("utf-8")
+    assert imap.append_args[1] == "(\\Seen)"
 
 
 def test_save_to_sent_folder_serializes_email_message():
     class DummyImap:
         def __init__(self):
             self.append_args = None
-
-        def select(self, folder):
-            return "OK", []
 
         def append(self, folder, flags, internaldate, msg_bytes):
             self.append_args = (folder, flags, internaldate, msg_bytes)
@@ -298,6 +293,7 @@ def test_save_to_sent_folder_serializes_email_message():
     imap = DummyImap()
     messaging.save_to_sent_folder(msg, imap=imap, folder="Sent")
     assert imap.append_args[3] == msg.as_bytes()
+    assert imap.append_args[1] == "(\\Seen)"
 
 
 def test_mark_unsubscribed_updates_log(temp_files):
