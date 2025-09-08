@@ -23,11 +23,14 @@ def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
     s = s.translate(str.maketrans(_CIRCLED_MAP))
+    # 1) удаляем невидимые символы (ZWSP, LRM и т.п.)
     s = _ZERO_WIDTH_RE.sub("", s)
+    # 2) заменяем переносы строк, табы и NBSP на пробел
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
-    s = s.replace('\xa0', ' ')  # NBSP → space
-    s = re.sub(r"[ ]{2,}", " ", s)
+    s = s.replace("\xa0", " ")
+    # 3) сжимаем повторяющиеся пробелы
+    s = re.sub(r" {2,}", " ", s)
     return s
 
 _EMAIL_CORE_RE = re.compile(
@@ -73,29 +76,24 @@ def sanitize_email(email: str) -> str:
     """
     s = _normalize_text(email).lower().strip()
     s = _PUNCT_TRIM_RE.sub("", s)
-    s = re.sub(r'(\?|\#|/).*$','', s)
+    s = re.sub(r"(\?|\#|/).*$", "", s)
 
-    if '@' not in s:
-        return s
-
-    local, domain = s.split('@', 1)
-    local = local.replace(',', '.')   # ошибки OCR: запятая вместо точки
-    # убираем сноску в начале
-    cleaned = _strip_leading_footnote(local)
-    # убираем мусорные тире/точки по краям, оставшиеся от переносов
-    cleaned = re.sub(r'^[-_.]+|[-_.]+$', '', cleaned)
-
-    # если после удаления цифр осталась валидная локальная часть — используем её
-    if cleaned and cleaned != local and _ASCII_LOCAL_RE.match(cleaned):
-        local = cleaned
-
-    # Жёстко: local-part строго ASCII, без смешанных скриптов
-    if not _ASCII_LOCAL_RE.match(local):
-        # отбрасываем — иначе SMTP без SMTPUTF8 не отправит
+    if "@" not in s:
         return ""
 
-    # Домен: приводим к IDNA (punycode), но запрещаем мусор
-    domain = domain.rstrip('.')
+    local, domain = s.split("@", 1)
+    local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
+    # убираем ведущие цифры-сноски
+    local = _strip_leading_footnote(local)
+    # чистим края от .-_ оставшихся от переносов
+    local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
+
+    # жёстко: local-part строго ASCII
+    if not _ASCII_LOCAL_RE.match(local):
+        return ""
+
+    # домен: приводим к IDNA (punycode), но запрещаем мусор
+    domain = domain.rstrip(".")
     if not _ASCII_DOMAIN_RE.match(domain):
         try:
             domain = idna.encode(domain).decode("ascii")
