@@ -123,7 +123,9 @@ def _rate_limit_domain(recipient: str) -> None:
     if last is not None:
         elapsed = now - last
         if elapsed < _DOMAIN_RATE_LIMIT:
-            time.sleep(_DOMAIN_RATE_LIMIT - elapsed)
+            pause = _DOMAIN_RATE_LIMIT - elapsed
+            logger.info("Domain %s rate limit: sleeping %.2fs", domain, pause)
+            time.sleep(pause)
             now = last + _DOMAIN_RATE_LIMIT
     _last_domain_send[domain] = now
 
