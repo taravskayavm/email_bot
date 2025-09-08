@@ -5,15 +5,15 @@ from __future__ import annotations
 import asyncio
 import csv
 import email
+import hashlib
 import imaplib
 import json
 import logging
 import os
 import re
-import time
 import secrets
 import smtplib
-import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -21,26 +21,25 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
-from .smtp_client import SmtpClient
-from .utils import log_error
 from .messaging_utils import (
+    SYNC_SEEN_EVENTS_PATH,
     add_bounce,
+    append_to_sent,
     canonical_for_history,
+    detect_sent_folder,
     ensure_sent_log_schema,
-    is_soft_bounce,
-    is_hard_bounce,
     is_foreign,
+    is_hard_bounce,
+    is_soft_bounce,
     is_suppressed,
+    load_seen_events,
+    load_sent_log,
+    save_seen_events,
     suppress_add,
     upsert_sent_log,
-    load_sent_log,
-    load_seen_events,
-    save_seen_events,
-    was_sent_within,
-    SYNC_SEEN_EVENTS_PATH,
-    detect_sent_folder,
-    append_to_sent,
 )
+from .smtp_client import SmtpClient
+from .utils import log_error
 
 logger = logging.getLogger(__name__)
 
@@ -315,37 +314,50 @@ def save_to_sent_folder(
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
 ):
+    """Унифицированное сохранение в «Отправленные»:
+    - Берём IMAP_HOST/IMAP_PORT/EMAIL_* из .env,
+    - Определяем папку через detect_sent_folder(imap),
+    - Выполняем append_to_sent(imap, folder, msg_bytes).
+    """
     try:
         close = False
-        if imap is None:
-            IMAP_HOST = os.getenv("IMAP_HOST")
-            IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
-            EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
-            EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
-            imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            close = True
         if isinstance(raw_message, EmailMessage):
             msg_bytes = raw_message.as_bytes()
         elif isinstance(raw_message, bytes):
             msg_bytes = raw_message
         else:
-            msg_bytes = raw_message.encode("utf-8")
+            msg_bytes = (raw_message or "").encode("utf-8")
 
-        sent_mb = folder or detect_sent_folder(imap)
-        res = append_to_sent(imap, sent_mb, msg_bytes)
-        logger.info("imap.append to %s: %s", sent_mb, res)
+        if imap is None:
+            imap_host = os.getenv("IMAP_HOST", "")
+            imap_port = int(os.getenv("IMAP_PORT", "993"))
+            user = os.getenv("EMAIL_ADDRESS", "")
+            pwd = os.getenv("EMAIL_PASSWORD", "")
+            if not (imap_host and user and pwd):
+                logger.warning("IMAP creds are incomplete; skip APPEND")
+                return
+            imap = imaplib.IMAP4_SSL(imap_host, imap_port)
+            imap.login(user, pwd)
+            close = True
+
+        if folder is None:
+            folder = detect_sent_folder(imap)
+
+        status, _ = append_to_sent(imap, folder, msg_bytes)
+        logger.info("IMAP APPEND to %s: %s", folder, status)
     except Exception as e:
         log_error(f"save_to_sent_folder: {e}")
     finally:
         if close and imap is not None:
             try:
                 imap.logout()
-            except Exception as e:
-                log_error(f"save_to_sent_folder logout: {e}")
+            except Exception:
+                pass
 
 
-def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
+def build_message(
+    to_addr: str, html_path: str, subject: str
+) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
@@ -356,12 +368,14 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
-        html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
+        html_body = re.sub(
+            r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE
+        )
     token = secrets.token_urlsafe(16)
     link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
     unsub_html = (
         f'<div style="margin-top:8px"><a href="{link}" '
-        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
+        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;'
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
     html_body = html_body.replace("</body>", f"{signature_html}{unsub_html}</body>")
@@ -373,9 +387,7 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    msg["List-Unsubscribe"] = (
-        f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
-    )
+    msg["List-Unsubscribe"] = f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
@@ -401,7 +413,9 @@ def send_email(
 ):
     try:
         if not _register_send(recipient, batch_id):
-            logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+            logger.info(
+                "Skipping duplicate send to %s for batch %s", recipient, batch_id
+            )
             return ""
         msg, token = build_message(recipient, html_path, subject)
         raw = msg.as_string()
@@ -540,24 +554,30 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
             reader = csv.DictReader(f)
             rows = list(reader)
         for row in rows:
-            if row.get("email") == email_norm and (token is None or row.get("unsubscribe_token") == token):
+            if row.get("email") == email_norm and (
+                token is None or row.get("unsubscribe_token") == token
+            ):
                 row["unsubscribed"] = "1"
                 row["unsubscribed_at"] = datetime.utcnow().isoformat()
                 changed = True
     if changed:
-        headers = rows[0].keys() if rows else [
-            "key",
-            "email",
-            "last_sent_at",
-            "source",
-            "status",
-            "user_id",
-            "filename",
-            "error_msg",
-            "unsubscribe_token",
-            "unsubscribed",
-            "unsubscribed_at",
-        ]
+        headers = (
+            rows[0].keys()
+            if rows
+            else [
+                "key",
+                "email",
+                "last_sent_at",
+                "source",
+                "status",
+                "user_id",
+                "filename",
+                "error_msg",
+                "unsubscribe_token",
+                "unsubscribed",
+                "unsubscribed_at",
+            ]
+        )
         with p.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
@@ -597,8 +617,6 @@ def log_sent_email(
     )
     global _log_cache
     _log_cache = None
-
-
 
 
 _log_cache: dict[str, List[datetime]] | None = None
@@ -885,7 +903,7 @@ __all__ = [
     "BLOCKED_FILE",
     "MAX_EMAILS_PER_DAY",
     "TEMPLATE_MAP",
-    "SIGNATURE_HTML",
+    "SIGNATURE_TEXT",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",
     "IMAP_FOLDER_FILE",
