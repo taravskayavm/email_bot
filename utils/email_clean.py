@@ -1,5 +1,6 @@
 import re
 import unicodedata
+import idna
 
 # Невидимые/служебные символы: ZWSP/ZWNJ/ZWNJ, NBSP, LRM/RLM, WORD JOINER и др.
 _ZERO_WIDTH = ''.join(map(chr, [
@@ -33,6 +34,9 @@ _EMAIL_CORE_RE = re.compile(
     r'([A-Za-z0-9.-]+\.[A-Za-z]{2,})'     # domain
     r'(?![\w-])'                          # справа не продолжение
 )
+
+_ASCII_LOCAL_RE = re.compile(r'^[A-Za-z0-9._%+\-]+$')
+_ASCII_DOMAIN_RE = re.compile(r'^[A-Za-z0-9.-]+$')
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -74,10 +78,22 @@ def sanitize_email(email: str) -> str:
     cleaned = re.sub(r'^[-_.]+|[-_.]+$', '', cleaned)
 
     # если после удаления цифр осталась валидная локальная часть — используем её
-    if cleaned and cleaned != local and re.match(r'^[A-Za-z0-9._%+\-]+$', cleaned):
+    if cleaned and cleaned != local and _ASCII_LOCAL_RE.match(cleaned):
         local = cleaned
 
-    # финальная защита: локальная часть только из цифр не запрещена (но для сносок это маловероятно)
+    # Жёстко: local-part строго ASCII, без смешанных скриптов
+    if not _ASCII_LOCAL_RE.match(local):
+        # отбрасываем — иначе SMTP без SMTPUTF8 не отправит
+        return ""
+
+    # Домен: приводим к IDNA (punycode), но запрещаем мусор
+    domain = domain.rstrip('.')
+    if not _ASCII_DOMAIN_RE.match(domain):
+        try:
+            domain = idna.encode(domain).decode("ascii")
+        except Exception:
+            return ""
+
     return f"{local}@{domain}"
 
 def dedupe_with_variants(emails: list[str]) -> list[str]:
@@ -86,6 +102,7 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
     Если есть и «55alexandr…@» и «alexandr…@», оставляем чистый.
     """
     raw = [sanitize_email(e) for e in emails]
+    raw = [e for e in raw if e]  # выбрасываем невалидные
     unique = set(raw)
 
     # Построим карту «локальная без начальных цифр» → варианты

@@ -6,7 +6,10 @@ def build_examples(emails: list[str], k: int = 10) -> list[str]:
     n = min(k, len(emails))
     if n == 0:
         return []
-    sample = rng.sample(emails, n)
+    # Ожидаем, что сюда приходят уже очищенные адреса. На всякий случай
+    # удалим дубликаты, чтобы примеры не повторялись.
+    unique = list(dict.fromkeys(emails))
+    sample = rng.sample(unique, n)
     return sample
 
 def make_summary_message(stats, emails: list[str]) -> str:
