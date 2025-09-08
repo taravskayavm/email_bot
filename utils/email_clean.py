@@ -69,7 +69,7 @@ _LEADING_FOOTNOTE_RE = re.compile(r'^(?:\d{1,3})+(?=[A-Za-z])')  # 1–3 циф�
 def _strip_leading_footnote(local: str) -> str:
     return _LEADING_FOOTNOTE_RE.sub('', local)
 
-def sanitize_email(email: str) -> str:
+def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     """
     Финальная чистка: убираем внешнюю пунктуацию, невидимые символы,
     откусываем ведущие цифры-сноски в local-part, обрезаем крайние -_. от переносов.
@@ -83,14 +83,24 @@ def sanitize_email(email: str) -> str:
 
     local, domain = s.split("@", 1)
     local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
-    # убираем ведущие цифры-сноски
-    local = _strip_leading_footnote(local)
+    # убираем ведущие цифры-сноски, если требуется
+    if strip_footnote:
+        local = _strip_leading_footnote(local)
     # чистим края от .-_ оставшихся от переносов
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
 
     # жёстко: local-part строго ASCII
     if not _ASCII_LOCAL_RE.match(local):
         return ""
+
+    # If local part accidentally contains something that looks like a
+    # domain with a known top-level domain followed by additional
+    # characters (e.g. ``mail.ruovalov``), it is likely the result of two
+    # concatenated addresses and should be rejected.
+    for tld in _TLD_PREFIXES:
+        # detect e.g. ``mail.ruovalov`` where ``.ru`` is followed by more letters
+        if re.search(rf"\.{tld}[A-Za-z]", local):
+            return ""
 
     # домен: приводим к IDNA (punycode), но запрещаем мусор
     domain = domain.rstrip(".")
@@ -107,27 +117,24 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
     Дедуплицируем, учитывая пару (сноской)вариант → чистый вариант.
     Если есть и «55alexandr…@» и «alexandr…@», оставляем чистый.
     """
-    raw = [sanitize_email(e) for e in emails]
-    raw = [e for e in raw if e]  # выбрасываем невалидные
-    unique = set(raw)
+    clean = [sanitize_email(e) for e in emails]
+    variants = [sanitize_email(e, strip_footnote=False) for e in emails]
 
-    # Построим карту «локальная без начальных цифр» → варианты
-    bucket = {}
-    for e in list(unique):
-        if '@' not in e:
-            continue
-        local, domain = e.split('@', 1)
-        key = f"{_strip_leading_footnote(local)}@{domain}"
-        bucket.setdefault(key, set()).add(e)
+    pairs = [(c, v) for c, v in zip(clean, variants) if v]
+
+    bucket: dict[str, set[str]] = {}
+    for c, v in pairs:
+        bucket.setdefault(c, set()).add(v)
 
     final = set()
-    for key, variants in bucket.items():
-        if key in variants:
-            # есть чистый — берём только его
+    for key, vars_set in bucket.items():
+        if key in vars_set:
+            final.add(key)
+        elif len(vars_set) == 1:
+            # only one variant – assume digits were footnotes and strip them
             final.add(key)
         else:
-            # чистого нет — берём единственный вариант
-            # (или самый короткий, если их несколько)
-            final.add(sorted(variants, key=len)[0])
+            # multiple variants without a clean version: keep the shortest variant
+            final.add(sorted(vars_set, key=len)[0])
 
     return sorted(final)
