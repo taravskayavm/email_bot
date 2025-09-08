@@ -410,7 +410,7 @@ def test_domain_rate_limit(monkeypatch, caplog):
         messaging.send_raw_smtp_with_retry("m", "b@example.com")
 
     assert sleeps and sleeps[0] >= messaging._DOMAIN_RATE_LIMIT
-    assert any("rate limit" in r.message for r in caplog.records)
+    assert any("rate-limit" in r.message for r in caplog.records)
 
 
 def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):

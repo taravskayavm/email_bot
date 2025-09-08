@@ -43,3 +43,10 @@ def test_nbsp_and_zwsp_boundaries():
 
 def test_invalid_concatenation_not_accepted():
     assert sanitize_email("mail.ruovalov@gmail.com") == ""
+
+
+def test_question_mark_anchor_trimming():
+    src = "test@site.com?param=1"
+    got = extract_emails(src)
+    assert "test@site.com" in got
+    assert not any("param=" in x for x in got)

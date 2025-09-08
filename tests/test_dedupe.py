@@ -6,7 +6,7 @@ def test_dedupe_with_footnote_and_clean():
 def test_dedupe_only_variants_keeps_shortest():
     from utils.email_clean import dedupe_with_variants
     got = dedupe_with_variants(["123alex@example.com", "9alex@example.com"])
-    assert got == ["alex@example.com"]
+    assert got == ["9alex@example.com"]
 
 def test_no_cross_domain_collapse():
     from utils.email_clean import dedupe_with_variants

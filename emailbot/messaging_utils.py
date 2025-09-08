@@ -18,6 +18,14 @@ SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
 
 logger = logging.getLogger(__name__)
 
+# A small cache file is used to remember the IMAP folder where
+# outgoing messages should be stored.  The file lives alongside this
+# module so the path is deterministic and independent of the working
+# directory.
+SCRIPT_DIR = Path(__file__).resolve().parent
+# Name of the file storing the detected "Sent" folder name.
+SENT_CACHE_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+
 
 class SecretFilter(logging.Filter):
     """Logging filter that masks sensitive values in records."""
@@ -99,6 +107,80 @@ def canonical_for_history(email: str) -> str:
     """
 
     return _normalize_email(email)
+
+
+def detect_sent_folder(imap) -> str:
+    r"""Determine the IMAP folder name for "Sent" messages.
+
+    The function tries a cached value first.  If none is found it inspects
+    the output of ``imap.list()`` searching for a mailbox flagged with
+    ``\Sent``.  If still not found, a list of common folder names is checked.
+    The chosen value is stored in :data:`SENT_CACHE_FILE` for future calls.
+    """
+
+    # 1) Cached value
+    try:
+        if SENT_CACHE_FILE.exists():
+            cached = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
+            if cached:
+                return cached
+    except Exception:
+        pass
+
+    candidates: List[str] = []
+    # 2) Ask the server
+    try:
+        status, data = imap.list()
+        if status == "OK" and data:
+            for raw in data:
+                line = raw.decode("utf-8", "ignore")
+                candidates.append(line)
+    except Exception:
+        candidates = []
+
+    # Prefer a folder explicitly flagged as Sent
+    for line in candidates:
+        if "\\Sent" in line:
+            name = line.rsplit('"', 2)[1] if '"' in line else line.split()[-1]
+            try:
+                SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+            except Exception:
+                pass
+            return name
+
+    # Common fallbacks (English and Russian variants)
+    COMMON = ["Sent", "Отправленные", "Отправленные письма"]
+    for line in candidates:
+        for name in COMMON:
+            if f'"{name}"' in line or line.endswith(name):
+                try:
+                    SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+                except Exception:
+                    pass
+                return name
+
+    # Last resort
+    fallback = "Sent"
+    try:
+        SENT_CACHE_FILE.write_text(fallback, encoding="utf-8")
+    except Exception:
+        pass
+    return fallback
+
+
+def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> Tuple[str, object]:
+    """Append a message to the given IMAP *mailbox*.
+
+    It is a very small wrapper around ``imap.append`` that returns the
+    ``(status, data)`` tuple and logs failures instead of propagating
+    exceptions.
+    """
+
+    try:
+        return imap.append(mailbox, None, None, msg_bytes)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("APPEND to %s failed: %s", mailbox, exc)
+        return "NO", exc
 
 
 def _normalize_ts(value: str) -> str:
