@@ -142,28 +142,25 @@ def test_handle_text_manual_emails():
 
     run(handle_text(update, ctx))
 
-    assert ctx.user_data["manual_emails"] == [
+    assert ctx.chat_data["manual_all_emails"] == [
         "123@site.com",
         "support@support.com",
         "test@site.com",
         "user@example.com",
     ]
     assert ctx.user_data["awaiting_manual_email"] is False
-    assert (
-        "К отправке: 123@site.com, support@support.com, test@site.com, user@example.com"
-        in update.message.replies[0]
-    )
+    assert "Адреса получены." in update.message.replies[0]
 
 
 def test_prompt_manual_email_clears_previous_list():
     update = DummyUpdate(text="/manual")
     ctx = DummyContext()
-    ctx.user_data["manual_emails"] = ["old@example.com"]
+    ctx.chat_data["manual_all_emails"] = ["old@example.com"]
     ctx.user_data["awaiting_block_email"] = True
 
     run(bh.prompt_manual_email(update, ctx))
 
-    assert "manual_emails" not in ctx.user_data
+    assert "manual_all_emails" not in ctx.chat_data
     assert ctx.user_data["awaiting_manual_email"] is True
     assert ctx.user_data.get("awaiting_block_email") is False
 
@@ -182,7 +179,7 @@ def test_select_group_sets_html_template():
 def test_send_manual_email_uses_html_template(monkeypatch):
     update = DummyUpdate(callback_data="manual_group_туризм")
     ctx = DummyContext()
-    ctx.user_data["manual_emails"] = ["user@example.com"]
+    ctx.chat_data["manual_all_emails"] = ["user@example.com"]
 
     sent_paths = []
 
@@ -238,7 +235,7 @@ def test_manual_input_parsing_accepts_gmail(caplog):
     ctx.user_data["awaiting_manual_email"] = True
     with caplog.at_level(logging.INFO):
         run(handle_text(update, ctx))
-    assert ctx.user_data["manual_emails"] == ["taravskayavm@gmail.com"]
+    assert ctx.chat_data["manual_all_emails"] == ["taravskayavm@gmail.com"]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert isinstance(update.message.reply_markups[0], InlineKeyboardMarkup)
     assert any("Manual input parsing" in r.message for r in caplog.records)
@@ -248,7 +245,7 @@ def test_manual_input_parsing_accepts_gmail(caplog):
 async def test_send_manual_email_no_block_mentions(monkeypatch):
     update = DummyUpdate(callback_data="manual_group_туризм")
     ctx = DummyContext()
-    ctx.user_data["manual_emails"] = ["x@example.com"]
+    ctx.chat_data["manual_all_emails"] = ["x@example.com"]
 
     monkeypatch.setattr(bh, "TEMPLATE_MAP", {"туризм": "template.html"})
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: {"x@example.com"})
