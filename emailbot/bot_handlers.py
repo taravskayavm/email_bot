@@ -29,7 +29,8 @@ from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
-from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
+from .extraction import normalize_email, smart_extract_emails
+from bot.handlers.manual_send import parse_manual_input
 from .reporting import build_mass_report_text, log_mass_filter_digest
 from . import settings
 from . import mass_state
@@ -1104,16 +1105,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        found = extract_emails_manual(text)
-        filtered = sorted(set(e.lower().strip() for e in found))
+        emails = parse_manual_input(text)
         logger.info(
-            "Manual input parsing: raw=%r found=%r filtered=%r",
+            "Manual input parsing: raw=%r emails=%r",
             text,
-            found,
-            filtered,
+            emails,
         )
-        if filtered:
-            context.user_data["manual_emails"] = sorted(filtered)
+        if emails:
+            context.user_data["manual_emails"] = emails
             context.user_data["awaiting_manual_email"] = False
             keyboard = [
                 [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
@@ -1126,7 +1125,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ]
             await update.message.reply_text(
                 (
-                    f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
+                    f"К отправке: {', '.join(emails)}\n\n"
                     "⬇️ Выберите направление письма:"
                 ),
                 reply_markup=InlineKeyboardMarkup(keyboard),
