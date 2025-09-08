@@ -24,3 +24,22 @@ def test_extract_and_clean():
     text = "Связь: ¹e.kuznetsova@alpfederation.ru, ②e.rozhkova@alpfederation.ru"
     emails = dedupe_with_variants(extract_emails(text))
     assert emails == ["e.kuznetsova@alpfederation.ru", "e.rozhkova@alpfederation.ru"]
+
+
+def test_no_concatenation_on_newlines():
+    src = ("pavelshabalin@mail.ru\n"
+           "ovalov@gmail.com\n")
+    got = extract_emails(src)
+    assert "pavelshabalin@mail.ru" in got
+    assert "ovalov@gmail.com" in got
+    assert not any("mail.ruovalov" in x for x in got)
+
+
+def test_nbsp_and_zwsp_boundaries():
+    src = "name@mail.ru\u00A0\n\u200bsecond@ya.ru"
+    got = extract_emails(src)
+    assert {"name@mail.ru", "second@ya.ru"} <= set(got)
+
+
+def test_invalid_concatenation_not_accepted():
+    assert sanitize_email("mail.ruovalov@gmail.com") == ""

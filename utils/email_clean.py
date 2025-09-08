@@ -24,19 +24,27 @@ def _normalize_text(s: str) -> str:
     s = s.translate(_SUPERSCRIPT_MAP)
     s = s.translate(str.maketrans(_CIRCLED_MAP))
     s = _ZERO_WIDTH_RE.sub("", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace('\xa0', ' ')  # NBSP → space
+    s = re.sub(r"[ ]{2,}", " ", s)
     return s
 
 _EMAIL_CORE_RE = re.compile(
-    r'(?<![\w.+-])'                       # слева не часть слова/email
-    r'([A-Za-z0-9._%+\-]+)'               # local
+    r'(?<![A-Za-z0-9._%+-])'          # слева не часть слова/email
+    r'([A-Za-z0-9._%+-]+)'
     r'@'
-    r'([A-Za-z0-9.-]+\.[A-Za-z]{2,})'     # domain
-    r'(?![\w-])'                          # справа не продолжение
+    r'([A-Za-z0-9.-]+\.[A-Za-z]{2,})' # домен
+    r'(?![A-Za-z0-9.-])',             # справа не продолжение
+    re.IGNORECASE
 )
 
 _ASCII_LOCAL_RE = re.compile(r'^[A-Za-z0-9._%+\-]+$')
 _ASCII_DOMAIN_RE = re.compile(r'^[A-Za-z0-9.-]+$')
+
+_TLD_PREFIXES = (
+    "ru", "com", "net", "org", "gov", "edu", "info", "biz", "su", "ua", "рф",
+)
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -72,6 +80,9 @@ def sanitize_email(email: str) -> str:
 
     local, domain = s.split('@', 1)
     local = local.replace(',', '.')   # ошибки OCR: запятая вместо точки
+    for part in local.split('.'):
+        if any(part.startswith(tld) and len(part) > len(tld) for tld in _TLD_PREFIXES):
+            return ""
     # убираем сноску в начале
     cleaned = _strip_leading_footnote(local)
     # убираем мусорные тире/точки по краям, оставшиеся от переносов
