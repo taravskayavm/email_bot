@@ -161,6 +161,12 @@ def main() -> None:
     )
 
     app.add_handler(
+        CallbackQueryHandler(bot_handlers.manual_mode, pattern="^manual_mode_")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.manual_reset, pattern="^manual_reset$")
+    )
+    app.add_handler(
         CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_group_")
     )
     app.add_handler(
