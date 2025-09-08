@@ -501,18 +501,36 @@ def _parse_list_line(line: bytes):
 
 def detect_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     status, data = imap.list()
-    if status != "OK" or not data:
-        return "Sent"
-    candidates = []
-    for line in data:
-        name, flags = _parse_list_line(line)
-        if not name:
-            continue
-        if "\\Sent" in flags or "\\sent" in flags:
-            candidates.append(name)
-    if candidates:
-        return candidates[0]
-    return "Sent"
+    folder = "Sent"
+    if status == "OK" and data:
+        candidates: list[str] = []
+        for line in data:
+            name, flags = _parse_list_line(line)
+            if not name:
+                continue
+            lname = name.lower()
+            if "\\Sent" in flags or "\\sent" in flags:
+                candidates.append(name)
+                continue
+            last = re.split(r"[/.]", lname)[-1]
+            if last in {
+                "sent",
+                "sent items",
+                "sent mail",
+                "sent messages",
+                "outbox",
+                "отправленные",
+                "отправленные письма",
+                "исходящие",
+            }:
+                candidates.append(name)
+        if candidates:
+            folder = candidates[0]
+    try:
+        IMAP_FOLDER_FILE.write_text(folder, encoding="utf-8")
+    except Exception:
+        logger.warning("could not write %s", IMAP_FOLDER_FILE, exc_info=True)
+    return folder
 
 
 _log_cache: dict[str, List[datetime]] | None = None
