@@ -16,6 +16,7 @@ import smtplib
 import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.header import Header
 from email.utils import formataddr
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
@@ -98,6 +99,15 @@ _sent_idempotency: Set[str] = set()
 _OLD_SIGNATURE_GROUPS = {"медицина", "спорт", "туризм"}
 _NEW_SIGNATURE_GROUPS = {"психология", "география", "биоинформатика"}
 
+def _choose_from_header(group: str) -> str:
+    """
+    Выбираем название отправителя в зависимости от направления.
+    """
+    g = (group or "").strip().lower()
+    if g in _NEW_SIGNATURE_GROUPS:
+        return "Редакция литературы"
+    return "Редакция литературы по медицине, спорту и туризму"
+
 _SIGNATURE_OLD = """--
 С уважением,
 Таравская Владлена Михайловна
@@ -155,6 +165,20 @@ def _read_template_file(path: str) -> str:
         return f.read()
 
 
+def _render_template_for_group(group: str, context: Dict[str, str]) -> str:
+    """
+    Загружает шаблон для указанного направления и подставляет подпись.
+    Для тестов допускается простая подстановка без использования контекста.
+    """
+    path = TEMPLATE_MAP.get((group or "").strip().lower())
+    if path and os.path.exists(path):
+        html = _read_template_file(path)
+    else:
+        html = "<html><body>{{SIGNATURE}}</body></html>"
+    signature_html = _choose_signature(group)
+    return _inject_signature(html, signature_html)
+
+
 def log_domain_rate_limit(domain: str, sleep_s: float) -> None:
     """Log diagnostic message for per-domain rate limiting.
 
@@ -194,6 +218,43 @@ def _extract_fonts(html: str) -> tuple[str, int]:
         font_size = int(Counter(sizes).most_common(1)[0][0])
 
     return font_family, font_size
+
+
+def build_messages_for_group(
+    group: str, recipients: List[str], base_context: Dict[str, str]
+) -> List[EmailMessage]:
+    """
+    Собирает письма для указанного направления на основе шаблона.
+    """
+    body_html = _render_template_for_group(group, base_context)
+    out: List[EmailMessage] = []
+    inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
+    logo_path = os.getenv("LOGO_PATH", "")
+    logo_cid = os.getenv("LOGO_CID", "logo")
+    from_addr = os.getenv("EMAIL_ADDRESS", "")
+    from_name = _choose_from_header(group)
+    for rcpt in recipients:
+        msg = EmailMessage()
+        msg["To"] = rcpt
+        if from_addr or from_name:
+            msg["From"] = Header(f"{from_name} <{from_addr}>", "utf-8")
+        text = strip_html(body_html)
+        msg.set_content(text)
+        msg.add_alternative(body_html, subtype="html")
+        if inline_logo and logo_path and os.path.exists(logo_path):
+            try:
+                with open(logo_path, "rb") as img:
+                    img_bytes = img.read()
+                msg.get_payload()[-1].add_related(
+                    img_bytes,
+                    maintype="image",
+                    subtype="png",
+                    cid=f"<{logo_cid}>",
+                )
+            except Exception:
+                pass
+        out.append(msg)
+    return out
 
 
 def _rate_limit_domain(recipient: str) -> None:
