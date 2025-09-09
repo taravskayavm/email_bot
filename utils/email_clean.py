@@ -1,6 +1,7 @@
 import re
 import unicodedata
 import idna
+from functools import lru_cache
 
 # Невидимые/служебные символы: ZWSP/ZWNJ/ZWNJ, NBSP, LRM/RLM, WORD JOINER и др.
 _ZERO_WIDTH = ''.join(map(chr, [
@@ -19,6 +20,38 @@ _SUPERSCRIPT_MAP = str.maketrans({
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
 
+_OBF_AT = [
+    r"\[at\]", r"\(at\)", r"\{at\}", r"\sat\s", r"\s@\s", r"\sat\s",
+    r"\[собака\]", r"\(собака\)", r"\{собака\}", r"\sсобака\s",
+]
+_OBF_DOT = [
+    r"\[dot\]", r"\(dot\)", r"\{dot\}", r"\sdot\s",
+    r"\[точка\]", r"\(точка\)", r"\{точка\}", r"\sточка\s",
+]
+
+@lru_cache(maxsize=256)
+def _deobfuscate(text: str) -> str:
+    """
+    Простейшая размаскировка: user [at] site [dot] ru → user@site.ru
+    Поддерживает англ./рус. маркеры и произвольные пробелы/скобки.
+    """
+    t = text
+    # унификация пробелов
+    t = re.sub(r"\s+", " ", t)
+    # замены at
+    for pat in _OBF_AT:
+        t = re.sub(pat, " @ ", t, flags=re.IGNORECASE)
+    # замены dot
+    for pat in _OBF_DOT:
+        t = re.sub(pat, " . ", t, flags=re.IGNORECASE)
+    # сжать пробелы и убрать их вокруг разделителей
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\s*@\s*", "@", t)
+    t = re.sub(r"\s*\.\s*", ".", t)
+    # частые OCR-ошибки: запятая перед TLD
+    t = re.sub(r"@([^,\s]+),([A-Za-z]{2,})\b", r"@\1.\2", t)
+    return t
+
 def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
@@ -29,6 +62,8 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
+    # 2.0) размаскировка "at/dot/собака/точка" перед границами
+    s = _deobfuscate(s)
     # 3) сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
