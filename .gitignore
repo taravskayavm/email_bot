@@ -1,6 +1,10 @@
 # локальная конфигурация/секреты
 .env
 *.env
+
+# Ignore real email templates (keep only examples)
+templates/*.html
+!templates/examples/*.html
 blocked_emails.txt
 imap_sent_folder.txt
 emailbot/sent_ids.jsonl
