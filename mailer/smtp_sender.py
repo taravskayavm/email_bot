@@ -1,3 +1,4 @@
+import logging
 import os
 import smtplib
 from typing import Iterable
@@ -5,6 +6,7 @@ from email.message import EmailMessage
 
 PORT = int(os.getenv("SMTP_PORT", "587"))
 USE_SSL = os.getenv("SMTP_SSL", "0") == "1"
+logger = logging.getLogger(__name__)
 try:
     TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "30"))
 except Exception:
@@ -22,6 +24,16 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             smtp.ehlo()
             smtp.login(user, password)
             for msg in messages:
+                if "From" not in msg:
+                    from_name = os.getenv("EMAIL_FROM_NAME", "")
+                    from_addr = os.getenv("EMAIL_ADDRESS", "")
+                    if from_addr:
+                        display = (from_name or from_addr).rstrip(". ").rstrip(" ")
+                        msg["From"] = f"{display} <{from_addr}>"
+                try:
+                    logger.info("SMTP send From=%r To=%r", msg.get("From"), msg.get("To"))
+                except Exception:
+                    pass
                 try:
                     smtp.send_message(msg)
                 except Exception:
@@ -37,6 +49,16 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             smtp.ehlo()
             smtp.login(user, password)
             for msg in messages:
+                if "From" not in msg:
+                    from_name = os.getenv("EMAIL_FROM_NAME", "")
+                    from_addr = os.getenv("EMAIL_ADDRESS", "")
+                    if from_addr:
+                        display = (from_name or from_addr).rstrip(". ").rstrip(" ")
+                        msg["From"] = f"{display} <{from_addr}>"
+                try:
+                    logger.info("SMTP send From=%r To=%r", msg.get("From"), msg.get("To"))
+                except Exception:
+                    pass
                 try:
                     smtp.send_message(msg)
                 except Exception:
