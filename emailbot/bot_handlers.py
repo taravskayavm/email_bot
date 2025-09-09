@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+# isort:skip_file
 import asyncio
 import csv
 import imaplib
 import logging
 import os
 import re
+import secrets
 import time
 import urllib.parse
-import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional, Set
@@ -25,15 +26,15 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from . import messaging
-from . import messaging_utils as mu
+from utils.email_clean import parse_emails_unified
+
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
-from .extraction import normalize_email, smart_extract_emails
-from bot.handlers.manual_send import parse_manual_input
-from .reporting import build_mass_report_text, log_mass_filter_digest
+from . import mass_state, messaging
+from . import messaging_utils as mu
 from . import settings
-from . import mass_state
+from .extraction import normalize_email, smart_extract_emails
+from .reporting import build_mass_report_text, log_mass_filter_digest
 from .settings_store import DEFAULTS
 
 
@@ -107,13 +108,14 @@ def sample_preview(items, k: int):
     return lst[:k]
 
 
-from .messaging import (
+from .messaging import (  # noqa: E402,F401  # isort: skip
     DOWNLOAD_DIR,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
     add_blocked_email,
     clear_recent_sent_cache,
+    count_sent_today,
     dedupe_blocked_file,
     get_blocked_emails,
     get_preferred_sent_folder,
@@ -122,11 +124,9 @@ from .messaging import (
     send_email_with_sessions,
     sync_log_with_imap,
     was_emailed_recently,
-    count_sent_today,
 )
-from .smtp_client import SmtpClient
-from .utils import log_error
-from .messaging_utils import (
+from .messaging_utils import (  # noqa: E402  # isort: skip
+    BOUNCE_LOG_PATH,
     add_bounce,
     is_foreign,
     is_hard_bounce,
@@ -134,8 +134,9 @@ from .messaging_utils import (
     is_suppressed,
     suppress_add,
     was_sent_within,
-    BOUNCE_LOG_PATH,
 )
+from .smtp_client import SmtpClient  # noqa: E402
+from .utils import log_error  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,9 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                 ],
                 [
-                    InlineKeyboardButton("Сноски: радиус 0", callback_data="feat:radius:0"),
+                    InlineKeyboardButton(
+                        "Сноски: радиус 0", callback_data="feat:radius:0"
+                    ),
                     InlineKeyboardButton("1", callback_data="feat:radius:1"),
                     InlineKeyboardButton("2", callback_data="feat:radius:2"),
                 ],
@@ -321,7 +324,9 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "PDF-layout — OFF, OCR — OFF."
         )
 
-    await update.message.reply_text(f"{_status()}\n\n{_doc()}", reply_markup=_keyboard())
+    await update.message.reply_text(
+        f"{_status()}\n\n{_doc()}", reply_markup=_keyboard()
+    )
 
 
 async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -353,9 +358,7 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if n not in {0, 1, 2}:
                 raise ValueError
             settings.FOOTNOTE_RADIUS_PAGES = n
-            hint = (
-                f"📝 Радиус сносок: {n}. Дубликаты «урезанных» адресов будут склеиваться в пределах той же страницы и ±{n} стр. того же файла."
-            )
+            hint = f"📝 Радиус сносок: {n}. Дубликаты «урезанных» адресов будут склеиваться в пределах той же страницы и ±{n} стр. того же файла."
         elif data == "feat:layout:toggle":
             settings.PDF_LAYOUT_AWARE = not settings.PDF_LAYOUT_AWARE
             hint = (
@@ -412,7 +415,9 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     )
                 ],
                 [
-                    InlineKeyboardButton("Сноски: радиус 0", callback_data="feat:radius:0"),
+                    InlineKeyboardButton(
+                        "Сноски: радиус 0", callback_data="feat:radius:0"
+                    ),
                     InlineKeyboardButton("1", callback_data="feat:radius:1"),
                     InlineKeyboardButton("2", callback_data="feat:radius:2"),
                 ],
@@ -456,11 +461,12 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user or user.id not in ADMIN_IDS:
         return
 
-    import sys
     import csv
-    import telegram
-    import aiohttp
+    import sys
     from datetime import datetime
+
+    import aiohttp
+    import telegram
 
     from .messaging_utils import BOUNCE_LOG_PATH
 
@@ -508,7 +514,9 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
-async def dedupe_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def dedupe_log_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Admin command to deduplicate sent log."""
 
     user = update.effective_user
@@ -906,7 +914,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await f.download_to_drive(file_path)
 
     await update.message.reply_text("Файл загружен. Идёт анализ...")
-    progress_msg = await update.message.reply_text("🔎 Анализируем...")
+    _progress_msg = await update.message.reply_text("🔎 Анализируем...")
 
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
@@ -940,7 +948,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
     ]
 
-    suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+    _suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
 
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
@@ -1142,7 +1150,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        emails = parse_manual_input(text)
+        # Единый вход: всё — через единый пайплайн
+        emails = parse_emails_unified(text)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
             await update.message.reply_text("❌ Не найдено ни одного email.")
@@ -1156,7 +1165,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         group_kb = [
             [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
             [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
-            [InlineKeyboardButton("🩺 Медицина", callback_data="manual_group_медицина")],
+            [
+                InlineKeyboardButton(
+                    "🩺 Медицина", callback_data="manual_group_медицина"
+                )
+            ],
         ]
 
         enforce, days, allow_override = _manual_cfg()
@@ -1177,9 +1190,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 InlineKeyboardButton(
                     "Отправить только разрешённым", callback_data="manual_mode_allowed"
                 ),
-                InlineKeyboardButton(
-                    "Отправить всем", callback_data="manual_mode_all"
-                ),
+                InlineKeyboardButton("Отправить всем", callback_data="manual_mode_all"),
             ]
         keyboard = [*group_kb]
         if mode_row:
@@ -1236,7 +1247,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         filtered = sorted(
             e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
         )
-        suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+        _suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
 
         state = get_state(context)
         state.all_emails.update(allowed_all)
@@ -1507,11 +1518,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Сообщение без раскрытия адресов — только счётчики
     await query.message.reply_text(
         f"Направление: {group_code}\nК отправке: {len(to_send)}"
-        + (
-            f"\nОтфильтровано по правилу 180 дней: {len(rejected)}"
-            if rejected
-            else ""
-        )
+        + (f"\nОтфильтровано по правилу 180 дней: {len(rejected)}" if rejected else "")
     )
 
     # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
