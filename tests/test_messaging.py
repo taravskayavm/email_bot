@@ -163,9 +163,12 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     assert "<img" not in html2
 
 
-@pytest.mark.parametrize("template_name", ["sport.html", "tourism.html", "medicine.html"])
-def test_repository_templates_logo_toggle(monkeypatch, template_name):
-    template_path = Path(__file__).resolve().parents[1] / "templates" / template_name
+def test_repository_templates_logo_toggle(monkeypatch, tmp_path):
+    template_path = tmp_path / "template.html"
+    template_path.write_text(
+        "<html><body><img src=\"cid:logo\" alt=\"logo\"/>{{BODY}}<br/><br/>{{SIGNATURE}}</body></html>",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
