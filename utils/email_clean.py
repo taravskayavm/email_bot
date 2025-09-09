@@ -1,35 +1,67 @@
+import logging
+import os
 import re
 import unicodedata
 from functools import lru_cache
+
 import idna
 
+logger = logging.getLogger(__name__)
+
 # Невидимые/служебные символы: ZWSP/ZWNJ/ZWNJ, NBSP, LRM/RLM, WORD JOINER и др.
-_ZERO_WIDTH = ''.join(map(chr, [
-    0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF
-]))
+_ZERO_WIDTH = "".join(
+    map(chr, [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF])
+)
 _ZERO_WIDTH_RE = re.compile(f"[{re.escape(_ZERO_WIDTH)}]")
 
 # Внешняя пунктуация, встречающаяся вокруг e-mail при парсинге
-_PUNCT_TRIM_RE = re.compile(r'^[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+|[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+$')
+_PUNCT_TRIM_RE = re.compile(
+    r'^[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+|[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+$'
+)
 
 # Цифровые сноски (включая надстрочные ¹²³ и пр. circled numbers)
-_SUPERSCRIPT_MAP = str.maketrans({
-    '¹': '1', '²':'2', '³':'3',
-    '⁰':'0','⁴':'4','⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9',
-})
+_SUPERSCRIPT_MAP = str.maketrans(
+    {
+        "¹": "1",
+        "²": "2",
+        "³": "3",
+        "⁰": "0",
+        "⁴": "4",
+        "⁵": "5",
+        "⁶": "6",
+        "⁷": "7",
+        "⁸": "8",
+        "⁹": "9",
+    }
+)
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
 
 # Удалено латинизирование гомоглифов — чтобы не искажать домены перед IDNA
 
 _OBF_AT = [
-    r"\[at\]", r"\(at\)", r"\{at\}", r"\sat\s", r"\s@\s", r"\sat\s",
-    r"\[собака\]", r"\(собака\)", r"\{собака\}", r"\sсобака\s",
+    r"\[at\]",
+    r"\(at\)",
+    r"\{at\}",
+    r"\sat\s",
+    r"\s@\s",
+    r"\sat\s",
+    r"\[собака\]",
+    r"\(собака\)",
+    r"\{собака\}",
+    r"\sсобака\s",
 ]
 _OBF_DOT = [
-    r"\[dot\]", r"\(dot\)", r"\{dot\}", r"\sdot\s",
-    r"\[точка\]", r"\(точка\)", r"\{точка\}", r"\sточка\s",
+    r"\[dot\]",
+    r"\(dot\)",
+    r"\{dot\}",
+    r"\sdot\s",
+    r"\[точка\]",
+    r"\(точка\)",
+    r"\{точка\}",
+    r"\sточка\s",
 ]
+
 
 @lru_cache(maxsize=256)
 def _deobfuscate(text: str) -> str:
@@ -54,6 +86,7 @@ def _deobfuscate(text: str) -> str:
     t = re.sub(r"@([^,\s]+),([A-Za-z]{2,})\b", r"@\1.\2", t)
     return t
 
+
 def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
@@ -70,24 +103,36 @@ def _normalize_text(s: str) -> str:
     s = re.sub(r" {2,}", " ", s)
     return s
 
+
 _EMAIL_CORE_RE = re.compile(
-    r'(?<![A-Za-z0-9._%+-])'          # слева не часть слова/email
-    r'([A-Za-z0-9._%+-]+)'
-    r'@'
-    r'([A-Za-z0-9.-]+\.[A-Za-z]{2,})' # домен
-    r'(?![A-Za-z0-9.-])',             # справа не продолжение
-    re.IGNORECASE
+    r"(?<![A-Za-z0-9._%+-])"  # слева не часть слова/email
+    r"([A-Za-z0-9._%+-]+)"
+    r"@"
+    r"([\w.-]+\.[\w]{2,})"  # домен (разрешаем Unicode)
+    r"(?![\w.-])",  # справа не продолжение
+    re.IGNORECASE,
 )
 
-_ASCII_LOCAL_RE = re.compile(r'^[A-Za-z0-9._%+\-]+$')
+_ASCII_LOCAL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+$")
 _ASCII_DOMAIN_RE = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
 )
 
 _TLD_PREFIXES = (
-    "ru", "com", "net", "org", "gov", "edu", "info", "biz", "su", "ua", "рф",
+    "ru",
+    "com",
+    "net",
+    "org",
+    "gov",
+    "edu",
+    "info",
+    "biz",
+    "su",
+    "ua",
+    "рф",
 )
+
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -100,14 +145,66 @@ def extract_emails(text: str) -> list[str]:
         email = f"{local}@{domain}"
         email = _PUNCT_TRIM_RE.sub("", email)
         # частые артефакты после домена (обрывки URL-параметров)
-        email = re.sub(r'(\?|\#|/).*$','', email)
+        email = re.sub(r"(\?|\#|/).*$", "", email)
         out.append(email.lower())
     return out
 
-_LEADING_FOOTNOTE_RE = re.compile(r'^(?:\d{1,3})+(?=[A-Za-z])')  # 1–3 цифры в начале local-part
+
+# === Unified pipeline =========================================================
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("EMAIL_PARSE_DEBUG", "0") == "1"
+
+
+def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
+    if not _debug_enabled():
+        return
+    try:
+        if isinstance(payload, list):
+            show = payload[:limit]
+            logger.debug(
+                "[parse] %s: %s%s",
+                step,
+                show,
+                " …" if len(payload) > limit else "",
+            )
+        else:
+            snippet = (payload[:300] + "…") if len(payload) > 300 else payload
+            logger.debug("[parse] %s: %s", step, snippet)
+    except Exception:
+        pass
+
+
+def parse_emails_unified(text: str) -> list[str]:
+    """
+    Единый вход парсинга:
+      raw -> deobfuscate -> normalize -> find -> sanitize -> dedupe (provider-aware)
+    Возвращает отсортированный список валидных адресов (оригинальные варианты).
+    """
+
+    _dbg("raw", text)
+    t1 = _deobfuscate(text or "")
+    _dbg("deobfuscated", t1)
+    t2 = _normalize_text(t1)
+    _dbg("normalized", t2)
+    found = [m.group(0) for m in _EMAIL_CORE_RE.finditer(t2)]
+    _dbg("found", found)
+    cleaned = [e for e in (sanitize_email(x) for x in found) if e]
+    _dbg("sanitized", cleaned)
+    deduped = dedupe_with_variants(cleaned)
+    _dbg("deduped", deduped)
+    return deduped
+
+
+_LEADING_FOOTNOTE_RE = re.compile(
+    r"^(?:\d{1,3})+(?=[A-Za-z])"
+)  # 1–3 цифры в начале local-part
+
 
 def _strip_leading_footnote(local: str) -> str:
-    return _LEADING_FOOTNOTE_RE.sub('', local)
+    return _LEADING_FOOTNOTE_RE.sub("", local)
+
 
 def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     """
@@ -156,6 +253,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
 
     return f"{local}@{domain}"
 
+
 def dedupe_with_variants(emails: list[str]) -> list[str]:
     """
     Дедуплицируем, учитывая пару (сноской)вариант → чистый вариант.
@@ -180,6 +278,7 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
         else:
             # multiple variants without a clean version: keep the shortest variant
             final.add(sorted(vars_set, key=len)[0])
+
     # существующая логика... + провайдерная канонизация для сравнения
     def _canon(e: str) -> str:
         try:
@@ -187,17 +286,27 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
         except ValueError:
             return e
         d = domain.lower()
-        l = local.lower()
+        local_norm = local.lower()
         # Gmail: игнорируем точки, режем +tag
         if d in ("gmail.com", "googlemail.com"):
-            l = l.split("+", 1)[0].replace(".", "")
+            local_norm = local_norm.split("+", 1)[0].replace(".", "")
         # Yandex: режем +tag
-        if d.endswith("yandex.ru") or d.endswith("yandex.com") or d.endswith("yandex.kz") or d.endswith("ya.ru"):
-            l = l.split("+", 1)[0]
+        if (
+            d.endswith("yandex.ru")
+            or d.endswith("yandex.com")
+            or d.endswith("yandex.kz")
+            or d.endswith("ya.ru")
+        ):
+            local_norm = local_norm.split("+", 1)[0]
         # Mail.ru: режем +tag
-        if d.endswith("mail.ru") or d.endswith("bk.ru") or d.endswith("inbox.ru") or d.endswith("list.ru"):
-            l = l.split("+", 1)[0]
-        return f"{l}@{d}"
+        if (
+            d.endswith("mail.ru")
+            or d.endswith("bk.ru")
+            or d.endswith("inbox.ru")
+            or d.endswith("list.ru")
+        ):
+            local_norm = local_norm.split("+", 1)[0]
+        return f"{local_norm}@{d}"
 
     seen = {}
     out = []
@@ -211,10 +320,7 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
 
 def parse_manual_input(text: str) -> list[str]:
     """
-    Унифицированный парсер ручного ввода.
-    Использует тот же пайплайн, что и для файлов/сайтов:
-      extract_emails → sanitize_email → dedupe_with_variants
+    DEPRECATED shim: оставлено для обратной совместимости.
+    Всегда вызывает parse_emails_unified(text).
     """
-    raw = extract_emails(text)
-    cleaned = [e for e in (sanitize_email(x) for x in raw) if e]
-    return dedupe_with_variants(cleaned)
+    return parse_emails_unified(text)
