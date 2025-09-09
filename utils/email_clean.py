@@ -1,7 +1,7 @@
 import re
 import unicodedata
-import idna
 from functools import lru_cache
+import idna
 
 # Невидимые/служебные символы: ZWSP/ZWNJ/ZWNJ, NBSP, LRM/RLM, WORD JOINER и др.
 _ZERO_WIDTH = ''.join(map(chr, [
@@ -20,19 +20,7 @@ _SUPERSCRIPT_MAP = str.maketrans({
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
 
-_HOMO_LATIN = str.maketrans({
-    # кириллические «похожие» → латиница (только для детекции!)
-    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x",
-    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H",
-    "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
-})
-
-def _latinize_for_detection(s: str) -> str:
-    """Только для поиска границ: переводим гомоглифы в латиницу."""
-    try:
-        return s.translate(_HOMO_LATIN)
-    except Exception:
-        return s
+# Удалено латинизирование гомоглифов — чтобы не искажать домены перед IDNA
 
 _OBF_AT = [
     r"\[at\]", r"\(at\)", r"\{at\}", r"\sat\s", r"\s@\s", r"\sat\s",
@@ -78,25 +66,6 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\xa0", " ")
     # 2.0) размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
-    # 2.1) если e-mail прилип к предыдущему слову (в т.ч. кириллица-гомоглифы) — вставим пробел
-    s_det = _latinize_for_detection(s)
-    s_det = re.sub(
-        r"([^\s<>\(\)\[\]\{\}])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
-        r"\1 \2",
-        s_det,
-    )
-    # переносим "вставленные" пробелы обратно по длине
-    if len(s_det) == len(s):
-        s = s_det
-    # 2.2) и если e-mail слит со следующим словом (редко встречается)
-    s_det = _latinize_for_detection(s)
-    s_det = re.sub(
-        r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})([^\s<>\(\)\[\]\{\}])",
-        r"\1 \2",
-        s_det,
-    )
-    if len(s_det) == len(s):
-        s = s_det
     # 3) сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
@@ -111,7 +80,7 @@ _EMAIL_CORE_RE = re.compile(
 )
 
 _ASCII_LOCAL_RE = re.compile(r'^[A-Za-z0-9._%+\-]+$')
-_ASCII_DOMAIN_RE = re.compile(r'^[A-Za-z0-9.-]+$')
+_ASCII_DOMAIN_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9-]{2,24}$")
 
 _TLD_PREFIXES = (
     "ru", "com", "net", "org", "gov", "edu", "info", "biz", "su", "ua", "рф",
@@ -142,7 +111,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     Финальная чистка: убираем внешнюю пунктуацию, невидимые символы,
     откусываем ведущие цифры-сноски в local-part, обрезаем крайние -_. от переносов.
     """
-    s = _normalize_text(email).lower().strip()
+    s = _normalize_text(email).lower().replace(" ", "").strip()
     s = _PUNCT_TRIM_RE.sub("", s)
     s = re.sub(r"(\?|\#|/).*$", "", s)
 
@@ -172,11 +141,16 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
 
     # домен: приводим к IDNA (punycode), но запрещаем мусор
     domain = domain.rstrip(".")
-    if not _ASCII_DOMAIN_RE.match(domain):
-        try:
-            domain = idna.encode(domain).decode("ascii")
-        except Exception:
-            return ""
+    # ВАЖНО: не трогаем Unicode-домен, кодируем через IDNA UTS#46
+    try:
+        # uts46=True — более совместимая нормализация доменных имён
+        domain_ascii = idna.encode(domain, uts46=True).decode("ascii")
+    except idna.IDNAError:
+        return ""
+    # Проверка уже в ASCII
+    if not _ASCII_DOMAIN_RE.match(domain_ascii):
+        return ""
+    domain = domain_ascii
 
     return f"{local}@{domain}"
 
@@ -204,8 +178,33 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
         else:
             # multiple variants without a clean version: keep the shortest variant
             final.add(sorted(vars_set, key=len)[0])
+    # существующая логика... + провайдерная канонизация для сравнения
+    def _canon(e: str) -> str:
+        try:
+            local, domain = e.split("@", 1)
+        except ValueError:
+            return e
+        d = domain.lower()
+        l = local.lower()
+        # Gmail: игнорируем точки, режем +tag
+        if d in ("gmail.com", "googlemail.com"):
+            l = l.split("+", 1)[0].replace(".", "")
+        # Yandex: режем +tag
+        if d.endswith("yandex.ru") or d.endswith("yandex.com") or d.endswith("yandex.kz") or d.endswith("ya.ru"):
+            l = l.split("+", 1)[0]
+        # Mail.ru: режем +tag
+        if d.endswith("mail.ru") or d.endswith("bk.ru") or d.endswith("inbox.ru") or d.endswith("list.ru"):
+            l = l.split("+", 1)[0]
+        return f"{l}@{d}"
 
-    return sorted(final)
+    seen = {}
+    out = []
+    for e in sorted(final):
+        key = _canon(e)
+        if key not in seen:
+            seen[key] = e
+            out.append(e)
+    return sorted(out)
 
 
 def parse_manual_input(text: str) -> list[str]:
