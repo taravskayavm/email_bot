@@ -50,3 +50,15 @@ def test_question_mark_anchor_trimming():
     got = extract_emails(src)
     assert "test@site.com" in got
     assert not any("param=" in x for x in got)
+
+
+def test_deobfuscation_variants():
+    src = "user [at] site [dot] ru и user собака site точка ru"
+    got = extract_emails(src)
+    assert {"user@site.ru"} == set(got)
+
+
+def test_ocr_comma_before_tld():
+    src = "foo@bar,ru"
+    got = extract_emails(src)
+    assert got == ["foo@bar.ru"]
