@@ -80,7 +80,10 @@ _EMAIL_CORE_RE = re.compile(
 )
 
 _ASCII_LOCAL_RE = re.compile(r'^[A-Za-z0-9._%+\-]+$')
-_ASCII_DOMAIN_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9-]{2,24}$")
+_ASCII_DOMAIN_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
+)
 
 _TLD_PREFIXES = (
     "ru", "com", "net", "org", "gov", "edu", "info", "biz", "su", "ua", "рф",
@@ -141,16 +144,15 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
 
     # домен: приводим к IDNA (punycode), но запрещаем мусор
     domain = domain.rstrip(".")
-    # ВАЖНО: не трогаем Unicode-домен, кодируем через IDNA UTS#46
-    try:
-        # uts46=True — более совместимая нормализация доменных имён
-        domain_ascii = idna.encode(domain, uts46=True).decode("ascii")
-    except idna.IDNAError:
+    if not _ASCII_DOMAIN_RE.match(domain):
+        # ВАЖНО: не трогаем Unicode-домен, кодируем через IDNA UTS#46
+        try:
+            domain = idna.encode(domain, uts46=True).decode("ascii")
+        except Exception:
+            return ""
+    # Повторная проверка уже в ASCII
+    if not _ASCII_DOMAIN_RE.match(domain):
         return ""
-    # Проверка уже в ASCII
-    if not _ASCII_DOMAIN_RE.match(domain_ascii):
-        return ""
-    domain = domain_ascii
 
     return f"{local}@{domain}"
 
