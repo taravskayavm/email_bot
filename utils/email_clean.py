@@ -20,6 +20,20 @@ _SUPERSCRIPT_MAP = str.maketrans({
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
 
+_HOMO_LATIN = str.maketrans({
+    # кириллические «похожие» → латиница (только для детекции!)
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x",
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H",
+    "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+})
+
+def _latinize_for_detection(s: str) -> str:
+    """Только для поиска границ: переводим гомоглифы в латиницу."""
+    try:
+        return s.translate(_HOMO_LATIN)
+    except Exception:
+        return s
+
 _OBF_AT = [
     r"\[at\]", r"\(at\)", r"\{at\}", r"\sat\s", r"\s@\s", r"\sat\s",
     r"\[собака\]", r"\(собака\)", r"\{собака\}", r"\sсобака\s",
@@ -64,6 +78,25 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\xa0", " ")
     # 2.0) размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
+    # 2.1) если e-mail прилип к предыдущему слову (в т.ч. кириллица-гомоглифы) — вставим пробел
+    s_det = _latinize_for_detection(s)
+    s_det = re.sub(
+        r"([^\s<>\(\)\[\]\{\}])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
+        r"\1 \2",
+        s_det,
+    )
+    # переносим "вставленные" пробелы обратно по длине
+    if len(s_det) == len(s):
+        s = s_det
+    # 2.2) и если e-mail слит со следующим словом (редко встречается)
+    s_det = _latinize_for_detection(s)
+    s_det = re.sub(
+        r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})([^\s<>\(\)\[\]\{\}])",
+        r"\1 \2",
+        s_det,
+    )
+    if len(s_det) == len(s):
+        s = s_det
     # 3) сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
