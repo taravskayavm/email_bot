@@ -16,7 +16,6 @@ import smtplib
 import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from email.header import Header
 from email.utils import formataddr
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
@@ -99,14 +98,32 @@ _sent_idempotency: Set[str] = set()
 _OLD_SIGNATURE_GROUPS = {"медицина", "спорт", "туризм"}
 _NEW_SIGNATURE_GROUPS = {"психология", "география", "биоинформатика"}
 
+
 def _choose_from_header(group: str) -> str:
     """
-    Выбираем название отправителя в зависимости от направления.
+    Имя отправителя в заголовке From — зависит от направления.
+    Старые: 'Редакция литературы по медицине, спорту и туризму'
+    Новые:  'Редакция литературы'
     """
     g = (group or "").strip().lower()
     if g in _NEW_SIGNATURE_GROUPS:
         return "Редакция литературы"
     return "Редакция литературы по медицине, спорту и туризму"
+
+
+def _apply_from(msg: EmailMessage, group: str) -> None:
+    """Гарантированно проставить корректный From по группе (без точки на конце)."""
+    from_addr = os.getenv("EMAIL_ADDRESS", "")
+    from_name = _choose_from_header(group).strip()
+    # убрать точку/пробелы на конце, если вдруг есть
+    while from_name.endswith((".", " ", " ")):  # пробел и NBSP
+        from_name = from_name[:-1]
+    if "From" in msg:
+        try:
+            del msg["From"]
+        except Exception:
+            pass
+    msg["From"] = formataddr((from_name, from_addr))
 
 _SIGNATURE_OLD = """--
 С уважением,
@@ -231,13 +248,9 @@ def build_messages_for_group(
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     logo_path = os.getenv("LOGO_PATH", "")
     logo_cid = os.getenv("LOGO_CID", "logo")
-    from_addr = os.getenv("EMAIL_ADDRESS", "")
-    from_name = _choose_from_header(group)
     for rcpt in recipients:
         msg = EmailMessage()
         msg["To"] = rcpt
-        if from_addr or from_name:
-            msg["From"] = Header(f"{from_name} <{from_addr}>", "utf-8")
         text = strip_html(body_html)
         msg.set_content(text)
         msg.add_alternative(body_html, subtype="html")
@@ -253,6 +266,8 @@ def build_messages_for_group(
                 )
             except Exception:
                 pass
+        # В самом конце — зафиксировать корректный From по группе
+        _apply_from(msg, group)
         out.append(msg)
     return out
 

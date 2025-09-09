@@ -1,5 +1,9 @@
 import os
+from email.message import EmailMessage
+from email.utils import parseaddr
+
 import pytest
+
 from emailbot import messaging
 
 
@@ -20,9 +24,28 @@ def test_choose_from_header(monkeypatch, group, expected):
     assert len(msgs) == 1
     msg = msgs[0]
     assert "From" in msg
-    value = msg["From"]
-    # проверяем, что имя совпадает
-    assert value.startswith(expected), f"unexpected From: {value}"
-    # и адрес подтянулся из EMAIL_ADDRESS
-    assert "<test@lanbook.ru>" in value
+    value = str(msg["From"])
+    # проверяем, что имя и адрес совпадают
+    name, addr = parseaddr(value)
+    assert name == expected, f"unexpected From: {value}"
+    assert addr == "test@lanbook.ru"
+
+
+def test_apply_from_trims(monkeypatch):
+    monkeypatch.setenv("EMAIL_ADDRESS", "test@lanbook.ru")
+
+    # simulate custom from name with trailing dot, NBSP and space
+    monkeypatch.setattr(
+        messaging,
+        "_choose_from_header",
+        lambda group: "Редакция литературы.\u00a0 ",
+    )
+
+    msg = EmailMessage()
+    msg["From"] = "Whatever <old@example.com>"
+    messaging._apply_from(msg, "психология")
+
+    name, addr = parseaddr(str(msg["From"]))
+    assert name == "Редакция литературы"
+    assert addr == "test@lanbook.ru"
 
