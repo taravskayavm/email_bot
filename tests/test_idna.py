@@ -4,6 +4,8 @@ from utils.email_clean import sanitize_email
 
 
 def test_unicode_domain_punycode_local_nfc():
-    got = sanitize_email("test@почта.рф")
-    assert got == "test@xn--80a1acny.xn--p1ai"
+    # регресс: домен должен кодироваться как IDNA без подмен букв
+    raw = "test@тест.рф"
+    got = sanitize_email(raw)
+    assert got == "test@xn--e1aybc.xn--p1ai"
     assert unicodedata.is_normalized("NFC", got.split("@", 1)[0])
