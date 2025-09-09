@@ -62,3 +62,20 @@ def test_ocr_comma_before_tld():
     src = "foo@bar,ru"
     got = extract_emails(src)
     assert got == ["foo@bar.ru"]
+
+
+def test_reject_double_dots_and_hyphen_edges():
+    assert sanitize_email("user@foo..bar.com") == ""
+    assert sanitize_email("user@-foo.com") == ""
+    assert sanitize_email("user@foo-.com") == ""
+
+
+def test_label_length_and_tld_rules():
+    long_label = "a" * 64
+    assert sanitize_email(f"user@{long_label}.com") == ""
+    assert sanitize_email("user@example.c0m") == ""
+    assert sanitize_email("user@example." + "a" * 25) == ""
+    assert (
+        sanitize_email("user@example." + "a" * 24)
+        == "user@example." + "a" * 24
+    )
