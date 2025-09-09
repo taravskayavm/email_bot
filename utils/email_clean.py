@@ -138,3 +138,14 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
             final.add(sorted(vars_set, key=len)[0])
 
     return sorted(final)
+
+
+def parse_manual_input(text: str) -> list[str]:
+    """
+    Унифицированный парсер ручного ввода.
+    Использует тот же пайплайн, что и для файлов/сайтов:
+      extract_emails → sanitize_email → dedupe_with_variants
+    """
+    raw = extract_emails(text)
+    cleaned = [e for e in (sanitize_email(x) for x in raw) if e]
+    return dedupe_with_variants(cleaned)
