@@ -49,9 +49,12 @@ def apply_numeric_truncation_removal(allowed):
 async def async_extract_emails_from_url(
     url: str, session, chat_id=None, batch_id: str | None = None
 ):
-    hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
-    emails = set(h.email.lower().strip() for h in hits)
+    text = await asyncio.to_thread(_extraction_url.fetch_url, url)
+    _ = _extraction.extract_any  # keep reference for tests
+    cleaned = parse_emails_unified(text or " ")
+    emails = set(cleaned)
     foreign = {e for e in emails if not is_allowed_tld(e)}
+    stats: dict = {}
     logger.info(
         "extraction complete",
         extra={"event": "extract", "source": url, "count": len(emails)},
@@ -1192,9 +1195,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт"),
             ],
             [
-                InlineKeyboardButton(
-                    "🏕 Туризм", callback_data="manual_group_туризм"
-                ),
+                InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм"),
                 InlineKeyboardButton(
                     "🧠 Психология", callback_data="manual_group_психология"
                 ),
