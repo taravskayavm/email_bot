@@ -612,9 +612,20 @@ async def prompt_change_group(
     """Prompt the user to choose a mailing group."""
 
     keyboard = [
-        [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
-        [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
-        [InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина")],
+        [
+            InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина"),
+            InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт"),
+        ],
+        [
+            InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм"),
+            InlineKeyboardButton("🧠 Психология", callback_data="group_психология"),
+        ],
+        [
+            InlineKeyboardButton("🗺 География", callback_data="group_география"),
+            InlineKeyboardButton(
+                "🧬 Биоинформатика", callback_data="group_биоинформатика"
+            ),
+        ],
     ]
     await update.message.reply_text(
         "⬇️ Выберите направление рассылки:",
@@ -1051,9 +1062,20 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     keyboard = [
-        [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
-        [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
-        [InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина")],
+        [
+            InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина"),
+            InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт"),
+        ],
+        [
+            InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм"),
+            InlineKeyboardButton("🧠 Психология", callback_data="group_психология"),
+        ],
+        [
+            InlineKeyboardButton("🗺 География", callback_data="group_география"),
+            InlineKeyboardButton(
+                "🧬 Биоинформатика", callback_data="group_биоинформатика"
+            ),
+        ],
     ]
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
@@ -1163,12 +1185,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
 
         group_kb = [
-            [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
-            [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
             [
                 InlineKeyboardButton(
                     "🩺 Медицина", callback_data="manual_group_медицина"
-                )
+                ),
+                InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏕 Туризм", callback_data="manual_group_туризм"
+                ),
+                InlineKeyboardButton(
+                    "🧠 Психология", callback_data="manual_group_психология"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗺 География", callback_data="manual_group_география"
+                ),
+                InlineKeyboardButton(
+                    "🧬 Биоинформатика",
+                    callback_data="manual_group_биоинформатика",
+                ),
             ],
         ]
 
