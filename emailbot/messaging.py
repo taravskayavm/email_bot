@@ -58,6 +58,11 @@ TEMPLATE_MAP = {
     "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
     "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
 }
+TEMPLATE_MAP.update({
+    "психология": os.path.join(TEMPLATES_DIR, "psychology.html"),
+    "география": os.path.join(TEMPLATES_DIR, "geography.html"),
+    "биоинформатика": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),
+})
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -88,6 +93,58 @@ MODULE_DIR = Path(__file__).resolve().parent
 SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
 _sent_idempotency: Set[str] = set()
 
+
+
+_OLD_SIGNATURE_GROUPS = {"медицина", "спорт", "туризм"}
+_NEW_SIGNATURE_GROUPS = {"психология", "география", "биоинформатика"}
+
+_SIGNATURE_OLD = """--
+С уважением,
+Таравская Владлена Михайловна
+Заведующая редакцией литературы по медицине, спорту и туризму
+ООО Издательство «ЛАНЬ»
+
+8 (812) 336-90-92, доб. 208
+
+196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А
+
+Рабочие часы: 10.00-18.00
+
+med@lanbook.ru
+www.lanbook.com"""
+
+_SIGNATURE_NEW = """--
+С уважением,
+Таравская Владлена Михайловна
+Заведующая редакцией литературы 
+ООО Издательство «ЛАНЬ»
+
+8 (812) 336-90-92, доб. 208
+
+196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А
+
+Рабочие часы: 10.00-18.00
+
+med@lanbook.ru
+www.lanbook.com"""
+
+def _choose_signature(group: str) -> str:
+    g = (group or "").strip().lower()
+    text = _SIGNATURE_NEW if g in _NEW_SIGNATURE_GROUPS else _SIGNATURE_OLD
+    return text.replace("\n", "<br>")
+
+
+def _inject_signature(html_body: str, signature_html: str) -> str:
+    """Вставляет подпись в письмо, заменяя {{SIGNATURE}} или добавляя перед </body>."""
+    if not html_body:
+        return signature_html
+    if "{{SIGNATURE}}" in html_body:
+        return html_body.replace("{{SIGNATURE}}", signature_html)
+    lower = html_body.lower()
+    closing = lower.rfind("</body>")
+    if closing != -1:
+        return html_body[:closing] + "\n" + signature_html + "\n" + html_body[closing:]
+    return html_body + "\n" + signature_html + "\n"
 
 def _read_template_file(path: str) -> str:
     if not os.path.exists(path):
@@ -363,9 +420,10 @@ def build_message(
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
+    group = next((g for g, p in TEMPLATE_MAP.items() if p == html_path), "")
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
-        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{SIGNATURE_TEXT}</div>'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{_choose_signature(group)}</div>'
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
@@ -379,7 +437,8 @@ def build_message(
         'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;'
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
-    html_body = html_body.replace("</body>", f"{signature_html}{unsub_html}</body>")
+    html_body = _inject_signature(html_body, signature_html)
+    html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
     msg["From"] = formataddr(
