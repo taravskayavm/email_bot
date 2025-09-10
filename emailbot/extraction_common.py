@@ -51,13 +51,23 @@ def normalize_text(s: str) -> str:
     s = s.replace("\u00A0", " ")  # NBSP
     s = _Z_SPACE_RE.sub(" ", s)
 
-    # Zero-width characters
-    s = (
-        s.replace("\u200B", "")
-        .replace("\u200C", "")
-        .replace("\u200D", "")
-        .replace("\uFEFF", "")
+    # Zero-width / invisibles / BiDi marks / soft hyphen и пр.
+    # Это центрально важно, чтобы не «съедалась» первая буква e-mail.
+    INVISIBLES_RE = re.compile(
+        r"[\u00AD"                # SOFT HYPHEN
+        r"\u200B-\u200F"          # ZWSP..RLM
+        r"\u202A-\u202E"          # LRE..RLO/PDF
+        r"\u2028\u2029"           # LINE/PARAGRAPH SEP
+        r"\u202F"                 # NARROW NBSP
+        r"\u205F"                 # MEDIUM MATH SPACE
+        r"\u2060-\u206F"          # WORD JOINER..INVISIBLE OPS
+        r"\u2066-\u2069"          # LRI/RLI/FSI/PDI
+        r"\uFEFF"                 # ZW NBSP (BOM)
+        r"\u1680"                 # OGHAM SPACE MARK
+        r"\u180E"                 # MONGOLIAN VOWEL SEPARATOR
+        r"]"
     )
+    s = INVISIBLES_RE.sub("", s)
 
     # Various dashes/minuses -> ASCII '-'
     s = (
