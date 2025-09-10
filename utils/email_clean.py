@@ -8,11 +8,38 @@ import idna
 
 logger = logging.getLogger(__name__)
 
-# Невидимые/служебные символы: ZWSP/ZWNJ/ZWNJ, NBSP, LRM/RLM, WORD JOINER и др.
-_ZERO_WIDTH = "".join(
-    map(chr, [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF])
+# -------- ЕДИНЫЙ ЧИСТИЛЬЩИК НЕВИДИМЫХ СИМВОЛОВ --------
+# Удаляем невидимые пробелы/переносы/bi-di маркеры, часто попадающие из PDF/OCR.
+# Внимание: чистим исходный текст, НО не лезем внутрь уже матчинговых адресов.
+_INVISIBLES_RE = re.compile(
+    r"["
+    r"\u00AD"  # SOFT HYPHEN
+    r"\u200B-\u200F"  # ZWSP..RLM
+    r"\u202A-\u202E"  # LRE..RLO/PDF
+    r"\u2028\u2029"  # LINE/PARAGRAPH SEPARATOR
+    r"\u202F"  # NARROW NO-BREAK SPACE
+    r"\u205F"  # MEDIUM MATHEMATICAL SPACE
+    r"\u2060-\u206F"  # WORD JOINER..INVISIBLE OPS
+    r"\u2066-\u2069"  # LRI/RLI/FSI/PDI
+    r"\uFEFF"  # ZERO WIDTH NO-BREAK SPACE (BOM)
+    r"\u1680"  # OGHAM SPACE MARK
+    r"\u180E"  # MONGOLIAN VOWEL SEPARATOR
+    r"]"
 )
-_ZERO_WIDTH_RE = re.compile(f"[{re.escape(_ZERO_WIDTH)}]")
+
+
+def strip_invisibles(text: str) -> str:
+    """Удаляет невидимые/служебные Unicode-символы, мешающие парсингу."""
+    if not text:
+        return text
+    before = len(text)
+    cleaned = _INVISIBLES_RE.sub("", text)
+    if len(cleaned) != before:
+        try:
+            logger.debug("strip_invisibles: removed %d hidden chars", before - len(cleaned))
+        except Exception:
+            pass
+    return cleaned
 
 # Внешняя пунктуация, встречающаяся вокруг e-mail при парсинге
 _PUNCT_TRIM_RE = re.compile(
@@ -158,21 +185,13 @@ def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
     s = s.translate(str.maketrans(_CIRCLED_MAP))
-    # 1) удаляем невидимые символы (ZWSP, LRM и т.п.)
-    s = _ZERO_WIDTH_RE.sub("", s)
-    # 2) заменяем переносы строк, табы и NBSP на пробел
+    # заменяем переносы строк, табы и NBSP на пробел
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
-    # убрать скрытые символы, которые ломают границы/переносы в PDF/OCR
-    s = (
-        s
-        .replace("\u200b", "")  # ZWSP
-        .replace("\u200c", "")  # ZWNJ
-        .replace("\u200d", "")  # ZWJ
-        .replace("\u00ad", "")  # soft hyphen
-    )
-    # нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
+    # 1) убираем единым правилом все невидимые/служебные символы
+    s = strip_invisibles(s)
+    # 2) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
     s = _normalize_localparts(s)
     # размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
