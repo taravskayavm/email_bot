@@ -27,7 +27,11 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from utils.email_clean import parse_emails_unified
+from utils.email_clean import (
+    canonicalize_email,
+    dedupe_keep_original,
+    parse_emails_unified,
+)
 from utils.send_stats import summarize_today
 
 from . import extraction as _extraction
@@ -53,7 +57,8 @@ async def async_extract_emails_from_url(
 ):
     text = await asyncio.to_thread(_extraction_url.fetch_url, url)
     _ = _extraction.extract_any  # keep reference for tests
-    cleaned = parse_emails_unified(text or " ")
+    found = parse_emails_unified(text or " ")
+    cleaned = dedupe_keep_original(found)
     emails = set(cleaned)
     foreign = {e for e in emails if not is_allowed_tld(e)}
     stats: dict = {}
@@ -1173,7 +1178,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if context.user_data.get("awaiting_manual_email"):
         # Единый вход: всё — через единый пайплайн
-        emails = parse_emails_unified(text)
+        found_emails = parse_emails_unified(text)
+        emails = dedupe_keep_original(found_emails)
+        emails = sorted(emails, key=str.lower)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
             await update.message.reply_text("❌ Не найдено ни одного email.")
