@@ -4,6 +4,8 @@ import smtplib
 from typing import Iterable
 from email.message import EmailMessage
 
+from utils.send_stats import log_error, log_success
+
 PORT = int(os.getenv("SMTP_PORT", "587"))
 USE_SSL = os.getenv("SMTP_SSL", "0") == "1"
 logger = logging.getLogger(__name__)
@@ -36,7 +38,19 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     pass
                 try:
                     smtp.send_message(msg)
-                except Exception:
+                    try:
+                        log_success(msg.get("To", ""), msg.get("X-EBOT-Group", ""))
+                    except Exception:
+                        pass
+                except Exception as e:
+                    try:
+                        log_error(
+                            msg.get("To", ""),
+                            msg.get("X-EBOT-Group", ""),
+                            repr(e),
+                        )
+                    except Exception:
+                        pass
                     try:
                         smtp.rset()
                     except Exception:
@@ -61,7 +75,19 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     pass
                 try:
                     smtp.send_message(msg)
-                except Exception:
+                    try:
+                        log_success(msg.get("To", ""), msg.get("X-EBOT-Group", ""))
+                    except Exception:
+                        pass
+                except Exception as e:
+                    try:
+                        log_error(
+                            msg.get("To", ""),
+                            msg.get("X-EBOT-Group", ""),
+                            repr(e),
+                        )
+                    except Exception:
+                        pass
                     try:
                         smtp.rset()
                     except Exception:
