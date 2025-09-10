@@ -363,7 +363,10 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
 _EMAIL_CORE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
 _RE_ANGLE = re.compile(rf"<\s*({_EMAIL_CORE})\s*>")
 _RE_MAILTO = re.compile(rf"mailto:\s*({_EMAIL_CORE})", re.IGNORECASE)
-_RE_RAW = re.compile(rf"(?<![A-Za-z0-9._%+-])({_EMAIL_CORE})(?![A-Za-z0-9-])")
+# Универсальная юникод-граница:
+#  - слева: не \w и не '@' → e-mail может начинаться после любого разделителя (.,;:()[]{}""«»- и т.п.)
+#  - справа: не \w и не '.'/'-' → не «врастать» в слово или доменные хвосты
+_RE_RAW = re.compile(rf"(?<![\w@])({_EMAIL_CORE})(?![\w.-])")
 
 _TRAIL_PUNCT = ".,;:!?)”’»"
 
@@ -421,24 +424,16 @@ from typing import Dict, Iterable, Optional, Set
 
 
 def _dedupe(hits: Iterable[EmailHit]) -> list[EmailHit]:
+    """Оставляем оригинальные адреса для отправки; сравниваем по канону."""
     seen: Set[str] = set()
     out: list[EmailHit] = []
     for h in hits:
-        n = normalize_email(h.email)
-        if n and n not in seen:
-            seen.add(n)
-            if n == h.email:
-                out.append(h)
-            else:
-                out.append(
-                    EmailHit(
-                        email=n,
-                        source_ref=h.source_ref,
-                        origin=h.origin,
-                        pre=h.pre,
-                        post=h.post,
-                    )
-                )
+        key = normalize_email(h.email)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        # НЕ подменяем email на нормализованный — точки/плюс остаются как в источнике
+        out.append(h)
     return out
 
 

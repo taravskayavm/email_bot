@@ -113,11 +113,10 @@ def is_numeric_localpart(email_addr: str) -> bool:
 
 def sample_preview(items, k: int):
     lst = list(dict.fromkeys(items))
-    n = min(k, len(lst))
-    if n <= 0:
-        return []
-    rng = random.SystemRandom()
-    return rng.sample(lst, n)
+    if len(lst) <= k:
+        return lst
+    rng = random.SystemRandom()    # не влияет на глобальное состояние
+    return rng.sample(lst, k)
 
 
 from .messaging import (  # noqa: E402,F401  # isort: skip
