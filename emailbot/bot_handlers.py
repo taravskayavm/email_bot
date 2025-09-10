@@ -27,6 +27,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from utils.email_clean import parse_emails_unified
+from utils.send_stats import summarize_today
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -738,13 +739,14 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def get_report(period: str = "day") -> str:
     """Return statistics of sent e-mails for the given period."""
+    if period == "day":
+        s = summarize_today()
+        return f"Успешных: {s.get('ok',0)}\nОшибок: {s.get('err',0)}"
 
     if not os.path.exists(LOG_FILE):
         return "Нет данных о рассылках."
     now = datetime.now()
-    if period == "day":
-        start_at = now - timedelta(days=1)
-    elif period == "week":
+    if period == "week":
         start_at = now - timedelta(weeks=1)
     elif period == "month":
         start_at = now - timedelta(days=30)
