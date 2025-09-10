@@ -73,7 +73,15 @@ _LOCAL_HOMO_MAP = str.maketrans(
     }
 )
 _DOT_VARIANTS = r"[\u00B7\u2022\u2219\u22C5\u2027\u30FB\u0387\u2024\u2044]"  # · • ∙ ⋅ ․ ・ · (one-dot leader) / (slash as dot в OCR)
-_LOCAL_CANDIDATE = re.compile(r"(?P<local>[^\s@]{1,64})@(?P<rest>[^\s<>\[\]\(\)\{\}]+)")
+# Кандидат local-part: допускаем ASCII-символы e-mail и кириллические гомоглифы,
+#                      но границу слева проверяем только по ASCII-набору
+_LOCAL_BOUNDARY = "A-Za-z0-9._%+-"
+_LOCAL_BASE = "A-Za-z0-9._%+"
+_LOCAL_HOMO = "аеорсхукмтнвіАЕОРСХУКМТНВІьЬ"
+_LOCAL_DOTS = "\u00B7\u2022\u2219\u22C5\u2027\u30FB\u0387\u2024\u2044"
+_LOCAL_CANDIDATE = re.compile(
+    rf"(?<!\w)(?P<local>[{_LOCAL_BASE}{_LOCAL_HOMO}{_LOCAL_DOTS}-]{{1,64}})@(?P<rest>[^\s<>\[\]\(\)\{{\}}]+)"
+)
 
 
 def _normalize_localparts(text: str) -> str:
@@ -156,11 +164,19 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
-    # 2.0) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
+    # убрать скрытые символы, которые ломают границы/переносы в PDF/OCR
+    s = (
+        s
+        .replace("\u200b", "")  # ZWSP
+        .replace("\u200c", "")  # ZWNJ
+        .replace("\u200d", "")  # ZWJ
+        .replace("\u00ad", "")  # soft hyphen
+    )
+    # нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
     s = _normalize_localparts(s)
-    # 2.1) размаскировка "at/dot/собака/точка" перед границами
+    # размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
-    # 3) сжимаем повторяющиеся пробелы
+    # сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
 
