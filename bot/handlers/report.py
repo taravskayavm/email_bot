@@ -1,16 +1,13 @@
 import random
 
+
 def build_examples(emails: list[str], k: int = 10) -> list[str]:
     # крипто-рандом, чтобы телеграм-кэш и однаковый вход давали разные примеры
     rng = random.SystemRandom()
-    n = min(k, len(emails))
-    if n == 0:
-        return []
-    # Ожидаем, что сюда приходят уже очищенные адреса. На всякий случай
-    # удалим дубликаты, чтобы примеры не повторялись.
     unique = list(dict.fromkeys(emails))
-    sample = rng.sample(unique, n)
-    return sample
+    if len(unique) <= k:
+        return unique
+    return rng.sample(unique, k)
 
 def make_summary_message(stats, emails: list[str]) -> str:
     examples = build_examples(emails)
