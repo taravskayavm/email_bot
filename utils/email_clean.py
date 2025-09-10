@@ -245,6 +245,56 @@ def extract_emails(text: str) -> list[str]:
         out.append(email.lower())
     return out
 
+# -------- Канонизация для дедупликации (не для отправки!) --------
+_GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
+_YANDEX_DOMAINS = {"yandex.ru", "ya.ru", "yandex.com"}
+_MAILRU_DOMAINS = {"mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru"}
+
+
+def _strip_plus_tag(local: str) -> str:
+    i = local.find("+")
+    return local[:i] if i != -1 else local
+
+
+def canonicalize_email(addr: str) -> str:
+    """
+    Каноническая форма адреса для сравнения/дедупликации.
+    - gmail/googlemail: убрать точки в local-part и '+tag'
+    - yandex/mail.ru-семейство: убрать только '+tag'
+    - всё остальное: только lower-case
+    NB: Возвращаем канон для сравнения, НО в отправку всегда идёт исходный адрес.
+    """
+
+    try:
+        a = addr.strip()
+        if "@" not in a:
+            return a.lower()
+        local, domain = a.split("@", 1)
+        d = domain.strip().lower()
+        l = local.strip()
+        if d in _GMAIL_DOMAINS:
+            l = l.replace(".", "")
+            l = _strip_plus_tag(l)
+        elif d in _YANDEX_DOMAINS or d in _MAILRU_DOMAINS:
+            l = _strip_plus_tag(l)
+        return f"{l.lower()}@{d}"
+    except Exception:
+        return addr.lower()
+
+
+def dedupe_keep_original(emails: list[str]) -> list[str]:
+    """Удаляет дубликаты по канонической форме, сохраняя первый исходный адрес."""
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in emails:
+        key = canonicalize_email(e)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
+
 
 # === Unified pipeline =========================================================
 
@@ -275,8 +325,8 @@ def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
 def parse_emails_unified(text: str) -> list[str]:
     """
     Единый вход парсинга:
-      raw -> deobfuscate -> normalize -> find -> sanitize -> dedupe (provider-aware)
-    Возвращает отсортированный список валидных адресов (оригинальные варианты).
+      raw -> deobfuscate -> normalize -> find -> sanitize
+    Возвращает список валидных адресов в порядке появления (дубли не убираются).
     """
 
     _dbg("raw", text)
@@ -288,9 +338,7 @@ def parse_emails_unified(text: str) -> list[str]:
     _dbg("found", found)
     cleaned = [e for e in (sanitize_email(x) for x in found) if e]
     _dbg("sanitized", cleaned)
-    deduped = dedupe_with_variants(cleaned)
-    _dbg("deduped", deduped)
-    return deduped
+    return cleaned
 
 
 _LEADING_FOOTNOTE_RE = re.compile(

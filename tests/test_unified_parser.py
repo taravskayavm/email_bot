@@ -1,6 +1,6 @@
 import pytest
 
-from utils.email_clean import parse_emails_unified
+from utils.email_clean import dedupe_keep_original, parse_emails_unified
 
 
 def test_simple_space_delimited():
@@ -33,19 +33,19 @@ def test_ocr_comma_before_tld():
 
 def test_provider_dedupe_gmail_dots_plus():
     src = "ivan.petrov+tag@gmail.com ivanpetrov@gmail.com"
-    got = parse_emails_unified(src)
+    got = dedupe_keep_original(parse_emails_unified(src))
     assert got == ["ivan.petrov+tag@gmail.com"]
 
 
 def test_provider_dedupe_yandex_plus():
     src = "pavel+news@yandex.ru pavel@yandex.ru"
-    got = parse_emails_unified(src)
+    got = dedupe_keep_original(parse_emails_unified(src))
     assert got == ["pavel+news@yandex.ru"]
 
 
 def test_provider_dedupe_mailru_plus():
     src = "name+abc@mail.ru name@mail.ru"
-    got = parse_emails_unified(src)
+    got = dedupe_keep_original(parse_emails_unified(src))
     assert got == ["name+abc@mail.ru"]
 
 
