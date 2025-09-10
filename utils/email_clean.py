@@ -67,9 +67,12 @@ _LOCAL_HOMO_MAP = str.maketrans(
         "Н": "H",
         "В": "B",
         "І": "I",
+        # OCR: мягкий знак часто распознаётся вместо латинской 'b'
+        "ь": "b",
+        "Ь": "B",
     }
 )
-_DOT_VARIANTS = "[\u00b7\u2022\u2219\u22c5\u2027\u30fb\u0387]"  # · • ∙ ⋅ ․ ・ ϙ
+_DOT_VARIANTS = r"[\u00B7\u2022\u2219\u22C5\u2027\u30FB\u0387\u2024\u2044]"  # · • ∙ ⋅ ․ ・ · (one-dot leader) / (slash as dot в OCR)
 _LOCAL_CANDIDATE = re.compile(r"(?P<local>[^\s@]{1,64})@(?P<rest>[^\s<>\[\]\(\)\{\}]+)")
 
 
