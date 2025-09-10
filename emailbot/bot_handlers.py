@@ -9,6 +9,7 @@ import imaplib
 import logging
 import os
 import re
+import random
 import secrets
 import time
 import urllib.parse
@@ -107,9 +108,11 @@ def is_numeric_localpart(email_addr: str) -> bool:
 
 def sample_preview(items, k: int):
     lst = list(dict.fromkeys(items))
-    if len(lst) <= k:
-        return lst
-    return lst[:k]
+    n = min(k, len(lst))
+    if n <= 0:
+        return []
+    rng = random.SystemRandom()
+    return rng.sample(lst, n)
 
 
 from .messaging import (  # noqa: E402,F401  # isort: skip
@@ -148,9 +151,9 @@ ADMIN_IDS = {
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 
-PREVIEW_ALLOWED = 10
-PREVIEW_NUMERIC = 6
-PREVIEW_FOREIGN = 6
+PREVIEW_ALLOWED = int(os.getenv("EXAMPLES_COUNT", "10"))
+PREVIEW_NUMERIC = 5
+PREVIEW_FOREIGN = 5
 
 TECH_PATTERNS = [
     "noreply",
@@ -885,24 +888,16 @@ async def _compose_report_and_save(
     state.footnote_dupes = footnote_dupes
 
     sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = (
-        sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
-        if suspicious_numeric
-        else []
-    )
+    sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
     sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
     report_lines = [
         "✅ Анализ завершён.",
         f"Найдено адресов: {len(allowed_all)}",
         f"Уникальных (после очистки): {len(filtered)}",
+        f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}",
+        f"Иностранные домены: {len(foreign)}",
     ]
-    if suspicious_numeric:
-        report_lines.append(
-            f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}"
-        )
-    if foreign:
-        report_lines.append(f"Иностранные домены: {len(foreign)}")
     report = "\n".join(report_lines)
     if footnote_dupes:
         report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
