@@ -37,7 +37,63 @@ _SUPERSCRIPT_MAP = str.maketrans(
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
 
-# Удалено латинизирование гомоглифов — чтобы не искажать домены перед IDNA
+# --- Доп. нормализация только для local-part (левая часть до '@') ---
+_LOCAL_HOMO_MAP = str.maketrans(
+    {
+        # кириллица → латиница (похоже выглядят)
+        "а": "a",
+        "е": "e",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "х": "x",
+        "у": "y",
+        "к": "k",
+        "м": "m",
+        "т": "t",
+        "н": "h",
+        "в": "b",
+        "і": "i",
+        "А": "A",
+        "Е": "E",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "Х": "X",
+        "У": "Y",
+        "К": "K",
+        "М": "M",
+        "Т": "T",
+        "Н": "H",
+        "В": "B",
+        "І": "I",
+    }
+)
+_DOT_VARIANTS = "[\u00b7\u2022\u2219\u22c5\u2027\u30fb\u0387]"  # · • ∙ ⋅ ․ ・ ϙ
+_LOCAL_CANDIDATE = re.compile(r"(?P<local>[^\s@]{1,64})@(?P<rest>[^\s<>\[\]\(\)\{\}]+)")
+
+
+def _normalize_localparts(text: str) -> str:
+    """
+    Исправляет только local-part (до '@'):
+      - кириллические гомоглифы → латиница
+      - псевдоточки (· • ∙ ․ ・) → '.'
+    Домены не меняются.
+    """
+
+    def _fix(m: re.Match) -> str:
+        local = m.group("local")
+        # заменяем «псевдоточки» на обычную точку
+        local = re.sub(_DOT_VARIANTS, ".", local)
+        # приводим гомоглифы к латинице
+        local = local.translate(_LOCAL_HOMO_MAP)
+        return f"{local}@{m.group('rest')}"
+
+    try:
+        return _LOCAL_CANDIDATE.sub(_fix, text)
+    except Exception:
+        return text
+
 
 _OBF_AT = [
     r"\[at\]",
@@ -97,7 +153,9 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
-    # 2.0) размаскировка "at/dot/собака/точка" перед границами
+    # 2.0) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
+    s = _normalize_localparts(s)
+    # 2.1) размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
     # 3) сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
