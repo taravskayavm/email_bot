@@ -247,12 +247,12 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\xa0", " ")
     # 1) убираем единым правилом все невидимые/служебные символы
     s = strip_invisibles(s)
-    # 2) безопасно разлепляем границы перед e-mail (НЕ изменяя сам адрес)
-    s = _fix_glued_boundaries(s)
-    # 3.5) аккуратно убираем сноски (не перед адресом)
-    s = _strip_footnotes(s)
-    # 4) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
+    # 2) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
     s = _normalize_localparts(s)
+    # 3) безопасно разлепляем границы перед e-mail (НЕ изменяя сам адрес)
+    s = _fix_glued_boundaries(s)
+    # 4) аккуратно убираем сноски (не перед адресом)
+    s = _strip_footnotes(s)
     # размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
     # сжимаем повторяющиеся пробелы
