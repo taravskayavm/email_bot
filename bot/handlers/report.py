@@ -1,18 +1,58 @@
 import random
+from utils.email_clean import parse_emails_unified
 
 
 def build_examples(emails: list[str], k: int = 10) -> list[str]:
-    # крипто-рандом, чтобы телеграм-кэш и однаковый вход давали разные примеры
+    """Return up to ``k`` unique examples in random order."""
     rng = random.SystemRandom()
     unique = list(dict.fromkeys(emails))
     if len(unique) <= k:
         return unique
     return rng.sample(unique, k)
 
-def make_summary_message(stats, emails: list[str]) -> str:
+
+async def send_report(update, context, extractor_result) -> None:
+    """Send a summary of extracted e-mails to the user.
+
+    Stores suspicious addresses (when the first letter might be missing) in
+    ``context.user_data['emails_suspects']`` for further use.
+    """
+    cleaned, meta = parse_emails_unified(
+        extractor_result.raw_text or " ", return_meta=True
+    )
+    unique = sorted(set(cleaned))
+    suspects = sorted(set(meta.get("suspects", [])))
+    examples = build_examples(unique)
+
+    lines = [
+        "✅ Анализ завершён.",
+        f"Найдено адресов: {len(unique)}",
+        f"Уникальных (после очистки): {len(unique)}",
+    ]
+    if suspects:
+        lines += [
+            "",
+            "⚠️ Подозрительные (возможно, «съелась» первая буква): "
+            f"{len(suspects)}",
+            *suspects[:5],
+        ]
+    if examples:
+        lines += ["", "🧪 Примеры:", *examples]
+
+    await update.message.reply_text("\n".join(lines))
+    context.user_data["emails_suspects"] = suspects
+
+def make_summary_message(
+    stats: str, emails: list[str], suspects: list[str] | None = None
+) -> str:
+    """Compose a human-readable report based on stats and e-mail lists."""
     examples = build_examples(emails)
-    blocks = []
-    blocks.append(stats)
+    blocks = [stats]
+    if suspects:
+        blocks.append(
+            "⚠️ Подозрительные (возможно, «съелась» первая буква): "
+            f"{len(suspects)}\n" + "\n".join(suspects[:5])
+        )
     if examples:
         blocks.append("🧪 Примеры:\n" + "\n".join(examples))
     # удаляем второй дублирующийся блок примеров: формируем сообщение ровно один раз
