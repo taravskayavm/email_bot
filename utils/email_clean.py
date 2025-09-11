@@ -7,6 +7,7 @@ from functools import lru_cache
 import idna
 
 logger = logging.getLogger(__name__)
+_FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
 
 # -------- ЕДИНЫЙ ЧИСТИЛЬЩИК НЕВИДИМЫХ СИМВОЛОВ --------
 # Удаляем невидимые пробелы/переносы/bi-di маркеры, часто попадающие из PDF/OCR.
@@ -183,7 +184,7 @@ def _deobfuscate(text: str) -> str:
 
 # Ядро адреса для lookahead (не использовать для замены самого адреса!)
 # Допускаем любые непробельные символы в local-part и домене
-_EMAIL_CORE = r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}"
+_EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
 
 def _fix_glued_boundaries(s: str) -> str:
@@ -216,8 +217,9 @@ def _strip_footnotes(s: str) -> str:
     """
     Удаляем типовые сноски (например, '[12]', '(a)', '¹²'), НО только если
     ПОСЛЕ них НЕ начинается e-mail. Это защищает первую букву адреса.
+    Можно отключить через переменную окружения FOOTNOTES_MODE=off.
     """
-    if not s:
+    if not s or _FOOTNOTES_MODE == "off":
         return s
     # 1) Квадратные/круглые сноски после слова, если далее НЕ e-mail
     s = re.sub(
@@ -384,23 +386,38 @@ def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
         pass
 
 
-def parse_emails_unified(text: str) -> list[str]:
+def parse_emails_unified(text: str, return_meta: bool = False):
     """
     Единый вход парсинга:
       raw -> deobfuscate -> normalize -> find -> sanitize
     Возвращает список валидных адресов в порядке появления (дубли не убираются).
+    При `return_meta=True` дополнительно возвращает словарь с метаданными.
     """
 
-    _dbg("raw", text)
-    t1 = _deobfuscate(text or "")
+    raw = text or ""
+    _dbg("raw", raw)
+    t1 = _deobfuscate(raw)
     _dbg("deobfuscated", t1)
     t2 = _normalize_text(t1)
     _dbg("normalized", t2)
-    found = [m.group(0) for m in _EMAIL_CORE_RE.finditer(t2)]
+    matches = list(_EMAIL_CORE_RE.finditer(t2))
+    found = [m.group(0) for m in matches]
     _dbg("found", found)
     cleaned = [e for e in (sanitize_email(x) for x in found) if e]
     _dbg("sanitized", cleaned)
-    return cleaned
+    if not return_meta:
+        return cleaned
+
+    suspects: list[str] = []
+    for m in matches:
+        start = m.start(0)
+        if start > 0:
+            prev = raw[start - 1 : start] if start <= len(raw) else t2[start - 1 : start]
+            first = m.group(0)[:1].lower()
+            if prev in ".,:;()[]{}-—" and first in "abc":
+                suspects.append(m.group(0))
+
+    return cleaned, {"suspects": suspects}
 
 
 _LEADING_FOOTNOTE_RE = re.compile(
