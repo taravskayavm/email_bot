@@ -37,10 +37,13 @@ def strip_invisibles(text: str) -> str:
     cleaned = _INVISIBLES_RE.sub("", text)
     if len(cleaned) != before:
         try:
-            logger.debug("strip_invisibles: removed %d hidden chars", before - len(cleaned))
+            logger.debug(
+                "strip_invisibles: removed %d hidden chars", before - len(cleaned)
+            )
         except Exception:
             pass
     return cleaned
+
 
 # Внешняя пунктуация, встречающаяся вокруг e-mail при парсинге
 _PUNCT_TRIM_RE = re.compile(
@@ -106,7 +109,7 @@ _DOT_VARIANTS = r"[\u00B7\u2022\u2219\u22C5\u2027\u30FB\u0387\u2024\u2044]"  # �
 _LOCAL_BOUNDARY = "A-Za-z0-9._%+-"
 _LOCAL_BASE = "A-Za-z0-9._%+"
 _LOCAL_HOMO = "аеорсхукмтнвіАЕОРСХУКМТНВІьЬ"
-_LOCAL_DOTS = "\u00B7\u2022\u2219\u22C5\u2027\u30FB\u0387\u2024\u2044"
+_LOCAL_DOTS = "\u00b7\u2022\u2219\u22c5\u2027\u30fb\u0387\u2024\u2044"
 _LOCAL_CANDIDATE = re.compile(
     rf"(?<!\w)(?P<local>[{_LOCAL_BASE}{_LOCAL_HOMO}{_LOCAL_DOTS}-]{{1,64}})@(?P<rest>[^\s<>\[\]\(\)\{{\}}]+)"
 )
@@ -232,7 +235,7 @@ def _strip_footnotes(s: str) -> str:
     s = re.sub(
         rf"(?:[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8])\s*(?!{_EMAIL_CORE})",
         "",
-        s
+        s,
     )
     return s
 
@@ -309,6 +312,7 @@ def extract_emails(text: str) -> list[str]:
         out.append(email.lower())
     return out
 
+
 # -------- Канонизация для дедупликации (не для отправки!) --------
 _GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
 _YANDEX_DOMAINS = {"yandex.ru", "ya.ru", "yandex.com"}
@@ -335,13 +339,13 @@ def canonicalize_email(addr: str) -> str:
             return a.lower()
         local, domain = a.split("@", 1)
         d = domain.strip().lower()
-        l = local.strip()
+        local_norm = local.strip()
         if d in _GMAIL_DOMAINS:
-            l = l.replace(".", "")
-            l = _strip_plus_tag(l)
+            local_norm = local_norm.replace(".", "")
+            local_norm = _strip_plus_tag(local_norm)
         elif d in _YANDEX_DOMAINS or d in _MAILRU_DOMAINS:
-            l = _strip_plus_tag(l)
-        return f"{l.lower()}@{d}"
+            local_norm = _strip_plus_tag(local_norm)
+        return f"{local_norm.lower()}@{d}"
     except Exception:
         return addr.lower()
 
@@ -412,10 +416,12 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     for m in matches:
         start = m.start(0)
         if start > 0:
-            prev = raw[start - 1 : start] if start <= len(raw) else t2[start - 1 : start]
+            prev = t2[:start].rstrip()[-1:]
             first = m.group(0)[:1].lower()
             if prev in ".,:;()[]{}-—" and first in "abc":
-                suspects.append(m.group(0))
+                suspect = sanitize_email(m.group(0))
+                if suspect:
+                    suspects.append(suspect)
 
     return cleaned, {"suspects": suspects}
 
