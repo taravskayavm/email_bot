@@ -181,6 +181,60 @@ def _deobfuscate(text: str) -> str:
     return t
 
 
+# Ядро адреса для lookahead (не использовать для замены самого адреса!)
+# Допускаем любые непробельные символы в local-part и домене
+_EMAIL_CORE = r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}"
+
+
+def _fix_glued_boundaries(s: str) -> str:
+    """
+    Вставляем пробел между предшествующим символом и НАЧАЛОМ e-mail,
+    если перед адресом нет пробела. Первая буква адреса НЕ трогается.
+    Примеры: 'Россия.duslem@mail.ru' → 'Россия. duslem@mail.ru'
+             'см:ivan@mail.ru'      → 'см: ivan@mail.ru'
+             '—alex@mail.ru'        → '— alex@mail.ru'
+    """
+    if not s:
+        return s
+    # Вставляем пробел ПЕРЕД адресом, не потребляя ни одного символа адреса.
+    # Слева допускаем любой не-пробельный (включая букву), чтобы разлепить 'словоivan@mail.ru'.
+    # Но НЕ трогаем случаи, где слева уже пробел.
+    out = []
+    last = 0
+    for m in re.finditer(_EMAIL_CORE, s):
+        start, end = m.span()
+        if start > 0 and s[start - 1] != " ":
+            out.append(s[last:start] + " ")
+        else:
+            out.append(s[last:start])
+        last = start
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _strip_footnotes(s: str) -> str:
+    """
+    Удаляем типовые сноски (например, '[12]', '(a)', '¹²'), НО только если
+    ПОСЛЕ них НЕ начинается e-mail. Это защищает первую букву адреса.
+    """
+    if not s:
+        return s
+    # 1) Квадратные/круглые сноски после слова, если далее НЕ e-mail
+    s = re.sub(
+        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z])\]|\((?:\d+|[a-z])\))\s*(?!{_EMAIL_CORE})",
+        " ",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # 2) Надстрочные цифры/буквы (часто из PDF) — убираем, если не перед e-mail
+    s = re.sub(
+        rf"(?:[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8])\s*(?!{_EMAIL_CORE})",
+        "",
+        s
+    )
+    return s
+
+
 def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
@@ -191,7 +245,11 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\xa0", " ")
     # 1) убираем единым правилом все невидимые/служебные символы
     s = strip_invisibles(s)
-    # 2) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
+    # 2) безопасно разлепляем границы перед e-mail (НЕ изменяя сам адрес)
+    s = _fix_glued_boundaries(s)
+    # 3.5) аккуратно убираем сноски (не перед адресом)
+    s = _strip_footnotes(s)
+    # 4) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
     s = _normalize_localparts(s)
     # размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
