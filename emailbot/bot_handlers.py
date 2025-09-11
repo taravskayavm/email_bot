@@ -32,7 +32,7 @@ from utils.email_clean import (
     dedupe_keep_original,
     parse_emails_unified,
 )
-from utils.send_stats import summarize_today
+from utils.send_stats import summarize_today, summarize_week, current_tz_label
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -749,13 +749,14 @@ def get_report(period: str = "day") -> str:
     if period == "day":
         s = summarize_today()
         return f"Успешных: {s.get('ok',0)}\nОшибок: {s.get('err',0)}"
+    if period == "week":
+        s = summarize_week()
+        return f"Успешных: {s.get('ok',0)}\nОшибок: {s.get('err',0)}"
 
     if not os.path.exists(LOG_FILE):
         return "Нет данных о рассылках."
     now = datetime.now()
-    if period == "week":
-        start_at = now - timedelta(weeks=1)
-    elif period == "month":
+    if period == "month":
         start_at = now - timedelta(days=30)
     elif period == "year":
         start_at = now - timedelta(days=365)
@@ -797,7 +798,10 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "year": "Отчёт за год",
     }
     text = get_report(period)
-    await query.edit_message_text(f"📊 {mapping.get(period, period)}:\n{text}")
+    header = mapping.get(period, period)
+    if period in ("day", "week"):
+        header = f"{header} ({current_tz_label()})"
+    await query.edit_message_text(f"📊 {header}:\n{text}")
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
