@@ -190,6 +190,27 @@ def _deobfuscate(text: str) -> str:
 _EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
 
+def _fix_hyphen_breaks(s: str) -> str:
+    """
+    Чиним переносы с дефисом: '-\n' внутри адресов оставляем как дефис,
+    обычные переносы '-\n' вне адресов — убираем.
+    Эвристика: если слева [A-Za-z0-9] и справа [A-Za-z0-9@], сохраняем '-'.
+    """
+    if not s:
+        return s
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    def repl(m: re.Match) -> str:
+        i = m.start()
+        left = s[i - 1 : i]
+        right = s[m.end() : m.end() + 1]
+        if left and right and re.match(r"[A-Za-z0-9]", left) and re.match(r"[A-Za-z0-9@]", right):
+            return "-"  # «реальный» дефис (в т.ч. перед @ в логине)
+        return ""  # мягкий перенос
+
+    return re.sub(r"-(?:\s*\n\s*)", repl, s)
+
+
 def _fix_glued_boundaries(s: str) -> str:
     """
     Вставляем пробел между предшествующим символом и НАЧАЛОМ e-mail,
@@ -218,20 +239,27 @@ def _fix_glued_boundaries(s: str) -> str:
 
 def _strip_footnotes(s: str) -> str:
     """
-    Удаляем типовые сноски (например, '[12]', '(a)', '¹²'), НО только если
-    ПОСЛЕ них НЕ начинается e-mail. Это защищает первую букву адреса.
-    Можно отключить через переменную окружения FOOTNOTES_MODE=off.
+    Удаляем типовые сноски ([12], (a), надстрочные), НО только если
+    после них НЕ начинается e-mail. Защищает первую букву a/b/c.
     """
-    if not s or _FOOTNOTES_MODE == "off":
+    if not s:
         return s
-    # 1) Квадратные/круглые сноски после слова, если далее НЕ e-mail
+    if _FOOTNOTES_MODE == "off":
+        return s
+    # допускаем необязательные пробелы перед адресом: (a)[пробелы]alex@...
     s = re.sub(
-        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z])\]|\((?:\d+|[a-z])\))\s*(?!{_EMAIL_CORE})",
+        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z]{{1,2}})\]|\((?:\d+|[a-z]{{1,2}})\))(?=\s*{_EMAIL_CORE})",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # иначе — это действительно сноска, удаляем её
+    s = re.sub(
+        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z]{{1,2}})\]|\((?:\d+|[a-z]{{1,2}})\))",
         " ",
         s,
         flags=re.IGNORECASE,
     )
-    # 2) Надстрочные цифры/буквы (часто из PDF) — убираем, если не перед e-mail
     s = re.sub(
         rf"(?:[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8])\s*(?!{_EMAIL_CORE})",
         "",
@@ -248,16 +276,18 @@ def _normalize_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
-    # 1) убираем единым правилом все невидимые/служебные символы
+    # 1) невидимые/биди/soft-hyphen
     s = strip_invisibles(s)
-    # 2) нормализация только local-part (чинит 'сhukanov·ev@' → 'chukanov.ev@')
-    s = _normalize_localparts(s)
-    # 3) безопасно разлепляем границы перед e-mail (НЕ изменяя сам адрес)
-    s = _fix_glued_boundaries(s)
-    # 4) аккуратно убираем сноски (не перед адресом)
-    s = _strip_footnotes(s)
-    # размаскировка "at/dot/собака/точка" перед границами
+    # 2) починить дефис-переносы, чтобы не ломать 'shestova-ma@...'
+    s = _fix_hyphen_breaks(s)
+    # 3) размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
+    # 4) нормализация local-part (замены юникод-lookalike и т.п.)
+    s = _normalize_localparts(s)
+    # 5) разлипание границы перед адресом (не трогаем сам адрес)
+    s = _fix_glued_boundaries(s)
+    # 6) «умные» сноски — после разлипаний и уже на «живом» окружении
+    s = _strip_footnotes(s)
     # сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
