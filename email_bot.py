@@ -101,6 +101,8 @@ def main() -> None:
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
     app.add_handler(CommandHandler("features", bot_handlers.features))
+    app.add_handler(CommandHandler("reports", bot_handlers.handle_reports))
+    app.add_handler(CommandHandler("reports_debug", bot_handlers.handle_reports_debug))
 
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
