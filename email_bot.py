@@ -15,6 +15,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -103,6 +104,30 @@ def main() -> None:
     app.add_handler(CommandHandler("features", bot_handlers.features))
     app.add_handler(CommandHandler("reports", bot_handlers.handle_reports))
     app.add_handler(CommandHandler("reports_debug", bot_handlers.handle_reports_debug))
+
+    # Inline-кнопки для подозрительных адресов
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.on_accept_suspects, pattern="^accept_suspects$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.on_edit_suspects, pattern="^edit_suspects$")
+    )
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[],
+            states={
+                bot_handlers.EDIT_SUSPECTS_INPUT: [
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND,
+                        bot_handlers.on_edit_suspects_input,
+                    )
+                ]
+            },
+            fallbacks=[],
+            name="edit_suspects_flow",
+            persistent=False,
+        )
+    )
 
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
