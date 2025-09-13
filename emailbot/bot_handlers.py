@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import imaplib
+import json
 import logging
 import os
 import re
@@ -14,7 +15,8 @@ import secrets
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import List, Optional, Set
 
 import aiohttp
@@ -33,6 +35,7 @@ from utils.email_clean import (
     parse_emails_unified,
 )
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
+from utils.send_stats import _PATH as STATS_PATH  # только для отображения пути
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -728,6 +731,47 @@ async def force_send_command(
         "Режим игнорирования дневного лимита включён для этого чата.\n"
         "Запустите рассылку ещё раз — ограничение на сегодня будет проигнорировано."
     )
+
+
+async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отчёт об отправках за сегодня и неделю."""
+
+    today = summarize_today()
+    week = summarize_week()
+    tz = current_tz_label()
+    lines = [
+        f"📝 Отчёт ({tz}):",
+        f"Сегодня — ок: {today.get('ok',0)}, ошибок: {today.get('err',0)}",
+        f"Неделя — ок: {week.get('ok',0)}, ошибок: {week.get('err',0)}",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
+async def handle_reports_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Диагностика отчётов: путь, наличие, хвост и текущее время."""
+
+    try:
+        p = Path(STATS_PATH)
+        exists = p.exists()
+        tail: list[str] = []
+        if exists:
+            with p.open("r", encoding="utf-8") as f:
+                lines = f.readlines()[-5:]
+                tail = [l.strip() for l in lines]
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        msg = [
+            "🛠 Диагностика отчётов:",
+            f"Файл: {p}",
+            f"Существует: {exists}",
+            f"Последние записи ({len(tail)}):",
+            *tail,
+            "",
+            f"Время сейчас (UTC): {now_utc}",
+            f"TZ отчёта: {current_tz_label()}",
+        ]
+        await update.message.reply_text("\n".join(msg))
+    except Exception as e:  # pragma: no cover - best effort
+        await update.message.reply_text(f"Diag error: {e!r}")
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
