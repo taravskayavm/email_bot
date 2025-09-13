@@ -47,6 +47,10 @@ from .reporting import build_mass_report_text, log_mass_filter_digest
 from .settings_store import DEFAULTS
 
 
+# --- Новое состояние для ручного ввода исправлений ---
+EDIT_SUSPECTS_INPUT = 9301
+
+
 def _preclean_text_for_emails(text: str) -> str:
     return text
 
@@ -772,6 +776,54 @@ async def handle_reports_debug(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("\n".join(msg))
     except Exception as e:  # pragma: no cover - best effort
         await update.message.reply_text(f"Diag error: {e!r}")
+
+
+# === КНОПКИ ДЛЯ ПОДОЗРИТЕЛЬНЫХ ===
+async def on_accept_suspects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    suspects = context.user_data.get("emails_suspects") or []
+    if not suspects:
+        return await q.edit_message_text("Подозрительных адресов нет.")
+    sendable = set(context.user_data.get("emails_for_sending") or [])
+    for e in suspects:
+        sendable.add(e)
+    context.user_data["emails_for_sending"] = sorted(sendable)
+    context.user_data["emails_suspects"] = []
+    await q.edit_message_text(
+        "✅ Подозрительные адреса приняты и добавлены к отправке.\n"
+        f"Итого к отправке: {len(sendable)}"
+    )
+
+
+async def on_edit_suspects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    suspects = context.user_data.get("emails_suspects") or []
+    preview = "\n".join(suspects[:10]) if suspects else "—"
+    await q.edit_message_text(
+        "✍️ Введите исправленные e-mail одним блоком (через пробел/запятую/с новой строки).\n"
+        "Текущие «подозрительные» (первые 10):\n" + preview
+    )
+    context.user_data["await_edit_suspects"] = True
+    return EDIT_SUSPECTS_INPUT
+
+
+async def on_edit_suspects_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("await_edit_suspects"):
+        return
+    text = update.message.text or ""
+    fixed = parse_emails_unified(text)
+    sendable = set(context.user_data.get("emails_for_sending") or [])
+    for e in fixed:
+        sendable.add(e)
+    context.user_data["emails_for_sending"] = sorted(sendable)
+    context.user_data["emails_suspects"] = []
+    context.user_data["await_edit_suspects"] = False
+    await update.message.reply_text(
+        "✅ Исправленные адреса приняты.\n"
+        f"Итого к отправке: {len(sendable)}"
+    )
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

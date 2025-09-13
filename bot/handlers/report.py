@@ -1,5 +1,6 @@
 import random
 from utils.email_clean import parse_emails_unified
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def build_examples(emails: list[str], k: int = 10) -> list[str]:
@@ -29,17 +30,34 @@ async def send_report(update, context, extractor_result) -> None:
         f"Найдено адресов: {len(unique)}",
         f"Уникальных (после очистки): {len(unique)}",
     ]
+    kb = None
     if suspects:
         lines += [
             "",
-            "⚠️ Подозрительные (возможно, «съелась» первая буква): "
-            f"{len(suspects)}",
+            f"⚠️ Подозрительные (возможно, «съелась» первая буква): {len(suspects)}",
             *suspects[:5],
+            "",
+            "Вы можете принять их как есть или вручную исправить.",
         ]
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Принять подозрительные", callback_data="accept_suspects"
+                    ),
+                    InlineKeyboardButton(
+                        "✍️ Исправить адреса", callback_data="edit_suspects"
+                    ),
+                ]
+            ]
+        )
     if examples:
         lines += ["", "🧪 Примеры:", *examples]
 
-    await update.message.reply_text("\n".join(lines))
+    if kb:
+        await update.message.reply_text("\n".join(lines), reply_markup=kb)
+    else:
+        await update.message.reply_text("\n".join(lines))
     context.user_data["emails_suspects"] = suspects
 
 def make_summary_message(
