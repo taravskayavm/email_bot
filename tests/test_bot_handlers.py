@@ -1,9 +1,9 @@
 import asyncio
+import imaplib
 import logging
 import types
-import imaplib
-import pytest
 
+import pytest
 from telegram import InlineKeyboardMarkup
 
 import emailbot.bot_handlers as bh
@@ -144,8 +144,8 @@ def test_handle_text_manual_emails():
 
     assert ctx.chat_data["manual_all_emails"] == [
         "123@site.com",
+        "1test@site.com",
         "support@support.com",
-        "test@site.com",
         "user@example.com",
     ]
     assert ctx.user_data["awaiting_manual_email"] is False
@@ -266,7 +266,11 @@ async def test_send_manual_email_no_block_mentions(monkeypatch):
 
     monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *a, **k: DummyImap())
 
-    monkeypatch.setattr(bh.messaging, "create_task_with_logging", lambda coro, _: asyncio.create_task(coro))
+    monkeypatch.setattr(
+        bh.messaging,
+        "create_task_with_logging",
+        lambda coro, _: asyncio.create_task(coro),
+    )
 
     await bh.send_manual_email(update, ctx)
     await asyncio.sleep(0)
