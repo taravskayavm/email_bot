@@ -242,7 +242,7 @@ def _fix_glued_boundaries(s: str) -> str:
     return "".join(out)
 
 
-def _strip_footnotes(s: str) -> str:
+def _strip_inline_footnotes(s: str) -> str:
     """
     Удаляем типовые сноски ([12], (a), надстрочные), НО только если
     после них НЕ начинается e-mail. Защищает первую букву a/b/c.
@@ -274,7 +274,11 @@ def _strip_footnotes(s: str) -> str:
 
 
 def _normalize_text(s: str) -> str:
-    s = re.sub(r"[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8\u2460-\u2473]", "", s)
+    s = re.sub(
+        r"[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8\u2460-\u2473\u1D43-\u1D61\u1D62-\u1D6A]",
+        "",
+        s,
+    )
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
     s = s.translate(str.maketrans(_CIRCLED_MAP))
@@ -293,7 +297,7 @@ def _normalize_text(s: str) -> str:
     # 5) разлипание границы перед адресом (не трогаем сам адрес)
     s = _fix_glued_boundaries(s)
     # 6) «умные» сноски — после разлипаний и уже на «живом» окружении
-    s = _strip_footnotes(s)
+    s = _strip_inline_footnotes(s)
     # сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
     return s
@@ -462,16 +466,28 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     return cleaned, {"suspects": suspects}
 
 
-_LEADING_FOOTNOTE_RE = re.compile(
-    r"^[\u00B9\u00B2\u00B3\u2070-\u2079]{1,3}(?=[A-Za-z])"
-)  # 1–3 надстрочные цифры в начале local-part
+# Сноски: убираем ТОЛЬКО надстрочные цифры/буквы, не трогаем обычные латинские
+# ¹²³⁰–⁹, ᵃ…  (диапазоны супертекстовых символов)
+_SUPERSCRIPT_FOOTNOTE_RE = re.compile(
+    r"^[\u00B9\u00B2\u00B3\u2070-\u2079\u1D43-\u1D61\u1D62-\u1D6A]+"
+)
+
+
+def _strip_footnotes(local: str) -> str:
+    """Удаляет ведущие надстрочные символы-сноски из local-part."""
+    # теперь удаляем только надстрочные «сноски»
+    return _SUPERSCRIPT_FOOTNOTE_RE.sub("", local)
 
 
 def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     """
     Финальная чистка: убираем внешнюю пунктуацию, невидимые символы,
-    откусываем ведущие цифры-сноски в local-part, обрезаем крайние -_. от переносов.
+    обрезаем крайние -_. от переносов.
     """
+    if strip_footnote and "@" in email:
+        local0, domain0 = email.split("@", 1)
+        email = f"{_strip_footnotes(local0)}@{domain0}"
+
     s = _normalize_text(email).lower().replace(" ", "").strip()
     s = _PUNCT_TRIM_RE.sub("", s)
     s = re.sub(r"(\?|\#|/).*$", "", s)
@@ -479,14 +495,8 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     if "@" not in s:
         return ""
 
-    orig_local = email.split("@", 1)[0]
     local, domain = s.split("@", 1)
     local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
-    if strip_footnote:
-        m = _LEADING_FOOTNOTE_RE.match(orig_local)
-        if m:
-            digits_to_strip = len(m.group(0))
-            local = re.sub(rf"^\d{{1,{digits_to_strip}}}", "", local)
     # чистим края от .-_ оставшихся от переносов
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
 
