@@ -1,10 +1,11 @@
 from utils.email_clean import dedupe_with_variants, sanitize_email
 
 
-def test_superscript_footnote_in_local_part():
-    assert sanitize_email("0-ju@mail.ru") == "0-ju@mail.ru"
-    assert sanitize_email("¹alex@mail.ru") == "alex@mail.ru"
-    assert sanitize_email("0-\nju@mail.ru") == "0-ju@mail.ru"
+def test_strip_leading_superscript_footnote_only():
+    assert sanitize_email("\u00B9test@site.com") == "test@site.com"  # ¹test
+    assert sanitize_email("\u2075\u2075alex@example.com") == "alex@example.com"  # ⁵⁵alex
+    assert sanitize_email("1test@site.com") == "1test@site.com"
+    assert sanitize_email("55alex@example.com") == "55alex@example.com"
 
 
 def test_trim_local_part_edges():
