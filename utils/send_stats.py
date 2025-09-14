@@ -129,7 +129,7 @@ def summarize(scope: str) -> dict:
                 ok += 1
             elif rec.get("status") == "error":
                 err += 1
-    return {"ok": ok, "err": err}
+    return {"ok": ok, "err": err, "success": ok, "error": err}
 
 
 def summarize_today() -> dict:

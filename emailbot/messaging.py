@@ -629,16 +629,33 @@ def send_email_with_sessions(
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
         return ""
     msg, token = build_message(recipient, html_path, subject)
+    group_code = msg.get("X-EBOT-Group", "") or ""
     raw = msg.as_string()
-    client.send(EMAIL_ADDRESS, recipient, raw)
     try:
-        m = message_from_string(raw)
-        grp = (m.get("X-EBOT-Group", "") or "")
-        log_success(recipient, grp)
-    except Exception:
-        pass
-    save_to_sent_folder(raw, imap=imap, folder=sent_folder)
-    return token
+        client.send(EMAIL_ADDRESS, recipient, raw)
+        save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+        try:
+            log_success(recipient, group_code)
+        except Exception:
+            pass
+        return token
+    except smtplib.SMTPResponseException as e:
+        code = getattr(e, "smtp_code", None)
+        msg_bytes = getattr(e, "smtp_error", b"")
+        add_bounce(recipient, code, msg_bytes, "send")
+        try:
+            err = msg_bytes.decode() if isinstance(msg_bytes, (bytes, bytearray)) else msg_bytes
+            log_error(recipient, group_code, f"{code} {err}")
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        logger.warning("SMTP send failed to %s: %s", recipient, e)
+        try:
+            log_error(recipient, group_code, repr(e))
+        except Exception:
+            pass
+        raise
 
 
 def process_unsubscribe_requests():
