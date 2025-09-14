@@ -216,6 +216,11 @@ def _fix_hyphen_breaks(s: str) -> str:
     return re.sub(r"-(?:\s*\n\s*)", repl, s)
 
 
+def _fix_hyphenation(text: str) -> str:
+    """Склеиваем слова, разорванные переносом: a-\nndrew → andrew"""
+    return re.sub(r"([A-Za-z0-9])-\n([A-Za-z0-9])", r"\1\2", text)
+
+
 def _fix_glued_boundaries(s: str) -> str:
     """
     Вставляем пробел между предшествующим символом и НАЧАЛОМ e-mail,
@@ -284,19 +289,23 @@ def _normalize_text(s: str) -> str:
     s = s.translate(str.maketrans(_CIRCLED_MAP))
     # заменяем переносы строк, табы и NBSP на пробел
     s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = _fix_hyphenation(s)
     s = s.replace("\n", " ").replace("\t", " ")
     s = s.replace("\xa0", " ")
     # 1) невидимые/биди/soft-hyphen
     s = strip_invisibles(s)
-    # 2) починить дефис-переносы, чтобы не ломать 'shestova-ma@...'
+    # 2) склеить переносы с дефисом: 'a-\nndrew' → 'andrew'
+    # (после удаления невидимых символов может появиться \n)
+    s = _fix_hyphenation(s)
+    # 3) починить дефис-переносы, чтобы не ломать 'shestova-ma@...'
     s = _fix_hyphen_breaks(s)
-    # 3) размаскировка "at/dot/собака/точка" перед границами
+    # 4) размаскировка "at/dot/собака/точка" перед границами
     s = _deobfuscate(s)
-    # 4) нормализация local-part (замены юникод-lookalike и т.п.)
+    # 5) нормализация local-part (замены юникод-lookalike и т.п.)
     s = _normalize_localparts(s)
-    # 5) разлипание границы перед адресом (не трогаем сам адрес)
+    # 6) разлипание границы перед адресом (не трогаем сам адрес)
     s = _fix_glued_boundaries(s)
-    # 6) «умные» сноски — после разлипаний и уже на «живом» окружении
+    # 7) «умные» сноски — после разлипаний и уже на «живом» окружении
     s = _strip_inline_footnotes(s)
     # сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
