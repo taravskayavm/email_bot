@@ -41,6 +41,7 @@ from .messaging_utils import (
 from .smtp_client import SmtpClient
 from .utils import log_error
 from utils.send_stats import log_success, log_error as log_stats_error
+from email import message_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -420,8 +421,6 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             logger.info("Email sent", extra={"event": "send", "email": recipient})
             try:
                 # Группа берётся из заголовка, если есть; иначе пусто
-                from email import message_from_bytes
-
                 msg = (
                     raw_message
                     if isinstance(raw_message, str)

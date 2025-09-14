@@ -463,12 +463,8 @@ def parse_emails_unified(text: str, return_meta: bool = False):
 
 
 _LEADING_FOOTNOTE_RE = re.compile(
-    r"^(?:\d{1,3})+(?=[A-Za-z])"
-)  # 1–3 цифры в начале local-part
-
-
-def _strip_leading_footnote(local: str) -> str:
-    return _LEADING_FOOTNOTE_RE.sub("", local)
+    r"^[\u00B9\u00B2\u00B3\u2070-\u2079]{1,3}(?=[A-Za-z])"
+)  # 1–3 надстрочные цифры в начале local-part
 
 
 def sanitize_email(email: str, strip_footnote: bool = True) -> str:
@@ -486,11 +482,11 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     orig_local = email.split("@", 1)[0]
     local, domain = s.split("@", 1)
     local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
-    # убираем ведущие цифры-сноски, только если оригинал начинался с надстрочных цифр
-    if strip_footnote and re.match(
-        r"^[\u00B9\u00B2\u00B3\u2070-\u2079]{1,3}(?=[A-Za-z])", orig_local
-    ):
-        local = _strip_leading_footnote(local)
+    if strip_footnote:
+        m = _LEADING_FOOTNOTE_RE.match(orig_local)
+        if m:
+            digits_to_strip = len(m.group(0))
+            local = re.sub(rf"^\d{{1,{digits_to_strip}}}", "", local)
     # чистим края от .-_ оставшихся от переносов
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
 
