@@ -40,6 +40,7 @@ from .messaging_utils import (
 )
 from .smtp_client import SmtpClient
 from .utils import log_error
+from utils.send_stats import log_success, log_error as log_stats_error
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +418,28 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
+            try:
+                # Группа берётся из заголовка, если есть; иначе пусто
+                from email import message_from_bytes
+
+                msg = (
+                    raw_message
+                    if isinstance(raw_message, str)
+                    else raw_message.decode("utf-8", "ignore")
+                )
+                group = ""
+                try:
+                    em = message_from_bytes(
+                        raw_message
+                        if isinstance(raw_message, (bytes, bytearray))
+                        else msg.encode("utf-8")
+                    )
+                    group = em.get("X-EBOT-Group", "") or ""
+                except Exception:
+                    pass
+                log_success(recipient, group)
+            except Exception:
+                pass
             return
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", None)
@@ -433,10 +456,19 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             if is_hard_bounce(code, msg):
                 suppress_add(recipient, code, "hard bounce")
             last_exc = e
+            try:
+                reason = f"{code} {msg.decode() if isinstance(msg, (bytes, bytearray)) else msg}"
+                log_stats_error(recipient, "", reason)
+            except Exception:
+                pass
             break
         except Exception as e:
             last_exc = e
             logger.warning("SMTP send failed to %s: %s", recipient, e)
+            try:
+                log_stats_error(recipient, "", repr(e))
+            except Exception:
+                pass
             if attempt < max_tries - 1:
                 time.sleep(2**attempt)
     if last_exc:
