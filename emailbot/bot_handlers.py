@@ -35,7 +35,9 @@ from utils.email_clean import (
     parse_emails_unified,
 )
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
-from utils.send_stats import _PATH as STATS_PATH  # только для отображения пути
+from utils.send_stats import _stats_path  # только для отображения пути
+
+STATS_PATH = str(_stats_path())
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
