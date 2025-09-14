@@ -39,9 +39,9 @@ from .messaging_utils import (
     upsert_sent_log,
 )
 from .smtp_client import SmtpClient
-from .utils import log_error
-from utils.send_stats import log_success, log_error as log_stats_error
-from email import message_from_bytes
+from .utils import log_error as log_internal_error
+from utils.send_stats import log_success, log_error
+from email import message_from_string, message_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -420,23 +420,13 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
             try:
-                # Группа берётся из заголовка, если есть; иначе пусто
-                msg = (
-                    raw_message
-                    if isinstance(raw_message, str)
-                    else raw_message.decode("utf-8", "ignore")
-                )
-                group = ""
-                try:
-                    em = message_from_bytes(
-                        raw_message
-                        if isinstance(raw_message, (bytes, bytearray))
-                        else msg.encode("utf-8")
-                    )
-                    group = em.get("X-EBOT-Group", "") or ""
-                except Exception:
-                    pass
-                log_success(recipient, group)
+                # вытащим группу из заголовка X-EBOT-Group, если есть
+                if isinstance(raw_message, (bytes, bytearray)):
+                    m = message_from_bytes(raw_message)
+                else:
+                    m = message_from_string(str(raw_message))
+                grp = (m.get("X-EBOT-Group", "") or "")
+                log_success(recipient, grp)
             except Exception:
                 pass
             return
@@ -456,8 +446,8 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
                 suppress_add(recipient, code, "hard bounce")
             last_exc = e
             try:
-                reason = f"{code} {msg.decode() if isinstance(msg, (bytes, bytearray)) else msg}"
-                log_stats_error(recipient, "", reason)
+                err = msg.decode() if isinstance(msg, (bytes, bytearray)) else msg
+                log_error(recipient, "", f"{code} {err}")
             except Exception:
                 pass
             break
@@ -465,7 +455,7 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             last_exc = e
             logger.warning("SMTP send failed to %s: %s", recipient, e)
             try:
-                log_stats_error(recipient, "", repr(e))
+                log_error(recipient, "", repr(e))
             except Exception:
                 pass
             if attempt < max_tries - 1:
@@ -511,7 +501,7 @@ def save_to_sent_folder(
         status, _ = append_to_sent(imap, folder, msg_bytes)
         logger.info("IMAP APPEND to %s: %s", folder, status)
     except Exception as e:
-        log_error(f"save_to_sent_folder: {e}")
+        log_internal_error(f"save_to_sent_folder: {e}")
     finally:
         if close and imap is not None:
             try:
@@ -567,7 +557,7 @@ def build_message(
                 img_bytes, maintype="image", subtype="png", cid="<logo>"
             )
         except Exception as e:
-            log_error(f"attach_logo: {e}")
+            log_internal_error(f"attach_logo: {e}")
     return msg, token
 
 
@@ -590,7 +580,7 @@ def send_email(
         save_to_sent_folder(raw)
         return token
     except Exception as e:
-        log_error(f"send_email: {recipient}: {e}")
+        log_internal_error(f"send_email: {recipient}: {e}")
         if notify_func:
             notify_func(f"❌ Ошибка при отправке на {recipient}: {e}")
         raise
@@ -602,7 +592,7 @@ async def async_send_email(recipient: str, html_path: str) -> str:
         return await loop.run_in_executor(None, send_email, recipient, html_path)
     except Exception as e:
         logger.exception(e)
-        log_error(e)
+        log_internal_error(e)
         raise
 
 
@@ -615,13 +605,13 @@ def create_task_with_logging(
             await coro
         except Exception as e:
             logger.exception(e)
-            log_error(e)
+            log_internal_error(e)
             if notify_func:
                 try:
                     await notify_func(f"❌ Ошибка: {e}")
                 except Exception as inner:
                     logger.exception(inner)
-                    log_error(inner)
+                    log_internal_error(inner)
 
     return asyncio.create_task(runner())
 
@@ -641,6 +631,12 @@ def send_email_with_sessions(
     msg, token = build_message(recipient, html_path, subject)
     raw = msg.as_string()
     client.send(EMAIL_ADDRESS, recipient, raw)
+    try:
+        m = message_from_string(raw)
+        grp = (m.get("X-EBOT-Group", "") or "")
+        log_success(recipient, grp)
+    except Exception:
+        pass
     save_to_sent_folder(raw, imap=imap, folder=sent_folder)
     return token
 
@@ -661,7 +657,7 @@ def process_unsubscribe_requests():
             imap.store(num, "+FLAGS", "\\Seen")
         imap.logout()
     except Exception as e:
-        log_error(f"process_unsubscribe_requests: {e}")
+        log_internal_error(f"process_unsubscribe_requests: {e}")
 
 
 def _canonical_blocked(email_str: str) -> str:
@@ -840,14 +836,14 @@ def was_emailed_recently(
         status, data = imap.search(None, f'(SINCE {date_str} HEADER To "{email_addr}")')
         return status == "OK" and bool(data and data[0])
     except Exception as e:
-        log_error(f"was_emailed_recently: {e}")
+        log_internal_error(f"was_emailed_recently: {e}")
         return False
     finally:
         if close and imap is not None:
             try:
                 imap.logout()
             except Exception as e:
-                log_error(f"was_emailed_recently logout: {e}")
+                log_internal_error(f"was_emailed_recently logout: {e}")
 
 
 def get_recent_6m_union() -> Set[str]:
@@ -1059,14 +1055,14 @@ def sync_log_with_imap() -> Dict[str, int]:
         stats["total_rows_after"] = len(load_sent_log(Path(LOG_FILE)))
         return stats
     except Exception as e:
-        log_error(f"sync_log_with_imap: {e}")
+        log_internal_error(f"sync_log_with_imap: {e}")
         raise
     finally:
         if imap is not None:
             try:
                 imap.logout()
             except Exception as e:
-                log_error(f"sync_log_with_imap logout: {e}")
+                log_internal_error(f"sync_log_with_imap logout: {e}")
 
 
 def periodic_unsubscribe_check(stop_event):
@@ -1074,7 +1070,7 @@ def periodic_unsubscribe_check(stop_event):
         try:
             process_unsubscribe_requests()
         except Exception as e:
-            log_error(f"periodic_unsubscribe_check: {e}")
+            log_internal_error(f"periodic_unsubscribe_check: {e}")
         time.sleep(300)
 
 
