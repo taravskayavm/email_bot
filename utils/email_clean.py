@@ -1,8 +1,10 @@
 import logging
 import os
+import json
 import re
 import unicodedata
 from functools import lru_cache
+from pathlib import Path
 
 import idna
 
@@ -456,7 +458,38 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     matches = list(_EMAIL_CORE_RE.finditer(t2))
     found = [m.group(0) for m in matches]
     _dbg("found", found)
-    cleaned = [e for e in (sanitize_email(x) for x in found) if e]
+
+    DEBUG_PARSE = os.getenv("DEBUG_EMAIL_PARSE", "0") == "1"
+    DEBUG_LOG = os.getenv("DEBUG_EMAIL_PARSE_LOG", "1") == "1"
+    log_path: Path | None = None
+    if DEBUG_PARSE and DEBUG_LOG:
+        log_path = Path(os.getenv("DEBUG_EMAIL_PARSE_LOG_PATH", "var/email_parse_debug.log"))
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            log_path = None
+
+    cleaned: list[str] = []
+    for c in found:
+        e = sanitize_email(c)
+        if DEBUG_PARSE:
+            try:
+                print(f"[EMAIL-PARSE] raw={repr(c)} -> sanitized={repr(e)}")
+            except Exception:
+                pass
+            if log_path is not None:
+                try:
+                    rec = {
+                        "raw": c,
+                        "sanitized": e,
+                        "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                    }
+                    with log_path.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+        if e:
+            cleaned.append(e)
     _dbg("sanitized", cleaned)
     if not return_meta:
         return cleaned
