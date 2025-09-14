@@ -24,6 +24,20 @@ def test_superscript_digits_are_stripped():
     assert sanitize_email("\u2075bob@mail.ru") == "bob@mail.ru"  # ⁵bob
 
 
+def test_invisible_chars_are_removed():
+    # soft hyphen в начале
+    raw = "\xadandrewvlasov@mail.ru"
+    assert sanitize_email(raw) == "andrewvlasov@mail.ru"
+    # zero-width space
+    raw2 = "\u200bbulykina.lv@yandex.ru"
+    assert sanitize_email(raw2) == "bulykina.lv@yandex.ru"
+
+
+def test_hyphenated_split_fixed():
+    raw = "and-\nrewvlasov@mail.ru"
+    assert sanitize_email(raw) == "andrewvlasov@mail.ru"
+
+
 def test_send_stats_success_and_error(tmp_path, monkeypatch):
     # перенаправим send_stats.jsonl в tmp
     stats_path = tmp_path / "send_stats.jsonl"
