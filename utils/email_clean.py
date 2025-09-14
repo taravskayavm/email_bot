@@ -204,7 +204,12 @@ def _fix_hyphen_breaks(s: str) -> str:
         i = m.start()
         left = s[i - 1 : i]
         right = s[m.end() : m.end() + 1]
-        if left and right and re.match(r"[A-Za-z0-9]", left) and re.match(r"[A-Za-z0-9@]", right):
+        if (
+            left
+            and right
+            and re.match(r"[A-Za-z0-9]", left)
+            and re.match(r"[A-Za-z0-9@]", right)
+        ):
             return "-"  # «реальный» дефис (в т.ч. перед @ в логине)
         return ""  # мягкий перенос
 
@@ -255,13 +260,13 @@ def _strip_footnotes(s: str) -> str:
     )
     # иначе — это действительно сноска, удаляем её
     s = re.sub(
-        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z]{{1,2}})\]|\((?:\d+|[a-z]{{1,2}})\))",
+        r"(?<=\w)\s*(?:\[(?:\d+|[a-z]{1,2})\]|\((?:\d+|[a-z]{1,2})\))",
         " ",
         s,
         flags=re.IGNORECASE,
     )
     s = re.sub(
-        rf"(?:[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8])\s*(?!{_EMAIL_CORE})",
+        rf"(?:[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8\u2460-\u2473])\s*(?!{_EMAIL_CORE})",
         "",
         s,
     )
@@ -269,6 +274,7 @@ def _strip_footnotes(s: str) -> str:
 
 
 def _normalize_text(s: str) -> str:
+    s = re.sub(r"[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8\u2460-\u2473]", "", s)
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_SUPERSCRIPT_MAP)
     s = s.translate(str.maketrans(_CIRCLED_MAP))
@@ -477,10 +483,13 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     if "@" not in s:
         return ""
 
+    orig_local = email.split("@", 1)[0]
     local, domain = s.split("@", 1)
     local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
-    # убираем ведущие цифры-сноски, если требуется
-    if strip_footnote:
+    # убираем ведущие цифры-сноски, только если оригинал начинался с надстрочных цифр
+    if strip_footnote and re.match(
+        r"^[\u00B9\u00B2\u00B3\u2070-\u2079]{1,3}(?=[A-Za-z])", orig_local
+    ):
         local = _strip_leading_footnote(local)
     # чистим края от .-_ оставшихся от переносов
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
@@ -516,7 +525,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
 def dedupe_with_variants(emails: list[str]) -> list[str]:
     """
     Дедуплицируем, учитывая пару (сноской)вариант → чистый вариант.
-    Если есть и «55alexandr…@» и «alexandr…@», оставляем чистый.
+    Если есть и «¹alexandr…@» и «alexandr…@», оставляем чистый.
     """
     clean = [sanitize_email(e) for e in emails]
     variants = [sanitize_email(e, strip_footnote=False) for e in emails]

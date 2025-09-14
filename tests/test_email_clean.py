@@ -1,9 +1,9 @@
-from utils.email_clean import sanitize_email, dedupe_with_variants, extract_emails
+from utils.email_clean import dedupe_with_variants, extract_emails, sanitize_email
 
 
 def test_footnote_prefix_removed_and_deduped():
     inp = [
-        "55alexandr.pyatnitsin@yandex.ru",
+        "¹alexandr.pyatnitsin@yandex.ru",
         "alexandr.pyatnitsin@yandex.ru",
     ]
     out = dedupe_with_variants(inp)
@@ -11,8 +11,14 @@ def test_footnote_prefix_removed_and_deduped():
 
 
 def test_punct_trim_and_params():
-    assert sanitize_email("(e.kuznetsova@alpfederation.ru)") == "e.kuznetsova@alpfederation.ru"
-    assert sanitize_email('e.rozhkova@alpfederation.ru?subject=Hi') == "e.rozhkova@alpfederation.ru"
+    assert (
+        sanitize_email("(e.kuznetsova@alpfederation.ru)")
+        == "e.kuznetsova@alpfederation.ru"
+    )
+    assert (
+        sanitize_email("e.rozhkova@alpfederation.ru?subject=Hi")
+        == "e.rozhkova@alpfederation.ru"
+    )
 
 
 def test_zero_width_and_nbsp():
@@ -27,8 +33,7 @@ def test_extract_and_clean():
 
 
 def test_no_concatenation_on_newlines():
-    src = ("pavelshabalin@mail.ru\n"
-           "ovalov@gmail.com\n")
+    src = "pavelshabalin@mail.ru\n" "ovalov@gmail.com\n"
     got = extract_emails(src)
     assert "pavelshabalin@mail.ru" in got
     assert "ovalov@gmail.com" in got
@@ -36,7 +41,7 @@ def test_no_concatenation_on_newlines():
 
 
 def test_nbsp_and_zwsp_boundaries():
-    src = "name@mail.ru\u00A0\n\u200bsecond@ya.ru"
+    src = "name@mail.ru\u00a0\n\u200bsecond@ya.ru"
     got = extract_emails(src)
     assert {"name@mail.ru", "second@ya.ru"} <= set(got)
 
@@ -75,7 +80,4 @@ def test_label_length_and_tld_rules():
     assert sanitize_email(f"user@{long_label}.com") == ""
     assert sanitize_email("user@example.c0m") == ""
     assert sanitize_email("user@example." + "a" * 25) == ""
-    assert (
-        sanitize_email("user@example." + "a" * 24)
-        == "user@example." + "a" * 24
-    )
+    assert sanitize_email("user@example." + "a" * 24) == "user@example." + "a" * 24
