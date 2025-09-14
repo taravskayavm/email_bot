@@ -1,0 +1,57 @@
+import os
+import json
+from pathlib import Path
+
+import pytest
+
+from emailbot.messaging import send_raw_smtp_with_retry
+
+
+class _FakeSMTP:
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def send(self, from_addr, to_addr, raw):
+        return
+
+
+@pytest.fixture(autouse=True)
+def _env_tmp_stats(tmp_path, monkeypatch):
+    stats = tmp_path / "send_stats.jsonl"
+    monkeypatch.setenv("SEND_STATS_PATH", str(stats))
+    # подменяем SMTP-клиент на фейковый
+    import emailbot.messaging as m
+    fake = _FakeSMTP
+    monkeypatch.setattr(m, "SmtpClient", fake, raising=True)
+    yield
+
+
+def _build_raw(group="sport"):
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "a@b.ru"
+    msg["To"] = "c@d.ru"
+    msg["Subject"] = "t"
+    if group:
+        msg["X-EBOT-Group"] = group
+    msg.set_content("hi")
+    return msg.as_bytes()
+
+
+def test_success_is_logged(tmp_path):
+    raw = _build_raw("sport")
+    send_raw_smtp_with_retry(raw, "c@d.ru", max_tries=1)
+    stats = Path(os.environ["SEND_STATS_PATH"])
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["status"] == "success"
+    assert rec["email"] == "c@d.ru"
+    assert rec.get("group") == "sport"
