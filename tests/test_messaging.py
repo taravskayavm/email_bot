@@ -118,7 +118,7 @@ def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
     token_host = "example.com"
     monkeypatch.setenv("HOST", token_host)
-    msg, token = messaging.build_message(
+    msg, token, _ = messaging.build_message(
         "recipient@example.com", str(html_file), "Subject"
     )
     assert token
@@ -147,7 +147,7 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
-    msg, _ = messaging.build_message(
+    msg, _, _ = messaging.build_message(
         "r@example.com", str(html_file), "Subj"
     )
     html = msg.get_body("html").get_content()
@@ -155,7 +155,7 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     assert html.count("<img") == 1
 
     monkeypatch.setenv("INLINE_LOGO", "0")
-    msg2, _ = messaging.build_message(
+    msg2, _, _ = messaging.build_message(
         "r@example.com", str(html_file), "Subj"
     )
     html2 = msg2.get_body("html").get_content()
@@ -172,13 +172,13 @@ def test_repository_templates_logo_toggle(monkeypatch, tmp_path):
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
-    msg, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
+    msg, _, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
     html = msg.get_body("html").get_content()
     assert html.count("cid:logo") == 1
     assert html.count("<img") == 1
 
     monkeypatch.setenv("INLINE_LOGO", "0")
-    msg2, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
+    msg2, _, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
     html2 = msg2.get_body("html").get_content()
     assert "cid:logo" not in html2
     assert "<img" not in html2
