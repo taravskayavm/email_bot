@@ -175,6 +175,11 @@ def main() -> None:
     )
     app.add_handler(
         MessageHandler(
+            filters.TEXT & filters.Regex("^🔁"), bot_handlers.sync_bounces_command
+        )
+    )
+    app.add_handler(
+        MessageHandler(
             filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command
         )
     )

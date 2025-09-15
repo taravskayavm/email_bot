@@ -18,7 +18,7 @@ def test_logo_inline_and_signature_styles(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
-    msg, _ = messaging.build_message("r@example.com", str(html_file), "Subj")
+    msg, _, _ = messaging.build_message("r@example.com", str(html_file), "Subj")
     container = msg.get_payload()[-1]
     content = container.get_payload()[0].get_content()
     assert content.count("cid:logo") == 1
@@ -39,7 +39,7 @@ def test_logo_inline_and_signature_styles(tmp_path, monkeypatch):
     assert "cid:logo" not in signature_block and "<img" not in signature_block
 
     monkeypatch.setenv("INLINE_LOGO", "0")
-    msg2, _ = messaging.build_message("r@example.com", str(html_file), "Subj")
+    msg2, _, _ = messaging.build_message("r@example.com", str(html_file), "Subj")
     html_part2 = msg2.get_body("html")
     content2 = html_part2.get_content()
     assert "cid:logo" not in content2

@@ -57,19 +57,21 @@ def _to_local(dt_utc: datetime) -> datetime:
     return dt_utc.astimezone(_tzinfo())
 
 
-def log_success(email: str, group: str) -> None:
+def log_success(email: str, group: str, extra: dict | None = None) -> None:
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": (email or "").strip(),
         "group": (group or "").strip().lower(),
         "status": "success",
     }
+    if extra:
+        rec.update(extra)
     path = _stats_path()
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def log_error(email: str, group: str, reason: str) -> None:
+def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": (email or "").strip(),
@@ -77,6 +79,24 @@ def log_error(email: str, group: str, reason: str) -> None:
         "status": "error",
         "reason": reason[:300],
     }
+    if extra:
+        rec.update(extra)
+    path = _stats_path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
+    rec = {
+        "ts": _now_utc().isoformat().replace("+00:00", "Z"),
+        "email": (email or "").strip(),
+        "status": "bounce",
+        "reason": str(reason)[:300],
+    }
+    if uuid:
+        rec["uuid"] = uuid
+    if message_id:
+        rec["message_id"] = message_id
     path = _stats_path()
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -125,9 +145,10 @@ def summarize(scope: str) -> dict:
             ts = rec.get("ts")
             if not ts or not pred(ts):
                 continue
-            if rec.get("status") == "success":
+            status = rec.get("status")
+            if status == "success":
                 ok += 1
-            elif rec.get("status") == "error":
+            elif status in ("error", "bounce"):
                 err += 1
     return {"ok": ok, "err": err, "success": ok, "error": err}
 
