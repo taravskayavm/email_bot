@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import csv
 import email
+import uuid
+import email.utils as eut
 import hashlib
 import imaplib
 import json
@@ -409,8 +411,21 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     return "Sent"
 
 
-def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
+def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries=3):
     last_exc: Exception | None = None
+    try:
+        m = (
+            message_from_bytes(raw_message)
+            if isinstance(raw_message, (bytes, bytearray))
+            else message_from_string(str(raw_message))
+        )
+        grp = m.get("X-EBOT-Group", "") or ""
+        eb_uuid = m.get("X-EBOT-UUID", "") or ""
+        mid = m.get("Message-ID", "") or ""
+    except Exception:
+        grp = ""
+        eb_uuid = ""
+        mid = ""
     for attempt in range(max_tries):
         _rate_limit_domain(recipient)
         try:
@@ -420,13 +435,11 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
             try:
-                # вытащим группу из заголовка X-EBOT-Group, если есть
-                if isinstance(raw_message, (bytes, bytearray)):
-                    m = message_from_bytes(raw_message)
-                else:
-                    m = message_from_string(str(raw_message))
-                grp = (m.get("X-EBOT-Group", "") or "")
-                log_success(recipient, grp)
+                log_success(
+                    recipient,
+                    grp,
+                    extra={"uuid": eb_uuid, "message_id": mid},
+                )
             except Exception:
                 pass
             return
@@ -447,7 +460,12 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             last_exc = e
             try:
                 err = msg.decode() if isinstance(msg, (bytes, bytearray)) else msg
-                log_error(recipient, "", f"{code} {err}")
+                log_error(
+                    recipient,
+                    grp,
+                    f"{code} {err}",
+                    extra={"uuid": eb_uuid, "message_id": mid},
+                )
             except Exception:
                 pass
             break
@@ -455,7 +473,12 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             last_exc = e
             logger.warning("SMTP send failed to %s: %s", recipient, e)
             try:
-                log_error(recipient, "", repr(e))
+                log_error(
+                    recipient,
+                    grp,
+                    repr(e),
+                    extra={"uuid": eb_uuid, "message_id": mid},
+                )
             except Exception:
                 pass
             if attempt < max_tries - 1:
@@ -558,7 +581,15 @@ def build_message(
             )
         except Exception as e:
             log_internal_error(f"attach_logo: {e}")
-    return msg, token
+
+    if not msg.get("Message-ID"):
+        msg["Message-ID"] = eut.make_msgid()
+
+    eb_uuid = str(uuid.uuid4())
+    msg["X-EBOT-UUID"] = eb_uuid
+    msg["X-EBOT-Recipient"] = to_addr
+    msg["X-EBOT-Group"] = group
+    return msg, token, eb_uuid
 
 
 def send_email(
@@ -574,7 +605,7 @@ def send_email(
                 "Skipping duplicate send to %s for batch %s", recipient, batch_id
             )
             return ""
-        msg, token = build_message(recipient, html_path, subject)
+        msg, token, _ = build_message(recipient, html_path, subject)
         raw = msg.as_string()
         send_raw_smtp_with_retry(raw, recipient, max_tries=3)
         save_to_sent_folder(raw)
@@ -628,14 +659,18 @@ def send_email_with_sessions(
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
         return ""
-    msg, token = build_message(recipient, html_path, subject)
+    msg, token, eb_uuid = build_message(recipient, html_path, subject)
     group_code = msg.get("X-EBOT-Group", "") or ""
     raw = msg.as_string()
     try:
         client.send(EMAIL_ADDRESS, recipient, raw)
         save_to_sent_folder(raw, imap=imap, folder=sent_folder)
         try:
-            log_success(recipient, group_code)
+            log_success(
+                recipient,
+                group_code,
+                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
+            )
         except Exception:
             pass
         return token
@@ -645,14 +680,24 @@ def send_email_with_sessions(
         add_bounce(recipient, code, msg_bytes, "send")
         try:
             err = msg_bytes.decode() if isinstance(msg_bytes, (bytes, bytearray)) else msg_bytes
-            log_error(recipient, group_code, f"{code} {err}")
+            log_error(
+                recipient,
+                group_code,
+                f"{code} {err}",
+                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
+            )
         except Exception:
             pass
         raise
     except Exception as e:
         logger.warning("SMTP send failed to %s: %s", recipient, e)
         try:
-            log_error(recipient, group_code, repr(e))
+            log_error(
+                recipient,
+                group_code,
+                repr(e),
+                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
+            )
         except Exception:
             pass
         raise

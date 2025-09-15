@@ -36,6 +36,7 @@ from utils.email_clean import (
 )
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
+from utils.bounce import sync_bounces
 
 STATS_PATH = str(_stats_path())
 
@@ -561,6 +562,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["🚫 Добавить в исключения", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
+        ["🔁 Синхронизировать бонсы"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -918,6 +920,18 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
+
+
+async def sync_bounces_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check INBOX for bounce messages and log them."""
+    await update.message.reply_text("⏳ Проверяю INBOX на бонсы...")
+    try:
+        n = sync_bounces()
+        await update.message.reply_text(
+            f"✅ Найдено и добавлено в отчёты: {n} bounce-сообщений."
+        )
+    except Exception as e:  # pragma: no cover - best effort
+        await update.message.reply_text(f"❌ Ошибка при синхронизации бонсов: {e}")
 
 
 async def retry_last_command(
@@ -2051,6 +2065,7 @@ __all__ = [
     "report_command",
     "report_callback",
     "sync_imap_command",
+    "sync_bounces_command",
     "reset_email_list",
     "diag",
     "dedupe_log_command",

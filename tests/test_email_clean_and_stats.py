@@ -47,6 +47,8 @@ def test_send_stats_success_and_error(tmp_path, monkeypatch):
     send_stats.log_success("ok@example.com", "sport")
     # Логируем ошибку
     send_stats.log_error("fail@example.com", "sport", "550 user not found")
+    # Логируем bounce
+    send_stats.log_bounce("bounce@example.com", "user unknown", uuid="u1", message_id="m1")
 
     data = [json.loads(line) for line in stats_path.read_text().splitlines()]
     emails = {d["email"]: d for d in data}
@@ -55,9 +57,11 @@ def test_send_stats_success_and_error(tmp_path, monkeypatch):
     assert emails["ok@example.com"]["status"] == "success"
     assert "fail@example.com" in emails
     assert emails["fail@example.com"]["status"] == "error"
+    assert "bounce@example.com" in emails
+    assert emails["bounce@example.com"]["status"] == "bounce"
 
     # Проверим агрегатор
     summary = send_stats.summarize_today()
     assert summary["success"] >= 1
-    assert summary["error"] >= 1
+    assert summary["error"] >= 2
 
