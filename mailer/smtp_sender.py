@@ -27,7 +27,14 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
         try:
             smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
             try:
-                log_success(msg.get("To", ""), msg.get("X-EBOT-Group", ""))
+                log_success(
+                    msg.get("To", ""),
+                    msg.get("X-EBOT-Group", ""),
+                    extra={
+                        "uuid": msg.get("X-EBOT-UUID", ""),
+                        "message_id": msg.get("Message-ID", ""),
+                    },
+                )
             except Exception:
                 pass
             return True, None
@@ -43,20 +50,43 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 try:
                     smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
                     try:
-                        log_success(msg.get("To", ""), msg.get("X-EBOT-Group", ""))
+                        log_success(
+                            msg.get("To", ""),
+                            msg.get("X-EBOT-Group", ""),
+                            extra={
+                                "uuid": msg.get("X-EBOT-UUID", ""),
+                                "message_id": msg.get("Message-ID", ""),
+                            },
+                        )
                     except Exception:
                         pass
                     return True, None
                 except Exception as e2:
                     e = e2
             try:
-                log_error(msg.get("To", ""), msg.get("X-EBOT-Group", ""), f"{code} {text}")
+                log_error(
+                    msg.get("To", ""),
+                    msg.get("X-EBOT-Group", ""),
+                    f"{code} {text}",
+                    extra={
+                        "uuid": msg.get("X-EBOT-UUID", ""),
+                        "message_id": msg.get("Message-ID", ""),
+                    },
+                )
             except Exception:
                 pass
             return False, e
         except Exception as e:
             try:
-                log_error(msg.get("To", ""), msg.get("X-EBOT-Group", ""), repr(e))
+                log_error(
+                    msg.get("To", ""),
+                    msg.get("X-EBOT-Group", ""),
+                    repr(e),
+                    extra={
+                        "uuid": msg.get("X-EBOT-UUID", ""),
+                        "message_id": msg.get("Message-ID", ""),
+                    },
+                )
             except Exception:
                 pass
             return False, e
