@@ -3,6 +3,7 @@ import os
 import json
 import re
 import unicodedata
+import string
 from functools import lru_cache
 from pathlib import Path
 
@@ -190,6 +191,31 @@ def _deobfuscate(text: str) -> str:
 # Ядро адреса для lookahead (не использовать для замены самого адреса!)
 # Допускаем любые непробельные символы в local-part и домене
 _EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+
+EMAIL_RE_STRICT = re.compile(
+    r"""
+    (?<![A-Za-z0-9._%+\-])                                  # слева не кусок e-mail
+    (?![^@]*\.\.)                                            # без двойной точки в local-part
+    [A-Za-z0-9](?:[A-Za-z0-9._%+\-]{0,62}[A-Za-z0-9])?      # local-part без точки на краях
+    @
+    (?:[\w](?:[\w\-]{0,61}[\w])?\.)+                     # доменные лейблы (ASCII/Unicode)
+    [\w]{2,24}                                            # TLD
+    (?!\w)                                                # справа НЕ буква/цифра/подчёркивание
+""",
+    re.VERBOSE,
+)
+
+_TRIM_AFTER_TLD_RE = re.compile(
+    r"^(.+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}?)([A-Z][A-Za-z]*)$"
+)
+
+
+def _trim_after_tld(s: str) -> str:
+    m = _TRIM_AFTER_TLD_RE.match(s)
+    return m.group(1) if m else s
+
+
+_ALNUM = set(string.ascii_letters + string.digits)
 
 
 def _fix_hyphen_breaks(s: str) -> str:
@@ -455,7 +481,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     _dbg("deobfuscated", t1)
     t2 = _normalize_text(t1)
     _dbg("normalized", t2)
-    matches = list(_EMAIL_CORE_RE.finditer(t2))
+    matches = list(EMAIL_RE_STRICT.finditer(t2))
     found = [m.group(0) for m in matches]
     _dbg("found", found)
 
@@ -521,11 +547,39 @@ def _strip_footnotes(local: str) -> str:
     return _SUPERSCRIPT_FOOTNOTE_RE.sub("", local)
 
 
+def _normalize_dots(local: str) -> str:
+    s = local.strip(".")
+    while ".." in s:
+        s = s.replace("..", ".")
+    return s
+
+
+def _preserve_leading_alnum(original: str, cleaned: str) -> str:
+    try:
+        o_loc, o_dom = original.split("@", 1)
+        c_loc, c_dom = cleaned.split("@", 1)
+    except ValueError:
+        return cleaned
+    if o_dom != c_dom or not o_loc or not c_loc:
+        return cleaned
+    if o_loc[0] in _ALNUM and c_loc[0] != o_loc[0]:
+        if len(o_loc) > 1 and c_loc.startswith(o_loc[1:]):
+            return original
+    return cleaned
+
+
+AGGR = os.getenv("AGGRESSIVE_LOCAL_REPAIR", "0") == "1"
+_POPULAR = re.compile(r"^(?:yandex|ya|gmail|mail|bk|list|rambler|inbox)\.", re.I)
+_REPAIR_RE = re.compile(r"^[a-z]{5,}\d+([a-z0-9._+\-]{4,})$", re.I)
+
+
 def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     """
     Финальная чистка: убираем внешнюю пунктуацию, невидимые символы,
     обрезаем крайние -_. от переносов.
     """
+    email_original = email
+    email = _trim_after_tld(email)
     if strip_footnote and "@" in email:
         local0, domain0 = email.split("@", 1)
         email = f"{_strip_footnotes(local0)}@{domain0}"
@@ -541,6 +595,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
     # чистим края от .-_ оставшихся от переносов
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
+    local = _normalize_dots(local)
 
     # жёстко: local-part строго ASCII
     if not _ASCII_LOCAL_RE.match(local):
@@ -567,7 +622,13 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     if not _ASCII_DOMAIN_RE.match(domain):
         return ""
 
-    return f"{local}@{domain}"
+    if AGGR and _POPULAR.match(domain):
+        m = _REPAIR_RE.match(local)
+        if m:
+            local = m.group(1)
+
+    normalized = f"{local}@{domain}".lower()
+    return _preserve_leading_alnum(email_original, normalized)
 
 
 def dedupe_with_variants(emails: list[str]) -> list[str]:
