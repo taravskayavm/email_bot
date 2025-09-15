@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from utils.email_clean import sanitize_email, parse_emails_unified
+from utils.email_clean import (
+    sanitize_email,
+    parse_emails_unified,
+    drop_leading_char_twins,
+)
 from utils import send_stats
 
 
@@ -64,4 +68,21 @@ def test_send_stats_success_and_error(tmp_path, monkeypatch):
     summary = send_stats.summarize_today()
     assert summary["success"] >= 1
     assert summary["error"] >= 2
+
+
+def test_drop_leading_char_twins():
+    src = [
+        "bezuglovan@gmail.com",
+        "ezuglovan@gmail.com",
+        "bezrukov@irigs.irk.ru",
+        "ezrukov@irigs.irk.ru",
+        "ankalaeva@yandex.ru",
+        "nkalaeva@yandex.ru",
+        "solo@example.com",
+    ]
+    out = drop_leading_char_twins(src)
+    assert "bezuglovan@gmail.com" in out and "ezuglovan@gmail.com" not in out
+    assert "bezrukov@irigs.irk.ru" in out and "ezrukov@irigs.irk.ru" not in out
+    assert "ankalaeva@yandex.ru" in out and "nkalaeva@yandex.ru" not in out
+    assert "solo@example.com" in out
 
