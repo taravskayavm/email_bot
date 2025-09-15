@@ -1,5 +1,5 @@
 import random
-from utils.email_clean import parse_emails_unified
+from utils.email_clean import parse_emails_unified, drop_leading_char_twins
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 
@@ -21,6 +21,7 @@ async def send_report(update, context, extractor_result) -> None:
     cleaned, meta = parse_emails_unified(
         extractor_result.raw_text or " ", return_meta=True
     )
+    cleaned = drop_leading_char_twins(cleaned)
     unique = sorted(set(cleaned))
     suspects = sorted(set(meta.get("suspects", [])))
     examples = build_examples(unique)

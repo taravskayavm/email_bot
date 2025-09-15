@@ -441,6 +441,60 @@ def dedupe_keep_original(emails: list[str]) -> list[str]:
     return out
 
 
+def drop_leading_char_twins(emails: list[str]) -> list[str]:
+    """Удаляет адреса, чья локальная часть равна локальной части другого адреса
+    без первого символа, при условии одинакового домена. Сохраняем более длинный
+    адрес, «срезанный» отбрасываем. Сравнение регистронезависимое для домена,
+    регистрозависимое для локала."""
+
+    if len(emails) <= 1:
+        return emails
+
+    groups: dict[str, dict[str, str]] = {}
+    for e in emails:
+        try:
+            local, domain = e.split("@", 1)
+        except ValueError:
+            continue
+        groups.setdefault(domain.lower(), {})[local] = e
+
+    to_drop: set[tuple[str, str]] = set()
+    log_pairs: list[tuple[str, str]] = []
+    for domain, mapping in groups.items():
+        locals_set = set(mapping.keys())
+        for local in locals_set:
+            if len(local) < 2:
+                continue
+            trimmed = local[1:]
+            if trimmed in locals_set:
+                to_drop.add((domain, trimmed))
+                log_pairs.append((mapping[local], mapping[trimmed]))
+
+    out: list[str] = []
+    for e in emails:
+        try:
+            local, domain = e.split("@", 1)
+        except ValueError:
+            out.append(e)
+            continue
+        if (domain.lower(), local) not in to_drop:
+            out.append(e)
+
+    if os.getenv("DEBUG_EMAIL_PARSE_LOG") == "1" and log_pairs:
+        log_path = Path(
+            os.getenv("DEBUG_EMAIL_PARSE_LOG_PATH", "var/email_parse_debug.log")
+        )
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                for kept, dropped in log_pairs:
+                    f.write(f"DROP_TRIMMED_TWIN: kept={kept} dropped={dropped}\n")
+        except Exception:
+            pass
+
+    return out
+
+
 # === Unified pipeline =========================================================
 
 
