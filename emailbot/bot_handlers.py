@@ -32,6 +32,7 @@ from telegram.ext import ContextTypes
 from utils.email_clean import (
     canonicalize_email,
     dedupe_keep_original,
+    drop_leading_char_twins,
     parse_emails_unified,
 )
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
@@ -69,6 +70,7 @@ async def async_extract_emails_from_url(
     _ = _extraction.extract_any  # keep reference for tests
     found = parse_emails_unified(text or " ")
     cleaned = dedupe_keep_original(found)
+    cleaned = drop_leading_char_twins(cleaned)
     emails = set(cleaned)
     foreign = {e for e in emails if not is_allowed_tld(e)}
     stats: dict = {}
@@ -818,6 +820,8 @@ async def on_edit_suspects_input(update: Update, context: ContextTypes.DEFAULT_T
         return
     text = update.message.text or ""
     fixed = parse_emails_unified(text)
+    fixed = dedupe_keep_original(fixed)
+    fixed = drop_leading_char_twins(fixed)
     sendable = set(context.user_data.get("emails_for_sending") or [])
     for e in fixed:
         sendable.add(e)
@@ -1295,6 +1299,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Единый вход: всё — через единый пайплайн
         found_emails = parse_emails_unified(text)
         emails = dedupe_keep_original(found_emails)
+        emails = drop_leading_char_twins(emails)
         emails = sorted(emails, key=str.lower)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
