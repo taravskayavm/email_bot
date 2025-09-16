@@ -1,0 +1,8 @@
+{
+  "bioinformatics": {"label": "Биоинформатика", "signature": "new"},
+  "geography": {"label": "География", "signature": "new"},
+  "medicine": {"label": "Медицина", "signature": "old"},
+  "psychology": {"label": "Психология", "signature": "new"},
+  "sport": {"label": "Спорт", "signature": "old"},
+  "tourism": {"label": "Туризм", "signature": "old"}
+}
