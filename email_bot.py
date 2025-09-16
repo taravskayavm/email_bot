@@ -212,9 +212,6 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")
-    )
-    app.add_handler(
         CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$")
     )
     app.add_handler(
@@ -224,19 +221,7 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
     )
     app.add_handler(
-        CallbackQueryHandler(
-            bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"
-        )
-    )
-    app.add_handler(
-        CallbackQueryHandler(
-            bot_handlers.include_numeric_emails, pattern="^confirm_include_numeric$"
-        )
-    )
-    app.add_handler(
-        CallbackQueryHandler(
-            bot_handlers.cancel_include_numeric, pattern="^cancel_include_numeric$"
-        )
+        CallbackQueryHandler(bot_handlers.request_fix, pattern=r"^fix:\d+$")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.apply_repairs, pattern="^apply_repairs$")
