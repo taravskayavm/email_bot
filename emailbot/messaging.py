@@ -716,6 +716,7 @@ def send_email_with_sessions(
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     batch_id: str | None = None,
+    fixed_from: str | None = None,
 ):
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
@@ -726,11 +727,13 @@ def send_email_with_sessions(
         send_with_retry(smtp, msg)
         save_to_sent_folder(msg, imap=imap, folder=sent_folder)
         try:
-            log_success(
-                recipient,
-                group_code,
-                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
-            )
+            extra = {
+                "uuid": eb_uuid,
+                "message_id": msg.get("Message-ID", ""),
+            }
+            if fixed_from:
+                extra["fixed_from"] = fixed_from
+            log_success(recipient, group_code, extra=extra)
         except Exception:
             pass
         return token
@@ -740,11 +743,17 @@ def send_email_with_sessions(
         add_bounce(recipient, code, msg_bytes, "send")
         try:
             err = msg_bytes.decode() if isinstance(msg_bytes, (bytes, bytearray)) else msg_bytes
+            extra = {
+                "uuid": eb_uuid,
+                "message_id": msg.get("Message-ID", ""),
+            }
+            if fixed_from:
+                extra["fixed_from"] = fixed_from
             log_error(
                 recipient,
                 group_code,
                 f"{code} {err}",
-                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
+                extra=extra,
             )
         except Exception:
             pass
@@ -752,11 +761,17 @@ def send_email_with_sessions(
     except Exception as e:
         logger.warning("SMTP send failed to %s: %s", recipient, e)
         try:
+            extra = {
+                "uuid": eb_uuid,
+                "message_id": msg.get("Message-ID", ""),
+            }
+            if fixed_from:
+                extra["fixed_from"] = fixed_from
             log_error(
                 recipient,
                 group_code,
                 _smtp_reason(e),
-                extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
+                extra=extra,
             )
         except Exception:
             pass

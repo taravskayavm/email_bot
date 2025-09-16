@@ -17,7 +17,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import aiohttp
 from telegram import (
@@ -121,11 +121,6 @@ def is_allowed_tld(email_addr: str) -> bool:
     return mu.classify_tld(email_addr) != "foreign"
 
 
-def is_numeric_localpart(email_addr: str) -> bool:
-    local = email_addr.split("@", 1)[0]
-    return local.isdigit()
-
-
 def sample_preview(items, k: int):
     lst = list(dict.fromkeys(items))
     if len(lst) <= k:
@@ -170,7 +165,6 @@ ADMIN_IDS = {
 }
 
 PREVIEW_ALLOWED = int(os.getenv("EXAMPLES_COUNT", "10"))
-PREVIEW_NUMERIC = 5
 PREVIEW_FOREIGN = 5
 
 TECH_PATTERNS = [
@@ -192,9 +186,9 @@ class SessionState:
     all_emails: Set[str] = field(default_factory=set)
     all_files: List[str] = field(default_factory=list)
     to_send: List[str] = field(default_factory=list)
-    suspect_numeric: List[str] = field(default_factory=list)
     foreign: List[str] = field(default_factory=list)
     preview_allowed_all: List[str] = field(default_factory=list)
+    dropped: List[Tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
     group: Optional[str] = None  # template code
@@ -1001,6 +995,8 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     init_state(context)
     context.chat_data.pop("manual_all_emails", None)
+    context.chat_data.pop("send_preview", None)
+    context.chat_data.pop("fix_pending", None)
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
@@ -1013,7 +1009,7 @@ async def _compose_report_and_save(
     context: ContextTypes.DEFAULT_TYPE,
     allowed_all: Set[str],
     filtered: List[str],
-    suspicious_numeric: List[str],
+    dropped: List[Tuple[str, str]],
     foreign: List[str],
     footnote_dupes: int = 0,
 ) -> str:
@@ -1021,31 +1017,73 @@ async def _compose_report_and_save(
 
     state = get_state(context)
     state.preview_allowed_all = sorted(filtered)
-    state.suspect_numeric = suspicious_numeric
+    state.dropped = list(dropped)
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
 
+    context.chat_data["send_preview"] = {
+        "final": list(dict.fromkeys(state.preview_allowed_all)),
+        "dropped": list(dropped),
+        "fixed": [],
+    }
+    context.chat_data.pop("fix_pending", None)
+
     sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
     sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
     report_lines = [
         "✅ Анализ завершён.",
         f"Найдено адресов: {len(allowed_all)}",
-        f"Уникальных (после очистки): {len(filtered)}",
-        f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}",
-        f"Иностранные домены: {len(foreign)}",
+        f"📧 К отправке: {len(filtered)} адресов",
+        f"⚠️ Подозрительные: {len(dropped)} адресов",
+        f"🌍 Иностранные домены: {len(foreign)}",
     ]
     report = "\n".join(report_lines)
     if footnote_dupes:
         report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
     if sample_allowed:
         report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
-    if sample_numeric:
-        report += "\n\n🔢 Примеры цифровых:\n" + "\n".join(sample_numeric)
+    if dropped:
+        preview_lines = [
+            "\n⚠️ Подозрительные адреса:",
+            *(
+                f"{i + 1}) {addr} — {reason}"
+                for i, (addr, reason) in enumerate(dropped[:10])
+            ),
+        ]
+        report += "\n" + "\n".join(preview_lines)
+        report += "\nНажмите «✏️ Исправить №…» чтобы отредактировать."
     if sample_foreign:
         report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(sample_foreign)
     return report
+
+
+async def request_fix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt the user to provide a fixed e-mail address."""
+
+    query = update.callback_query
+    await query.answer()
+    preview = context.chat_data.get("send_preview", {})
+    dropped = preview.get("dropped", [])
+    data = query.data or ""
+    try:
+        _, idx_s = data.split(":", 1)
+        idx = int(idx_s)
+    except Exception:
+        await query.message.reply_text("⚠️ Некорректный индекс.")
+        return
+    if idx < 0 or idx >= len(dropped):
+        await query.message.reply_text("⚠️ Индекс вне диапазона.")
+        return
+    original, reason = dropped[idx]
+    context.chat_data["fix_pending"] = {"index": idx, "original": original}
+    await query.message.reply_text(
+        (
+            "Введите исправленный адрес для:\n"
+            f"`{original}`\n(прежняя причина: {reason})"
+        ),
+        parse_mode="Markdown",
+    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1097,7 +1135,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
     ]
 
-    _suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+    dropped_current: List[Tuple[str, str]] = []
+    for email in sorted(allowed_all):
+        if email in filtered:
+            continue
+        if email in technical_emails:
+            dropped_current.append((email, "technical-address"))
+        elif not is_allowed_tld(email):
+            dropped_current.append((email, "foreign-domain"))
+        else:
+            dropped_current.append((email, "filtered"))
 
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
@@ -1112,14 +1159,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
     foreign_total = set(state.foreign) | set(foreign)
-    suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
     total_footnote = state.footnote_dupes + footnote_dupes
+
+    existing = list(state.dropped or [])
+    combined_map: dict[str, str] = {}
+    for addr, reason in existing + dropped_current:
+        if addr not in combined_map:
+            combined_map[addr] = reason
+    dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
 
     report = await _compose_report_and_save(
         context,
         all_allowed,
         state.to_send,
-        suspicious_total,
+        dropped_total,
         sorted(foreign_total),
         total_footnote,
     )
@@ -1127,14 +1180,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
         for s in state.repairs_sample:
             report += f"\n{s}"
-    extra_buttons = [
+    preview = context.chat_data.get("send_preview", {})
+    dropped_preview = preview.get("dropped", [])
+    fix_buttons: List[InlineKeyboardButton] = []
+    for idx in range(min(len(dropped_preview), 5)):
+        fix_buttons.append(
+            InlineKeyboardButton(
+                f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
+            )
+        )
+
+    extra_buttons: List[List[InlineKeyboardButton]] = []
+    if fix_buttons:
+        extra_buttons.append(fix_buttons)
+    extra_buttons.append(
         [
             InlineKeyboardButton(
                 "🔁 Показать ещё примеры", callback_data="refresh_preview"
             )
         ]
-    ]
-    # No extra buttons for numeric or foreign preview
+    )
     if state.repairs:
         extra_buttons.append(
             [
@@ -1171,22 +1236,26 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
     allowed_all = state.preview_allowed_all if state else []
-    numeric = state.suspect_numeric if state else []
+    dropped = state.dropped if state else []
     foreign = state.foreign if state else []
-    if not (allowed_all or numeric or foreign):
+    if not (allowed_all or dropped or foreign):
         await query.answer(
             "Нет данных для примеров. Загрузите файл/ссылки.", show_alert=True
         )
         return
     await query.answer()
     sample_allowed = sample_preview(allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = sample_preview(numeric, PREVIEW_NUMERIC)
     sample_foreign = sample_preview(foreign, PREVIEW_FOREIGN)
     report = []
     if sample_allowed:
         report.append("🧪 Примеры:\n" + "\n".join(sample_allowed))
-    if sample_numeric:
-        report.append("🔢 Примеры цифровых:\n" + "\n".join(sample_numeric))
+    if dropped:
+        preview_lines = [
+            f"{i + 1}) {addr} — {reason}"
+            for i, (addr, reason) in enumerate(dropped[:5])
+        ]
+        if preview_lines:
+            report.append("⚠️ Подозрительные:\n" + "\n".join(preview_lines))
     if sample_foreign:
         report.append("🌍 Примеры иностранных:\n" + "\n".join(sample_foreign))
     await query.message.reply_text(
@@ -1310,6 +1379,59 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
+    fix_state = context.chat_data.get("fix_pending")
+    if fix_state:
+        new_text = text.strip()
+        if not new_text:
+            await update.message.reply_text("❌ Введите корректный адрес.")
+            return
+        from pipelines.extract_emails import run_pipeline_on_text
+
+        final_new, dropped_new = run_pipeline_on_text(new_text)
+        if final_new and not dropped_new:
+            new_email = final_new[0]
+            preview = context.chat_data.get("send_preview", {}) or {}
+            dropped_list = list(preview.get("dropped", []))
+            idx = fix_state.get("index", -1)
+            original = fix_state.get("original")
+            if 0 <= idx < len(dropped_list) and dropped_list[idx][0] == original:
+                dropped_list.pop(idx)
+            else:
+                dropped_list = [pair for pair in dropped_list if pair[0] != original]
+            preview["dropped"] = dropped_list
+            final_list = [
+                item for item in list(preview.get("final", [])) if item != original
+            ]
+            final_list.append(new_email)
+            preview["final"] = list(dict.fromkeys(final_list))
+            fixed_list = list(preview.get("fixed", []))
+            fixed_list.append({"from": original, "to": new_email})
+            preview["fixed"] = fixed_list
+            context.chat_data["send_preview"] = preview
+            context.chat_data.pop("fix_pending", None)
+
+            state = get_state(context)
+            state.dropped = [pair for pair in state.dropped if pair[0] != original]
+            state.foreign = sorted(addr for addr in state.foreign if addr != original)
+            to_send_set = set(state.to_send)
+            to_send_set.discard(original)
+            to_send_set.add(new_email)
+            state.to_send = sorted(to_send_set)
+            preview_allowed = [
+                addr for addr in state.preview_allowed_all if addr != original
+            ]
+            preview_allowed.append(new_email)
+            state.preview_allowed_all = sorted(set(preview_allowed))
+            await update.message.reply_text(
+                f"✅ Исправлено: `{original}` → **{new_email}**",
+                parse_mode="Markdown",
+            )
+        else:
+            reason = dropped_new[0][1] if dropped_new else "invalid"
+            await update.message.reply_text(
+                f"❌ Всё ещё некорректно ({reason}). Попробуйте ещё раз или отправьте другой адрес."
+            )
+        return
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
         emails = {normalize_email(x) for x in extract_emails_loose(clean) if "@" in x}
@@ -1418,7 +1540,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         filtered = sorted(
             e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
         )
-        _suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+        dropped_current: List[Tuple[str, str]] = []
+        for email in sorted(allowed_all):
+            if email in filtered:
+                continue
+            if email in technical_emails:
+                dropped_current.append((email, "technical-address"))
+            elif not is_allowed_tld(email):
+                dropped_current.append((email, "foreign-domain"))
+            else:
+                dropped_current.append((email, "filtered"))
 
         state = get_state(context)
         state.all_emails.update(allowed_all)
@@ -1430,14 +1561,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state.repairs_sample = sample_preview(
             [f"{b} → {g}" for (b, g) in state.repairs], 6
         )
-        suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
         total_footnote = state.footnote_dupes + footnote_dupes
+
+        existing = list(state.dropped or [])
+        combined_map: dict[str, str] = {}
+        for addr, reason in existing + dropped_current:
+            if addr not in combined_map:
+                combined_map[addr] = reason
+        dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
 
         report = await _compose_report_and_save(
             context,
             state.all_emails,
             state.to_send,
-            suspicious_total,
+            dropped_total,
             sorted(foreign_total),
             total_footnote,
         )
@@ -1445,14 +1582,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
             for s in state.repairs_sample:
                 report += f"\n{s}"
-        extra_buttons = [
+        preview = context.chat_data.get("send_preview", {})
+        dropped_preview = preview.get("dropped", [])
+        fix_buttons: List[InlineKeyboardButton] = []
+        for idx in range(min(len(dropped_preview), 5)):
+            fix_buttons.append(
+                InlineKeyboardButton(
+                    f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
+                )
+            )
+
+        extra_buttons: List[List[InlineKeyboardButton]] = []
+        if fix_buttons:
+            extra_buttons.append(fix_buttons)
+        extra_buttons.append(
             [
                 InlineKeyboardButton(
                     "🔁 Показать ещё примеры", callback_data="refresh_preview"
                 )
             ]
-        ]
-        # No extra buttons for numeric or foreign preview
+        )
         if state.repairs:
             extra_buttons.append(
                 [
@@ -1482,94 +1631,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
         return
-
-
-async def ask_include_numeric(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Ask whether numeric-only addresses should be added."""
-
-    query = update.callback_query
-    state = get_state(context)
-    numeric = state.suspect_numeric
-    if not numeric:
-        await query.answer("Цифровых адресов нет", show_alert=True)
-        return
-    await query.answer()
-    preview_list = numeric[:60]
-    txt = (
-        f"Найдено цифровых логинов: {len(numeric)}.\nБудут добавлены все.\n\nПример:\n"
-        + "\n".join(preview_list)
-    )
-    more = len(numeric) - len(preview_list)
-    if more > 0:
-        txt += f"\n… и ещё {more}."
-    await query.message.reply_text(
-        txt,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✅ Включить все цифровые",
-                        callback_data="confirm_include_numeric",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "↩️ Отмена", callback_data="cancel_include_numeric"
-                    )
-                ],
-            ]
-        ),
-    )
-
-
-async def include_numeric_emails(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Include numeric-only e-mail addresses in the send list."""
-
-    query = update.callback_query
-    state = get_state(context)
-    numeric = state.suspect_numeric
-    if not numeric:
-        await query.answer("Цифровых адресов нет", show_alert=True)
-        return
-    await query.answer()
-    current = set(state.to_send)
-    added = [e for e in numeric if e not in current]
-    current.update(numeric)
-    state.to_send = sorted(current)
-    await query.message.reply_text(
-        (
-            f"➕ Добавлено цифровых адресов: {len(added)}.\n"
-            f"Итого к отправке: {len(state.to_send)}."
-        )
-    )
-
-
-async def cancel_include_numeric(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Keep numeric addresses excluded from the send list."""
-
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("Ок, цифровые адреса оставлены выключенными.")
-
-
-async def show_numeric_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display a list of numeric-only e-mail addresses."""
-
-    query = update.callback_query
-    state = context.chat_data.get(SESSION_KEY)
-    numeric = state.suspect_numeric if state else []
-    if not numeric:
-        await query.answer("Список пуст", show_alert=True)
-        return
-    await query.answer()
-    for chunk in _chunk_list(numeric, 60):
-        await query.message.reply_text("🔢 Цифровые логины:\n" + "\n".join(chunk))
 
 
 async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1734,6 +1795,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # manual отправка не учитывает супресс-лист
         get_blocked_emails()
         sent_today = get_sent_today()
+        preview = context.chat_data.get("send_preview", {}) or {}
+        fixed_map: Dict[str, str] = {}
+        for item in preview.get("fixed", []):
+            if isinstance(item, dict):
+                new_addr = item.get("to")
+                original_addr = item.get("from")
+                if new_addr and original_addr:
+                    fixed_map[str(new_addr)] = str(original_addr)
 
         try:
             imap = imaplib.IMAP4_SSL("imap.mail.ru")
@@ -1784,7 +1853,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     break
                 try:
                     token = send_email_with_sessions(
-                        smtp, imap, sent_folder, email_addr, template_path
+                        smtp,
+                        imap,
+                        sent_folder,
+                        email_addr,
+                        template_path,
+                        fixed_from=fixed_map.get(email_addr),
                     )
                     log_sent_email(
                         email_addr,
@@ -1872,6 +1946,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
+        preview = context.chat_data.get("send_preview", {}) or {}
+        fixed_map: Dict[str, str] = {}
+        for item in preview.get("fixed", []):
+            if isinstance(item, dict):
+                new_addr = item.get("to")
+                original_addr = item.get("from")
+                if new_addr and original_addr:
+                    fixed_map[str(new_addr)] = str(original_addr)
 
         saved_state = mass_state.load_chat_state(chat_id)
         if saved_state and saved_state.get("pending"):
@@ -2009,7 +2091,12 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 email_addr = to_send.pop(0)
                 try:
                     token = send_email_with_sessions(
-                        smtp, imap, sent_folder, email_addr, template_path
+                        smtp,
+                        imap,
+                        sent_folder,
+                        email_addr,
+                        template_path,
+                        fixed_from=fixed_map.get(email_addr),
                     )
                     log_sent_email(
                         email_addr,
@@ -2119,10 +2206,7 @@ __all__ = [
     "select_group",
     "prompt_manual_email",
     "handle_text",
-    "ask_include_numeric",
-    "include_numeric_emails",
-    "cancel_include_numeric",
-    "show_numeric_list",
+    "request_fix",
     "show_foreign_list",
     "apply_repairs",
     "show_repairs",
