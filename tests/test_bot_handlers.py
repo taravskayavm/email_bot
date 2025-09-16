@@ -36,7 +36,7 @@ class DummyMessage:
         self.reply_markups: list = []
         self.chat = types.SimpleNamespace(id=chat_id)
 
-    async def reply_text(self, text, reply_markup=None):
+    async def reply_text(self, text, reply_markup=None, **kwargs):
         self.replies.append(text)
         self.reply_markups.append(reply_markup)
         return self
@@ -112,11 +112,102 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
 
     state = ctx.chat_data[SESSION_KEY]
     assert state.all_emails == {"good@example.com", "123@site.com"}
-    assert state.suspect_numeric == ["123@site.com"]
+    assert state.dropped == []
     assert state.foreign == ["foreign@example.de"]
     report = update.message.replies[2]
     assert "Найдено адресов: 2" in report
-    assert "Уникальных (после очистки): 2" in report
+    assert "📧 К отправке: 2 адресов" in report
+    assert "⚠️ Подозрительные: 0 адресов" in report
+
+
+def test_request_fix_sets_state(monkeypatch):
+    update = DummyUpdate(callback_data="fix:0")
+    ctx = DummyContext()
+    ctx.chat_data["send_preview"] = {
+        "final": [],
+        "dropped": [("bad@example.com", "invalid-email")],
+        "fixed": [],
+    }
+
+    run(bh.request_fix(update, ctx))
+
+    assert ctx.chat_data["fix_pending"] == {
+        "index": 0,
+        "original": "bad@example.com",
+    }
+    prompt = update.callback_query.message.replies[-1]
+    assert "Введите исправленный адрес" in prompt
+
+
+def test_handle_text_fix_success(monkeypatch):
+    update = DummyUpdate(text="new@example.com")
+    ctx = DummyContext()
+    state = SessionState(
+        to_send=[],
+        preview_allowed_all=[],
+        dropped=[("old@example.com", "invalid-email")],
+        foreign=[],
+    )
+    ctx.chat_data[SESSION_KEY] = state
+    ctx.chat_data["send_preview"] = {
+        "final": [],
+        "dropped": [("old@example.com", "invalid-email")],
+        "fixed": [],
+    }
+    ctx.chat_data["fix_pending"] = {
+        "index": 0,
+        "original": "old@example.com",
+    }
+
+    monkeypatch.setattr(
+        "pipelines.extract_emails.run_pipeline_on_text",
+        lambda text: (["new@example.com"], []),
+    )
+
+    run(handle_text(update, ctx))
+
+    assert ctx.chat_data.get("fix_pending") is None
+    preview = ctx.chat_data["send_preview"]
+    assert "new@example.com" in preview["final"]
+    assert preview["dropped"] == []
+    assert {"from": "old@example.com", "to": "new@example.com"} in preview["fixed"]
+    assert state.to_send == ["new@example.com"]
+    assert state.dropped == []
+    assert "✅ Исправлено" in update.message.replies[-1]
+
+
+def test_handle_text_fix_invalid(monkeypatch):
+    update = DummyUpdate(text="still-bad")
+    ctx = DummyContext()
+    state = SessionState(
+        to_send=[],
+        preview_allowed_all=[],
+        dropped=[("broken@example", "invalid")],
+        foreign=[],
+    )
+    ctx.chat_data[SESSION_KEY] = state
+    ctx.chat_data["send_preview"] = {
+        "final": [],
+        "dropped": [("broken@example", "invalid")],
+        "fixed": [],
+    }
+    ctx.chat_data["fix_pending"] = {
+        "index": 0,
+        "original": "broken@example",
+    }
+
+    monkeypatch.setattr(
+        "pipelines.extract_emails.run_pipeline_on_text",
+        lambda text: ([], [(text, "invalid-email")]),
+    )
+
+    run(handle_text(update, ctx))
+
+    assert ctx.chat_data.get("fix_pending") is not None
+    assert ctx.chat_data["send_preview"]["dropped"] == [
+        ("broken@example", "invalid")
+    ]
+    assert "❌ Всё ещё некорректно" in update.message.replies[-1]
 
 
 def test_handle_text_add_block(monkeypatch):
