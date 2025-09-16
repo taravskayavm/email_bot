@@ -29,4 +29,17 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     return unique, stats
 
 
-__all__ = ["extract_emails_pipeline"]
+def run_pipeline_on_text(text: str) -> Tuple[List[str], List[str]]:
+    """Convenience helper returning final emails and dropped ones for tests."""
+
+    cleaned, meta = parse_emails_unified(text or "", return_meta=True)
+    final = dedupe_with_variants(cleaned)
+    dropped = [
+        item.get("raw")
+        for item in meta.get("items", [])
+        if not item.get("sanitized")
+    ]
+    return final, dropped
+
+
+__all__ = ["extract_emails_pipeline", "run_pipeline_on_text"]

@@ -207,7 +207,15 @@ def _normalize_localparts(text: str) -> str:
 # Допускаем любые непробельные символы в local-part и домене
 _EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
-_TLD_PREFIXES = (
+_TLD_RE = r"(?:[A-Za-z]{2,24})"
+
+_TRAILING_GARBAGE_CHARS = re.escape(">)]:;, }")
+
+_TAIL_CUT = re.compile(
+    rf"^(.+?\.(?:{_TLD_RE}))([{_TRAILING_GARBAGE_CHARS}].*)$"
+)
+
+_COMMON_TLDS = (
     "ru",
     "рф",
     "su",
@@ -250,13 +258,8 @@ _TLD_PREFIXES = (
     "tech",
 )
 
-_TLD_RE = "|".join(
-    sorted((re.escape(tld) for tld in _TLD_PREFIXES), key=len, reverse=True)
-)
-
-_TAIL_CUT = re.compile(
-    rf"^(.+?\.(?:{_TLD_RE}))([>}}\]\):;,\s].*)$",
-    re.IGNORECASE,
+_COMMON_TLD_RE = "|".join(
+    sorted((re.escape(tld) for tld in _COMMON_TLDS), key=len, reverse=True)
 )
 
 EMAIL_RE_STRICT = re.compile(
@@ -272,19 +275,28 @@ EMAIL_RE_STRICT = re.compile(
     re.VERBOSE,
 )
 
-_TRIM_AFTER_TLD_RE = re.compile(
-    r"^(.+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}?)([A-Z][A-Za-z]*)$"
-)
+def _trim_after_tld(addr: str) -> str:
+    """
+    Обрезает все хвосты после корректного TLD.
+    Пример: 'ivan@mail.ru>:' -> 'ivan@mail.ru'
+    """
+
+    m = _TAIL_CUT.match(addr)
+    return m.group(1) if m else addr
 
 
-def _trim_after_tld(s: str) -> str:
-    if not s:
-        return s
-    m = _TAIL_CUT.match(s)
-    if m:
-        return m.group(1)
-    m = _TRIM_AFTER_TLD_RE.match(s)
-    return m.group(1) if m else s
+def _strip_footnotes_before_email(addr: str) -> str:
+    """
+    Убирает сноски вида (a), [1] перед адресом.
+    Не трогает первую букву local-part.
+    """
+
+    return re.sub(
+        r"(?<!\w)\s*(?:\[(?:\d+|[a-z]{1,2})\]|\((?:\d+|[a-z]{1,2})\))\s*(?=[A-Za-z0-9._%+\-]{1,64}@)",
+        "",
+        addr,
+        flags=re.IGNORECASE,
+    )
 
 
 _ALNUM = set(string.ascii_letters + string.digits)
@@ -446,7 +458,7 @@ _ASCII_DOMAIN_RE = re.compile(
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
 )
 
-_LOCAL_TLD_GLUE_RE = re.compile(rf"\.({_TLD_RE})[A-Za-z]", re.IGNORECASE)
+_LOCAL_TLD_GLUE_RE = re.compile(rf"\.({_COMMON_TLD_RE})[A-Za-z]", re.IGNORECASE)
 _EMAIL_FULL_RE = re.compile(rf"^{_EMAIL_CORE}$", re.IGNORECASE)
 
 def extract_emails(text: str) -> list[str]:
@@ -851,6 +863,8 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     if trimmed != email:
         reason = reason or "trailing-garbage"
     email = trimmed
+
+    email = _strip_footnotes_before_email(email)
 
     if strip_footnote and "@" in email:
         local0, domain0 = email.split("@", 1)
