@@ -1,4 +1,8 @@
-from utils.email_clean import parse_emails_unified, sanitize_email
+from utils.email_clean import parse_emails_unified, sanitize_email as _sanitize_email
+
+
+def sanitize_email(value: str, strip_footnote: bool = True) -> str:
+    return _sanitize_email(value, strip_footnote)[0]
 
 def test_trailing_glue_after_tld_is_cut():
     s = "omgma-obschim@mail.ruSysoev"

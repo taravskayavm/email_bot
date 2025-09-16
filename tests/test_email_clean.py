@@ -1,11 +1,17 @@
 import pytest
 
+import config
+import utils.email_clean as email_clean
 from utils.email_clean import (
     dedupe_with_variants,
     extract_emails,
     parse_emails_unified,
-    sanitize_email,
+    sanitize_email as _sanitize_email,
 )
+
+
+def sanitize_email(value: str, strip_footnote: bool = True) -> str:
+    return _sanitize_email(value, strip_footnote)[0]
 
 
 @pytest.mark.parametrize(
@@ -92,7 +98,9 @@ def test_question_mark_anchor_trimming():
     assert not any("param=" in x for x in got)
 
 
-def test_deobfuscation_variants():
+def test_deobfuscation_variants(monkeypatch):
+    monkeypatch.setattr(config, "OBFUSCATION_ENABLE", True, raising=False)
+    monkeypatch.setattr(email_clean, "OBFUSCATION_ENABLE", True, raising=False)
     src = "user [at] site [dot] ru и user собака site точка ru"
     got = extract_emails(src)
     assert {"user@site.ru"} == set(got)
