@@ -17,20 +17,25 @@ from emailbot.reporting import build_mass_report_text
 
 @pytest.fixture(autouse=True)
 def fake_smtp(monkeypatch):
-    class DummySmtp:
+    class DummySMTP:
         def __init__(self, *a, **kw):
-            pass
+            self.sent = []
 
-        def __enter__(self):
-            return self
+        def send(self, msg):
+            self.sent.append(msg)
 
-        def __exit__(self, exc_type, exc, tb):
-            pass
+        def ensure(self):
+            return None
 
-        def send(self, *a, **kw):
-            pass
+        def close(self):
+            return None
 
-    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(
+        messaging,
+        "send_with_retry",
+        lambda smtp, msg, retries=3, backoff=1.0: smtp.send(msg),
+    )
 
 
 @pytest.fixture
@@ -353,20 +358,20 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
     sent: list[str] = []
 
-    class DummySmtp:
+    class DummySMTP:
         def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
             pass
 
         def send(self, *a, **kw):
             sent.append("1")
 
-    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+        def ensure(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
 
@@ -386,20 +391,20 @@ def test_domain_rate_limit(monkeypatch, caplog):
     def fake_sleep(sec):
         sleeps.append(sec)
 
-    class DummySmtp:
+    class DummySMTP:
         def __init__(self, *a, **kw):
             pass
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            pass
-
         def send(self, *a, **kw):
-            pass
+            return None
 
-    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+        def ensure(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(messaging.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(messaging.time, "sleep", fake_sleep)
     messaging._last_domain_send.clear()
@@ -415,14 +420,8 @@ def test_domain_rate_limit(monkeypatch, caplog):
 def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
     calls = {"n": 0}
 
-    class DummySmtp:
+    class DummySMTP:
         def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
             pass
 
         def send(self, *a, **kw):
@@ -430,9 +429,15 @@ def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
             if calls["n"] == 1:
                 raise smtplib.SMTPResponseException(451, b"try again")
 
+        def ensure(self):
+            return None
+
+        def close(self):
+            return None
+
     sleeps: list[float] = []
     monkeypatch.setattr(messaging.time, "sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
     monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
@@ -450,20 +455,20 @@ def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
 
 
 def test_hard_bounce_triggers_suppress(monkeypatch):
-    class DummySmtp:
+    class DummySMTP:
         def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
             pass
 
         def send(self, *a, **kw):
             raise smtplib.SMTPResponseException(550, b"user unknown")
 
-    monkeypatch.setattr(messaging, "SmtpClient", DummySmtp)
+        def ensure(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
     monkeypatch.setattr(messaging.time, "sleep", lambda s: None)
 

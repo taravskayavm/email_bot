@@ -40,10 +40,10 @@ from .messaging_utils import (
     suppress_add,
     upsert_sent_log,
 )
-from .smtp_client import SmtpClient
 from .utils import log_error as log_internal_error
+from email import message_from_string, message_from_bytes, policy
 from utils.send_stats import log_success, log_error
-from email import message_from_string, message_from_bytes
+from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,27 @@ _batch_idempotency: Set[str] = set()
 MODULE_DIR = Path(__file__).resolve().parent
 SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
 _sent_idempotency: Set[str] = set()
+
+
+def _smtp_reason(exc: Exception) -> str:
+    reason = getattr(exc, "smtp_error", None)
+    if isinstance(reason, (bytes, bytearray)):
+        try:
+            return reason.decode()
+        except Exception:
+            return repr(reason)
+    if reason:
+        return str(reason)
+    return str(exc)
+
+
+def _raw_to_text(raw_message: str | bytes) -> str:
+    if isinstance(raw_message, (bytes, bytearray)):
+        try:
+            return raw_message.decode()
+        except Exception:
+            return raw_message.decode("utf-8", errors="ignore")
+    return str(raw_message)
 
 
 
@@ -413,78 +434,104 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
 
 def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries=3):
     last_exc: Exception | None = None
-    try:
-        m = (
-            message_from_bytes(raw_message)
-            if isinstance(raw_message, (bytes, bytearray))
-            else message_from_string(str(raw_message))
-        )
-        grp = m.get("X-EBOT-Group", "") or ""
-        eb_uuid = m.get("X-EBOT-UUID", "") or ""
-        mid = m.get("Message-ID", "") or ""
-    except Exception:
-        grp = ""
-        eb_uuid = ""
-        mid = ""
-    for attempt in range(max_tries):
-        _rate_limit_domain(recipient)
+    grp = ""
+    eb_uuid = ""
+    mid = ""
+    if isinstance(raw_message, EmailMessage):
+        msg = raw_message
+        grp = msg.get("X-EBOT-Group", "") or ""
+        eb_uuid = msg.get("X-EBOT-UUID", "") or ""
+        mid = msg.get("Message-ID", "") or ""
+    else:
         try:
-            with SmtpClient(
-                "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
-            ) as client:
-                client.send(EMAIL_ADDRESS, recipient, raw_message)
-            logger.info("Email sent", extra={"event": "send", "email": recipient})
+            parsed = (
+                message_from_bytes(raw_message, policy=policy.default)
+                if isinstance(raw_message, (bytes, bytearray))
+                else message_from_string(str(raw_message), policy=policy.default)
+            )
+            if isinstance(parsed, EmailMessage):
+                msg = parsed
+            else:
+                msg = EmailMessage()
+                msg.set_content(_raw_to_text(raw_message))
+            grp = msg.get("X-EBOT-Group", "") or ""
+            eb_uuid = msg.get("X-EBOT-UUID", "") or ""
+            mid = msg.get("Message-ID", "") or ""
+        except Exception:
+            msg = EmailMessage()
+            msg.set_content(_raw_to_text(raw_message))
+    if not msg.get("To"):
+        msg["To"] = recipient
+    if not msg.get("From") and EMAIL_ADDRESS:
+        msg["From"] = EMAIL_ADDRESS
+
+    smtp = RobustSMTP()
+    try:
+        for attempt in range(max_tries):
+            _rate_limit_domain(recipient)
             try:
-                log_success(
-                    recipient,
-                    grp,
-                    extra={"uuid": eb_uuid, "message_id": mid},
-                )
-            except Exception:
-                pass
-            return
-        except smtplib.SMTPResponseException as e:
-            code = getattr(e, "smtp_code", None)
-            msg = getattr(e, "smtp_error", b"")
-            add_bounce(recipient, code, msg, "send")
-            if is_soft_bounce(code, msg) and attempt < max_tries - 1:
-                delay = 2**attempt
-                logger.info(
-                    "Soft bounce for %s (%s), retrying in %s s", recipient, code, delay
-                )
-                time.sleep(delay)
+                send_with_retry(smtp, msg)
+                logger.info("Email sent", extra={"event": "send", "email": recipient})
+                try:
+                    log_success(
+                        recipient,
+                        grp,
+                        extra={"uuid": eb_uuid, "message_id": mid},
+                    )
+                except Exception:
+                    pass
+                return
+            except smtplib.SMTPResponseException as e:
+                code = getattr(e, "smtp_code", None)
+                msg_bytes = getattr(e, "smtp_error", b"")
+                add_bounce(recipient, code, msg_bytes, "send")
+                if is_soft_bounce(code, msg_bytes) and attempt < max_tries - 1:
+                    delay = 2**attempt
+                    logger.info(
+                        "Soft bounce for %s (%s), retrying in %s s",
+                        recipient,
+                        code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    last_exc = e
+                    continue
+                if is_hard_bounce(code, msg_bytes):
+                    suppress_add(recipient, code, "hard bounce")
                 last_exc = e
-                continue
-            if is_hard_bounce(code, msg):
-                suppress_add(recipient, code, "hard bounce")
-            last_exc = e
-            try:
-                err = msg.decode() if isinstance(msg, (bytes, bytearray)) else msg
-                log_error(
-                    recipient,
-                    grp,
-                    f"{code} {err}",
-                    extra={"uuid": eb_uuid, "message_id": mid},
-                )
-            except Exception:
-                pass
-            break
-        except Exception as e:
-            last_exc = e
-            logger.warning("SMTP send failed to %s: %s", recipient, e)
-            try:
-                log_error(
-                    recipient,
-                    grp,
-                    repr(e),
-                    extra={"uuid": eb_uuid, "message_id": mid},
-                )
-            except Exception:
-                pass
-            if attempt < max_tries - 1:
-                time.sleep(2**attempt)
-    if last_exc:
-        raise last_exc
+                try:
+                    err = (
+                        msg_bytes.decode()
+                        if isinstance(msg_bytes, (bytes, bytearray))
+                        else msg_bytes
+                    )
+                    log_error(
+                        recipient,
+                        grp,
+                        f"{code} {err}",
+                        extra={"uuid": eb_uuid, "message_id": mid},
+                    )
+                except Exception:
+                    pass
+                break
+            except Exception as e:
+                last_exc = e
+                logger.warning("SMTP send failed to %s: %s", recipient, e)
+                try:
+                    log_error(
+                        recipient,
+                        grp,
+                        _smtp_reason(e),
+                        extra={"uuid": eb_uuid, "message_id": mid},
+                    )
+                except Exception:
+                    pass
+                if attempt < max_tries - 1:
+                    time.sleep(2**attempt)
+        if last_exc:
+            raise last_exc
+    finally:
+        smtp.close()
 
 
 def save_to_sent_folder(
@@ -606,9 +653,8 @@ def send_email(
             )
             return ""
         msg, token, _ = build_message(recipient, html_path, subject)
-        raw = msg.as_string()
-        send_raw_smtp_with_retry(raw, recipient, max_tries=3)
-        save_to_sent_folder(raw)
+        send_raw_smtp_with_retry(msg, recipient, max_tries=3)
+        save_to_sent_folder(msg)
         return token
     except Exception as e:
         log_internal_error(f"send_email: {recipient}: {e}")
@@ -648,7 +694,7 @@ def create_task_with_logging(
 
 
 def send_email_with_sessions(
-    client: SmtpClient,
+    smtp: RobustSMTP,
     imap: imaplib.IMAP4_SSL,
     sent_folder: str,
     recipient: str,
@@ -661,10 +707,9 @@ def send_email_with_sessions(
         return ""
     msg, token, eb_uuid = build_message(recipient, html_path, subject)
     group_code = msg.get("X-EBOT-Group", "") or ""
-    raw = msg.as_string()
     try:
-        client.send(EMAIL_ADDRESS, recipient, raw)
-        save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+        send_with_retry(smtp, msg)
+        save_to_sent_folder(msg, imap=imap, folder=sent_folder)
         try:
             log_success(
                 recipient,
@@ -695,7 +740,7 @@ def send_email_with_sessions(
             log_error(
                 recipient,
                 group_code,
-                repr(e),
+                _smtp_reason(e),
                 extra={"uuid": eb_uuid, "message_id": msg.get("Message-ID", "")},
             )
         except Exception:
