@@ -193,8 +193,10 @@ def _normalize_localparts(text: str) -> str:
         local = m.group("local")
         # заменяем «псевдоточки» на обычную точку
         local = re.sub(_DOT_VARIANTS, ".", local)
-        # приводим гомоглифы к латинице
-        local = local.translate(_LOCAL_HOMO_MAP)
+        # приводим гомоглифы к латинице, если итог в ASCII
+        translated = local.translate(_LOCAL_HOMO_MAP)
+        if translated.isascii():
+            local = translated
         return f"{local}@{m.group('rest')}"
 
     try:
@@ -205,7 +207,13 @@ def _normalize_localparts(text: str) -> str:
 
 # Ядро адреса для lookahead (не использовать для замены самого адреса!)
 # Допускаем любые непробельные символы в local-part и домене
-_EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+_LOCAL_START_CHARS = "A-Za-z0-9А-Яа-яЁё"
+_LOCAL_BODY_CHARS = _LOCAL_START_CHARS + "._%+\\-"
+_EMAIL_CORE_ASCII = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+_EMAIL_CORE_UNICODE = (
+    rf"[{_LOCAL_START_CHARS}][{_LOCAL_BODY_CHARS}]*@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}"
+)
+_EMAIL_CORE = _EMAIL_CORE_ASCII
 
 _TLD_RE = r"(?:[A-Za-z]{2,24})"
 
@@ -263,15 +271,19 @@ _COMMON_TLD_RE = "|".join(
 )
 
 EMAIL_RE_STRICT = re.compile(
-    r"""
+    (
+        r"""
     (?<![A-Za-z0-9._%+\-])                                  # слева не кусок e-mail
     (?![^@]*\.\.)                                            # без двойной точки в local-part
-    [A-Za-z0-9](?:[A-Za-z0-9._%+\-]{0,62}[A-Za-z0-9])?      # local-part без точки на краях
+    """
+        + rf"[{_LOCAL_START_CHARS}](?:[{_LOCAL_BODY_CHARS}]{{0,62}}[{_LOCAL_START_CHARS}])?"
+        + r"""
     @
     (?:[\w](?:[\w\-]{0,61}[\w])?\.)+                     # доменные лейблы (ASCII/Unicode)
     [\w]{2,24}                                            # TLD
     (?!\w)                                                # справа НЕ буква/цифра/подчёркивание
-""",
+"""
+    ),
     re.VERBOSE,
 )
 
@@ -282,7 +294,17 @@ def _trim_after_tld(addr: str) -> str:
     """
 
     m = _TAIL_CUT.match(addr)
-    return m.group(1) if m else addr
+    if m:
+        return m.group(1)
+    m = _CAMELTAIL_RE.match(addr)
+    if m:
+        return m.group(1)
+    return addr
+
+
+_CAMELTAIL_RE = re.compile(
+    rf"^(.+?\.(?:{_TLD_RE}))([A-Z][a-z]+(?:[A-Z][a-z]+)*)$"
+)
 
 
 def _strip_footnotes_before_email(addr: str) -> str:
@@ -444,22 +466,22 @@ def _normalize_text(s: str, *, already_deobfuscated: bool = False) -> str:
 #           (все разделители — точка, запятая, двоеточие, кавычки, скобки, тире и т.п. — допустимы)
 #  - справа: адрес НЕ продолжается буквенно-цифровым, точкой или дефисом (не «врастать» в слово/доменные хвосты)
 _EMAIL_CORE_RE = re.compile(
-    r"(?<![A-Za-z0-9_@])"
-    r"([A-Za-z0-9][A-Za-z0-9._%+-]*)"
+    rf"(?<![A-Za-z0-9_@])"
+    rf"([{_LOCAL_START_CHARS}][{_LOCAL_BODY_CHARS}]*)"
     r"@"
     r"([\w.-]+\.[\w]{2,})"  # домен (разрешаем Unicode)
     r"(?![\w.-])",
     re.IGNORECASE,
 )
 
-_ASCII_LOCAL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+$")
+_ASCII_LOCAL_RE = re.compile(rf"^[{_LOCAL_BODY_CHARS}]+$")
 _ASCII_DOMAIN_RE = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
 )
 
 _LOCAL_TLD_GLUE_RE = re.compile(rf"\.({_COMMON_TLD_RE})[A-Za-z]", re.IGNORECASE)
-_EMAIL_FULL_RE = re.compile(rf"^{_EMAIL_CORE}$", re.IGNORECASE)
+_EMAIL_FULL_RE = re.compile(rf"^{_EMAIL_CORE_UNICODE}$", re.IGNORECASE)
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -890,6 +912,9 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     local = _normalize_dots(local)
     if local != before_local and reason is None:
         reason = "punct-trimmed"
+
+    if _has_cyrillic(local) and _has_latin(local):
+        return "", "mixed-script-local"
 
     if not _ASCII_LOCAL_RE.match(local):
         return "", reason
