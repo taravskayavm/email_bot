@@ -22,6 +22,10 @@ from email.utils import formataddr
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
+from email import message_from_bytes, message_from_string, policy
+
+from services.templates import get_template, get_template_by_path
+
 from .extraction import normalize_email, strip_html
 from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
@@ -41,8 +45,7 @@ from .messaging_utils import (
     upsert_sent_log,
 )
 from .utils import log_error as log_internal_error
-from email import message_from_string, message_from_bytes, policy
-from utils.send_stats import log_success, log_error
+from utils.send_stats import log_error, log_success
 from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
@@ -54,19 +57,6 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = 200
-
-# HTML templates are stored at the root-level ``templates`` directory.
-TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
-TEMPLATE_MAP = {
-    "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
-    "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
-    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
-}
-TEMPLATE_MAP.update({
-    "психология": os.path.join(TEMPLATES_DIR, "psychology.html"),
-    "география": os.path.join(TEMPLATES_DIR, "geography.html"),
-    "биоинформатика": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),
-})
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -120,8 +110,31 @@ def _raw_to_text(raw_message: str | bytes) -> str:
 
 
 
-_OLD_SIGNATURE_GROUPS = {"медицина", "спорт", "туризм"}
-_NEW_SIGNATURE_GROUPS = {"психология", "география", "биоинформатика"}
+def _normalize_template_code(code: str) -> str:
+    return (code or "").strip().lower()
+
+
+def _new_signature_codes() -> set[str]:
+    raw = os.getenv(
+        "TEMPLATES_NEW_SIGNATURE",
+        "bioinformatics,geography,psychology",
+    )
+    return {
+        part.strip().lower()
+        for part in raw.split(",")
+        if part.strip()
+    }
+
+
+def _resolve_signature_mode(code: str) -> str:
+    info = get_template(code)
+    if info:
+        mode = info.get("signature")
+        if isinstance(mode, str):
+            mode_norm = mode.strip().lower()
+            if mode_norm in {"new", "old"}:
+                return mode_norm
+    return "new" if _normalize_template_code(code) in _new_signature_codes() else "old"
 
 
 def _choose_from_header(group: str) -> str:
@@ -130,8 +143,8 @@ def _choose_from_header(group: str) -> str:
     Старые: 'Редакция литературы по медицине, спорту и туризму'
     Новые:  'Редакция литературы'
     """
-    g = (group or "").strip().lower()
-    if g in _NEW_SIGNATURE_GROUPS:
+    mode = _resolve_signature_mode(group)
+    if mode == "new":
         return "Редакция литературы"
     return "Редакция литературы по медицине, спорту и туризму"
 
@@ -181,8 +194,7 @@ med@lanbook.ru
 www.lanbook.com"""
 
 def _choose_signature(group: str) -> str:
-    g = (group or "").strip().lower()
-    text = _SIGNATURE_NEW if g in _NEW_SIGNATURE_GROUPS else _SIGNATURE_OLD
+    text = _SIGNATURE_NEW if _resolve_signature_mode(group) == "new" else _SIGNATURE_OLD
     return text.replace("\n", "<br>")
 
 
@@ -208,11 +220,10 @@ def _read_template_file(path: str) -> str:
 
 
 def _render_template_for_group(group: str, context: Dict[str, str]) -> str:
-    """
-    Загружает шаблон для указанного направления и подставляет подпись.
-    Для тестов допускается простая подстановка без использования контекста.
-    """
-    path = TEMPLATE_MAP.get((group or "").strip().lower())
+    """Загрузить HTML шаблон для указанного кода и дополнить подписью."""
+
+    info = get_template(group)
+    path = info.get("path") if info else ""
     if path and os.path.exists(path):
         html = _read_template_file(path)
     else:
@@ -587,7 +598,11 @@ def build_message(
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
-    group = next((g for g, p in TEMPLATE_MAP.items() if p == html_path), "")
+    template_info = get_template_by_path(html_path)
+    group = template_info.get("code") if template_info else ""
+    if not group:
+        group = _normalize_template_code(Path(html_path).stem)
+    label = str(template_info.get("label") or group) if template_info else group
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
         f'font-size:{sig_size}px;color:#222;line-height:1.4;">{_choose_signature(group)}</div>'
@@ -608,9 +623,6 @@ def build_message(
     html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
-    msg["From"] = formataddr(
-        ("Редакция литературы по медицине, спорту и туризму", EMAIL_ADDRESS)
-    )
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
@@ -618,6 +630,9 @@ def build_message(
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    _apply_from(msg, group)
+    if label:
+        msg["X-EBOT-Template-Label"] = label
     logo_path = SCRIPT_DIR / "Logo.png"
     if inline_logo and logo_path.exists():
         try:
@@ -1192,7 +1207,6 @@ __all__ = [
     "LOG_FILE",
     "BLOCKED_FILE",
     "MAX_EMAILS_PER_DAY",
-    "TEMPLATE_MAP",
     "SIGNATURE_TEXT",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",

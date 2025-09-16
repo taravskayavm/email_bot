@@ -199,12 +199,12 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.manual_reset, pattern="^manual_reset$")
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_group_")
+        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_tpl:")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")
     )
-    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
+    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^tpl:"))
     app.add_handler(
         CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending")
     )
