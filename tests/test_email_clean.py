@@ -1,4 +1,39 @@
-from utils.email_clean import dedupe_with_variants, extract_emails, sanitize_email
+import pytest
+
+from utils.email_clean import (
+    dedupe_with_variants,
+    extract_emails,
+    parse_emails_unified,
+    sanitize_email,
+)
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("(a) anton-belousov0@rambler.ru", ["anton-belousov0@rambler.ru"]),
+        (
+            "RCPT TO:<russiavera.kidyaeva@yandex.ru>:",
+            ["russiavera.kidyaeva@yandex.ru"],
+        ),
+        (
+            "... tsibulnikova2011@yandex.ru> 550 5.7.1 ...",
+            ["tsibulnikova2011@yandex.ru"],
+        ),
+        (
+            "словоanton-belousov0@rambler.ru",
+            ["anton-belousov0@rambler.ru"],
+        ),
+        (
+            "anton-belousov0@rambler.ru словоanton-belousov0@rambler.ru",
+            ["anton-belousov0@rambler.ru"],
+        ),
+    ],
+)
+def test_bounce_samples_are_parsed_cleanly(source, expected):
+    parsed = parse_emails_unified(source)
+    deduped = dedupe_with_variants(parsed)
+    assert deduped == expected
 
 
 def test_footnote_prefix_removed_and_deduped():

@@ -50,7 +50,7 @@ def strip_invisibles(text: str) -> str:
 
 # Внешняя пунктуация, встречающаяся вокруг e-mail при парсинге
 _PUNCT_TRIM_RE = re.compile(
-    r'^[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+|[\s\(\[\{<«"“”„‚’»>}\]\).,:;]+$'
+    r'^[\s\(\[\{<«‹"“”„‚’›»>}\]\).,:;—]+|[\s\(\[\{<«‹"“”„‚’›»>}\]\).,:;—]+$'
 )
 
 # Цифровые сноски (включая надстрочные ¹²³ и пр. circled numbers)
@@ -192,6 +192,58 @@ def _deobfuscate(text: str) -> str:
 # Допускаем любые непробельные символы в local-part и домене
 _EMAIL_CORE = r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
+_TLD_PREFIXES = (
+    "ru",
+    "рф",
+    "su",
+    "com",
+    "org",
+    "net",
+    "edu",
+    "gov",
+    "info",
+    "biz",
+    "kz",
+    "by",
+    "ua",
+    "uz",
+    "kg",
+    "az",
+    "am",
+    "ge",
+    "md",
+    "tj",
+    "tm",
+    "pl",
+    "cz",
+    "de",
+    "fr",
+    "it",
+    "es",
+    "co",
+    "io",
+    "me",
+    "us",
+    "uk",
+    "ca",
+    "asia",
+    "top",
+    "site",
+    "club",
+    "online",
+    "store",
+    "tech",
+)
+
+_TLD_RE = "|".join(
+    sorted((re.escape(tld) for tld in _TLD_PREFIXES), key=len, reverse=True)
+)
+
+_TAIL_CUT = re.compile(
+    rf"^(.+?\.(?:{_TLD_RE}))([>}}\]\):;,\s].*)$",
+    re.IGNORECASE,
+)
+
 EMAIL_RE_STRICT = re.compile(
     r"""
     (?<![A-Za-z0-9._%+\-])                                  # слева не кусок e-mail
@@ -211,6 +263,11 @@ _TRIM_AFTER_TLD_RE = re.compile(
 
 
 def _trim_after_tld(s: str) -> str:
+    if not s:
+        return s
+    m = _TAIL_CUT.match(s)
+    if m:
+        return m.group(1)
     m = _TRIM_AFTER_TLD_RE.match(s)
     return m.group(1) if m else s
 
@@ -249,28 +306,41 @@ def _fix_hyphenation(text: str) -> str:
     return re.sub(r"([A-Za-z0-9])-\n([A-Za-z0-9])", r"\1\2", text)
 
 
-def _fix_glued_boundaries(s: str) -> str:
-    """
-    Вставляем пробел между предшествующим символом и НАЧАЛОМ e-mail,
-    если перед адресом нет пробела. Первая буква адреса НЕ трогается.
-    Примеры: 'Россия.duslem@mail.ru' → 'Россия. duslem@mail.ru'
-             'см:ivan@mail.ru'      → 'см: ivan@mail.ru'
-             '—alex@mail.ru'        → '— alex@mail.ru'
-    """
+def _ensure_space_before_emails(s: str) -> str:
+    """Добавляет пробел перед адресом, если он слипся с предыдущим словом."""
+
     if not s:
         return s
-    # Вставляем пробел ПЕРЕД адресом, не потребляя ни одного символа адреса.
-    # Слева допускаем любой не-пробельный (включая букву), чтобы разлепить 'словоivan@mail.ru'.
-    # Но НЕ трогаем случаи, где слева уже пробел.
-    out = []
+
+    out: list[str] = []
+    last = 0
+    for m in re.finditer(_EMAIL_CORE, s):
+        start, _ = m.span()
+        segment = s[last:start]
+        if start > 0 and not s[start - 1].isspace():
+            out.append(segment + " ")
+        else:
+            out.append(segment)
+        last = start
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _ensure_space_after_emails(s: str) -> str:
+    """Добавляет пробел после адреса, если сразу идёт буква или цифра."""
+
+    if not s:
+        return s
+
+    out: list[str] = []
     last = 0
     for m in re.finditer(_EMAIL_CORE, s):
         start, end = m.span()
-        if start > 0 and s[start - 1] != " ":
-            out.append(s[last:start] + " ")
-        else:
-            out.append(s[last:start])
-        last = start
+        out.append(s[last:start])
+        out.append(s[start:end])
+        if end < len(s) and not s[end].isspace() and s[end].isalnum():
+            out.append(" ")
+        last = end
     out.append(s[last:])
     return "".join(out)
 
@@ -286,7 +356,7 @@ def _strip_inline_footnotes(s: str) -> str:
         return s
     # допускаем необязательные пробелы перед адресом: (a)[пробелы]alex@...
     s = re.sub(
-        rf"(?<=\w)\s*(?:\[(?:\d+|[a-z]{{1,2}})\]|\((?:\d+|[a-z]{{1,2}})\))(?=\s*{_EMAIL_CORE})",
+        rf"\s*(?:\[(?:\d+|[a-z]{{1,2}})\]|\((?:\d+|[a-z]{{1,2}})\))(?=\s*{_EMAIL_CORE})",
         "",
         s,
         flags=re.IGNORECASE,
@@ -332,8 +402,10 @@ def _normalize_text(s: str) -> str:
     # 5) нормализация local-part (замены юникод-lookalike и т.п.)
     s = _normalize_localparts(s)
     # 6) разлипание границы перед адресом (не трогаем сам адрес)
-    s = _fix_glued_boundaries(s)
-    # 7) «умные» сноски — после разлипаний и уже на «живом» окружении
+    s = _ensure_space_before_emails(s)
+    # 7) разлипание границы после адреса, когда за ним сразу цифры/буквы
+    s = _ensure_space_after_emails(s)
+    # 8) «умные» сноски — после разлипаний и уже на «живом» окружении
     s = _strip_inline_footnotes(s)
     # сжимаем повторяющиеся пробелы
     s = re.sub(r" {2,}", " ", s)
@@ -359,20 +431,8 @@ _ASCII_DOMAIN_RE = re.compile(
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
 )
 
-_TLD_PREFIXES = (
-    "ru",
-    "com",
-    "net",
-    "org",
-    "gov",
-    "edu",
-    "info",
-    "biz",
-    "su",
-    "ua",
-    "рф",
-)
-
+_LOCAL_TLD_GLUE_RE = re.compile(rf"\.({_TLD_RE})[A-Za-z]", re.IGNORECASE)
+_EMAIL_FULL_RE = re.compile(rf"^{_EMAIL_CORE}$", re.IGNORECASE)
 
 def extract_emails(text: str) -> list[str]:
     """
@@ -659,10 +719,8 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> str:
     # domain with a known top-level domain followed by additional
     # characters (e.g. ``mail.ruovalov``), it is likely the result of two
     # concatenated addresses and should be rejected.
-    for tld in _TLD_PREFIXES:
-        # detect e.g. ``mail.ruovalov`` where ``.ru`` is followed by more letters
-        if re.search(rf"\.{tld}[A-Za-z]", local):
-            return ""
+    if _LOCAL_TLD_GLUE_RE.search(local):
+        return ""
 
     # домен: приводим к IDNA (punycode), но запрещаем мусор
     domain = domain.rstrip(".")
@@ -701,14 +759,21 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
 
     final = set()
     for key, vars_set in bucket.items():
-        if key in vars_set:
+        if key and key in vars_set:
             final.add(key)
-        elif len(vars_set) == 1:
+            continue
+        if key and len(vars_set) == 1:
             # only one variant – assume digits were footnotes and strip them
             final.add(key)
-        else:
-            # multiple variants without a clean version: keep the shortest variant
-            final.add(sorted(vars_set, key=len)[0])
+            continue
+
+        clean_variants = {v for v in vars_set if _EMAIL_FULL_RE.fullmatch(v)}
+        candidates = clean_variants or vars_set
+        if not candidates:
+            continue
+        chosen = min(candidates, key=len)
+        if chosen:
+            final.add(chosen)
 
     # существующая логика... + провайдерная канонизация для сравнения
     def _canon(e: str) -> str:
