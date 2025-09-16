@@ -4,10 +4,12 @@ import json
 import re
 import unicodedata
 import string
-from functools import lru_cache
 from pathlib import Path
 
 import idna
+
+from config import CONFUSABLES_NORMALIZE, OBFUSCATION_ENABLE
+from utils.email_deobfuscate import deobfuscate_text
 
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
@@ -70,6 +72,67 @@ _SUPERSCRIPT_MAP = str.maketrans(
 )
 # ①②③…⑳ → 1..20 (нужны хотя бы 1–9)
 _CIRCLED_MAP = {chr(cp): str(i) for i, cp in enumerate(range(0x2460, 0x2469), start=1)}
+
+# Таблица безопасных кириллических гомоглифов
+_CONFUSABLE_TRANSLATION = str.maketrans(
+    {
+        "а": "a",
+        "е": "e",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "у": "y",
+        "х": "x",
+        "к": "k",
+        "м": "m",
+        "т": "t",
+        "в": "b",
+        "н": "h",
+        "л": "l",
+        "А": "A",
+        "Е": "E",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "У": "Y",
+        "Х": "X",
+        "К": "K",
+        "М": "M",
+        "Т": "T",
+        "В": "B",
+        "Н": "H",
+        "Л": "L",
+        "і": "i",
+        "І": "I",
+        "ј": "j",
+        "Ј": "J",
+    }
+)
+
+_ASCII_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+_ASCII_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+def _is_cyrillic(ch: str) -> bool:
+    try:
+        return "CYRILLIC" in unicodedata.name(ch)
+    except ValueError:
+        return False
+
+
+def _is_latin(ch: str) -> bool:
+    try:
+        return "LATIN" in unicodedata.name(ch)
+    except ValueError:
+        return False
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any(_is_cyrillic(ch) for ch in text)
+
+
+def _has_latin(text: str) -> bool:
+    return any(_is_latin(ch) for ch in text)
 
 # --- Доп. нормализация только для local-part (левая часть до '@') ---
 _LOCAL_HOMO_MAP = str.maketrans(
@@ -138,54 +201,6 @@ def _normalize_localparts(text: str) -> str:
         return _LOCAL_CANDIDATE.sub(_fix, text)
     except Exception:
         return text
-
-
-_OBF_AT = [
-    r"\[at\]",
-    r"\(at\)",
-    r"\{at\}",
-    r"\sat\s",
-    r"\s@\s",
-    r"\sat\s",
-    r"\[собака\]",
-    r"\(собака\)",
-    r"\{собака\}",
-    r"\sсобака\s",
-]
-_OBF_DOT = [
-    r"\[dot\]",
-    r"\(dot\)",
-    r"\{dot\}",
-    r"\sdot\s",
-    r"\[точка\]",
-    r"\(точка\)",
-    r"\{точка\}",
-    r"\sточка\s",
-]
-
-
-@lru_cache(maxsize=256)
-def _deobfuscate(text: str) -> str:
-    """
-    Простейшая размаскировка: user [at] site [dot] ru → user@site.ru
-    Поддерживает англ./рус. маркеры и произвольные пробелы/скобки.
-    """
-    t = text
-    # унификация пробелов
-    t = re.sub(r"\s+", " ", t)
-    # замены at
-    for pat in _OBF_AT:
-        t = re.sub(pat, " @ ", t, flags=re.IGNORECASE)
-    # замены dot
-    for pat in _OBF_DOT:
-        t = re.sub(pat, " . ", t, flags=re.IGNORECASE)
-    # сжать пробелы и убрать их вокруг разделителей
-    t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"\s*@\s*", "@", t)
-    t = re.sub(r"\s*\.\s*", ".", t)
-    # частые OCR-ошибки: запятая перед TLD
-    t = re.sub(r"@([^,\s]+),([A-Za-z]{2,})\b", r"@\1.\2", t)
-    return t
 
 
 # Ядро адреса для lookahead (не использовать для замены самого адреса!)
@@ -376,7 +391,7 @@ def _strip_inline_footnotes(s: str) -> str:
     return s
 
 
-def _normalize_text(s: str) -> str:
+def _normalize_text(s: str, *, already_deobfuscated: bool = False) -> str:
     s = re.sub(
         r"[\u00B9\u00B2\u00B3\u2070-\u2079\u02B0-\u02B8\u2460-\u2473\u1D43-\u1D61\u1D62-\u1D6A]",
         "",
@@ -397,10 +412,10 @@ def _normalize_text(s: str) -> str:
     s = _fix_hyphenation(s)
     # 3) починить дефис-переносы, чтобы не ломать 'shestova-ma@...'
     s = _fix_hyphen_breaks(s)
-    # 4) размаскировка "at/dot/собака/точка" перед границами
-    s = _deobfuscate(s)
-    # 5) нормализация local-part (замены юникод-lookalike и т.п.)
+    if OBFUSCATION_ENABLE and not already_deobfuscated:
+        s = deobfuscate_text(s)
     s = _normalize_localparts(s)
+    s = re.sub(r"@([^,\s]+),([A-Za-z]{2,})\b", r"@\1.\2", s)
     # 6) разлипание границы перед адресом (не трогаем сам адрес)
     s = _ensure_space_before_emails(s)
     # 7) разлипание границы после адреса, когда за ним сразу цифры/буквы
@@ -582,18 +597,26 @@ def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
 
 
 def parse_emails_unified(text: str, return_meta: bool = False):
-    """
-    Единый вход парсинга:
-      raw -> deobfuscate -> normalize -> find -> sanitize
-    Возвращает список валидных адресов в порядке появления (дубли не убираются).
-    При `return_meta=True` дополнительно возвращает словарь с метаданными.
-    """
+    """Единый вход парсинга с учётом фичефлагов."""
 
     raw = text or ""
     _dbg("raw", raw)
-    t1 = _deobfuscate(raw)
+
+    deobf_rules: list[str] = []
+    deobf_applied = False
+    if OBFUSCATION_ENABLE:
+        t1 = deobfuscate_text(raw)
+        deobf_applied = t1 != raw
+        if hasattr(deobfuscate_text, "last_rules"):
+            try:
+                deobf_rules = list(getattr(deobfuscate_text, "last_rules"))
+            except Exception:
+                deobf_rules = []
+    else:
+        t1 = raw
     _dbg("deobfuscated", t1)
-    t2 = _normalize_text(t1)
+
+    t2 = _normalize_text(t1, already_deobfuscated=deobf_applied)
     _dbg("normalized", t2)
     matches = list(EMAIL_RE_STRICT.finditer(t2))
     found = [m.group(0) for m in matches]
@@ -610,26 +633,75 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             log_path = None
 
     cleaned: list[str] = []
+    final_reasons: list[str | None] = []
+    items_meta: list[dict[str, object]] = []
+    confusables_fixed = 0
+
     for c in found:
-        e = sanitize_email(c)
+        try:
+            raw_local, raw_domain = c.split("@", 1)
+        except ValueError:
+            continue
+
+        norm_local, norm_domain = raw_local, raw_domain
+        conf_fixed = False
+        if CONFUSABLES_NORMALIZE:
+            norm_local, norm_domain, conf_fixed = normalize_confusables(raw_local, raw_domain)
+
+        candidate = f"{norm_local}@{norm_domain}"
+        sanitized, sanitize_reason = sanitize_email(candidate)
+        reverted = False
+
+        if not sanitized and sanitize_reason == "invalid-idna" and conf_fixed:
+            sanitized, sanitize_reason = sanitize_email(c)
+            reverted = sanitized != ""
+            if reverted:
+                conf_fixed = False
+
+        final_reason = sanitize_reason
+        if sanitized:
+            if conf_fixed:
+                confusables_fixed += 1
+                if final_reason is None:
+                    final_reason = "confusables-normalized"
+            elif final_reason is None and deobf_applied:
+                if c not in raw and sanitized not in raw:
+                    final_reason = "obfuscation-applied"
+
+            cleaned.append(sanitized)
+            final_reasons.append(final_reason)
+        items_meta.append(
+            {
+                "raw": c,
+                "normalized": candidate,
+                "sanitized": sanitized,
+                "reason": final_reason,
+                "confusables_applied": conf_fixed,
+                "reverted": reverted,
+            }
+        )
+
         if DEBUG_PARSE:
             try:
-                print(f"[EMAIL-PARSE] raw={repr(c)} -> sanitized={repr(e)}")
+                print(
+                    "[EMAIL-PARSE] raw=%r -> sanitized=%r reason=%r"
+                    % (c, sanitized, final_reason)
+                )
             except Exception:
                 pass
             if log_path is not None:
                 try:
                     rec = {
                         "raw": c,
-                        "sanitized": e,
+                        "sanitized": sanitized,
+                        "reason": final_reason,
                         "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
                     }
                     with log_path.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
-        if e:
-            cleaned.append(e)
+
     _dbg("sanitized", cleaned)
     if not return_meta:
         return cleaned
@@ -641,11 +713,20 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             prev = t2[:start].rstrip()[-1:]
             first = m.group(0)[:1].lower()
             if prev in ".,:;()[]{}-—" and first in "abc":
-                suspect = sanitize_email(m.group(0))
+                suspect, _ = sanitize_email(m.group(0))
                 if suspect:
                     suspects.append(suspect)
 
-    return cleaned, {"suspects": suspects}
+    deobfuscated_count = sum(1 for r in final_reasons if r == "obfuscation-applied")
+
+    meta = {
+        "suspects": suspects,
+        "deobfuscated_count": deobfuscated_count,
+        "confusables_fixed": confusables_fixed,
+        "deobfuscation_rules": deobf_rules,
+        "items": items_meta,
+    }
+    return cleaned, meta
 
 
 # Сноски: убираем ТОЛЬКО надстрочные цифры/буквы, не трогаем обычные латинские
@@ -668,6 +749,79 @@ def _normalize_dots(local: str) -> str:
     return s
 
 
+def normalize_confusables(local: str, domain: str) -> tuple[str, str, bool]:
+    """Нормализует безопасные кириллические гомоглифы в local/domain."""
+
+    email = f"{local}@{domain}"
+    if not email or "@" not in email:
+        return local, domain, False
+
+    if not _has_cyrillic(email):
+        return local, domain, False
+
+    replaced = email.translate(_CONFUSABLE_TRANSLATION)
+    if replaced == email:
+        return local, domain, False
+
+    if not _has_latin(email):
+        if not _ASCII_EMAIL_RE.fullmatch(replaced):
+            return local, domain, False
+
+    new_local, new_domain = replaced.split("@", 1)
+    new_local = unicodedata.normalize("NFKC", new_local)
+    new_domain = unicodedata.normalize("NFKC", new_domain)
+
+    changed = new_local != local or new_domain != domain
+    return new_local, new_domain, changed
+
+
+def normalize_domain(domain: str) -> tuple[str, str | None]:
+    """Преобразует домен к IDNA, проверяя ограничения RFC."""
+
+    domain = (domain or "").strip().rstrip(".")
+    if not domain:
+        return "", "invalid-idna"
+
+    domain = unicodedata.normalize("NFKC", domain)
+    domain = domain.lower()
+
+    labels = domain.split(".")
+    ascii_labels: list[str] = []
+    for label in labels:
+        if not label:
+            return "", "invalid-idna"
+        label_nfkc = unicodedata.normalize("NFKC", label)
+        try:
+            label_nfkc.encode("ascii")
+            ascii_label = label_nfkc
+        except UnicodeEncodeError:
+            try:
+                ascii_label = idna.encode(label_nfkc, uts46=True).decode("ascii")
+            except idna.IDNAError:
+                return "", "invalid-idna"
+        ascii_label = ascii_label.lower()
+        if not (1 <= len(ascii_label) <= 63):
+            return "", "invalid-idna"
+        if ascii_label.startswith("-") or ascii_label.endswith("-"):
+            return "", "invalid-idna"
+        if not _ASCII_DOMAIN_LABEL_RE.fullmatch(ascii_label):
+            return "", "invalid-idna"
+        ascii_labels.append(ascii_label)
+
+    ascii_domain = ".".join(ascii_labels)
+    if len(ascii_domain) > 253:
+        return "", "invalid-idna"
+
+    tld = ascii_labels[-1]
+    if not tld.startswith("xn--") and not (2 <= len(tld) <= 24 and tld.isalpha()):
+        return "", "invalid-idna"
+
+    if not _ASCII_DOMAIN_RE.match(ascii_domain):
+        return "", "invalid-idna"
+
+    return ascii_domain, None
+
+
 def _preserve_leading_alnum(original: str, cleaned: str) -> str:
     try:
         o_loc, o_dom = original.split("@", 1)
@@ -687,60 +841,60 @@ _POPULAR = re.compile(r"^(?:yandex|ya|gmail|mail|bk|list|rambler|inbox)\.", re.I
 _REPAIR_RE = re.compile(r"^[a-z]{5,}\d+([a-z0-9._+\-]{4,})$", re.I)
 
 
-def sanitize_email(email: str, strip_footnote: bool = True) -> str:
-    """
-    Финальная чистка: убираем внешнюю пунктуацию, невидимые символы,
-    обрезаем крайние -_. от переносов.
-    """
+def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | None]:
+    """Финальная чистка и проверка адреса."""
+
     email_original = email
-    email = _trim_after_tld(email)
+    reason: str | None = None
+
+    trimmed = _trim_after_tld(email)
+    if trimmed != email:
+        reason = reason or "trailing-garbage"
+    email = trimmed
+
     if strip_footnote and "@" in email:
         local0, domain0 = email.split("@", 1)
         email = f"{_strip_footnotes(local0)}@{domain0}"
 
     s = _normalize_text(email).lower().replace(" ", "").strip()
+    before_trim = s
     s = _PUNCT_TRIM_RE.sub("", s)
-    s = re.sub(r"(\?|\#|/).*$", "", s)
+    if s != before_trim and reason is None:
+        reason = "punct-trimmed"
+    trimmed_tail = re.sub(r"(\?|\#|/).*$", "", s)
+    if trimmed_tail != s and reason is None:
+        reason = "trailing-garbage"
+    s = trimmed_tail
 
     if "@" not in s:
-        return ""
+        return "", reason
 
     local, domain = s.split("@", 1)
-    local = local.replace(",", ".")  # ошибки OCR: запятая вместо точки
-    # чистим края от .-_ оставшихся от переносов
+    before_local = local
+    local = local.replace(",", ".")
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
     local = _normalize_dots(local)
+    if local != before_local and reason is None:
+        reason = "punct-trimmed"
 
-    # жёстко: local-part строго ASCII
     if not _ASCII_LOCAL_RE.match(local):
-        return ""
+        return "", reason
 
-    # If local part accidentally contains something that looks like a
-    # domain with a known top-level domain followed by additional
-    # characters (e.g. ``mail.ruovalov``), it is likely the result of two
-    # concatenated addresses and should be rejected.
     if _LOCAL_TLD_GLUE_RE.search(local):
-        return ""
+        return "", "skleyka-in-local"
 
-    # домен: приводим к IDNA (punycode), но запрещаем мусор
-    domain = domain.rstrip(".")
-    if not _ASCII_DOMAIN_RE.match(domain):
-        # ВАЖНО: не трогаем Unicode-домен, кодируем через IDNA UTS#46
-        try:
-            domain = idna.encode(domain, uts46=True).decode("ascii")
-        except Exception:
-            return ""
-    # Повторная проверка уже в ASCII
-    if not _ASCII_DOMAIN_RE.match(domain):
-        return ""
+    domain_ascii, domain_reason = normalize_domain(domain)
+    if not domain_ascii:
+        return "", domain_reason or reason
 
-    if AGGR and _POPULAR.match(domain):
+    if AGGR and _POPULAR.match(domain_ascii):
         m = _REPAIR_RE.match(local)
         if m:
             local = m.group(1)
 
-    normalized = f"{local}@{domain}".lower()
-    return _preserve_leading_alnum(email_original, normalized)
+    normalized = f"{local}@{domain_ascii}".lower()
+    normalized = _preserve_leading_alnum(email_original, normalized)
+    return normalized, reason
 
 
 def dedupe_with_variants(emails: list[str]) -> list[str]:
@@ -748,8 +902,8 @@ def dedupe_with_variants(emails: list[str]) -> list[str]:
     Дедуплицируем, учитывая пару (сноской)вариант → чистый вариант.
     Если есть и «¹alexandr…@» и «alexandr…@», оставляем чистый.
     """
-    clean = [sanitize_email(e) for e in emails]
-    variants = [sanitize_email(e, strip_footnote=False) for e in emails]
+    clean = [sanitize_email(e)[0] for e in emails]
+    variants = [sanitize_email(e, strip_footnote=False)[0] for e in emails]
 
     pairs = [(c, v) for c, v in zip(clean, variants) if v]
 

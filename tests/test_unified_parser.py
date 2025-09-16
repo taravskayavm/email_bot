@@ -1,6 +1,16 @@
 import pytest
 
+import pytest
+
+import config
+import utils.email_clean as email_clean
 from utils.email_clean import dedupe_keep_original, parse_emails_unified
+
+
+@pytest.fixture(autouse=True)
+def enable_obfuscation(monkeypatch):
+    monkeypatch.setattr(config, "OBFUSCATION_ENABLE", True, raising=False)
+    monkeypatch.setattr(email_clean, "OBFUSCATION_ENABLE", True, raising=False)
 
 
 def test_simple_space_delimited():
