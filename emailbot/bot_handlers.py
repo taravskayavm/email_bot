@@ -663,14 +663,11 @@ async def prompt_change_group(
 ) -> None:
     """Prompt the user to choose a mailing group."""
 
-    current = context.chat_data.get("current_template_code")
-    if not current:
-        state = context.chat_data.get(SESSION_KEY)
-        if state and getattr(state, "group", None):
-            current = state.group
     await update.message.reply_text(
-        "⬇️ Выберите направление рассылки:",
-        reply_markup=build_templates_kb(current),
+        "Выберите направление:",
+        reply_markup=build_templates_kb(
+            context.chat_data.get("current_template_code")
+        ),
     )
 
 
