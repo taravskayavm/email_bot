@@ -6,7 +6,7 @@ from tests.test_bot_handlers import DummyUpdate, DummyContext
 
 
 @pytest.mark.asyncio
-async def test_preview_after_filters(monkeypatch):
+async def test_preview_after_filters(monkeypatch, tmp_path):
     ctx = DummyContext()
     ctx.chat_data[bh.SESSION_KEY] = bh.SessionState(to_send=["user@example.com"])
 
@@ -27,8 +27,22 @@ async def test_preview_after_filters(monkeypatch):
 
     monkeypatch.setattr(messaging, "prepare_mass_mailing", fake_prepare)
 
-    update = DummyUpdate(callback_data="group_спорт", chat_id=1)
+    tpl_path = tmp_path / "sport.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "sport"
+        else None,
+    )
+
+    update = DummyUpdate(callback_data="tpl:sport", chat_id=1)
     await bh.select_group(update, ctx)
 
-    assert "блок-листах" in update.callback_query.message.replies[0]
-    assert update.callback_query.message.reply_markups[0] is None
+    assert any("блок-листах" in text for text in update.callback_query.message.replies)
+    assert update.callback_query.message.reply_markups[-1] is None

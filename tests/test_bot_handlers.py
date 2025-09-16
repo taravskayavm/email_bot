@@ -165,19 +165,49 @@ def test_prompt_manual_email_clears_previous_list():
     assert ctx.user_data.get("awaiting_block_email") is False
 
 
-def test_select_group_sets_html_template():
-    update = DummyUpdate(callback_data="group_спорт")
+def test_select_group_sets_html_template(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    update = DummyUpdate(callback_data="tpl:tourism")
     ctx = DummyContext()
     ctx.chat_data[SESSION_KEY] = SessionState(to_send=["a@example.com"])
 
     run(bh.select_group(update, ctx))
 
     state = ctx.chat_data[SESSION_KEY]
-    assert state.template.endswith((".htm", ".html"))
+    assert state.template == str(tpl_path)
 
 
-def test_send_manual_email_uses_html_template(monkeypatch):
-    update = DummyUpdate(callback_data="manual_group_туризм")
+def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    update = DummyUpdate(callback_data="manual_tpl:tourism")
     ctx = DummyContext()
     ctx.chat_data["manual_all_emails"] = ["user@example.com"]
 
@@ -239,12 +269,25 @@ def test_manual_input_parsing_accepts_gmail(caplog):
 
 
 @pytest.mark.asyncio
-async def test_send_manual_email_no_block_mentions(monkeypatch):
-    update = DummyUpdate(callback_data="manual_group_туризм")
+async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    update = DummyUpdate(callback_data="manual_tpl:tourism")
     ctx = DummyContext()
     ctx.chat_data["manual_all_emails"] = ["x@example.com"]
 
-    monkeypatch.setattr(bh, "TEMPLATE_MAP", {"туризм": "template.html"})
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: {"x@example.com"})
     monkeypatch.setattr(bh, "get_sent_today", lambda: set())
 
