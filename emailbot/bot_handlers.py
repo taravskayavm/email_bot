@@ -9,8 +9,8 @@ import imaplib
 import json
 import logging
 import os
-import re
 import random
+import re
 import secrets
 import time
 import urllib.parse
@@ -28,6 +28,9 @@ from telegram import (
     Update,
 )
 from telegram.ext import ContextTypes
+
+from bot.keyboards import build_templates_kb
+from services.templates import get_template
 
 from utils.email_clean import (
     canonicalize_email,
@@ -135,7 +138,6 @@ from .messaging import (  # noqa: E402,F401  # isort: skip
     DOWNLOAD_DIR,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
-    TEMPLATE_MAP,
     add_blocked_email,
     clear_recent_sent_cache,
     count_sent_today,
@@ -195,9 +197,35 @@ class SessionState:
     preview_allowed_all: List[str] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
-    group: Optional[str] = None
+    group: Optional[str] = None  # template code
     template: Optional[str] = None
+    template_label: Optional[str] = None
     footnote_dupes: int = 0
+
+
+def _normalize_template_code(code: str) -> str:
+    return (code or "").strip().lower()
+
+
+def _template_label(info) -> str:
+    if not info:
+        return ""
+    label = info.get("label") if isinstance(info, dict) else ""
+    if not label:
+        label = info.get("code") if isinstance(info, dict) else ""
+    return str(label or "")
+
+
+def _template_path(info) -> Path | None:
+    if not info or not isinstance(info, dict):
+        return None
+    path = info.get("path")
+    if not path:
+        return None
+    try:
+        return Path(path)
+    except Exception:
+        return None
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -635,25 +663,14 @@ async def prompt_change_group(
 ) -> None:
     """Prompt the user to choose a mailing group."""
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина"),
-            InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт"),
-        ],
-        [
-            InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм"),
-            InlineKeyboardButton("🧠 Психология", callback_data="group_психология"),
-        ],
-        [
-            InlineKeyboardButton("🗺 География", callback_data="group_география"),
-            InlineKeyboardButton(
-                "🧬 Биоинформатика", callback_data="group_биоинформатика"
-            ),
-        ],
-    ]
+    current = context.chat_data.get("current_template_code")
+    if not current:
+        state = context.chat_data.get(SESSION_KEY)
+        if state and getattr(state, "group", None):
+            current = state.group
     await update.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=build_templates_kb(current),
     )
 
 
@@ -1185,25 +1202,14 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     query = update.callback_query
     await query.answer()
-    keyboard = [
-        [
-            InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина"),
-            InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт"),
-        ],
-        [
-            InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм"),
-            InlineKeyboardButton("🧠 Психология", callback_data="group_психология"),
-        ],
-        [
-            InlineKeyboardButton("🗺 География", callback_data="group_география"),
-            InlineKeyboardButton(
-                "🧬 Биоинформатика", callback_data="group_биоинформатика"
-            ),
-        ],
-    ]
+    current = context.chat_data.get("current_template_code")
+    if not current:
+        state = context.chat_data.get(SESSION_KEY)
+        if state and getattr(state, "group", None):
+            current = state.group
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=build_templates_kb(current),
     )
 
 
@@ -1212,12 +1218,31 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     await query.answer()
-    group_code = query.data.split("_")[1]
-    template_path = TEMPLATE_MAP[group_code]
+    data = query.data or ""
+    _, _, group_raw = data.partition(":")
+    group_code = _normalize_template_code(group_raw)
+    template_info = get_template(group_code)
+    template_path_obj = _template_path(template_info)
+    if not template_info or not template_path_obj or not template_path_obj.exists():
+        await query.message.reply_text(
+            "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+        )
+        return
+    template_path = str(template_path_obj)
+    label = _template_label(template_info) or group_code
     state = get_state(context)
     emails = state.to_send
     state.group = group_code
     state.template = template_path
+    state.template_label = label
+    context.chat_data["current_template_code"] = group_code
+    context.chat_data["current_template_label"] = label
+    context.chat_data["current_template_path"] = template_path
+    try:
+        await query.message.edit_reply_markup(reply_markup=build_templates_kb(group_code))
+    except Exception:
+        pass
+    await query.message.reply_text(f"✅ Выбран шаблон: «{label}»\nФайл: {template_path}")
     chat_id = query.message.chat.id
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
         messaging.prepare_mass_mailing(emails)
@@ -1236,6 +1261,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         {
             "group": group_code,
             "template": template_path,
+            "template_label": label,
             "pending": ready,
             "blocked_foreign": blocked_foreign,
             "blocked_invalid": blocked_invalid,
@@ -1270,7 +1296,8 @@ async def prompt_manual_email(
     context.chat_data.pop("manual_send_mode", None)
     context.chat_data.pop("manual_allowed_preview", None)
     context.chat_data.pop("manual_rejected_preview", None)
-    context.chat_data.pop("manual_selected_group", None)
+    context.chat_data.pop("manual_selected_template_code", None)
+    context.chat_data.pop("manual_selected_template_label", None)
     context.chat_data.pop("manual_selected_emails", None)
     await update.message.reply_text(
         (
@@ -1311,28 +1338,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.chat_data["manual_all_emails"] = emails
         context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
 
-        group_kb = [
-            [
-                InlineKeyboardButton(
-                    "🩺 Медицина", callback_data="manual_group_медицина"
-                ),
-                InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт"),
-            ],
-            [
-                InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм"),
-                InlineKeyboardButton(
-                    "🧠 Психология", callback_data="manual_group_психология"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🗺 География", callback_data="manual_group_география"
-                ),
-                InlineKeyboardButton(
-                    "🧬 Биоинформатика",
-                    callback_data="manual_group_биоинформатика",
-                ),
-            ],
+        template_rows = [
+            row[:]
+            for row in build_templates_kb(
+                context.chat_data.get("manual_selected_template_code"),
+                prefix="manual_tpl:",
+            ).inline_keyboard
         ]
 
         enforce, days, allow_override = _manual_cfg()
@@ -1355,7 +1366,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ),
                 InlineKeyboardButton("Отправить всем", callback_data="manual_mode_all"),
             ]
-        keyboard = [*group_kb]
+        keyboard = [*template_rows]
         if mode_row:
             keyboard.append(mode_row)
         keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
@@ -1649,6 +1660,8 @@ async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
     clear_all_awaiting(context)
     init_state(context)
+    context.chat_data.pop("manual_selected_template_code", None)
+    context.chat_data.pop("manual_selected_template_label", None)
     await query.message.reply_text(
         "Сброшено. Нажмите /manual для новой ручной рассылки."
     )
@@ -1661,7 +1674,18 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
-    group_code = query.data.split("manual_group_", 1)[-1]
+    data = query.data or ""
+    _, _, group_raw = data.partition(":")
+    group_code = _normalize_template_code(group_raw)
+    template_info = get_template(group_code)
+    template_path_obj = _template_path(template_info)
+    if not template_info or not template_path_obj or not template_path_obj.exists():
+        await query.message.reply_text(
+            "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+        )
+        return
+    template_path = str(template_path_obj)
+    label = _template_label(template_info) or group_code
 
     enforce, days, allow_override = _manual_cfg()
     if enforce and mode == "allowed":
@@ -1679,8 +1703,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # Сообщение без раскрытия адресов — только счётчики
+    display_label = label
+    if label.lower() != group_code:
+        display_label = f"{label} ({group_code})"
     await query.message.reply_text(
-        f"Направление: {group_code}\nК отправке: {len(to_send)}"
+        f"Шаблон: {display_label}\nК отправке: {len(to_send)}"
         + (f"\nОтфильтровано по правилу 180 дней: {len(rejected)}" if rejected else "")
     )
 
@@ -1698,14 +1725,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # Сохраняем выбранный набор; дальнейшая логика подхватит эти значения
-    context.chat_data["manual_selected_group"] = group_code
+    context.chat_data["manual_selected_template_code"] = group_code
+    context.chat_data["manual_selected_template_label"] = label
     context.chat_data["manual_selected_emails"] = to_send
 
     await query.message.reply_text("Запущено — выполняю в фоне...")
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
-        template_path = TEMPLATE_MAP[group_code]
 
         # manual отправка не учитывает супресс-лист
         get_blocked_emails()
@@ -1820,16 +1847,29 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         emails = saved.get("pending", [])
         group_code = saved.get("group")
         template_path = saved.get("template")
+        template_label = saved.get("template_label") or ""
     else:
         state = get_state(context)
         emails = state.to_send
         group_code = state.group
         template_path = state.template
+        template_label = state.template_label or ""
     if not emails or not group_code or not template_path:
         await query.answer("Нет данных для отправки", show_alert=True)
         return
+    if not Path(template_path).exists():
+        await query.answer("Шаблон недоступен", show_alert=True)
+        await query.message.reply_text(
+            "⚠️ Шаблон не найден или файл отсутствует. Нажмите «🧭 Сменить группу» и выберите шаблон."
+        )
+        return
     await query.answer()
-    await query.message.reply_text("Запущено — выполняю в фоне...")
+    display_label = template_label or group_code
+    if template_label and template_label.lower() != group_code:
+        display_label = f"{template_label} ({group_code})"
+    await query.message.reply_text(
+        "Запущено — выполняю в фоне...\n" f"Шаблон: {display_label}"
+    )
 
     async def long_job() -> None:
         lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
