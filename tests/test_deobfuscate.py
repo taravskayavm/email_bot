@@ -1,6 +1,19 @@
 from utils.email_clean import extract_emails, dedupe_with_variants
 
 
+import pytest
+
+import config
+import utils.email_clean as email_clean
+from utils.email_clean import dedupe_with_variants, extract_emails
+
+
+@pytest.fixture(autouse=True)
+def enable_obfuscation(monkeypatch):
+    monkeypatch.setattr(config, "OBFUSCATION_ENABLE", True, raising=False)
+    monkeypatch.setattr(email_clean, "OBFUSCATION_ENABLE", True, raising=False)
+
+
 def test_english_obfuscation():
     src = "Write me: ivan.petrov [at] gmail [dot] com"
     assert extract_emails(src) == ["ivan.petrov@gmail.com"]

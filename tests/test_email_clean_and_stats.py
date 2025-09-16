@@ -5,11 +5,15 @@ from pathlib import Path
 import pytest
 
 from utils.email_clean import (
-    sanitize_email,
+    sanitize_email as _sanitize_email,
     parse_emails_unified,
     drop_leading_char_twins,
 )
 from utils import send_stats
+
+
+def sanitize_email(value: str, strip_footnote: bool = True) -> str:
+    return _sanitize_email(value, strip_footnote)[0]
 
 
 def test_leading_letters_and_digits_preserved():

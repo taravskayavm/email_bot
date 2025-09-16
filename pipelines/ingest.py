@@ -2,7 +2,7 @@ from utils.email_clean import sanitize_email, dedupe_with_variants, _strip_leadi
 
 
 def ingest(all_extracted_emails: list[str]) -> tuple[list[str], str]:
-    cleaned = [sanitize_email(e) for e in all_extracted_emails]
+    cleaned = [sanitize_email(e)[0] for e in all_extracted_emails]
     rejected_non_ascii = sum(1 for e in cleaned if not e)
     cleaned = [e for e in cleaned if e]  # убираем невалидные
     emails = dedupe_with_variants(cleaned)
