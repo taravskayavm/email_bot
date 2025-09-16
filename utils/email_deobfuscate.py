@@ -1,71 +1,93 @@
-import re
+try:  # pragma: no cover - optional dependency
+    import regex as re  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - fallback for environments without "regex"
+    import re  # type: ignore[no-redef]
 
 __all__ = ["deobfuscate_text"]
 
-_LOCAL_FRAGMENT = r"[A-Za-z0-9._%+-]{1,64}"
-_DOMAIN_LABEL = r"[A-Za-z0-9-]{1,63}"
-_DOMAIN_FRAGMENT = rf"(?:{_DOMAIN_LABEL}\.)+[A-Za-z]{{2,24}}"
-_LETTER_CLASS = "A-Za-zА-Яа-яЁё"
-_GAP = rf"(?:[^{_LETTER_CLASS}])?"
 
+def _word_pattern(base: str) -> str:
+    """Allow obfuscated words like "s o b a k a" or "d-o-t"."""
 
-def _spaced(word: str) -> str:
-    if not word:
+    letters = list(base)
+    if not letters:
         return ""
-    parts = [re.escape(word[0])]
-    for ch in word[1:]:
-        parts.append(_GAP)
-        parts.append(re.escape(ch))
-    return "".join(parts)
+    rest = [rf"\W?{re.escape(ch)}" for ch in letters[1:]]
+    return rf"{re.escape(letters[0])}\s*" + "\s*".join(rest)
 
 
-_AT_WORD = rf"(?:{_spaced('at')}|{_spaced('собака')})"
-_DOT_WORD = rf"(?:{_spaced('dot')}|{_spaced('точка')})"
-_AT_WRAPPED = rf"[\(\[\{{]?\s*{_AT_WORD}\s*[\)\]\}}]?"
-_DOT_WRAPPED = rf"[\(\[\{{]?\s*{_DOT_WORD}\s*[\)\]\}}]?"
+_LOCAL_FRAGMENT = r"[\w.%+\-]{1,64}"
+_DOMAIN_LABEL = r"[A-Za-z0-9-]{1,63}"
 
-_DOT_PATTERN = re.compile(
-    rf"(?<![A-Za-z0-9-])(?P<left>{_DOMAIN_LABEL})\s*{_DOT_WRAPPED}\s*(?P<right>{_DOMAIN_LABEL})(?![A-Za-z0-9-])",
-    re.IGNORECASE,
-)
+_PAT_ATS = [
+    re.compile(
+        rf"(?P<L>{_LOCAL_FRAGMENT})\s*[\(\[\{{]?\s*(?:{_word_pattern('собака')}|{_word_pattern('at')})\s*[\)\]\}}]?\s*(?P<R>{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*)",
+        re.IGNORECASE,
+    )
+]
 
-_AT_PATTERN = re.compile(
-    rf"(?<![A-Za-z0-9._%+-])(?P<local>{_LOCAL_FRAGMENT})\s*{_AT_WRAPPED}\s*(?P<domain>{_DOMAIN_FRAGMENT})(?![A-Za-z0-9-])",
-    re.IGNORECASE,
-)
+_PAT_DOTS = [
+    re.compile(
+        rf"(?P<L>{_DOMAIN_LABEL})\s*[\(\[\{{]?\s*(?:{_word_pattern('точка')}|{_word_pattern('dot')})\s*[\)\]\}}]?\s*(?P<R>{_DOMAIN_LABEL})",
+        re.IGNORECASE,
+    )
+]
 
 
 def deobfuscate_text(text: str) -> str:
     """Return text with simple e-mail obfuscations normalised."""
 
     if not text:
-        deobfuscate_text.last_rules = []
+        try:
+            deobfuscate_text.last_rules = []  # type: ignore[attr-defined]
+        except Exception:
+            pass
         return text
 
     rules: set[str] = set()
     current = text
 
-    def _dot_repl(match: re.Match) -> str:
-        rules.add("dot")
-        return f"{match.group('left')}.{match.group('right')}"
-
-    def _at_repl(match: re.Match) -> str:
-        rules.add("at")
-        return f"{match.group('local')}@{match.group('domain')}"
+    def _sub_all(patterns: list[re.Pattern], repl_func, rule_name: str) -> bool:
+        nonlocal current
+        changed = False
+        for pat in patterns:
+            new_current, count = pat.subn(
+                lambda m, rf=repl_func, rn=rule_name: (
+                    rules.add(rn),
+                    rf(m),
+                )[1],
+                current,
+            )
+            if count:
+                current = new_current
+                changed = True
+        return changed
 
     while True:
-        current, count = _DOT_PATTERN.subn(_dot_repl, current)
-        if count == 0:
+        changed = False
+        if _sub_all(
+            _PAT_DOTS,
+            lambda m: f"{m.group('L')}.{m.group('R')}",
+            "dot",
+        ):
+            changed = True
+        if _sub_all(
+            _PAT_ATS,
+            lambda m: f"{m.group('L')}@{m.group('R')}",
+            "at",
+        ):
+            changed = True
+        if not changed:
             break
 
-    current, _ = _AT_PATTERN.subn(_at_repl, current)
-
-    deobfuscate_text.last_rules = sorted(rules)
+    try:
+        deobfuscate_text.last_rules = sorted(rules)  # type: ignore[attr-defined]
+    except Exception:
+        pass
     return current
 
 
-# Attach default attribute for introspection
-try:
+try:  # pragma: no cover - default value for attribute
     deobfuscate_text.last_rules = []  # type: ignore[attr-defined]
 except Exception:
     pass
