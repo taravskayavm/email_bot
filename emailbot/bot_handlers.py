@@ -158,8 +158,8 @@ from .messaging_utils import (  # noqa: E402  # isort: skip
     suppress_add,
     was_sent_within,
 )
-from .smtp_client import SmtpClient  # noqa: E402
 from .utils import log_error  # noqa: E402
+from utils.smtp_client import RobustSMTP  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1753,15 +1753,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         sent_count = 0
         errors: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
-        with SmtpClient(
-            "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
-        ) as client:
+        smtp = RobustSMTP()
+        try:
             for email_addr in to_send_local:
                 if cancel_event and cancel_event.is_set():
                     break
                 try:
                     token = send_email_with_sessions(
-                        client, imap, sent_folder, email_addr, template_path
+                        smtp, imap, sent_folder, email_addr, template_path
                     )
                     log_sent_email(
                         email_addr,
@@ -1792,6 +1791,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     log_sent_email(
                         email_addr, group_code, "error", chat_id, template_path, str(e)
                     )
+        finally:
+            smtp.close()
         imap.logout()
         if cancel_event and cancel_event.is_set():
             await query.message.reply_text(
@@ -1963,16 +1964,15 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         errors: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
-        with SmtpClient(
-            "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
-        ) as client:
+        smtp = RobustSMTP()
+        try:
             while to_send:
                 if cancel_event and cancel_event.is_set():
                     break
                 email_addr = to_send.pop(0)
                 try:
                     token = send_email_with_sessions(
-                        client, imap, sent_folder, email_addr, template_path
+                        smtp, imap, sent_folder, email_addr, template_path
                     )
                     log_sent_email(
                         email_addr,
@@ -2017,6 +2017,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "skipped_recent": skipped_recent,
                     },
                 )
+        finally:
+            smtp.close()
         imap.logout()
         if not to_send:
             mass_state.clear_chat_state(chat_id)

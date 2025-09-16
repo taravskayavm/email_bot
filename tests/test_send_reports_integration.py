@@ -11,14 +11,14 @@ class _FakeSMTP:
     def __init__(self, *a, **k):
         pass
 
-    def __enter__(self):
-        return self
+    def send(self, msg):
+        return None
 
-    def __exit__(self, *a):
-        return False
+    def ensure(self):
+        return None
 
-    def send(self, from_addr, to_addr, raw):
-        return
+    def close(self):
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,10 @@ def _env_tmp_stats(tmp_path, monkeypatch):
     # подменяем SMTP-клиент на фейковый
     import emailbot.messaging as m
     fake = _FakeSMTP
-    monkeypatch.setattr(m, "SmtpClient", fake, raising=True)
+    monkeypatch.setattr(m, "RobustSMTP", lambda *a, **k: fake(), raising=True)
+    monkeypatch.setattr(
+        m, "send_with_retry", lambda smtp, msg, retries=3, backoff=1.0: smtp.send(msg)
+    )
     yield
 
 

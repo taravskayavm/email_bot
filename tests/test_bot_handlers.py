@@ -200,14 +200,11 @@ def test_send_manual_email_uses_html_template(monkeypatch):
         def logout(self):
             return
 
-    class DummyClient:
-        def __enter__(self):
-            return self
+    class DummySMTP:
+        def close(self):
+            return None
 
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(bh, "SmtpClient", lambda *a, **k: DummyClient())
+    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(
         bh, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap())
     )
