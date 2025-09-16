@@ -1,6 +1,7 @@
-import os, re, ssl, socket, imaplib, email
+import os, re, ssl, socket, imaplib, email, time
 from datetime import datetime, timedelta, timezone
 from .send_stats import log_bounce
+from .bounce_pop3 import sync_bounces_pop3
 
 BOUNCE_SINCE_DAYS = int(os.getenv("BOUNCE_SINCE_DAYS","7"))
 INBOX_MAILBOX = os.getenv("INBOX_MAILBOX","INBOX")
@@ -31,19 +32,33 @@ def _imap_connect():
             continue
     raise last or OSError("IMAP connect failed")
 
+def try_imap_connect():
+    for attempt in range(IMAP_RETRIES):
+        try:
+            return _imap_connect()
+        except TimeoutError:
+            time.sleep(min(2 ** attempt, 8))
+            continue
+        except ConnectionRefusedError:
+            time.sleep(min(2 ** attempt, 8))
+            continue
+        except OSError as e:
+            if getattr(e, "winerror", None) == 10061 or "timed out" in str(e).lower():
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            raise
+    return None
+
 def sync_bounces():
     """Сканирует INBOX, находит bounce, логирует их в send_stats как status='bounce'."""
-    # Подключение с ретраями
-    attempt = 0
-    while True:
-        try:
-            imap = _imap_connect()
-            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            break
-        except Exception as e:
-            attempt += 1
-            if attempt >= IMAP_RETRIES:
-                raise
+    imap = try_imap_connect()
+    if imap is None:
+        backend = os.getenv("BOUNCE_FETCH_BACKEND", "auto").lower()
+        if backend in ("auto", "pop3"):
+            return sync_bounces_pop3()
+        raise RuntimeError("IMAP unavailable and POP3 fallback disabled")
+
+    imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
     imap.select(INBOX_MAILBOX)
 
     since = (datetime.now(timezone.utc) - timedelta(days=BOUNCE_SINCE_DAYS)).strftime("%d-%b-%Y")
