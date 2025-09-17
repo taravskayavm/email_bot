@@ -699,8 +699,10 @@ async def imap_folders_command(
 ) -> None:
     """List available IMAP folders and allow user to choose."""
 
+    IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
+    IMAP_TIMEOUT = float(os.getenv("IMAP_TIMEOUT", "15"))
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
         imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         status, data = imap.list()
         imap.logout()
@@ -1744,7 +1746,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     fixed_map[str(new_addr)] = str(original_addr)
 
         try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
+            IMAP_TIMEOUT = float(os.getenv("IMAP_TIMEOUT", "15"))
+            imap = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
             imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
             sent_folder = get_preferred_sent_folder(imap)
             imap.select(f'"{sent_folder}"')
