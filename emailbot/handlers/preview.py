@@ -8,8 +8,19 @@ from typing import Any, Iterable, Sequence, TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from emailbot import history_service
+from emailbot import history_service, mass_state, messaging
+from emailbot.edit_service import (
+    apply_edits as apply_saved_edits,
+    clear_edits as clear_saved_edits,
+    list_edits as list_saved_edits,
+    save_edit as save_edit_record,
+)
 from emailbot.report_preview import PreviewData, build_preview_workbook
+from utils.email_clean import (
+    dedupe_keep_original,
+    drop_leading_char_twins,
+    parse_emails_unified,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers only
     from emailbot.bot_handlers import SessionState
@@ -17,6 +28,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing helpers only
 
 PREVIEW_DIR = Path("var")
 _BACK_CALLBACK = "preview_back"
+_EDIT_CALLBACK = "preview_edit"
+_SHOW_EDITS_CALLBACK = "preview_edits_show"
+_CLEAR_EDITS_CALLBACK = "preview_edits_reset"
+_REFRESH_PREFIX = "preview_refresh:"
 
 
 def _utc_now() -> datetime:
@@ -244,7 +259,12 @@ def _preview_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("Отправить", callback_data="start_sending"),
                 InlineKeyboardButton("Вернуться / Править", callback_data=_BACK_CALLBACK),
-            ]
+            ],
+            [InlineKeyboardButton("✏️ Исправить адрес", callback_data=_EDIT_CALLBACK)],
+            [
+                InlineKeyboardButton("📄 Показать правки", callback_data=_SHOW_EDITS_CALLBACK),
+                InlineKeyboardButton("♻️ Сбросить правки", callback_data=_CLEAR_EDITS_CALLBACK),
+            ],
         ]
     )
 
@@ -309,3 +329,234 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         lines.extend(preview_lines)
     await query.message.reply_text("\n".join(lines))
+
+
+def _format_edit_ts(value: str) -> str:
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return value
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=None).isoformat(sep=" ", timespec="minutes")
+
+
+def _get_source_emails(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    stored = context.chat_data.get("preview_source_emails")
+    if isinstance(stored, list):
+        return list(stored)
+    preview = context.chat_data.get("send_preview")
+    if isinstance(preview, dict):
+        final = preview.get("final")
+        if isinstance(final, list):
+            return list(final)
+    state = _get_state(context)
+    if state and getattr(state, "to_send", None):
+        return list(state.to_send)
+    return []
+
+
+async def request_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt the user to enter an address correction."""
+
+    query = update.callback_query
+    await query.answer()
+    context.chat_data["preview_edit_pending"] = True
+    await query.message.reply_text(
+        (
+            "Введите правку в формате «старый -> новый».\n"
+            "Пример: old@example.ru -> new@example.ru"
+        )
+    )
+
+
+async def show_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the list of saved edits for the chat."""
+
+    query = update.callback_query
+    await query.answer()
+    chat = update.effective_chat
+    chat_id = chat.id if chat else 0
+    rows = list_saved_edits(chat_id)
+    if not rows:
+        await query.message.reply_text("📄 Сохранённых правок нет.")
+        return
+    limit = 20
+    lines = ["📄 Текущие правки:"]
+    for idx, (old_email, new_email, edited_at) in enumerate(rows[:limit], start=1):
+        ts = _format_edit_ts(edited_at)
+        lines.append(f"{idx}) {old_email} → {new_email} ({ts})")
+    if len(rows) > limit:
+        lines.append(f"… и ещё {len(rows) - limit}.")
+    await query.message.reply_text("\n".join(lines))
+
+
+async def reset_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all saved edits for the current chat."""
+
+    query = update.callback_query
+    await query.answer()
+    chat = update.effective_chat
+    chat_id = chat.id if chat else 0
+    clear_saved_edits(chat_id)
+    preview = context.chat_data.get("send_preview")
+    if isinstance(preview, dict):
+        preview["fixed"] = []
+        context.chat_data["send_preview"] = preview
+    await query.message.reply_text("♻️ Правки удалены.")
+
+
+async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Validate and store the edit provided by the user."""
+
+    text = update.message.text or ""
+    raw = text.strip()
+    normalized = raw.replace("→", "->")
+    if "->" not in normalized:
+        context.chat_data["preview_edit_pending"] = True
+        await update.message.reply_text("❌ Формат: старый -> новый")
+        return
+    old_raw, new_raw = (part.strip() for part in normalized.split("->", 1))
+    if not old_raw or not new_raw:
+        context.chat_data["preview_edit_pending"] = True
+        await update.message.reply_text("❌ Укажите адреса в формате: старый -> новый")
+        return
+    if "@" not in old_raw:
+        context.chat_data["preview_edit_pending"] = True
+        await update.message.reply_text("❌ Старый адрес должен содержать символ @.")
+        return
+
+    parsed = parse_emails_unified(new_raw)
+    parsed = dedupe_keep_original(parsed)
+    parsed = drop_leading_char_twins(parsed)
+    if not parsed:
+        context.chat_data["preview_edit_pending"] = True
+        await update.message.reply_text("❌ Не удалось распознать новый адрес.")
+        return
+    if len(parsed) > 1:
+        context.chat_data["preview_edit_pending"] = True
+        await update.message.reply_text("❌ Укажите только один новый адрес.")
+        return
+
+    new_email = parsed[0]
+    chat = update.effective_chat
+    chat_id = chat.id if chat else 0
+    save_edit_record(chat_id, old_raw, new_email)
+    context.chat_data["preview_edit_pending"] = False
+
+    preview = context.chat_data.get("send_preview")
+    if isinstance(preview, dict):
+        fixed = list(preview.get("fixed") or [])
+        fixed.append({"from": old_raw, "to": new_email})
+        preview["fixed"] = fixed
+        context.chat_data["send_preview"] = preview
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Да", callback_data=f"{_REFRESH_PREFIX}yes"),
+                InlineKeyboardButton("Нет", callback_data=f"{_REFRESH_PREFIX}no"),
+            ]
+        ]
+    )
+    await update.message.reply_text(
+        f"✅ Правка сохранена:\n{old_raw} → {new_email}\nОбновить предпросмотр?",
+        reply_markup=keyboard,
+    )
+
+
+async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    query = update.callback_query
+    if not query or not query.message:
+        return False
+    chat = query.message.chat
+    chat_id = chat.id if chat else 0
+    if not chat_id:
+        return False
+
+    base_emails = _get_source_emails(context)
+    if not base_emails:
+        await query.message.reply_text("⚠️ Нет исходного списка адресов для обновления.")
+        return False
+
+    state = _get_state(context)
+    group_code = context.chat_data.get("current_template_code")
+    if not group_code and state and getattr(state, "group", None):
+        group_code = state.group
+    group_code = group_code or ""
+    if not group_code:
+        await query.message.reply_text("⚠️ Сначала выберите направление рассылки.")
+        return False
+
+    label = context.chat_data.get("current_template_label") or ""
+    if not label and state and getattr(state, "template_label", None):
+        label = state.template_label or ""
+    template_path = context.chat_data.get("current_template_path") or ""
+    if not template_path and state and getattr(state, "template", None):
+        template_path = state.template or ""
+    if not template_path:
+        await query.message.reply_text("⚠️ Шаблон письма недоступен. Выберите его заново.")
+        return False
+
+    updated_source = apply_saved_edits(list(base_emails), chat_id)
+    context.chat_data["preview_source_emails"] = list(updated_source)
+
+    ready, blocked_foreign, blocked_invalid, skipped_recent, _ = (
+        messaging.prepare_mass_mailing(updated_source, group_code, chat_id=chat_id)
+    )
+
+    if state:
+        state.to_send = ready
+        state.group = group_code
+        state.template = template_path
+        state.template_label = label or state.template_label
+
+    mass_state.save_chat_state(
+        chat_id,
+        {
+            "group": group_code,
+            "template": template_path,
+            "template_label": label,
+            "pending": ready,
+            "blocked_foreign": blocked_foreign,
+            "blocked_invalid": blocked_invalid,
+            "skipped_recent": skipped_recent,
+            "batch_id": context.chat_data.get("batch_id"),
+        },
+    )
+
+    preview = context.chat_data.get("send_preview")
+    if isinstance(preview, dict):
+        preview["final"] = list(dict.fromkeys(ready))
+        context.chat_data["send_preview"] = preview
+
+    await send_preview_report(
+        update,
+        context,
+        group_code,
+        label or group_code,
+        ready,
+        blocked_foreign,
+        blocked_invalid,
+        skipped_recent,
+    )
+    return True
+
+
+async def handle_refresh_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process the user choice after saving an edit."""
+
+    query = update.callback_query
+    data = query.data or ""
+    _, _, choice = data.partition(":")
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # pragma: no cover - best effort
+        pass
+    if choice == "yes":
+        success = await _regenerate_preview(update, context)
+        if not success:
+            await query.message.reply_text("❌ Не удалось обновить предпросмотр.")
+    else:
+        await query.message.reply_text("Предпросмотр оставлен без изменений.")
