@@ -54,7 +54,15 @@ def test_bounce_code_parsing():
 def test_gmail_canonicalization_for_180_days(tmp_path, monkeypatch):
     log = tmp_path / "log.csv"
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
-    mu.log_sent("user.name+tag@gmail.com", "g")
+    from emailbot import history_service
+    from datetime import datetime, timezone
+
+    history_service.mark_sent(
+        "user.name+tag@gmail.com",
+        "",
+        None,
+        datetime.now(timezone.utc),
+    )
     assert mu.was_sent_within("username@gmail.com") is True
 
 
