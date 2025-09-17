@@ -237,6 +237,35 @@ def _template_path(info) -> Path | None:
         return None
 
 
+def get_template_from_map(
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    key: str,
+) -> dict | None:
+    """Return template info stored in ``context.user_data`` for the given key."""
+
+    if not context or not hasattr(context, "user_data"):
+        return None
+    groups_map = context.user_data.get("groups_map")
+    if not isinstance(groups_map, dict):
+        return None
+    prefix_map = groups_map.get(prefix)
+    if not isinstance(prefix_map, dict):
+        return None
+    normalized = _normalize_template_code(key)
+    info = prefix_map.get(normalized)
+    if not isinstance(info, dict):
+        return None
+    result = dict(info)
+    if "code" in result:
+        result["code"] = str(result.get("code") or "")
+    if "label" in result:
+        result["label"] = str(result.get("label") or "")
+    if "path" in result:
+        result["path"] = str(result.get("path") or "")
+    return result
+
+
 FORCE_SEND_CHAT_IDS: set[int] = set()
 SESSION_KEY = "state"
 
@@ -659,7 +688,8 @@ async def prompt_change_group(
     await update.message.reply_text(
         "Выберите направление:",
         reply_markup=build_templates_kb(
-            context.chat_data.get("current_template_code")
+            context,
+            current_code=context.chat_data.get("current_template_code"),
         ),
     )
 
@@ -1375,7 +1405,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         template_rows = [
             row[:]
             for row in build_templates_kb(
-                context.chat_data.get("manual_selected_template_code"),
+                context,
+                current_code=context.chat_data.get("manual_selected_template_code"),
                 prefix="manual_tpl:",
             ).inline_keyboard
         ]
@@ -1630,15 +1661,26 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
     data = query.data or ""
-    _, _, group_raw = data.partition(":")
-    group_code = _normalize_template_code(group_raw)
-    template_info = get_template(group_code)
-    template_path_obj = _template_path(template_info)
-    if not template_info or not template_path_obj or not template_path_obj.exists():
+    if ":" not in data:
         await query.message.reply_text(
-            "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            "⚠️ Некорректный выбор шаблона. Обновите список и попробуйте снова."
         )
         return
+    prefix_raw, group_raw = data.split(":", 1)
+    prefix = f"{prefix_raw}:"
+    template_info = get_template_from_map(context, prefix, group_raw)
+    template_path_obj = _template_path(template_info)
+    if not template_info or not template_path_obj or not template_path_obj.exists():
+        group_code_fallback = _normalize_template_code(group_raw)
+        template_info = get_template(group_code_fallback)
+        template_path_obj = _template_path(template_info)
+        if not template_info or not template_path_obj or not template_path_obj.exists():
+            await query.message.reply_text(
+                "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            )
+            return
+        group_raw = template_info.get("code") or group_code_fallback
+    group_code = _normalize_template_code(group_raw)
     template_path = str(template_path_obj)
     label = _template_label(template_info) or group_code
 
