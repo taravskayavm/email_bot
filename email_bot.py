@@ -26,6 +26,19 @@ from emailbot.utils import load_env
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+logger = logging.getLogger(__name__)
+
+
+def _safe_add(app, handler, signature: str) -> None:
+    """Register ``handler`` only once per application."""
+
+    seen = app.bot_data.setdefault("_handlers_signatures", set())
+    if signature in seen:
+        logger.debug("skip duplicate handler: %s", signature)
+        return
+    seen.add(signature)
+    app.add_handler(handler)
+
 
 class JsonFormatter(logging.Formatter):
     """Format logs as JSON objects."""
@@ -98,21 +111,42 @@ def main() -> None:
 
     app = ApplicationBuilder().token(token).build()
 
-    app.add_handler(CommandHandler("start", bot_handlers.start))
-    app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
-    app.add_handler(CommandHandler("diag", bot_handlers.diag))
-    app.add_handler(CommandHandler("features", bot_handlers.features))
-    app.add_handler(CommandHandler("reports", bot_handlers.handle_reports))
-    app.add_handler(CommandHandler("reports_debug", bot_handlers.handle_reports_debug))
+    _safe_add(app, CommandHandler("start", bot_handlers.start), "cmd:start")
+    _safe_add(
+        app,
+        CommandHandler("retry_last", bot_handlers.retry_last_command),
+        "cmd:retry_last",
+    )
+    _safe_add(app, CommandHandler("diag", bot_handlers.diag), "cmd:diag")
+    _safe_add(
+        app, CommandHandler("features", bot_handlers.features), "cmd:features"
+    )
+    _safe_add(
+        app, CommandHandler("reports", bot_handlers.handle_reports), "cmd:reports"
+    )
+    _safe_add(
+        app,
+        CommandHandler("reports_debug", bot_handlers.handle_reports_debug),
+        "cmd:reports_debug",
+    )
 
     # Inline-кнопки для подозрительных адресов
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.on_accept_suspects, pattern="^accept_suspects$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            bot_handlers.on_accept_suspects, pattern="^accept_suspects$"
+        ),
+        "cb:accept_suspects",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.on_edit_suspects, pattern="^edit_suspects$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            bot_handlers.on_edit_suspects, pattern="^edit_suspects$"
+        ),
+        "cb:edit_suspects",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         ConversationHandler(
             entry_points=[],
             states={
@@ -126,133 +160,216 @@ def main() -> None:
             fallbacks=[],
             name="edit_suspects_flow",
             persistent=False,
-        )
+        ),
+        "conv:edit_suspects_flow",
     )
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
+    _safe_add(
+        app,
+        MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload),
+        "msg:prompt_upload",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🧹"), bot_handlers.reset_email_list
-        )
+        ),
+        "msg:reset_email_list",
     )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🧾"), bot_handlers.about_bot)
+    _safe_add(
+        app,
+        MessageHandler(filters.TEXT & filters.Regex("^🧾"), bot_handlers.about_bot),
+        "msg:about_bot",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🚫"), bot_handlers.add_block_prompt
-        )
+        ),
+        "msg:add_block_prompt",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list
-        )
+        ),
+        "msg:show_blocked_list",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^✉️"), bot_handlers.prompt_manual_email
-        )
+        ),
+        "msg:prompt_manual_email",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🧭"), bot_handlers.prompt_change_group
-        )
+        ),
+        "msg:prompt_change_group",
     )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command)
+    _safe_add(
+        app,
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command
+        ),
+        "msg:report_command",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^📁"), bot_handlers.imap_folders_command
-        )
+        ),
+        "msg:imap_folders_command",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command
-        )
+        ),
+        "msg:sync_imap_command",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🔁"), bot_handlers.sync_bounces_command
-        )
+        ),
+        "msg:sync_bounces_command",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         MessageHandler(
             filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command
-        )
+        ),
+        "msg:force_send_command",
     )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
-    )
-
-    app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text)
+    _safe_add(
+        app,
+        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process),
+        "msg:stop_process",
     )
 
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.manual_mode, pattern="^manual_mode_")
+    _safe_add(
+        app,
+        MessageHandler(filters.Document.ALL, bot_handlers.handle_document),
+        "msg:handle_document",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.manual_reset, pattern="^manual_reset$")
+    _safe_add(
+        app,
+        MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text),
+        "msg:handle_text",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_tpl:")
+
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.manual_mode, pattern="^manual_mode_"),
+        "cb:manual_mode",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.manual_reset, pattern="^manual_reset$"),
+        "cb:manual_reset",
     )
-    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^tpl:"))
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_tpl:"),
+        "cb:manual_tpl",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$"),
+        "cb:proceed_group",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.select_group, pattern="^tpl:"),
+        "cb:select_group",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.features_callback, pattern="^feature_")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending"),
+        "cb:start_sending",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_"),
+        "cb:report_callback",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.preview_go_back, pattern="^preview_back$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$"),
+        "cb:show_foreign_list",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.preview_request_edit, pattern="^preview_edit$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.features_callback, pattern="^feature_"),
+        "cb:features_callback",
     )
-    app.add_handler(
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            bot_handlers.refresh_preview, pattern="^refresh_preview$"
+        ),
+        "cb:refresh_preview",
+    )
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.preview_go_back, pattern="^preview_back$"),
+        "cb:preview_back",
+    )
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            bot_handlers.preview_request_edit, pattern="^preview_edit$"
+        ),
+        "cb:preview_edit",
+    )
+    _safe_add(
+        app,
         CallbackQueryHandler(
             bot_handlers.preview_show_edits, pattern="^preview_edits_show$"
-        )
+        ),
+        "cb:preview_show_edits",
     )
-    app.add_handler(
+    _safe_add(
+        app,
         CallbackQueryHandler(
             bot_handlers.preview_reset_edits, pattern="^preview_edits_reset$"
-        )
+        ),
+        "cb:preview_reset_edits",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.preview_refresh_choice, pattern="^preview_refresh:")
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            bot_handlers.preview_refresh_choice, pattern="^preview_refresh:"
+        ),
+        "cb:preview_refresh_choice",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.request_fix, pattern=r"^fix:\d+$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.request_fix, pattern=r"^fix:\d+$"),
+        "cb:request_fix",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.apply_repairs, pattern="^apply_repairs$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.apply_repairs, pattern="^apply_repairs$"),
+        "cb:apply_repairs",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.show_repairs, pattern="^show_repairs$")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.show_repairs, pattern="^show_repairs$"),
+        "cb:show_repairs",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.imap_page_callback, pattern="^imap_page:")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.imap_page_callback, pattern="^imap_page:"),
+        "cb:imap_page",
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:")
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:"),
+        "cb:imap_choose",
     )
 
     print("Бот запущен.")
