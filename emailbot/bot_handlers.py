@@ -153,10 +153,11 @@ from .messaging_utils import (  # noqa: E402  # isort: skip
     is_soft_bounce,
     is_suppressed,
     suppress_add,
-    was_sent_within,
 )
 from .utils import log_error  # noqa: E402
 from utils.smtp_client import RobustSMTP  # noqa: E402
+
+from . import history_service
 
 from emailbot.handlers import (
     start,
@@ -239,10 +240,11 @@ def _manual_cfg():
     import os
 
     enforce = os.getenv("MANUAL_ENFORCE_180", "1") == "1"
+    default_days = history_service.get_days_rule_default()
     try:
-        days = int(os.getenv("MANUAL_DAYS", "180"))
+        days = int(os.getenv("MANUAL_DAYS", str(default_days)))
     except Exception:
-        days = 180
+        days = default_days
     allow_override = os.getenv("MANUAL_ALLOW_OVERRIDE", "1") == "1"
     return enforce, days, allow_override
 
@@ -252,18 +254,11 @@ def _filter_by_180(
 ) -> tuple[list[str], list[str]]:
     """Разделяет список на разрешённые и отклонённые по правилу N дней."""
 
-    allowed: list[str] = []
-    rejected: list[str] = []
-    for e in emails:
-        try:
-            if was_sent_within(e, days=days):  # True если было письмо за N дней
-                rejected.append(e)
-            else:
-                allowed.append(e)
-        except Exception:
-            # в случае ошибки проверки — перестрахуемся и разрешим
-            allowed.append(e)
-    return allowed, rejected
+    try:
+        return history_service.filter_by_days(emails, group, days)
+    except Exception:  # pragma: no cover - defensive fallback
+        # в случае ошибки проверки — перестрахуемся и разрешим
+        return list(emails), []
 
 
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:

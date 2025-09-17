@@ -2,11 +2,11 @@
 
 import sys
 from pathlib import Path
+from dataclasses import dataclass
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import pytest
-from dataclasses import dataclass
 
 
 @dataclass
@@ -65,3 +65,17 @@ def httpx_file_server(monkeypatch):
         monkeypatch.setattr("httpx.get", fake_get)
         monkeypatch.setattr("httpx.stream", fake_stream)
     return factory
+
+
+@pytest.fixture(autouse=True)
+def _isolated_history_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "history.db"
+    monkeypatch.setenv("HISTORY_DB_PATH", str(db_path))
+    # Reset lazy initialization between tests
+    import emailbot.history_service as history_service
+    import emailbot.history_store as history_store
+
+    history_service._INITIALIZED_PATH = None
+    history_store._INITIALIZED = False
+    history_store._DB_PATH = db_path
+    yield
