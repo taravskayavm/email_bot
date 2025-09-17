@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from emailbot import history_service, messaging
+from utils import rules
 
 
 @pytest.fixture(autouse=True)
@@ -37,3 +38,32 @@ def test_prepare_mass_mailing_respects_history():
     )
     assert ready2 == []
     assert skipped_recent2 == ["user@example.com"]
+
+
+def test_prepare_mass_mailing_respects_local_rules_history():
+    history_service.ensure_initialized()
+    rules.ensure_dirs()
+    rules.append_history("user@example.com")
+
+    ready, blocked_foreign, blocked_invalid, skipped_recent, _ = (
+        messaging.prepare_mass_mailing(["user@example.com"], group="grp")
+    )
+    assert ready == []
+    assert blocked_foreign == []
+    assert blocked_invalid == []
+    assert skipped_recent == ["user@example.com"]
+
+
+def test_prepare_mass_mailing_respects_rules_blocklist():
+    history_service.ensure_initialized()
+    rules.ensure_dirs()
+    rules.BLOCKLIST_PATH.write_text("blocked@example.com\n", encoding="utf-8")
+
+    ready, blocked_foreign, blocked_invalid, skipped_recent, _ = (
+        messaging.prepare_mass_mailing(["blocked@example.com"], group="grp")
+    )
+
+    assert ready == []
+    assert blocked_foreign == []
+    assert blocked_invalid == ["blocked@example.com"]
+    assert skipped_recent == []
