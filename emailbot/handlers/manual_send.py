@@ -124,8 +124,9 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pass
     await query.message.reply_text(f"✅ Выбран шаблон: «{label}»\nФайл: {template_path}")
     chat_id = query.message.chat.id
+    context.chat_data["preview_source_emails"] = list(emails)
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(emails, group_code)
+        messaging.prepare_mass_mailing(emails, group_code, chat_id=chat_id)
     )
     log_mass_filter_digest(
         {

@@ -54,6 +54,21 @@ def init_db(path: Path = Path("var/state.db")) -> None:
                 ON sent(email, grp)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS edits (
+                  chat_id INTEGER NOT NULL,
+                  old_email TEXT NOT NULL,
+                  new_email TEXT NOT NULL,
+                  edited_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_edits_chat_email ON edits(chat_id, old_email)
+                """
+            )
             _run_migrations(conn)
         finally:
             conn.commit()
