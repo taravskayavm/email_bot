@@ -10,7 +10,7 @@ async def test_preview_after_filters(monkeypatch, tmp_path):
     ctx = DummyContext()
     ctx.chat_data[bh.SESSION_KEY] = bh.SessionState(to_send=["user@example.com"])
 
-    def fake_prepare(emails, group):
+    def fake_prepare(emails, group, chat_id=None):
         assert emails == ["user@example.com"]
         assert group == "sport"
         return [], [], [], [], {

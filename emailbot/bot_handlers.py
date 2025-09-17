@@ -49,6 +49,7 @@ from . import extraction_url as _extraction_url
 from . import mass_state, messaging
 from . import messaging_utils as mu
 from . import settings
+from .edit_service import apply_edits
 from .extraction import normalize_email, smart_extract_emails
 from .reporting import build_mass_report_text, log_mass_filter_digest
 from .settings_store import DEFAULTS
@@ -166,6 +167,10 @@ from emailbot.handlers import (
     proceed_to_group,
     send_all,
     preview_go_back,
+    preview_request_edit,
+    preview_show_edits,
+    preview_reset_edits,
+    preview_refresh_choice,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,15 +256,21 @@ def _manual_cfg():
 
 
 def _filter_by_180(
-    emails: list[str], group: str, days: int
+    emails: list[str], group: str, days: int, chat_id: int | None = None
 ) -> tuple[list[str], list[str]]:
     """Разделяет список на разрешённые и отклонённые по правилу N дней."""
 
+    to_check = list(emails)
+    if chat_id is not None:
+        try:
+            to_check = apply_edits(to_check, chat_id)
+        except Exception:  # pragma: no cover - defensive fallback
+            to_check = list(emails)
     try:
-        return history_service.filter_by_days(emails, group, days)
+        return history_service.filter_by_days(to_check, group, days)
     except Exception:  # pragma: no cover - defensive fallback
         # в случае ошибки проверки — перестрахуемся и разрешим
-        return list(emails), []
+        return to_check, []
 
 
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
@@ -1278,6 +1289,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
+    if context.chat_data.get("preview_edit_pending"):
+        from emailbot.handlers import preview as preview_handlers
+
+        await preview_handlers.handle_edit_input(update, context)
+        return
     fix_state = context.chat_data.get("fix_pending")
     if fix_state:
         new_text = text.strip()
@@ -1366,7 +1382,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         enforce, days, allow_override = _manual_cfg()
         if enforce:
-            allowed, rejected = _filter_by_180(emails, group="", days=days)
+            allowed, rejected = _filter_by_180(emails, group="", days=days, chat_id=chat_id)
         else:
             allowed, rejected = (emails, [])
 
@@ -1610,6 +1626,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat.id
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
     data = query.data or ""
@@ -1627,7 +1644,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     enforce, days, allow_override = _manual_cfg()
     if enforce and mode == "allowed":
-        allowed, rejected = _filter_by_180(list(emails), group_code, days)
+        allowed, rejected = _filter_by_180(list(emails), group_code, days, chat_id=chat_id)
         to_send = allowed
     else:
         to_send = list(emails)
