@@ -44,14 +44,23 @@ def build_templates_kb(
     normalized_current = _normalize_code(current_code)
     rows = []
     mapping: Dict[str, Dict[str, str]] = {}
+    label_rows: Dict[str, int] = {}
     for key, info in deduped.items():
-        label = info.get("label") or info.get("code") or key
-        if normalized_current and key == normalized_current:
-            label = f"{label} • текущий"
-        rows.append(
-            [InlineKeyboardButton(str(label), callback_data=f"{prefix}{key}")]
-        )
         mapping[key] = dict(info)
+        base_label = str(info.get("label") or info.get("code") or key)
+        display_label = base_label
+        if normalized_current and key == normalized_current:
+            display_label = f"{base_label} • текущий"
+        existing_idx = label_rows.get(base_label)
+        button = InlineKeyboardButton(
+            str(display_label), callback_data=f"{prefix}{key}"
+        )
+        if existing_idx is None:
+            rows.append([button])
+            label_rows[base_label] = len(rows) - 1
+        else:
+            if normalized_current and key == normalized_current:
+                rows[existing_idx] = [button]
 
     if context is not None:
         storage = context.user_data.setdefault(map_name, {})
