@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Tuple
 
@@ -23,6 +24,103 @@ BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")  # ts, email, code, msg, phas
 SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
 
 logger = logging.getLogger(__name__)
+
+
+def _format_unsubscribe_target(value: str | None, *, recipient: str | None = None) -> str | None:
+    """Return a RFC 2369 compliant URI wrapped in angle brackets.
+
+    Environment variables may contain templates with ``{email}`` placeholders.
+    They are substituted on best effort basis; any formatting errors fall back to
+    the original value to avoid breaking mail delivery.
+    """
+
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if recipient:
+        try:
+            raw = raw.format(email=recipient, EMAIL=recipient)
+        except Exception:
+            pass
+    if not raw:
+        return None
+    if raw.startswith("<") and raw.endswith(">"):
+        return raw
+    return f"<{raw}>"
+
+
+def set_list_unsubscribe_headers(
+    msg: EmailMessage,
+    *,
+    recipient: str | None = None,
+    default_mailto: str | None = None,
+    default_http: str | None = None,
+    default_one_click: bool | None = None,
+) -> None:
+    """Populate ``List-Unsubscribe`` headers respecting environment overrides."""
+
+    env_mailto = os.getenv("LIST_UNSUB_MAILTO", "").strip()
+    env_http = os.getenv("LIST_UNSUB_HTTP", "").strip()
+    env_one_click = os.getenv("LIST_UNSUB_ONECLICK")
+    if env_mailto:
+        mailto = env_mailto
+    else:
+        mailto = default_mailto
+    if env_http:
+        http = env_http
+    else:
+        http = default_http
+
+    def _env_flag(raw: str | None) -> bool | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        return text == "1"
+
+    flag = _env_flag(env_one_click)
+    if flag is None:
+        flag = default_one_click if default_one_click is not None else False
+
+    formatted_mailto = _format_unsubscribe_target(mailto, recipient=recipient)
+    formatted_http = _format_unsubscribe_target(http, recipient=recipient)
+
+    parts = [p for p in (formatted_mailto, formatted_http) if p]
+
+    if "List-Unsubscribe" in msg:
+        del msg["List-Unsubscribe"]
+    if "List-Unsubscribe-Post" in msg:
+        del msg["List-Unsubscribe-Post"]
+
+    if parts:
+        msg["List-Unsubscribe"] = ", ".join(parts)
+        if flag and formatted_http:
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+
+
+def build_email(
+    to_addr: str,
+    subject: str,
+    body_html: str,
+    group_title: str | None = None,
+    group_key: str | None = None,
+) -> EmailMessage:
+    """Собирает EmailMessage с безопасными заголовками."""
+
+    msg = EmailMessage()
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    if group_title:
+        msg["X-EBOT-Group"] = group_title
+    if group_key:
+        msg["X-EBOT-Group-Key"] = group_key
+    msg.set_content("HTML version required", subtype="plain")
+    msg.add_alternative(body_html, subtype="html")
+    set_list_unsubscribe_headers(msg, recipient=to_addr)
+    return msg
 
 # A small cache file is used to remember the IMAP folder where
 # outgoing messages should be stored.  The file lives alongside this
