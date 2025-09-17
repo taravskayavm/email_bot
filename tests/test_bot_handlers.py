@@ -79,6 +79,10 @@ class DummyUpdate:
                 async def answer(self, *a, **k):
                     return
 
+                async def edit_message_reply_markup(self, reply_markup=None, **kwargs):
+                    self.message.reply_markups.append(reply_markup)
+                    return self.message
+
             self.callback_query = DummyQuery(callback_data, chat_id)
 
 
@@ -292,7 +296,7 @@ def test_select_group_sets_html_template(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bh.messaging,
         "prepare_mass_mailing",
-        lambda emails, group: (emails, [], [], [], {}),
+        lambda emails, group, chat_id=None: (emails, [], [], [], {}),
     )
     monkeypatch.setattr("emailbot.handlers.preview.PREVIEW_DIR", tmp_path)
     monkeypatch.setattr(
@@ -326,7 +330,7 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
         else None,
     )
 
-    def fake_prepare(emails, group):
+    def fake_prepare(emails, group, chat_id=None):
         return emails, ["blocked-foreign@example.com"], ["blocked@example.com"], [
             "recent@example.com"
         ], {}
@@ -354,6 +358,8 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
     buttons = markup.inline_keyboard[0]
     assert buttons[0].callback_data == "start_sending"
     assert buttons[1].callback_data == "preview_back"
+    assert len(markup.inline_keyboard) >= 3
+    assert markup.inline_keyboard[1][0].callback_data == "preview_edit"
     assert "Готово к отправке" in update.callback_query.message.replies[-1]
     doc_entry = update.callback_query.message.documents[-1]
     assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")

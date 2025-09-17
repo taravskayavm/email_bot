@@ -27,6 +27,7 @@ from email import message_from_bytes, message_from_string, policy
 from services.templates import get_template, get_template_by_path
 
 from . import history_service
+from .edit_service import apply_edits as apply_saved_edits
 
 from .extraction import normalize_email, strip_html
 from .messaging_utils import (
@@ -1112,7 +1113,9 @@ def start_manual_mass_send(group: str, emails: List[str], *args, **kwargs) -> No
     notify_user(f"✅ Отправлено писем: {sent}")
 
 
-def prepare_mass_mailing(emails: list[str], group: str = ""):
+def prepare_mass_mailing(
+    emails: list[str], group: str = "", chat_id: int | None = None
+):
     """Apply all mass-mailing filters and return ready e-mails.
 
     Returns a tuple ``(ready, blocked_foreign, blocked_invalid, skipped_recent, digest)``
@@ -1121,6 +1124,13 @@ def prepare_mass_mailing(emails: list[str], group: str = ""):
     blocked addresses, and ``skipped_recent`` – addresses found in the 180 day
     history. ``digest`` contains counters for logging.
     """
+
+    source = list(emails)
+    if chat_id is not None:
+        try:
+            source = apply_saved_edits(source, chat_id)
+        except Exception:  # pragma: no cover - defensive fallback
+            source = list(emails)
 
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
@@ -1131,7 +1141,7 @@ def prepare_mass_mailing(emails: list[str], group: str = ""):
     skipped_recent: list[str] = []
 
     queue: list[str] = []
-    for e in emails:
+    for e in source:
         if e in blocked or e in sent_today:
             continue
         if is_foreign(e):
@@ -1165,7 +1175,7 @@ def prepare_mass_mailing(emails: list[str], group: str = ""):
             deduped.append(e)
 
     digest = {
-        "input_total": len(emails),
+        "input_total": len(source),
         "after_suppress": len(queue2),
         "foreign_blocked": len(blocked_foreign),
         "after_180d": len(queue3),
