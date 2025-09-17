@@ -38,6 +38,7 @@ from utils.email_clean import (
     drop_leading_char_twins,
     parse_emails_unified,
 )
+from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
 from utils.bounce import sync_bounces
@@ -237,6 +238,35 @@ def _template_path(info) -> Path | None:
         return None
 
 
+def get_template_from_map(
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    key: str,
+) -> dict | None:
+    """Return template info stored in ``context.user_data`` for the given key."""
+
+    if not context or not hasattr(context, "user_data"):
+        return None
+    groups_map = context.user_data.get("groups_map")
+    if not isinstance(groups_map, dict):
+        return None
+    prefix_map = groups_map.get(prefix)
+    if not isinstance(prefix_map, dict):
+        return None
+    normalized = _normalize_template_code(key)
+    info = prefix_map.get(normalized)
+    if not isinstance(info, dict):
+        return None
+    result = dict(info)
+    if "code" in result:
+        result["code"] = str(result.get("code") or "")
+    if "label" in result:
+        result["label"] = str(result.get("label") or "")
+    if "path" in result:
+        result["path"] = str(result.get("path") or "")
+    return result
+
+
 FORCE_SEND_CHAT_IDS: set[int] = set()
 SESSION_KEY = "state"
 
@@ -267,10 +297,23 @@ def _filter_by_180(
         except Exception:  # pragma: no cover - defensive fallback
             to_check = list(emails)
     try:
-        return history_service.filter_by_days(to_check, group, days)
+        allowed, rejected = history_service.filter_by_days(to_check, group, days)
     except Exception:  # pragma: no cover - defensive fallback
         # в случае ошибки проверки — перестрахуемся и разрешим
-        return to_check, []
+        allowed, rejected = to_check, []
+
+    extra_recent: list[str] = []
+    allowed_final: list[str] = []
+    for email in allowed:
+        if rules.seen_within_window(email):
+            extra_recent.append(email)
+        else:
+            allowed_final.append(email)
+
+    if extra_recent:
+        rejected = list(rejected) + extra_recent
+
+    return allowed_final, rejected
 
 
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
@@ -659,7 +702,8 @@ async def prompt_change_group(
     await update.message.reply_text(
         "Выберите направление:",
         reply_markup=build_templates_kb(
-            context.chat_data.get("current_template_code")
+            context,
+            current_code=context.chat_data.get("current_template_code"),
         ),
     )
 
@@ -669,8 +713,10 @@ async def imap_folders_command(
 ) -> None:
     """List available IMAP folders and allow user to choose."""
 
+    IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
+    IMAP_TIMEOUT = float(os.getenv("IMAP_TIMEOUT", "15"))
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
         imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         status, data = imap.list()
         imap.logout()
@@ -1375,7 +1421,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         template_rows = [
             row[:]
             for row in build_templates_kb(
-                context.chat_data.get("manual_selected_template_code"),
+                context,
+                current_code=context.chat_data.get("manual_selected_template_code"),
                 prefix="manual_tpl:",
             ).inline_keyboard
         ]
@@ -1629,16 +1676,28 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = query.message.chat.id
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
+    override_active = mode == "all"
     data = query.data or ""
-    _, _, group_raw = data.partition(":")
-    group_code = _normalize_template_code(group_raw)
-    template_info = get_template(group_code)
-    template_path_obj = _template_path(template_info)
-    if not template_info or not template_path_obj or not template_path_obj.exists():
+    if ":" not in data:
         await query.message.reply_text(
-            "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            "⚠️ Некорректный выбор шаблона. Обновите список и попробуйте снова."
         )
         return
+    prefix_raw, group_raw = data.split(":", 1)
+    prefix = f"{prefix_raw}:"
+    template_info = get_template_from_map(context, prefix, group_raw)
+    template_path_obj = _template_path(template_info)
+    if not template_info or not template_path_obj or not template_path_obj.exists():
+        group_code_fallback = _normalize_template_code(group_raw)
+        template_info = get_template(group_code_fallback)
+        template_path_obj = _template_path(template_info)
+        if not template_info or not template_path_obj or not template_path_obj.exists():
+            await query.message.reply_text(
+                "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            )
+            return
+        group_raw = template_info.get("code") or group_code_fallback
+    group_code = _normalize_template_code(group_raw)
     template_path = str(template_path_obj)
     label = _template_label(template_info) or group_code
 
@@ -1649,6 +1708,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:
         to_send = list(emails)
         rejected = []
+
+    blocked_manual: list[str] = []
+    filtered_to_send: list[str] = []
+    block_set = {normalize_email(item) for item in rules.load_blocklist() if item}
+    for email_addr in to_send:
+        norm = normalize_email(email_addr)
+        if norm and norm in block_set:
+            blocked_manual.append(email_addr)
+        else:
+            filtered_to_send.append(email_addr)
+    to_send = filtered_to_send
 
     # Если вообще нет исходных адресов — подскажем и выйдем
     if not emails:
@@ -1661,10 +1731,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     display_label = label
     if label.lower() != group_code:
         display_label = f"{label} ({group_code})"
-    await query.message.reply_text(
-        f"Шаблон: {display_label}\nК отправке: {len(to_send)}"
-        + (f"\nОтфильтровано по правилу 180 дней: {len(rejected)}" if rejected else "")
-    )
+    lines = [f"Шаблон: {display_label}", f"К отправке: {len(to_send)}"]
+    if rejected:
+        lines.append(f"Отфильтровано по правилу 180 дней: {len(rejected)}")
+    if blocked_manual:
+        lines.append(f"Исключено по блок-листу: {len(blocked_manual)}")
+    await query.message.reply_text("\n".join(lines))
 
     # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
     if len(to_send) == 0:
@@ -1674,8 +1746,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "Вы можете нажать «Отправить всем» для игнорирования правила."
             )
         else:
+            reasons: list[str] = []
+            if rejected:
+                reasons.append("правилом 180 дней")
+            if blocked_manual:
+                reasons.append("блок-листом")
+            reason_txt = " и ".join(reasons) if reasons else "правилами отправки"
             await query.message.reply_text(
-                "Все адреса были отфильтрованы правилом 180 дней. Отправка не запущена."
+                f"Все адреса были отфильтрованы {reason_txt}. Отправка не запущена."
             )
         return
 
@@ -1702,7 +1780,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     fixed_map[str(new_addr)] = str(original_addr)
 
         try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
+            IMAP_TIMEOUT = float(os.getenv("IMAP_TIMEOUT", "15"))
+            imap = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
             imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
             sent_folder = get_preferred_sent_folder(imap)
             imap.select(f'"{sent_folder}"')
@@ -1756,6 +1836,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         email_addr,
                         template_path,
                         fixed_from=fixed_map.get(email_addr),
+                        group_title=label,
+                        group_key=group_code,
+                        override_180d=override_active,
                     )
                     log_sent_email(
                         email_addr,

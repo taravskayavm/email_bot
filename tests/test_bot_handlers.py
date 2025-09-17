@@ -494,6 +494,84 @@ async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
     assert "180" not in text
 
 
+@pytest.mark.asyncio
+async def test_manual_send_override_sets_flag(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    update = DummyUpdate(callback_data="manual_tpl:tourism")
+    ctx = DummyContext()
+    ctx.chat_data["manual_all_emails"] = ["user@example.com"]
+    ctx.chat_data["manual_send_mode"] = "all"
+
+    overrides: list[bool | None] = []
+
+    def fake_send(client, imap, folder, addr, path, *a, **kw):
+        overrides.append(kw.get("override_180d"))
+        return "tok"
+
+    class DummyImap:
+        def login(self, *a, **k):
+            return "OK", []
+
+        def list(self, *a, **k):
+            return "OK", []
+
+        def select(self, *a, **k):
+            return "OK", []
+
+        def logout(self):
+            return None
+
+    class DummySMTP:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(
+        bh,
+        "imaplib",
+        types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()),
+    )
+    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
+    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
+    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+    monkeypatch.setattr(bh.rules, "load_blocklist", lambda: [])
+    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
+    tasks: list[asyncio.Task] = []
+
+    def spawn(coro, _):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    monkeypatch.setattr(bh.messaging, "create_task_with_logging", spawn)
+
+    async def dummy_sleep(_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
+
+    await bh.send_manual_email(update, ctx)
+    for task in tasks:
+        await task
+
+    assert overrides and overrides[0] is True
+
+
 def test_preview_separates_foreign():
     ctx = DummyContext()
     allowed_all = {

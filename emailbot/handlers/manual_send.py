@@ -89,7 +89,9 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             current = state.group
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=build_templates_kb(current),
+        reply_markup=build_templates_kb(
+            context, current_code=current
+        ),
     )
 
 
@@ -99,15 +101,32 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     await query.answer()
     data = query.data or ""
-    _, _, group_raw = data.partition(":")
-    group_code = bot_handlers_module._normalize_template_code(group_raw)
-    template_info = bot_handlers_module.get_template(group_code)
-    template_path_obj = bot_handlers_module._template_path(template_info)
-    if not template_info or not template_path_obj or not template_path_obj.exists():
+    if ":" not in data:
         await query.message.reply_text(
-            "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            "⚠️ Некорректный выбор шаблона. Обновите список и попробуйте снова."
         )
         return
+    prefix_raw, group_raw = data.split(":", 1)
+    prefix = f"{prefix_raw}:"
+    template_info = bot_handlers_module.get_template_from_map(
+        context, prefix, group_raw
+    )
+    template_path_obj = (
+        bot_handlers_module._template_path(template_info)
+        if template_info
+        else None
+    )
+    if not template_info or not template_path_obj or not template_path_obj.exists():
+        group_code_fallback = bot_handlers_module._normalize_template_code(group_raw)
+        template_info = bot_handlers_module.get_template(group_code_fallback)
+        template_path_obj = bot_handlers_module._template_path(template_info)
+        if not template_info or not template_path_obj or not template_path_obj.exists():
+            await query.message.reply_text(
+                "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
+            )
+            return
+        group_raw = template_info.get("code") or group_code_fallback
+    group_code = bot_handlers_module._normalize_template_code(group_raw)
     template_path = str(template_path_obj)
     label = bot_handlers_module._template_label(template_info) or group_code
     state = bot_handlers_module.get_state(context)
@@ -119,7 +138,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.chat_data["current_template_label"] = label
     context.chat_data["current_template_path"] = template_path
     try:
-        await query.message.edit_reply_markup(reply_markup=build_templates_kb(group_code))
+        await query.message.edit_reply_markup(
+            reply_markup=build_templates_kb(
+                context, current_code=group_code, prefix=prefix
+            )
+        )
     except Exception:
         pass
     await query.message.reply_text(f"✅ Выбран шаблон: «{label}»\nФайл: {template_path}")
@@ -360,6 +383,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         email_addr,
                         template_path,
                         fixed_from=fixed_map.get(email_addr),
+                        group_title=label,
+                        group_key=group_code,
                     )
                     log_sent_email(
                         email_addr,
