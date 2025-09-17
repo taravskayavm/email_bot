@@ -1676,6 +1676,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = query.message.chat.id
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
+    override_active = mode == "all"
     data = query.data or ""
     if ":" not in data:
         await query.message.reply_text(
@@ -1837,6 +1838,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         fixed_from=fixed_map.get(email_addr),
                         group_title=label,
                         group_key=group_code,
+                        override_180d=override_active,
                     )
                     log_sent_email(
                         email_addr,
