@@ -383,6 +383,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         email_addr,
                         template_path,
                         fixed_from=fixed_map.get(email_addr),
+                        group_title=label,
+                        group_key=group_code,
                     )
                     log_sent_email(
                         email_addr,

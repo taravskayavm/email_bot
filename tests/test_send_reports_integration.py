@@ -35,7 +35,7 @@ def _env_tmp_stats(tmp_path, monkeypatch):
     yield
 
 
-def _build_raw(group="sport"):
+def _build_raw(group="sport", title=None):
     from email.message import EmailMessage
 
     msg = EmailMessage()
@@ -43,13 +43,15 @@ def _build_raw(group="sport"):
     msg["To"] = "c@d.ru"
     msg["Subject"] = "t"
     if group:
-        msg["X-EBOT-Group"] = group
+        title_value = title if title is not None else group.upper()
+        msg["X-EBOT-Group"] = title_value
+        msg["X-EBOT-Group-Key"] = group
     msg.set_content("hi")
     return msg.as_bytes()
 
 
 def test_success_is_logged(tmp_path):
-    raw = _build_raw("sport")
+    raw = _build_raw("sport", title="Спорт")
     send_raw_smtp_with_retry(raw, "c@d.ru", max_tries=1)
     stats = Path(os.environ["SEND_STATS_PATH"])
     lines = stats.read_text(encoding="utf-8").strip().splitlines()
