@@ -38,6 +38,7 @@ from utils.email_clean import (
     drop_leading_char_twins,
     parse_emails_unified,
 )
+from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
 from utils.bounce import sync_bounces
@@ -296,10 +297,23 @@ def _filter_by_180(
         except Exception:  # pragma: no cover - defensive fallback
             to_check = list(emails)
     try:
-        return history_service.filter_by_days(to_check, group, days)
+        allowed, rejected = history_service.filter_by_days(to_check, group, days)
     except Exception:  # pragma: no cover - defensive fallback
         # в случае ошибки проверки — перестрахуемся и разрешим
-        return to_check, []
+        allowed, rejected = to_check, []
+
+    extra_recent: list[str] = []
+    allowed_final: list[str] = []
+    for email in allowed:
+        if rules.seen_within_window(email):
+            extra_recent.append(email)
+        else:
+            allowed_final.append(email)
+
+    if extra_recent:
+        rejected = list(rejected) + extra_recent
+
+    return allowed_final, rejected
 
 
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
@@ -1694,6 +1708,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         to_send = list(emails)
         rejected = []
 
+    blocked_manual: list[str] = []
+    filtered_to_send: list[str] = []
+    block_set = {normalize_email(item) for item in rules.load_blocklist() if item}
+    for email_addr in to_send:
+        norm = normalize_email(email_addr)
+        if norm and norm in block_set:
+            blocked_manual.append(email_addr)
+        else:
+            filtered_to_send.append(email_addr)
+    to_send = filtered_to_send
+
     # Если вообще нет исходных адресов — подскажем и выйдем
     if not emails:
         await query.message.reply_text(
@@ -1705,10 +1730,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     display_label = label
     if label.lower() != group_code:
         display_label = f"{label} ({group_code})"
-    await query.message.reply_text(
-        f"Шаблон: {display_label}\nК отправке: {len(to_send)}"
-        + (f"\nОтфильтровано по правилу 180 дней: {len(rejected)}" if rejected else "")
-    )
+    lines = [f"Шаблон: {display_label}", f"К отправке: {len(to_send)}"]
+    if rejected:
+        lines.append(f"Отфильтровано по правилу 180 дней: {len(rejected)}")
+    if blocked_manual:
+        lines.append(f"Исключено по блок-листу: {len(blocked_manual)}")
+    await query.message.reply_text("\n".join(lines))
 
     # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
     if len(to_send) == 0:
@@ -1718,8 +1745,14 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "Вы можете нажать «Отправить всем» для игнорирования правила."
             )
         else:
+            reasons: list[str] = []
+            if rejected:
+                reasons.append("правилом 180 дней")
+            if blocked_manual:
+                reasons.append("блок-листом")
+            reason_txt = " и ".join(reasons) if reasons else "правилами отправки"
             await query.message.reply_text(
-                "Все адреса были отфильтрованы правилом 180 дней. Отправка не запущена."
+                f"Все адреса были отфильтрованы {reason_txt}. Отправка не запущена."
             )
         return
 
