@@ -474,9 +474,9 @@ def log_sent(email: str, *args, **kwargs):
 def was_sent_within(email: str, days: int = 180) -> bool:
     """Check recent sends."""
 
-    from . import messaging as _messaging
+    from . import history_service as _history_service
 
-    return _messaging.was_sent_within(email, days=days)
+    return _history_service.was_sent_within_days(email, "", days)
 
 
 def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
