@@ -26,6 +26,8 @@ from email import message_from_bytes, message_from_string, policy
 
 from services.templates import get_template, get_template_by_path
 
+from . import history_service
+
 from .extraction import normalize_email, strip_html
 from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
@@ -411,7 +413,22 @@ def _persist_sent_key(key: str) -> None:
         pass
 
 
+def _primary_recipient(msg) -> str:
+    values = msg.get_all("To", []) if hasattr(msg, "get_all") else []
+    addresses = eut.getaddresses(values)
+    for _, addr in addresses:
+        if addr:
+            return addr
+    return (msg.get("To") or "").strip()
+
+
 def was_sent_recently(msg) -> bool:
+    recipient = _primary_recipient(msg)
+    group = (msg.get("X-EBOT-Group", "") or "").strip()
+    try:
+        return history_service.was_sent_within_days(recipient, group, 1)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("history_service was_sent_recently failed", exc_info=True)
     global _sent_idempotency
     if not _sent_idempotency:
         _sent_idempotency = _load_sent_ids()
@@ -420,6 +437,19 @@ def was_sent_recently(msg) -> bool:
 
 
 def mark_sent(msg) -> None:
+    recipient = _primary_recipient(msg)
+    group = (msg.get("X-EBOT-Group", "") or "").strip()
+    msg_id = (msg.get("Message-ID") or "").strip() or None
+    try:
+        history_service.mark_sent(
+            recipient,
+            group,
+            msg_id,
+            datetime.now(timezone.utc),
+        )
+        return
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("history_service mark_sent failed", exc_info=True)
     key = _make_send_key(msg)
     _sent_idempotency.add(key)
     _persist_sent_key(key)
@@ -491,6 +521,15 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                     )
                 except Exception:
                     pass
+                try:
+                    history_service.mark_sent(
+                        recipient,
+                        grp,
+                        mid,
+                        datetime.now(timezone.utc),
+                    )
+                except Exception:  # pragma: no cover - defensive fallback
+                    logger.debug("history_service mark_sent failed", exc_info=True)
                 return
             except smtplib.SMTPResponseException as e:
                 code = getattr(e, "smtp_code", None)
@@ -736,6 +775,15 @@ def send_email_with_sessions(
             log_success(recipient, group_code, extra=extra)
         except Exception:
             pass
+        try:
+            history_service.mark_sent(
+                recipient,
+                group_code,
+                msg.get("Message-ID", ""),
+                datetime.now(timezone.utc),
+            )
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("history_service mark_sent failed", exc_info=True)
         return token
     except smtplib.SMTPResponseException as e:
         code = getattr(e, "smtp_code", None)
@@ -934,6 +982,10 @@ def _load_sent_log() -> Dict[str, datetime]:
 
 def was_sent_within(email: str, days: int = 180) -> bool:
     """Return True if ``email`` was sent to within ``days`` days."""
+    try:
+        return history_service.was_sent_within_days(email, "", days)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("history_service was_sent_within failed", exc_info=True)
     cutoff = datetime.utcnow() - timedelta(days=days)
     cache = _load_sent_log()
     key = canonical_for_history(email)
@@ -1060,7 +1112,7 @@ def start_manual_mass_send(group: str, emails: List[str], *args, **kwargs) -> No
     notify_user(f"✅ Отправлено писем: {sent}")
 
 
-def prepare_mass_mailing(emails: list[str]):
+def prepare_mass_mailing(emails: list[str], group: str = ""):
     """Apply all mass-mailing filters and return ready e-mails.
 
     Returns a tuple ``(ready, blocked_foreign, blocked_invalid, skipped_recent, digest)``
@@ -1072,7 +1124,7 @@ def prepare_mass_mailing(emails: list[str]):
 
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
-    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+    lookup_days = history_service.get_days_rule_default()
 
     blocked_foreign: list[str] = []
     blocked_invalid: list[str] = []
@@ -1094,12 +1146,12 @@ def prepare_mass_mailing(emails: list[str]):
         else:
             queue2.append(e)
 
-    queue3: list[str] = []
-    for e in queue2:
-        if was_sent_within(e, days=lookup_days):
-            skipped_recent.append(e)
-        else:
-            queue3.append(e)
+    try:
+        queue3, skipped_recent = history_service.filter_by_days(queue2, group, lookup_days)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("history_service filter_by_days failed", exc_info=True)
+        queue3 = list(queue2)
+        skipped_recent = []
 
     deduped: list[str] = []
     seen: set[str] = set()

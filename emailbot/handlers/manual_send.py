@@ -30,8 +30,8 @@ from emailbot.messaging_utils import (
     is_hard_bounce,
     is_suppressed,
     suppress_add,
-    was_sent_within,
 )
+from emailbot import history_service
 from emailbot.reporting import build_mass_report_text, log_mass_filter_digest
 from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
@@ -124,7 +124,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.message.reply_text(f"✅ Выбран шаблон: «{label}»\nФайл: {template_path}")
     chat_id = query.message.chat.id
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(emails)
+        messaging.prepare_mass_mailing(emails, group_code)
     )
     log_mass_filter_digest(
         {
@@ -200,7 +200,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     async def long_job() -> None:
-        lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+        lookup_days = history_service.get_days_rule_default()
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
         preview = context.chat_data.get("send_preview", {}) or {}
@@ -240,12 +240,15 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 else:
                     queue.append(e)
 
-            to_send = []
-            for e in queue:
-                if was_sent_within(e, days=lookup_days):
-                    skipped_recent.append(e)
-                else:
-                    to_send.append(e)
+            try:
+                allowed, rejected = history_service.filter_by_days(
+                    queue, group_code or "", lookup_days
+                )
+            except Exception:  # pragma: no cover - defensive fallback
+                allowed = list(queue)
+                rejected = []
+            to_send = list(allowed)
+            skipped_recent.extend(rejected)
 
             deduped: List[str] = []
             seen_norm: Set[str] = set()
