@@ -37,6 +37,7 @@ from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
 
 import emailbot.bot_handlers as bot_handlers_module
+from .preview import send_preview_report
 
 logger = logging.getLogger(__name__)
 
@@ -154,14 +155,15 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=None,
         )
         return
-    await query.message.reply_text(
-        (
-            f"✉️ Готово к отправке {len(ready)} писем.\n"
-            "Для запуска рассылки нажмите кнопку ниже."
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✉️ Начать рассылку", callback_data="start_sending")]]
-        ),
+    await send_preview_report(
+        update,
+        context,
+        group_code,
+        label,
+        ready,
+        blocked_foreign,
+        blocked_invalid,
+        skipped_recent,
     )
 
 

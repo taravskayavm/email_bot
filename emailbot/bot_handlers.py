@@ -165,6 +165,7 @@ from emailbot.handlers import (
     select_group,
     proceed_to_group,
     send_all,
+    preview_go_back,
 )
 
 logger = logging.getLogger(__name__)
