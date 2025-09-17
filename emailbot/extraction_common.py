@@ -5,7 +5,9 @@ import base64
 import binascii
 import re
 import unicodedata
+from datetime import datetime
 from html import unescape
+from typing import Any, Iterable
 
 from .tld_registry import tld_of, is_known_tld
 
@@ -18,7 +20,13 @@ __all__ = [
     "filter_invalid_tld",
     "score_candidate",
     "CANDIDATE_SCORE_THRESHOLD",
+    "wrap_as_entries",
 ]
+
+try:  # pragma: no cover - fallback is best-effort for optional dependency
+    from .models import EmailEntry
+except Exception:  # pragma: no cover
+    EmailEntry = None  # type: ignore[assignment]
 
 # Mapping of Cyrillic homoglyphs to their Latin counterparts
 _CYR_TO_LATIN = str.maketrans({
@@ -288,3 +296,31 @@ def score_candidate(features: dict) -> int:
 # addresses are put into a quarantine bucket and are not returned by the
 # extractor.
 CANDIDATE_SCORE_THRESHOLD = 1
+
+
+def wrap_as_entries(
+    emails: Iterable[str],
+    *,
+    source: str,
+    status: str = "new",
+    last_sent: datetime | None = None,
+    meta: dict[str, Any] | None = None,
+) -> list[EmailEntry] | list[str]:
+    """Return ``EmailEntry`` objects for ``emails`` when the model is available.
+
+    The helper keeps the rest of the codebase decoupled from the concrete data
+    model: if :mod:`emailbot.models` cannot be imported, a plain list of strings
+    is returned instead.  This enables a gradual migration towards the unified
+    model without breaking existing call sites.
+    """
+
+    items = list(emails)
+    if EmailEntry is None:  # pragma: no cover - defensive branch
+        return items
+    return EmailEntry.wrap_list(
+        items,
+        source=source,
+        status=status,
+        last_sent=last_sent,
+        meta=meta,
+    )
