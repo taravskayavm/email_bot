@@ -34,11 +34,28 @@ class DummyMessage:
         self.document = document
         self.replies: list[str] = []
         self.reply_markups: list = []
+        self.documents: list[dict] = []
         self.chat = types.SimpleNamespace(id=chat_id)
 
     async def reply_text(self, text, reply_markup=None, **kwargs):
         self.replies.append(text)
         self.reply_markups.append(reply_markup)
+        return self
+
+    async def reply_document(
+        self, document, caption=None, reply_markup=None, filename=None, **kwargs
+    ):
+        doc_name = None
+        if hasattr(document, "name"):
+            doc_name = document.name
+        elif filename:
+            doc_name = filename
+        self.documents.append({"name": doc_name, "caption": caption})
+        self.replies.append(caption or "")
+        self.reply_markups.append(reply_markup)
+        close = getattr(document, "close", None)
+        if callable(close):
+            close()
         return self
 
 
@@ -272,6 +289,16 @@ def test_select_group_sets_html_template(monkeypatch, tmp_path):
         else None,
     )
 
+    monkeypatch.setattr(
+        bh.messaging,
+        "prepare_mass_mailing",
+        lambda emails, group: (emails, [], [], [], {}),
+    )
+    monkeypatch.setattr("emailbot.handlers.preview.PREVIEW_DIR", tmp_path)
+    monkeypatch.setattr(
+        "emailbot.handlers.preview.history_service.get_last_sent", lambda *a, **k: None
+    )
+
     update = DummyUpdate(callback_data="tpl:tourism")
     ctx = DummyContext()
     ctx.chat_data[SESSION_KEY] = SessionState(to_send=["a@example.com"])
@@ -280,6 +307,56 @@ def test_select_group_sets_html_template(monkeypatch, tmp_path):
 
     state = ctx.chat_data[SESSION_KEY]
     assert state.template == str(tpl_path)
+
+
+@pytest.mark.asyncio
+async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    def fake_prepare(emails, group):
+        return emails, ["blocked-foreign@example.com"], ["blocked@example.com"], [
+            "recent@example.com"
+        ], {}
+
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing", fake_prepare)
+    monkeypatch.setattr("emailbot.handlers.preview.PREVIEW_DIR", tmp_path)
+    monkeypatch.setattr(
+        "emailbot.handlers.preview.history_service.get_last_sent", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "emailbot.handlers.preview.history_service.get_days_rule_default", lambda: 180
+    )
+
+    update = DummyUpdate(callback_data="tpl:tourism", chat_id=42)
+    ctx = DummyContext()
+    ctx.chat_data[SESSION_KEY] = SessionState(to_send=["a@example.com"])
+    ctx.chat_data["send_preview"] = {"final": ["a@example.com"], "dropped": [], "fixed": []}
+
+    await bh.select_group(update, ctx)
+
+    path = tmp_path / "preview_42.xlsx"
+    assert path.exists()
+    markup = update.callback_query.message.reply_markups[-1]
+    assert isinstance(markup, InlineKeyboardMarkup)
+    buttons = markup.inline_keyboard[0]
+    assert buttons[0].callback_data == "start_sending"
+    assert buttons[1].callback_data == "preview_back"
+    assert "Готово к отправке" in update.callback_query.message.replies[-1]
+    doc_entry = update.callback_query.message.documents[-1]
+    assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")
 
 
 def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):
