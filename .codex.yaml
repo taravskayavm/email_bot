@@ -1,0 +1,46 @@
+stages:
+  - setup
+
+setup-env:
+  stage: setup
+  image: python:3.11-slim
+  script:
+    - set -Eeuo pipefail
+    - python --version
+    - python -m venv .venv
+    - . .venv/bin/activate
+    - python -m pip install --upgrade pip setuptools wheel
+    - pip --version
+    # Установка зависимостей (с учётом optional constraints.txt)
+    - |
+      if [ -f constraints.txt ]; then
+        echo "Using constraints.txt"
+        pip install -vvv --prefer-binary -r requirements.txt -c constraints.txt
+      else
+        pip install -vvv --prefer-binary -r requirements.txt
+      fi
+    - |
+      if [ -f requirements-dev.txt ]; then
+        if [ -f constraints.txt ]; then
+          pip install -vvv --prefer-binary -r requirements-dev.txt -c constraints.txt
+        else
+          pip install -vvv --prefer-binary -r requirements-dev.txt
+        fi
+      fi
+    # Фиксируем итоговую резолюцию для диагностики
+    - pip freeze | sort | tee pip-freeze.log
+    # Минимальный smoke-тест импортов (не запускает бота)
+    - python - <<'PY'
+import sys, platform
+print("python:", sys.version)
+print("platform:", platform.platform())
+try:
+    import telegram
+    print("python-telegram-bot OK:", getattr(telegram, "__version__", "unknown"))
+except Exception as e:
+    print("IMPORT FAILED:", e); raise
+PY
+  artifacts:
+    paths:
+      - pip-freeze.log
+    expire_in: 7 days
