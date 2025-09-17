@@ -13,10 +13,11 @@ import logging
 import re
 import unicodedata
 import time
+from datetime import datetime
 from collections import Counter
 from dataclasses import dataclass, field
 from html import unescape
-from typing import List, Tuple, Dict, Iterable, Set, Optional, Any, Callable
+from typing import List, Tuple, Dict, Iterable, Set, Optional, Any, Callable, TYPE_CHECKING
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
@@ -28,6 +29,7 @@ from .extraction_common import (
     filter_invalid_tld,
     strip_phone_prefix,
     score_candidate,
+    wrap_as_entries,
     CANDIDATE_SCORE_THRESHOLD,
 )
 from .extraction_pdf import (
@@ -37,6 +39,9 @@ from .extraction_pdf import (
 from .extraction_zip import extract_emails_from_zip
 from .settings_store import get
 from .reporting import log_extract_digest
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .models import EmailEntry
 
 __all__ = [
     "EmailHit",
@@ -52,6 +57,7 @@ __all__ = [
     "extract_emails_from_zip",
     "extract_from_url",
     "extract_any",
+    "extract_any_enriched",
     "extract_any_stream",
 ]
 
@@ -1100,6 +1106,60 @@ def extract_any(
     if _return_hits:
         return hits, stats
     return sorted({h.email for h in hits}), stats
+
+
+def extract_any_enriched(
+    source: str,
+    *,
+    status: str = "new",
+    last_sent: datetime | None = None,
+    meta: dict[str, Any] | None = None,
+) -> list[EmailEntry] | list[str]:
+    """Return ``EmailEntry`` records for ``source`` when the model is enabled.
+
+    The helper mirrors :func:`extract_any` but produces richer objects that
+    preserve provenance metadata.  If the optional :mod:`emailbot.models`
+    module is not available, a plain list of strings is returned instead.
+    """
+
+    result = extract_any(source)
+    emails = result[0] if isinstance(result, tuple) else result
+    inferred = _infer_source_kind(source)
+    return wrap_as_entries(
+        emails,
+        source=inferred,
+        status=status,
+        last_sent=last_sent,
+        meta=meta,
+    )
+
+
+def _infer_source_kind(source: str) -> str:
+    """Best-effort classification of ``source`` for :class:`EmailEntry`."""
+
+    if re.match(r"https?://", source, re.I):
+        return "url"
+
+    import os
+
+    ext = os.path.splitext(source)[1].lower()
+    mapping = {
+        ".pdf": "pdf",
+        ".zip": "zip",
+        ".docx": "docx",
+        ".doc": "doc",
+        ".xlsx": "excel",
+        ".xls": "excel",
+        ".csv": "csv",
+        ".txt": "text",
+        ".html": "html",
+        ".htm": "html",
+    }
+    if ext in mapping:
+        return mapping[ext]
+    if ext:
+        return ext.lstrip(".") or "file"
+    return "file"
 
 
 def extract_any_stream(
