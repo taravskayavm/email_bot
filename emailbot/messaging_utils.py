@@ -107,6 +107,8 @@ def build_email(
     body_html: str,
     group_title: str | None = None,
     group_key: str | None = None,
+    *,
+    override_180d: bool = False,
 ) -> EmailMessage:
     """Собирает EmailMessage с безопасными заголовками."""
 
@@ -119,6 +121,8 @@ def build_email(
         msg["X-EBOT-Group-Key"] = group_key
     msg.set_content("HTML version required", subtype="plain")
     msg.add_alternative(body_html, subtype="html")
+    if override_180d:
+        msg["X-EBOT-Override-180d"] = "1"
     set_list_unsubscribe_headers(msg, recipient=to_addr)
     return msg
 

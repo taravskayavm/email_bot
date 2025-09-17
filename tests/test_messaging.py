@@ -186,6 +186,27 @@ def test_build_message_uses_explicit_group_metadata(tmp_path, monkeypatch):
     assert msg["X-EBOT-Template-Label"] == "Custom Label"
 
 
+def test_build_message_marks_override(tmp_path, monkeypatch):
+    html_file = tmp_path / "template.html"
+    html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+
+    msg, _, _ = messaging.build_message(
+        "override@example.com",
+        str(html_file),
+        "Subject",
+        override_180d=True,
+    )
+    assert msg["X-EBOT-Override-180d"] == "1"
+
+    msg2, _, _ = messaging.build_message(
+        "override@example.com",
+        str(html_file),
+        "Subject",
+    )
+    assert msg2.get("X-EBOT-Override-180d") is None
+
+
 def test_repository_templates_logo_toggle(monkeypatch, tmp_path):
     template_path = tmp_path / "template.html"
     template_path.write_text(
