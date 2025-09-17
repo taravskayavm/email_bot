@@ -656,7 +656,8 @@ def build_message(
     *,
     group_title: str | None = None,
     group_key: str | None = None,
-) -> tuple[EmailMessage, str]:
+    override_180d: bool = False,
+) -> tuple[EmailMessage, str, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
@@ -716,6 +717,8 @@ def build_message(
     _apply_from(msg, resolved_key)
     if resolved_title:
         msg["X-EBOT-Template-Label"] = resolved_title
+    if override_180d:
+        msg["X-EBOT-Override-180d"] = "1"
     logo_path = SCRIPT_DIR / "Logo.png"
     if inline_logo and logo_path.exists():
         try:
@@ -808,6 +811,7 @@ def send_email_with_sessions(
     *,
     group_title: str | None = None,
     group_key: str | None = None,
+    override_180d: bool = False,
 ):
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
@@ -818,6 +822,7 @@ def send_email_with_sessions(
         subject,
         group_title=group_title,
         group_key=group_key,
+        override_180d=override_180d,
     )
     group_code = _message_group_key(msg)
     try:
