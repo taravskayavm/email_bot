@@ -221,6 +221,9 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
     )
     app.add_handler(
+        CallbackQueryHandler(bot_handlers.preview_go_back, pattern="^preview_back$")
+    )
+    app.add_handler(
         CallbackQueryHandler(bot_handlers.request_fix, pattern=r"^fix:\d+$")
     )
     app.add_handler(
