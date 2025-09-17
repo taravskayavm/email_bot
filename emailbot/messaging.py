@@ -305,6 +305,9 @@ def build_messages_for_group(
                 )
             except Exception:
                 pass
+        if group:
+            msg["X-EBOT-Group"] = group
+            msg["X-EBOT-Group-Key"] = group
         # В самом конце — зафиксировать корректный From по группе
         _apply_from(msg, group)
         out.append(msg)
@@ -423,9 +426,18 @@ def _primary_recipient(msg) -> str:
     return (msg.get("To") or "").strip()
 
 
+def _message_group_key(msg) -> str:
+    """Extract a stable group identifier from message headers."""
+
+    if msg is None or not hasattr(msg, "get"):
+        return ""
+    key = msg.get("X-EBOT-Group-Key", "") or msg.get("X-EBOT-Group", "") or ""
+    return str(key).strip()
+
+
 def was_sent_recently(msg) -> bool:
     recipient = _primary_recipient(msg)
-    group = (msg.get("X-EBOT-Group", "") or "").strip()
+    group = _message_group_key(msg)
     try:
         return history_service.was_sent_within_days(recipient, group, 1)
     except Exception:  # pragma: no cover - defensive fallback
@@ -439,7 +451,7 @@ def was_sent_recently(msg) -> bool:
 
 def mark_sent(msg) -> None:
     recipient = _primary_recipient(msg)
-    group = (msg.get("X-EBOT-Group", "") or "").strip()
+    group = _message_group_key(msg)
     msg_id = (msg.get("Message-ID") or "").strip() or None
     try:
         history_service.mark_sent(
@@ -481,7 +493,7 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
     mid = ""
     if isinstance(raw_message, EmailMessage):
         msg = raw_message
-        grp = msg.get("X-EBOT-Group", "") or ""
+        grp = _message_group_key(msg)
         eb_uuid = msg.get("X-EBOT-UUID", "") or ""
         mid = msg.get("Message-ID", "") or ""
     else:
@@ -496,7 +508,7 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
             else:
                 msg = EmailMessage()
                 msg.set_content(_raw_to_text(raw_message))
-            grp = msg.get("X-EBOT-Group", "") or ""
+            grp = _message_group_key(msg)
             eb_uuid = msg.get("X-EBOT-UUID", "") or ""
             mid = msg.get("Message-ID", "") or ""
         except Exception:
@@ -632,20 +644,37 @@ def save_to_sent_folder(
 
 
 def build_message(
-    to_addr: str, html_path: str, subject: str
+    to_addr: str,
+    html_path: str,
+    subject: str,
+    *,
+    group_title: str | None = None,
+    group_key: str | None = None,
 ) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
     template_info = get_template_by_path(html_path)
-    group = template_info.get("code") if template_info else ""
-    if not group:
-        group = _normalize_template_code(Path(html_path).stem)
-    label = str(template_info.get("label") or group) if template_info else group
+    info_code = ""
+    info_label = ""
+    if template_info:
+        raw_code = template_info.get("code")
+        if raw_code:
+            info_code = str(raw_code).strip()
+        raw_label = template_info.get("label")
+        if raw_label:
+            info_label = str(raw_label).strip()
+    fallback_code = _normalize_template_code(Path(html_path).stem)
+    resolved_key = str(group_key or info_code or fallback_code or "").strip()
+    if not resolved_key:
+        resolved_key = fallback_code
+    resolved_title = str(group_title or info_label or resolved_key or "").strip()
+    if not resolved_title:
+        resolved_title = resolved_key
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
-        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{_choose_signature(group)}</div>'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{_choose_signature(resolved_key)}</div>'
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
@@ -670,9 +699,9 @@ def build_message(
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
-    _apply_from(msg, group)
-    if label:
-        msg["X-EBOT-Template-Label"] = label
+    _apply_from(msg, resolved_key)
+    if resolved_title:
+        msg["X-EBOT-Template-Label"] = resolved_title
     logo_path = SCRIPT_DIR / "Logo.png"
     if inline_logo and logo_path.exists():
         try:
@@ -690,7 +719,12 @@ def build_message(
     eb_uuid = str(uuid.uuid4())
     msg["X-EBOT-UUID"] = eb_uuid
     msg["X-EBOT-Recipient"] = to_addr
-    msg["X-EBOT-Group"] = group
+    if resolved_title:
+        msg["X-EBOT-Group"] = resolved_title
+    if resolved_key:
+        msg["X-EBOT-Group-Key"] = resolved_key
+    elif resolved_title:
+        msg["X-EBOT-Group-Key"] = resolved_title
     return msg, token, eb_uuid
 
 
@@ -757,12 +791,21 @@ def send_email_with_sessions(
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     batch_id: str | None = None,
     fixed_from: str | None = None,
+    *,
+    group_title: str | None = None,
+    group_key: str | None = None,
 ):
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
         return ""
-    msg, token, eb_uuid = build_message(recipient, html_path, subject)
-    group_code = msg.get("X-EBOT-Group", "") or ""
+    msg, token, eb_uuid = build_message(
+        recipient,
+        html_path,
+        subject,
+        group_title=group_title,
+        group_key=group_key,
+    )
+    group_code = _message_group_key(msg)
     try:
         send_with_retry(smtp, msg)
         save_to_sent_folder(msg, imap=imap, folder=sent_folder)
