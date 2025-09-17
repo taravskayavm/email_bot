@@ -44,6 +44,7 @@ from .messaging_utils import (
     load_seen_events,
     load_sent_log,
     save_seen_events,
+    set_list_unsubscribe_headers,
     suppress_add,
     upsert_sent_log,
 )
@@ -695,8 +696,16 @@ def build_message(
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    msg["List-Unsubscribe"] = f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
-    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    default_mailto = (
+        f"mailto:{EMAIL_ADDRESS}?subject=unsubscribe" if EMAIL_ADDRESS else None
+    )
+    set_list_unsubscribe_headers(
+        msg,
+        recipient=to_addr,
+        default_mailto=default_mailto,
+        default_http=link,
+        default_one_click=True,
+    )
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     _apply_from(msg, resolved_key)
