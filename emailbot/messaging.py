@@ -49,6 +49,7 @@ from .messaging_utils import (
     upsert_sent_log,
 )
 from .utils import log_error as log_internal_error
+from utils import rules
 from utils.send_stats import log_error, log_success
 from utils.smtp_client import RobustSMTP, send_with_retry
 
@@ -544,6 +545,10 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                     )
                 except Exception:  # pragma: no cover - defensive fallback
                     logger.debug("history_service mark_sent failed", exc_info=True)
+                try:
+                    rules.append_history(recipient)
+                except Exception:  # pragma: no cover - defensive fallback
+                    logger.debug("rules.append_history failed", exc_info=True)
                 return
             except smtplib.SMTPResponseException as e:
                 code = getattr(e, "smtp_code", None)
@@ -837,6 +842,10 @@ def send_email_with_sessions(
             )
         except Exception:  # pragma: no cover - defensive fallback
             logger.debug("history_service mark_sent failed", exc_info=True)
+        try:
+            rules.append_history(recipient)
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("rules.append_history failed", exc_info=True)
         return token
     except smtplib.SMTPResponseException as e:
         code = getattr(e, "smtp_code", None)
@@ -1192,9 +1201,26 @@ def prepare_mass_mailing(
     blocked_invalid: list[str] = []
     skipped_recent: list[str] = []
 
+    blocklist_rules = {
+        normalize_email(item)
+        for item in rules.load_blocklist()
+        if isinstance(item, str) and item
+    }
+    skipped_blocklist_rules = 0
+
     queue: list[str] = []
     for e in source:
-        if e in blocked or e in sent_today:
+        norm = normalize_email(e)
+        if norm and norm in blocklist_rules:
+            blocked_invalid.append(e)
+            skipped_blocklist_rules += 1
+            continue
+        if (
+            e in blocked
+            or norm in blocked
+            or e in sent_today
+            or norm in sent_today
+        ):
             continue
         if is_foreign(e):
             blocked_foreign.append(e)
@@ -1214,6 +1240,22 @@ def prepare_mass_mailing(
         logger.debug("history_service filter_by_days failed", exc_info=True)
         queue3 = list(queue2)
         skipped_recent = []
+
+    queue_after_rules: list[str] = []
+    skipped_local_recent: list[str] = []
+    for e in queue3:
+        if rules.seen_within_window(e):
+            skipped_local_recent.append(e)
+        else:
+            queue_after_rules.append(e)
+
+    queue3 = queue_after_rules
+    if skipped_recent:
+        skipped_recent = list(skipped_recent)
+    else:
+        skipped_recent = []
+    if skipped_local_recent:
+        skipped_recent.extend(skipped_local_recent)
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -1237,6 +1279,8 @@ def prepare_mass_mailing(
         "skipped_suppress": len(blocked_invalid),
         "skipped_180d": len(skipped_recent),
         "skipped_foreign": len(blocked_foreign),
+        "skipped_blocklist_file": skipped_blocklist_rules,
+        "skipped_local_history": len(skipped_local_recent),
     }
 
     return deduped, blocked_foreign, blocked_invalid, skipped_recent, digest

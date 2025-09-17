@@ -8,6 +8,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from utils import rules
+
 
 @dataclass
 class _Resp:
@@ -79,3 +81,12 @@ def _isolated_history_db(tmp_path, monkeypatch):
     history_store._INITIALIZED = False
     history_store._DB_PATH = db_path
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_rules_files(tmp_path, monkeypatch):
+    history_path = tmp_path / "send_history.jsonl"
+    blocklist_path = tmp_path / "blocklist.txt"
+    monkeypatch.setattr(rules, "HISTORY_PATH", history_path)
+    monkeypatch.setattr(rules, "BLOCKLIST_PATH", blocklist_path)
+    rules.ensure_dirs()
