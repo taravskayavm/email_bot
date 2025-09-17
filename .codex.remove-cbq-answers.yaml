@@ -1,0 +1,15 @@
+stages:
+  - sanitize
+
+remove-callback-answers:
+  stage: sanitize
+  image: python:3.11-slim
+  script:
+    - set -Eeuo pipefail
+    - python --version
+    - python -m pip install --upgrade pip
+    - python scripts/remove_callback_answers.py
+  artifacts:
+    paths:
+      - scripts/remove_callback_answers.py
+    expire_in: 7 days
