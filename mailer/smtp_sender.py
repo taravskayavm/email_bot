@@ -8,6 +8,11 @@ from smtplib import SMTPResponseException
 
 from utils.send_stats import log_error, log_success
 
+
+def _extract_group(msg: EmailMessage) -> str:
+    raw = msg.get("X-EBOT-Group-Key", "") or msg.get("X-EBOT-Group", "") or ""
+    return str(raw).strip()
+
 PORT = int(os.getenv("SMTP_PORT", "587"))
 USE_SSL = os.getenv("SMTP_SSL", "0") == "1"
 logger = logging.getLogger(__name__)
@@ -29,7 +34,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             try:
                 log_success(
                     msg.get("To", ""),
-                    msg.get("X-EBOT-Group", ""),
+                    _extract_group(msg),
                     extra={
                         "uuid": msg.get("X-EBOT-UUID", ""),
                         "message_id": msg.get("Message-ID", ""),
@@ -52,7 +57,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     try:
                         log_success(
                             msg.get("To", ""),
-                            msg.get("X-EBOT-Group", ""),
+                            _extract_group(msg),
                             extra={
                                 "uuid": msg.get("X-EBOT-UUID", ""),
                                 "message_id": msg.get("Message-ID", ""),
@@ -66,7 +71,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             try:
                 log_error(
                     msg.get("To", ""),
-                    msg.get("X-EBOT-Group", ""),
+                    _extract_group(msg),
                     f"{code} {text}",
                     extra={
                         "uuid": msg.get("X-EBOT-UUID", ""),
@@ -80,7 +85,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             try:
                 log_error(
                     msg.get("To", ""),
-                    msg.get("X-EBOT-Group", ""),
+                    _extract_group(msg),
                     repr(e),
                     extra={
                         "uuid": msg.get("X-EBOT-UUID", ""),
