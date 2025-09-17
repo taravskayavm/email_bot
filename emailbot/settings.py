@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import json
+
 from . import settings_store as _store
 
 # Default values
@@ -14,6 +17,9 @@ MAX_SITEMAP_URLS: int = 200
 MAX_DOCS: int = 30
 PER_REQUEST_TIMEOUT: int = 15
 EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
+
+TPL_DIR = Path("templates")
+LABELS_FILE = TPL_DIR / "_labels.json"
 
 
 def load() -> None:
@@ -46,6 +52,36 @@ def save() -> None:
     _store.set("EXTERNAL_SOURCES", EXTERNAL_SOURCES)
 
 
+def _load_labels() -> dict[str, dict[str, str]]:
+    if not LABELS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(LABELS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def list_available_directions() -> list[str]:
+    """Return direction labels from templates/_labels.json."""
+
+    labels = _load_labels()
+    return [str(meta.get("label") or slug) for slug, meta in labels.items()]
+
+
+def resolve_label(label: str) -> str:
+    """Resolve human-readable label back to slug."""
+
+    query = label.strip()
+    for slug, meta in _load_labels().items():
+        stored_label = str(meta.get("label") or "").strip()
+        if stored_label == query:
+            return slug
+    return query
+
+
 # Load settings on module import.
 load()
 
@@ -62,5 +98,7 @@ __all__ = [
     "EXTERNAL_SOURCES",
     "load",
     "save",
+    "list_available_directions",
+    "resolve_label",
 ]
 
