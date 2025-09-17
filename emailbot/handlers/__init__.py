@@ -8,6 +8,7 @@ from .manual_send import (
     proceed_to_group,
     send_all,
 )
+from .preview import go_back as preview_go_back
 
 __all__ = [
     "start",
@@ -15,4 +16,5 @@ __all__ = [
     "select_group",
     "proceed_to_group",
     "send_all",
+    "preview_go_back",
 ]
