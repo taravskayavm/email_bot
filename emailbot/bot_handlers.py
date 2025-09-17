@@ -1798,6 +1798,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         email_addr,
                         template_path,
                         fixed_from=fixed_map.get(email_addr),
+                        group_title=label,
+                        group_key=group_code,
                     )
                     log_sent_email(
                         email_addr,
