@@ -56,6 +56,7 @@ from .edit_service import apply_edits
 from .extraction import normalize_email, smart_extract_emails
 from .reporting import build_mass_report_text, log_mass_filter_digest
 from .settings_store import DEFAULTS
+from .services.cooldown import should_skip_by_cooldown
 
 
 # --- Новое состояние для ручного ввода исправлений ---
@@ -351,6 +352,186 @@ def _manual_cfg():
         days = default_days
     allow_override = os.getenv("MANUAL_ALLOW_OVERRIDE", "1") == "1"
     return enforce, days, allow_override
+
+
+MANUAL_OVERRIDE_PAGE_SIZE = 6
+
+
+def _manual_override_clear(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        "manual_override_candidates",
+        "manual_override_selected",
+        "manual_override_page",
+        "manual_override_days",
+    ):
+        context.chat_data.pop(key, None)
+
+
+def _manual_override_prepare(
+    context: ContextTypes.DEFAULT_TYPE,
+    rejected: Sequence[str],
+    days: int,
+) -> None:
+    candidates: list[dict[str, str]] = []
+    for email_addr in rejected:
+        skip, reason = should_skip_by_cooldown(email_addr, days=days)
+        reason_text = reason or f"cooldown<{days}d"
+        candidates.append({"email": email_addr, "reason": reason_text})
+    context.chat_data["manual_override_candidates"] = candidates
+    context.chat_data["manual_override_selected"] = []
+    context.chat_data["manual_override_page"] = 0
+    context.chat_data["manual_override_days"] = days
+
+
+def _manual_override_candidates(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> list[dict[str, str]]:
+    raw = context.chat_data.get("manual_override_candidates") or []
+    if not isinstance(raw, list):
+        return []
+    candidates: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        email_addr = str(item.get("email") or "")
+        if not email_addr:
+            continue
+        reason_text = str(item.get("reason") or "")
+        candidates.append({"email": email_addr, "reason": reason_text})
+    return candidates
+
+
+def _manual_override_selected_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    stored = context.chat_data.get("manual_override_selected")
+    result: set[str] = set()
+    if isinstance(stored, (list, set, tuple)):
+        for item in stored:
+            if item:
+                result.add(str(item))
+    elif isinstance(stored, str):
+        result.add(stored)
+    return result
+
+
+def _manual_override_store_selected(
+    context: ContextTypes.DEFAULT_TYPE,
+    selected: set[str],
+) -> None:
+    candidate_emails = {item["email"] for item in _manual_override_candidates(context)}
+    cleaned = sorted(email for email in selected if email in candidate_emails)
+    previous = _manual_override_selected_set(context)
+    if previous == set(cleaned):
+        return
+    context.chat_data["manual_override_selected"] = cleaned
+
+
+def _manual_override_current_page(context: ContextTypes.DEFAULT_TYPE) -> int:
+    page_raw = context.chat_data.get("manual_override_page", 0)
+    try:
+        page = int(page_raw)
+    except Exception:
+        page = 0
+    return max(0, page)
+
+
+def _manual_override_render(
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    candidates = _manual_override_candidates(context)
+    if not candidates:
+        return "", InlineKeyboardMarkup([])
+    per_page = max(1, MANUAL_OVERRIDE_PAGE_SIZE)
+    total = len(candidates)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(page, pages - 1))
+    context.chat_data["manual_override_page"] = page
+    start = page * per_page
+    chunk = candidates[start : start + per_page]
+    selected = _manual_override_selected_set(context)
+    selected_in_candidates = {
+        item["email"] for item in candidates if item["email"] in selected
+    }
+    days_raw = context.chat_data.get("manual_override_days")
+    days = days_raw if isinstance(days_raw, int) and days_raw > 0 else None
+
+    lines: list[str] = []
+    if days:
+        lines.append(
+            f"Отфильтровано правилом {days} дней. Выберите адреса для игнорирования."
+        )
+    else:
+        lines.append("Выберите адреса для игнорирования правила 180 дней.")
+    lines.append(f"Выбрано: {len(selected_in_candidates)} из {total}.")
+    if pages > 1:
+        lines.append(f"Страница {page + 1}/{pages}.")
+    for idx, item in enumerate(chunk, start=start):
+        mark = "✅" if item["email"] in selected else "◻️"
+        reason = item.get("reason") or "recent-send"
+        lines.append(f"{mark} {idx + 1}) {item['email']} — {reason}")
+    text = "\n".join(lines)
+
+    buttons = [
+        InlineKeyboardButton(
+            f"{'✅' if item['email'] in selected else '◻️'} {idx + 1}",
+            callback_data=f"manual_ignore_selected:toggle:{idx}",
+        )
+        for idx, item in enumerate(chunk, start=start)
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(buttons), 3):
+        rows.append(buttons[i : i + 3])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "Игнорировать (выбранные)",
+                callback_data="manual_ignore_selected:apply",
+            )
+        ]
+    )
+    nav_row: list[InlineKeyboardButton] = []
+    if pages > 1 and page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                "⬅️", callback_data=f"manual_ignore_selected:page:{page - 1}"
+            )
+        )
+    nav_row.append(
+        InlineKeyboardButton(
+            "Очистить выбор", callback_data="manual_ignore_selected:clear"
+        )
+    )
+    if pages > 1 and page < pages - 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                "➡️", callback_data=f"manual_ignore_selected:page:{page + 1}"
+            )
+        )
+    rows.append(nav_row)
+    rows.append(
+        [InlineKeyboardButton("Закрыть", callback_data="manual_ignore_selected:close")]
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _manual_override_show(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int,
+    *,
+    edit: bool = False,
+) -> None:
+    text, markup = _manual_override_render(context, page)
+    if not text:
+        if edit:
+            await query.message.edit_text("Список пуст.")
+        else:
+            await _safe_reply_text(query.message, "Список пуст.")
+        return
+    if edit:
+        await query.message.edit_text(text, reply_markup=markup)
+    else:
+        await _safe_reply_text(query.message, text, reply_markup=markup)
 
 
 def _filter_by_180(
@@ -1392,6 +1573,7 @@ async def prompt_manual_email(
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
     context.chat_data.pop("manual_selected_emails", None)
+    _manual_override_clear(context)
     await _safe_reply_text(update.message, 
         (
             "Введите email или список email-адресов "
@@ -1512,11 +1694,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         context.chat_data["manual_allowed_preview"] = allowed
         context.chat_data["manual_rejected_preview"] = rejected
+        if allow_override and enforce and rejected:
+            _manual_override_prepare(context, rejected, days)
+        else:
+            _manual_override_clear(context)
+
         lines = ["Адреса получены.", f"К отправке (предварительно): {len(allowed)}"]
         if rejected:
             lines.append(f"Отфильтровано по правилу {days} дней: {len(rejected)}")
+        selected_override = _manual_override_selected_set(context)
+        if selected_override:
+            lines.append(
+                f"Для игнорирования выбрано адресов: {len(selected_override)}"
+            )
 
-        mode_row = []
+        mode_row: list[InlineKeyboardButton] = []
         if allow_override and rejected:
             mode_row = [
                 InlineKeyboardButton(
@@ -1524,9 +1716,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ),
                 InlineKeyboardButton("Отправить всем", callback_data="manual_mode_all"),
             ]
+        ignore_row: list[InlineKeyboardButton] = []
+        if allow_override and enforce and rejected:
+            ignore_row = [
+                InlineKeyboardButton(
+                    "Игнорировать (выбранные)",
+                    callback_data="manual_ignore_selected:go",
+                )
+            ]
         keyboard = [*template_rows]
         if mode_row:
             keyboard.append(mode_row)
+        if ignore_row:
+            keyboard.append(ignore_row)
         keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
 
         await _safe_reply_text(update.message, 
@@ -1734,6 +1936,99 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _safe_reply_text(query.message, "🧩 Возможные исправления:\n" + "\n".join(chunk))
 
 
+async def manual_ignore_selected(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Allow selecting individual addresses to ignore the cooldown."""
+
+    query = update.callback_query
+    data = query.data or ""
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "go"
+    argument = parts[2] if len(parts) > 2 else None
+
+    candidates = _manual_override_candidates(context)
+
+    if action == "go":
+        if not candidates:
+            await query.answer("Нет адресов для игнорирования", show_alert=True)
+            return
+        await query.answer()
+        await _manual_override_show(query, context, 0)
+        return
+
+    if action == "close":
+        selected = _manual_override_selected_set(context)
+        _manual_override_store_selected(context, selected)
+        days_raw = context.chat_data.get("manual_override_days")
+        days = days_raw if isinstance(days_raw, int) and days_raw > 0 else None
+        count = len(_manual_override_selected_set(context))
+        if count and days:
+            summary = (
+                f"Игнорирование правила {days} дней для {count} адресов сохранено."
+            )
+        elif count:
+            summary = f"Игнорирование для {count} адресов сохранено."
+        else:
+            summary = "Игнорирование не выбрано."
+        await query.answer()
+        await query.message.edit_text(summary)
+        return
+
+    if not candidates:
+        await query.answer("Список пуст", show_alert=True)
+        return
+
+    if action == "page":
+        try:
+            page = int(argument or "0")
+        except (TypeError, ValueError):
+            await query.answer("Некорректная страница", show_alert=True)
+            return
+        await query.answer()
+        await _manual_override_show(query, context, page, edit=True)
+        return
+
+    if action == "toggle":
+        try:
+            idx = int(argument or "-1")
+        except (TypeError, ValueError):
+            await query.answer("Некорректный индекс", show_alert=True)
+            return
+        if idx < 0 or idx >= len(candidates):
+            await query.answer("Индекс вне диапазона", show_alert=True)
+            return
+        selected = _manual_override_selected_set(context)
+        email_addr = candidates[idx]["email"]
+        if email_addr in selected:
+            selected.remove(email_addr)
+        else:
+            selected.add(email_addr)
+        _manual_override_store_selected(context, selected)
+        await query.answer()
+        page = _manual_override_current_page(context)
+        await _manual_override_show(query, context, page, edit=True)
+        return
+
+    if action == "clear":
+        _manual_override_store_selected(context, set())
+        await query.answer("Выбор очищен")
+        page = _manual_override_current_page(context)
+        await _manual_override_show(query, context, page, edit=True)
+        return
+
+    if action == "apply":
+        selected = _manual_override_selected_set(context)
+        _manual_override_store_selected(context, selected)
+        count = len(_manual_override_selected_set(context))
+        await query.answer(f"Игнорируем: {count}")
+        page = _manual_override_current_page(context)
+        await _manual_override_show(query, context, page, edit=True)
+        return
+
+    await query.answer()
+
+
 async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Сброс состояния ручной рассылки."""
 
@@ -1743,7 +2038,9 @@ async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     init_state(context)
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
-    await _safe_reply_text(query.message, 
+    context.chat_data.pop("manual_selected_emails", None)
+    _manual_override_clear(context)
+    await _safe_reply_text(query.message,
         "Сброшено. Нажмите /manual для новой ручной рассылки."
     )
 
@@ -1757,6 +2054,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     emails = context.chat_data.get("manual_all_emails") or []
     mode = context.chat_data.get("manual_send_mode", "allowed")
     override_active = mode == "all"
+    override_selected = {
+        addr for addr in _manual_override_selected_set(context) if addr in emails
+    }
+    _manual_override_store_selected(context, override_selected)
     data = query.data or ""
     if ":" not in data:
         await _safe_reply_text(query.message, 
@@ -1786,12 +2087,23 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         label = group_code
 
     enforce, days, allow_override = _manual_cfg()
+    rule_days = days if isinstance(days, int) and days > 0 else 180
+    override_to_send: list[str] = []
     if enforce and mode == "allowed":
-        allowed, rejected = _filter_by_180(list(emails), group_code, days, chat_id=chat_id)
-        to_send = allowed
+        allowed, rejected_all = _filter_by_180(
+            list(emails), group_code, days, chat_id=chat_id
+        )
+        override_to_send = [
+            addr for addr in rejected_all if addr in override_selected
+        ]
+        rejected = [addr for addr in rejected_all if addr not in override_selected]
+        to_send = allowed + override_to_send
+        _manual_override_store_selected(context, set(override_to_send))
     else:
         to_send = list(emails)
         rejected = []
+        if not override_active:
+            _manual_override_store_selected(context, set())
 
     blocked_manual: list[str] = []
     filtered_to_send: list[str] = []
@@ -1817,7 +2129,20 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         display_label = f"{label} ({group_code})"
     lines = [f"Шаблон: {display_label}", f"К отправке: {len(to_send)}"]
     if rejected:
-        lines.append(f"Отфильтровано по правилу 180 дней: {len(rejected)}")
+        lines.append(
+            f"Отфильтровано по правилу {rule_days} дней: {len(rejected)}"
+        )
+    if override_active:
+        lines.append(
+            f"Правило {rule_days} дней будет проигнорировано для всех адресов."
+        )
+    elif override_to_send:
+        lines.append(
+            (
+                "Правило {days} дней будет проигнорировано для: "
+                "{count} адресов"
+            ).format(days=rule_days, count=len(override_to_send))
+        )
     if blocked_manual:
         lines.append(f"Исключено по блок-листу: {len(blocked_manual)}")
     await _safe_reply_text(query.message, "\n".join(lines))
@@ -1825,9 +2150,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
     if len(to_send) == 0:
         if allow_override and len(rejected) > 0:
-            await _safe_reply_text(query.message, 
-                "Все адреса были отфильтрованы правилом 180 дней.\n"
-                "Вы можете нажать «Отправить всем» для игнорирования правила."
+            await _safe_reply_text(query.message,
+                f"Все адреса были отфильтрованы правилом {rule_days} дней.\n"
+                f"Вы можете нажать «Отправить всем» для игнорирования правила {rule_days} дней."
             )
         else:
             reasons: list[str] = []
@@ -1843,6 +2168,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     state = get_state(context)
     to_send = _drop_truncated_twins(to_send, state=state)
+    if override_active:
+        override_set: set[str] = set(to_send)
+    else:
+        override_set = {addr for addr in override_to_send if addr in to_send}
+        _manual_override_store_selected(context, override_set)
     # Сохраняем выбранный набор; дальнейшая логика подхватит эти значения
     context.chat_data["manual_selected_template_code"] = group_code
     context.chat_data["manual_selected_template_label"] = label
@@ -1881,6 +2211,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         to_send_local = _drop_truncated_twins(
             list(to_send), state=state_snapshot
         )
+        override_set_local = {addr for addr in override_set if addr in to_send_local}
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
@@ -1900,6 +2231,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         if not is_force_send(chat_id) and len(to_send_local) > available:
             to_send_local = to_send_local[:available]
+            override_set_local &= set(to_send_local)
             await notify(
                 query.message,
                 (
@@ -1933,7 +2265,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         fixed_from=fixed_map.get(email_addr),
                         group_title=label,
                         group_key=group_code,
-                        override_180d=override_active,
+                        override_180d=email_addr in override_set_local,
                     )
                     log_sent_email(
                         email_addr,
@@ -1987,6 +2319,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
 
         context.chat_data["manual_all_emails"] = []
+        _manual_override_clear(context)
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 

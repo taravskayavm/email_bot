@@ -1,5 +1,6 @@
 import importlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -45,7 +46,7 @@ def test_should_skip_by_cooldown_recent(cooldown_module):
     )
     skip, reason = cooldown.should_skip_by_cooldown("testuser@gmail.com", now=now, days=180)
     assert skip is True
-    assert "remain" in reason
+    assert re.search(r"remain≈\d+d \d+h \d+m", reason)
 
 
 def test_should_allow_after_window(cooldown_module):

@@ -238,6 +238,13 @@ def main() -> None:
     )
     _safe_add(
         app,
+        CallbackQueryHandler(
+            bot_handlers.manual_ignore_selected, pattern="^manual_ignore_selected"
+        ),
+        "cb:manual_ignore_selected",
+    )
+    _safe_add(
+        app,
         CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_tpl:"),
         "cb:manual_tpl",
     )
