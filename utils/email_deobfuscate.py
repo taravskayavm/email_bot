@@ -19,9 +19,12 @@ def _word_pattern(base: str) -> str:
 _LOCAL_FRAGMENT = r"[\w.%+\-]{1,64}"
 _DOMAIN_LABEL = r"[A-Za-z0-9-]{1,63}"
 
+# Разделитель между local-part и обфусцированным «at»: хотя бы один не-алфанумерик.
+_AT_SEP = r"\W+"
+
 _PAT_ATS = [
     re.compile(
-        rf"(?P<L>{_LOCAL_FRAGMENT})\s*[\(\[\{{]?\s*(?:{_word_pattern('собака')}|{_word_pattern('at')})\s*[\)\]\}}]?\s*(?P<R>{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*)",
+        rf"(?P<L>{_LOCAL_FRAGMENT}){_AT_SEP}(?:{_word_pattern('собака')}|{_word_pattern('at')}){_AT_SEP}(?P<R>{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*)",
         re.IGNORECASE,
     )
 ]

@@ -2,6 +2,7 @@ import logging
 import os
 import smtplib
 import time
+from datetime import datetime, timezone
 from typing import Iterable
 from email.message import EmailMessage
 from email.utils import getaddresses
@@ -9,6 +10,7 @@ from smtplib import SMTPResponseException
 
 from emailbot.audit import write_audit_drop
 from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
+from emailbot.history_service import ensure_initialized, mark_sent
 from utils.send_stats import log_error, log_success
 
 
@@ -33,15 +35,15 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
     """
     def _send_one(msg):
         override_flag = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
+        to_values = msg.get_all("To", [])
+        recipients = [addr for _, addr in getaddresses(to_values)]
+        if not recipients:
+            raw_to = msg.get("To", "")
+            if isinstance(raw_to, str) and raw_to:
+                recipients = [raw_to]
+        if not recipients and msg.get("X-EBOT-Recipient"):
+            recipients = [msg.get("X-EBOT-Recipient")]
         if override_flag not in {"1", "true", "yes", "on"}:
-            to_values = msg.get_all("To", [])
-            recipients = [addr for _, addr in getaddresses(to_values)]
-            if not recipients:
-                raw_to = msg.get("To", "")
-                if isinstance(raw_to, str) and raw_to:
-                    recipients = [raw_to]
-            if not recipients and msg.get("X-EBOT-Recipient"):
-                recipients = [msg.get("X-EBOT-Recipient")]
             for addr in recipients:
                 if not addr:
                     continue
@@ -62,8 +64,8 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                         skip_reason,
                     )
                     return True, None
-        try:
-            smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
+
+        def _record_success(to_list: list[str]) -> None:
             try:
                 log_success(
                     msg.get("To", ""),
@@ -75,6 +77,26 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 )
             except Exception:
                 pass
+            try:
+                ensure_initialized()
+                now = datetime.now(timezone.utc)
+                group_key = _extract_group(msg)
+                message_id = (msg.get("Message-ID") or "").strip() or None
+                seen: set[str] = set()
+                for addr in to_list:
+                    addr_norm = (addr or "").strip()
+                    if not addr_norm:
+                        continue
+                    key = addr_norm.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    mark_sent(addr_norm, group_key, message_id, now, smtp_result="ok")
+            except Exception:
+                logger.warning("history_registry_record_failed", exc_info=True)
+        try:
+            smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
+            _record_success(recipients)
             return True, None
         except SMTPResponseException as e:
             code = e.smtp_code
@@ -87,17 +109,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 time.sleep(1)
                 try:
                     smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
-                    try:
-                        log_success(
-                            msg.get("To", ""),
-                            _extract_group(msg),
-                            extra={
-                                "uuid": msg.get("X-EBOT-UUID", ""),
-                                "message_id": msg.get("Message-ID", ""),
-                            },
-                        )
-                    except Exception:
-                        pass
+                    _record_success(recipients)
                     return True, None
                 except Exception as e2:
                     e = e2

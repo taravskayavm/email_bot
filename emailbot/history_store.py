@@ -1,4 +1,6 @@
-"""SQLite-backed storage for send history."""
+"""Low-level SQLite helpers for send-history registry.
+   [EBOT-SQL-COOLDOWN-001]
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Iterable
+from typing import Iterable, Optional, Tuple
 
 from .extraction_common import normalize_email as _normalize_email
 
@@ -21,52 +23,58 @@ _INITIALIZED = False
 _LOCK = Lock()
 
 
-def _ensure_path(path: Path) -> Path:
+def _ensure_path(path: Path | str) -> Path:
     path = Path(path)
     if not path.is_absolute():
         path = Path.cwd() / path
     return path
 
 
-def init_db(path: Path = Path("var/state.db")) -> None:
+def init_db(path: Path | str | None = None) -> None:
     """Initialise the SQLite database and run legacy migrations."""
 
     global _DB_PATH, _INITIALIZED
-    resolved = _ensure_path(path)
+    target = path or _DB_PATH
+    resolved = _ensure_path(target)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
         conn = sqlite3.connect(resolved)
         try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS sent (
-                  email TEXT NOT NULL,
-                  grp   TEXT NOT NULL,
-                  msg_id TEXT,
-                  sent_at TEXT NOT NULL,
-                  PRIMARY KEY (email, grp, sent_at)
+                CREATE TABLE IF NOT EXISTS send_history(
+                    email_norm  TEXT NOT NULL,
+                    group_key   TEXT NOT NULL,
+                    sent_at_utc TEXT NOT NULL,
+                    message_id  TEXT,
+                    run_id      TEXT,
+                    smtp_result TEXT,
+                    PRIMARY KEY (email_norm, group_key, sent_at_utc)
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_sent_email_grp
-                ON sent(email, grp)
+                CREATE INDEX IF NOT EXISTS idx_send_history_last
+                  ON send_history(email_norm, group_key, sent_at_utc DESC)
                 """
             )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS edits (
-                  chat_id INTEGER NOT NULL,
-                  old_email TEXT NOT NULL,
-                  new_email TEXT NOT NULL,
-                  edited_at TIMESTAMP NOT NULL
+                    chat_id   INTEGER NOT NULL,
+                    old_email TEXT NOT NULL,
+                    new_email TEXT NOT NULL,
+                    edited_at TEXT NOT NULL
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_edits_chat_email ON edits(chat_id, old_email)
+                CREATE INDEX IF NOT EXISTS idx_edits_chat_email
+                ON edits(chat_id, old_email)
                 """
             )
             _run_migrations(conn)
@@ -82,9 +90,10 @@ def _ensure_initialized() -> None:
         init_db(_DB_PATH)
 
 
-def _open() -> sqlite3.Connection:
+def _connect() -> sqlite3.Connection:
     _ensure_initialized()
-    conn = sqlite3.connect(_DB_PATH)
+    conn = sqlite3.connect(_DB_PATH, timeout=30)
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
@@ -98,8 +107,8 @@ def _canonical_email(email: str) -> str:
         return email.lower()
 
 
-def _canonical_group(grp: str) -> str:
-    return (grp or "").strip().lower()
+def _canonical_group(group: str) -> str:
+    return (group or "").strip().lower()
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -109,10 +118,10 @@ def _ensure_utc(dt: datetime) -> datetime:
 
 
 def _isoformat(dt: datetime) -> str:
-    return _ensure_utc(dt).isoformat()
+    return _ensure_utc(dt).isoformat().replace("+00:00", "Z")
 
 
-def _parse_datetime(value) -> datetime | None:
+def _parse_datetime(value) -> Optional[datetime]:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     if value is None:
@@ -130,68 +139,160 @@ def _parse_datetime(value) -> datetime | None:
 
 
 def _prepare_row(
-    email: str, grp: str, msg_id: str | None, sent_at: datetime | None
-) -> tuple[str, str, str | None, str] | None:
+    email: str,
+    group: str,
+    message_id: str | None,
+    sent_at: datetime | None,
+    *,
+    run_id: str = "",
+    smtp_result: str = "ok",
+) -> Optional[tuple[str, str, str, str | None, str | None, str | None]]:
     if sent_at is None:
         return None
     email_norm = _canonical_email(email)
     if not email_norm:
         return None
-    grp_norm = _canonical_group(grp)
-    msg_norm = (msg_id or "").strip() or None
-    return email_norm, grp_norm, msg_norm, _isoformat(sent_at)
+    group_norm = _canonical_group(group)
+    msg_norm = (message_id or "").strip() or None
+    run_norm = (run_id or "").strip() or None
+    result_norm = (smtp_result or "").strip() or None
+    return (
+        email_norm,
+        group_norm,
+        _isoformat(sent_at),
+        msg_norm,
+        run_norm,
+        result_norm,
+    )
 
 
-def record_sent(email: str, grp: str, msg_id: str | None, sent_at: datetime) -> None:
-    """Persist a new send event."""
-
-    row = _prepare_row(email, grp, msg_id, sent_at)
-    if row is None:
-        return
-    with _open() as conn:
+def _insert_history_row(row: tuple[str, str, str, str | None, str | None, str | None]) -> None:
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
         conn.execute(
-            "INSERT OR REPLACE INTO sent(email, grp, msg_id, sent_at) VALUES (?, ?, ?, ?)",
+            """
+            INSERT OR REPLACE INTO send_history(
+                email_norm, group_key, sent_at_utc, message_id, run_id, smtp_result
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
             row,
         )
         conn.commit()
+    finally:
+        conn.close()
 
 
-def was_sent_within(email: str, grp: str, days: int) -> bool:
-    """Return ``True`` if ``email`` was sent to within ``days`` days for ``grp``."""
+def record_send(
+    email_norm: str,
+    group_key: str,
+    sent_at_utc: datetime,
+    message_id: str = "",
+    run_id: str = "",
+    smtp_result: str = "",
+) -> None:
+    email_norm = (email_norm or "").strip().lower()
+    if not email_norm:
+        return
+    group_key = (group_key or "").strip().lower()
+    row = (
+        email_norm,
+        group_key,
+        _isoformat(sent_at_utc),
+        (message_id or "").strip() or None,
+        (run_id or "").strip() or None,
+        (smtp_result or "").strip() or None,
+    )
+    _insert_history_row(row)
 
+
+def record_sent(email: str, group: str, msg_id: str | None, sent_at: datetime) -> None:
+    row = _prepare_row(email, group, msg_id, sent_at, smtp_result="ok")
+    if row is None:
+        return
+    _insert_history_row(row)
+
+
+def last_send(email_norm: str, group_key: str) -> Optional[datetime]:
+    email_norm = (email_norm or "").strip().lower()
+    if not email_norm:
+        return None
+    group_key = (group_key or "").strip().lower()
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """
+            SELECT sent_at_utc FROM send_history
+            WHERE email_norm=? AND group_key=?
+            ORDER BY sent_at_utc DESC
+            LIMIT 1
+            """,
+            (email_norm, group_key),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return _parse_datetime(row[0])
+
+
+def last_send_any_group(email_norm: str) -> Optional[Tuple[str, datetime]]:
+    email_norm = (email_norm or "").strip().lower()
+    if not email_norm:
+        return None
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """
+            SELECT group_key, sent_at_utc FROM send_history
+            WHERE email_norm=?
+            ORDER BY sent_at_utc DESC
+            LIMIT 1
+            """,
+            (email_norm,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    dt = _parse_datetime(row[1])
+    if dt is None:
+        return None
+    return row[0], dt
+
+
+def was_sent_within(email: str, group: str, days: int) -> bool:
+    if days <= 0:
+        return False
+    last = get_last_sent(email, group)
+    if last is None:
+        return False
+    now = datetime.now(timezone.utc)
+    return last >= now - timedelta(days=days)
+
+
+def get_last_sent(email: str, group: str) -> Optional[datetime]:
+    email_norm = _canonical_email(email)
+    if not email_norm:
+        return None
+    group_norm = _canonical_group(group)
+    return last_send(email_norm, group_norm)
+
+
+def was_sent_within_any_group(email: str, days: int) -> bool:
     if days <= 0:
         return False
     email_norm = _canonical_email(email)
     if not email_norm:
         return False
-    grp_norm = _canonical_group(grp)
+    info = last_send_any_group(email_norm)
+    if not info:
+        return False
+    _, last = info
     now = datetime.now(timezone.utc)
-    cutoff_iso = _isoformat(now - timedelta(days=days))
-    with _open() as conn:
-        cur = conn.execute(
-            "SELECT 1 FROM sent WHERE email=? AND grp=? AND sent_at >= ? LIMIT 1",
-            (email_norm, grp_norm, cutoff_iso),
-        )
-        return cur.fetchone() is not None
-
-
-def get_last_sent(email: str, grp: str) -> datetime | None:
-    """Return the most recent send timestamp for ``email``/``grp`` if present."""
-
-    email_norm = _canonical_email(email)
-    if not email_norm:
-        return None
-    grp_norm = _canonical_group(grp)
-    with _open() as conn:
-        cur = conn.execute(
-            "SELECT sent_at FROM sent WHERE email=? AND grp=? ORDER BY sent_at DESC LIMIT 1",
-            (email_norm, grp_norm),
-        )
-        row = cur.fetchone()
-    if not row:
-        return None
-    value = row[0]
-    return _parse_datetime(value)
+    return last >= now - timedelta(days=days)
 
 
 def _legacy_stats_paths() -> Iterable[Path]:
@@ -237,7 +338,7 @@ def _migrate_send_stats(conn: sqlite3.Connection) -> None:
                     if rec.get("status") not in {"success", "ok", "sent"}:
                         continue
                     email = rec.get("email") or ""
-                    grp = rec.get("group") or rec.get("source") or ""
+                    group = rec.get("group") or rec.get("source") or ""
                     ts = rec.get("ts")
                     dt = _parse_datetime(ts)
                     if dt is None:
@@ -246,11 +347,16 @@ def _migrate_send_stats(conn: sqlite3.Connection) -> None:
                         except Exception:
                             dt = datetime.now(timezone.utc)
                     msg_id = rec.get("message_id") or rec.get("msg_id")
-                    row = _prepare_row(email, grp, msg_id, dt)
+                    status = rec.get("status") or "ok"
+                    row = _prepare_row(email, group, msg_id, dt, smtp_result=status)
                     if row is None:
                         continue
                     conn.execute(
-                        "INSERT OR REPLACE INTO sent(email, grp, msg_id, sent_at) VALUES (?, ?, ?, ?)",
+                        """
+                        INSERT OR REPLACE INTO send_history(
+                            email_norm, group_key, sent_at_utc, message_id, run_id, smtp_result
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
                         row,
                     )
         except FileNotFoundError:
@@ -264,20 +370,24 @@ def _migrate_sent_log(conn: sqlite3.Connection) -> None:
         try:
             with path.open(encoding="utf-8") as fh:
                 reader = csv.DictReader(fh)
-                for row in reader:
-                    email = row.get("email") or row.get("key") or ""
-                    grp = row.get("source") or row.get("group") or ""
-                    ts = row.get("last_sent_at")
+                for rec in reader:
+                    email = rec.get("email") or rec.get("key") or ""
+                    group = rec.get("source") or rec.get("group") or ""
+                    ts = rec.get("last_sent_at")
                     dt = _parse_datetime(ts)
                     if dt is None:
                         continue
-                    msg_id = row.get("message_id") or row.get("msg_id")
-                    prepared = _prepare_row(email, grp, msg_id, dt)
-                    if prepared is None:
+                    msg_id = rec.get("message_id") or rec.get("msg_id")
+                    row = _prepare_row(email, group, msg_id, dt, smtp_result="ok")
+                    if row is None:
                         continue
                     conn.execute(
-                        "INSERT OR REPLACE INTO sent(email, grp, msg_id, sent_at) VALUES (?, ?, ?, ?)",
-                        prepared,
+                        """
+                        INSERT OR REPLACE INTO send_history(
+                            email_norm, group_key, sent_at_utc, message_id, run_id, smtp_result
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
                     )
         except FileNotFoundError:
             continue
@@ -295,7 +405,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
 __all__ = [
     "init_db",
+    "record_send",
     "record_sent",
     "was_sent_within",
     "get_last_sent",
+    "last_send",
+    "last_send_any_group",
+    "was_sent_within_any_group",
 ]
