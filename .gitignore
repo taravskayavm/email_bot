@@ -230,3 +230,6 @@ __marimo__/
 templates/_backup/
 templates/.Rhistory
 
+# Telegram bot logs
+bot.log*
+logs/
