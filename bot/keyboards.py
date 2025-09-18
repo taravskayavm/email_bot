@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
+from pathlib import Path
 from typing import Dict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from services.templates import list_templates
+
+_ICONS = {}
+_ICONS_PATH = Path("icons.json")
+if _ICONS_PATH.exists():
+    try:
+        _ICONS = json.loads(_ICONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        _ICONS = {}
+
+
+def _icon_for(label: str) -> str:
+    return _ICONS.get(label) or _ICONS.get(label.strip()) or ""
 
 
 def _normalize_code(code: str | None) -> str:
@@ -49,8 +63,12 @@ def build_templates_kb(
         mapping[key] = dict(info)
         base_label = str(info.get("label") or info.get("code") or key)
         display_label = base_label
+        # Префиксуем иконкой, если она задана в icons.json
+        icon = _icon_for(display_label)
+        if icon:
+            display_label = f"{icon} {display_label}"
         if normalized_current and key == normalized_current:
-            display_label = f"{base_label} • текущий"
+            display_label = f"{display_label} • текущий"
         existing_idx = label_rows.get(base_label)
         button = InlineKeyboardButton(
             str(display_label), callback_data=f"{prefix}{key}"
