@@ -35,6 +35,57 @@ _SHOW_EDITS_CALLBACK = "preview_edits_show"
 _CLEAR_EDITS_CALLBACK = "preview_edits_reset"
 _REFRESH_PREFIX = "preview_refresh:"
 
+MAX_TG = 4096
+_PARAGRAPH_CHUNK = 3000
+
+
+def _split_for_telegram(text: str) -> list[str]:
+    parts: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        if not block:
+            candidate = current + ("\n\n" if current else "")
+            if len(candidate) <= MAX_TG:
+                current = candidate
+            else:
+                if current:
+                    parts.append(current)
+                current = ""
+            continue
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= MAX_TG:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+            current = ""
+        if len(block) <= MAX_TG:
+            current = block
+            continue
+        start = 0
+        while start < len(block):
+            chunk = block[start : start + _PARAGRAPH_CHUNK]
+            parts.append(chunk)
+            start += _PARAGRAPH_CHUNK
+    if current:
+        parts.append(current)
+    return [part for part in parts if part]
+
+
+async def _safe_reply_text(message, text: str, **kwargs):
+    if not text:
+        return
+    if len(text) <= MAX_TG:
+        await message.reply_text(text, **kwargs)
+        return
+    chunks = _split_for_telegram(text)
+    if not chunks:
+        return
+    first, *rest = chunks
+    await message.reply_text(first, **kwargs)
+    for part in rest:
+        await message.reply_text(part)
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -364,7 +415,7 @@ async def request_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     await query.answer()
     context.chat_data["preview_edit_pending"] = True
-    await query.message.reply_text(
+    await _safe_reply_text(query.message, 
         (
             "Введите правку в формате «старый -> новый».\n"
             "Пример: old@example.ru -> new@example.ru"
@@ -381,7 +432,7 @@ async def show_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = chat.id if chat else 0
     rows = list_saved_edits(chat_id)
     if not rows:
-        await query.message.reply_text("📄 Сохранённых правок нет.")
+        await _safe_reply_text(query.message, "📄 Сохранённых правок нет.")
         return
     limit = 20
     lines = ["📄 Текущие правки:"]
@@ -390,7 +441,7 @@ async def show_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append(f"{idx}) {old_email} → {new_email} ({ts})")
     if len(rows) > limit:
         lines.append(f"… и ещё {len(rows) - limit}.")
-    await query.message.reply_text("\n".join(lines))
+    await _safe_reply_text(query.message, "\n".join(lines))
 
 
 async def reset_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -405,7 +456,7 @@ async def reset_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if isinstance(preview, dict):
         preview["fixed"] = []
         context.chat_data["send_preview"] = preview
-    await query.message.reply_text("♻️ Правки удалены.")
+    await _safe_reply_text(query.message, "♻️ Правки удалены.")
 
 
 async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -416,16 +467,16 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     normalized = raw.replace("→", "->")
     if "->" not in normalized:
         context.chat_data["preview_edit_pending"] = True
-        await update.message.reply_text("❌ Формат: старый -> новый")
+        await _safe_reply_text(update.message, "❌ Формат: старый -> новый")
         return
     old_raw, new_raw = (part.strip() for part in normalized.split("->", 1))
     if not old_raw or not new_raw:
         context.chat_data["preview_edit_pending"] = True
-        await update.message.reply_text("❌ Укажите адреса в формате: старый -> новый")
+        await _safe_reply_text(update.message, "❌ Укажите адреса в формате: старый -> новый")
         return
     if "@" not in old_raw:
         context.chat_data["preview_edit_pending"] = True
-        await update.message.reply_text("❌ Старый адрес должен содержать символ @.")
+        await _safe_reply_text(update.message, "❌ Старый адрес должен содержать символ @.")
         return
 
     parsed = parse_emails_unified(new_raw)
@@ -433,11 +484,11 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     parsed = drop_leading_char_twins(parsed)
     if not parsed:
         context.chat_data["preview_edit_pending"] = True
-        await update.message.reply_text("❌ Не удалось распознать новый адрес.")
+        await _safe_reply_text(update.message, "❌ Не удалось распознать новый адрес.")
         return
     if len(parsed) > 1:
         context.chat_data["preview_edit_pending"] = True
-        await update.message.reply_text("❌ Укажите только один новый адрес.")
+        await _safe_reply_text(update.message, "❌ Укажите только один новый адрес.")
         return
 
     new_email = parsed[0]
@@ -461,7 +512,7 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ]
         ]
     )
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         f"✅ Правка сохранена:\n{old_raw} → {new_email}\nОбновить предпросмотр?",
         reply_markup=keyboard,
     )
@@ -478,7 +529,7 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     base_emails = _get_source_emails(context)
     if not base_emails:
-        await query.message.reply_text("⚠️ Нет исходного списка адресов для обновления.")
+        await _safe_reply_text(query.message, "⚠️ Нет исходного списка адресов для обновления.")
         return False
 
     state = _get_state(context)
@@ -487,7 +538,7 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
         group_code = state.group
     group_code = group_code or ""
     if not group_code:
-        await query.message.reply_text("⚠️ Сначала выберите направление рассылки.")
+        await _safe_reply_text(query.message, "⚠️ Сначала выберите направление рассылки.")
         return False
 
     label = context.chat_data.get("current_template_label") or ""
@@ -497,7 +548,7 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not template_path and state and getattr(state, "template", None):
         template_path = state.template or ""
     if not template_path:
-        await query.message.reply_text("⚠️ Шаблон письма недоступен. Выберите его заново.")
+        await _safe_reply_text(query.message, "⚠️ Шаблон письма недоступен. Выберите его заново.")
         return False
 
     updated_source = apply_saved_edits(list(base_emails), chat_id)
@@ -559,6 +610,6 @@ async def handle_refresh_choice(update: Update, context: ContextTypes.DEFAULT_TY
     if choice == "yes":
         success = await _regenerate_preview(update, context)
         if not success:
-            await query.message.reply_text("❌ Не удалось обновить предпросмотр.")
+            await _safe_reply_text(query.message, "❌ Не удалось обновить предпросмотр.")
     else:
-        await query.message.reply_text("Предпросмотр оставлен без изменений.")
+        await _safe_reply_text(query.message, "Предпросмотр оставлен без изменений.")

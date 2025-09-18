@@ -18,7 +18,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import aiohttp
 from telegram import (
@@ -198,6 +198,72 @@ TECH_PATTERNS = [
     "info@",
 ]
 
+MAX_TG_MESSAGE = 4096
+_PARAGRAPH_CHUNK = 3000
+
+
+def _split_for_telegram(text: str) -> list[str]:
+    parts: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        if not block:
+            candidate = current + ("\n\n" if current else "")
+            if len(candidate) <= MAX_TG_MESSAGE:
+                current = candidate
+            else:
+                if current:
+                    parts.append(current)
+                current = ""
+            continue
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= MAX_TG_MESSAGE:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+            current = ""
+        if len(block) <= MAX_TG_MESSAGE:
+            current = block
+            continue
+        start = 0
+        while start < len(block):
+            chunk = block[start : start + _PARAGRAPH_CHUNK]
+            parts.append(chunk)
+            start += _PARAGRAPH_CHUNK
+    if current:
+        parts.append(current)
+    return [part for part in parts if part]
+
+
+async def _safe_reply_text(message, text: str, **kwargs):
+    if not text:
+        return
+    if len(text) <= MAX_TG_MESSAGE:
+        await message.reply_text(text, **kwargs)
+        return
+    chunks = _split_for_telegram(text)
+    if not chunks:
+        return
+    first, *rest = chunks
+    await message.reply_text(first, **kwargs)
+    for part in rest:
+        await message.reply_text(part)
+
+
+def _drop_truncated_twins(
+    emails: Sequence[str],
+    state: SessionState | None = None,
+    *,
+    update_counter: bool = True,
+) -> list[str]:
+    items = list(emails)
+    cleaned = drop_leading_char_twins(items)
+    if state is not None and update_counter:
+        removed = len(items) - len(cleaned)
+        if removed:
+            state.footnote_dupes = (state.footnote_dupes or 0) + removed
+    return cleaned
+
 
 @dataclass
 class SessionState:
@@ -361,7 +427,7 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     if not user or user.id not in ADMIN_IDS:
-        await update.message.reply_text("Команда доступна только администратору.")
+        await _safe_reply_text(update.message, "Команда доступна только администратору.")
         return
 
     settings.load()
@@ -429,7 +495,7 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "PDF-layout — OFF, OCR — OFF."
         )
 
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         f"{_status()}\n\n{_doc()}", reply_markup=_keyboard()
     )
 
@@ -629,9 +695,9 @@ async def dedupe_log_command(
         return
     if context.args and context.args[0].lower() in {"yes", "y"}:
         result = mu.dedupe_sent_log_inplace(messaging.LOG_FILE)
-        await update.message.reply_text(str(result))
+        await _safe_reply_text(update.message, str(result))
     else:
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             "⚠️ Это действие перезапишет sent_log.csv. Запустите /dedupe_log yes для подтверждения."
         )
 
@@ -639,7 +705,7 @@ async def dedupe_log_command(
 async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to upload files or URLs with e-mail addresses."""
 
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         (
             "📥 Загрузите данные с e-mail-адресами для рассылки.\n\n"
             "Поддерживаемые форматы: PDF, Excel (.xlsx), Word (.docx), CSV, "
@@ -651,7 +717,7 @@ async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a short description of the bot."""
 
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         (
             "Бот делает рассылку HTML-писем с учётом истории отправки "
             "(IMAP 180 дней) и блок-листа. Один адрес — не чаще 1 раза в 6 "
@@ -665,7 +731,7 @@ async def stop_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     event = context.chat_data.get("cancel_event")
     if event:
         event.set()
-    await update.message.reply_text("Остановлено…")
+    await _safe_reply_text(update.message, "Остановлено…")
     context.chat_data["cancel_event"] = asyncio.Event()
 
 
@@ -673,7 +739,7 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Ask the user to provide e-mails to add to the block list."""
 
     clear_all_awaiting(context)
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         (
             "Введите email или список email-адресов "
             "(через запятую/пробел/с новой строки), "
@@ -689,9 +755,9 @@ async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     dedupe_blocked_file()
     blocked = get_blocked_emails()
     if not blocked:
-        await update.message.reply_text("📄 Список исключений пуст.")
+        await _safe_reply_text(update.message, "📄 Список исключений пуст.")
     else:
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             "📄 В исключениях:\n" + "\n".join(sorted(blocked))
         )
 
@@ -701,7 +767,7 @@ async def prompt_change_group(
 ) -> None:
     """Prompt the user to choose a mailing group."""
 
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "Выберите направление:",
         reply_markup=build_templates_kb(
             context,
@@ -723,7 +789,7 @@ async def imap_folders_command(
         status, data = imap.list()
         imap.logout()
         if status != "OK" or not data:
-            await update.message.reply_text("❌ Не удалось получить список папок.")
+            await _safe_reply_text(update.message, "❌ Не удалось получить список папок.")
             return
         folders = [
             line.decode(errors="ignore").split(' "', 2)[-1].strip('"') for line in data
@@ -732,7 +798,7 @@ async def imap_folders_command(
         await _show_imap_page(update, context, 0)
     except Exception as e:
         log_error(f"imap_folders_command: {e}")
-        await update.message.reply_text(f"❌ Ошибка IMAP: {e}")
+        await _safe_reply_text(update.message, f"❌ Ошибка IMAP: {e}")
 
 
 async def _show_imap_page(update_or_query, context, page: int) -> None:
@@ -759,7 +825,7 @@ async def _show_imap_page(update_or_query, context, page: int) -> None:
     markup = InlineKeyboardMarkup(keyboard)
     text = "Выберите папку для сохранения отправленных писем:"
     if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(text, reply_markup=markup)
+        await _safe_reply_text(update_or_query.message, text, reply_markup=markup)
     else:
         await update_or_query.message.edit_text(text, reply_markup=markup)
 
@@ -782,7 +848,7 @@ async def choose_imap_folder(
     folder = urllib.parse.unquote(encoded)
     with open(messaging.IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
         f.write(folder)
-    await query.message.reply_text(f"📁 Папка сохранена: {folder}")
+    await _safe_reply_text(query.message, f"📁 Папка сохранена: {folder}")
 
 
 async def force_send_command(
@@ -792,7 +858,7 @@ async def force_send_command(
 
     chat_id = update.effective_chat.id
     enable_force_send(chat_id)
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "Режим игнорирования дневного лимита включён для этого чата.\n"
         "Запустите рассылку ещё раз — ограничение на сегодня будет проигнорировано."
     )
@@ -809,7 +875,7 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Сегодня — ок: {today.get('ok',0)}, ошибок: {today.get('err',0)}",
         f"Неделя — ок: {week.get('ok',0)}, ошибок: {week.get('err',0)}",
     ]
-    await update.message.reply_text("\n".join(lines))
+    await _safe_reply_text(update.message, "\n".join(lines))
 
 
 async def handle_reports_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -834,9 +900,9 @@ async def handle_reports_debug(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Время сейчас (UTC): {now_utc}",
             f"TZ отчёта: {current_tz_label()}",
         ]
-        await update.message.reply_text("\n".join(msg))
+        await _safe_reply_text(update.message, "\n".join(msg))
     except Exception as e:  # pragma: no cover - best effort
-        await update.message.reply_text(f"Diag error: {e!r}")
+        await _safe_reply_text(update.message, f"Diag error: {e!r}")
 
 
 # === КНОПКИ ДЛЯ ПОДОЗРИТЕЛЬНЫХ ===
@@ -876,14 +942,14 @@ async def on_edit_suspects_input(update: Update, context: ContextTypes.DEFAULT_T
     text = update.message.text or ""
     fixed = parse_emails_unified(text)
     fixed = dedupe_keep_original(fixed)
-    fixed = drop_leading_char_twins(fixed)
+    fixed = _drop_truncated_twins(fixed, state=get_state(context))
     sendable = set(context.user_data.get("emails_for_sending") or [])
     for e in fixed:
         sendable.add(e)
     context.user_data["emails_for_sending"] = sorted(sendable)
     context.user_data["emails_suspects"] = []
     context.user_data["await_edit_suspects"] = False
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "✅ Исправленные адреса приняты.\n"
         f"Итого к отправке: {len(sendable)}"
     )
@@ -898,7 +964,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton("🗓 Месяц", callback_data="report_month")],
         [InlineKeyboardButton("📅 Год", callback_data="report_year")],
     ]
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "Выберите период отчёта:", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -966,31 +1032,31 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Synchronize local log with the IMAP "Sent" folder."""
 
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "⏳ Сканируем папку «Отправленные» (последние 180 дней)..."
     )
     try:
         stats = sync_log_with_imap()
         clear_recent_sent_cache()
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             "🔄 "
             f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
             f"пропущено: {stats['skipped_events']}, всего: {stats['total_rows_after']}"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
+        await _safe_reply_text(update.message, f"❌ Ошибка синхронизации: {e}")
 
 
 async def sync_bounces_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check INBOX for bounce messages and log them."""
-    await update.message.reply_text("⏳ Проверяю INBOX на бонсы...")
+    await _safe_reply_text(update.message, "⏳ Проверяю INBOX на бонсы...")
     try:
         n = sync_bounces()
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             f"✅ Найдено и добавлено в отчёты: {n} bounce-сообщений."
         )
     except Exception as e:  # pragma: no cover - best effort
-        await update.message.reply_text(f"❌ Ошибка при синхронизации бонсов: {e}")
+        await _safe_reply_text(update.message, f"❌ Ошибка при синхронизации бонсов: {e}")
 
 
 async def retry_last_command(
@@ -1003,7 +1069,7 @@ async def retry_last_command(
         with BOUNCE_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
     if not rows:
-        await update.message.reply_text("Нет писем для ретрая")
+        await _safe_reply_text(update.message, "Нет писем для ретрая")
         return
     last_ts = rows[-1]["ts"]
     addrs: list[str] = []
@@ -1021,7 +1087,7 @@ async def retry_last_command(
                 addrs.append(email)
     unique = list(dict.fromkeys(addrs))
     if not unique:
-        await update.message.reply_text("Нет писем для ретрая")
+        await _safe_reply_text(update.message, "Нет писем для ретрая")
         return
     sent = 0
     for addr in unique:
@@ -1033,7 +1099,7 @@ async def retry_last_command(
             sent += 1
         except Exception as e:
             logger.warning("retry_last send failed for %s: %s", addr, e)
-    await update.message.reply_text(f"Повторно отправлено: {sent}")
+    await _safe_reply_text(update.message, f"Повторно отправлено: {sent}")
 
 
 async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1047,7 +1113,7 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
 
@@ -1117,14 +1183,14 @@ async def request_fix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _, idx_s = data.split(":", 1)
         idx = int(idx_s)
     except Exception:
-        await query.message.reply_text("⚠️ Некорректный индекс.")
+        await _safe_reply_text(query.message, "⚠️ Некорректный индекс.")
         return
     if idx < 0 or idx >= len(dropped):
-        await query.message.reply_text("⚠️ Индекс вне диапазона.")
+        await _safe_reply_text(query.message, "⚠️ Индекс вне диапазона.")
         return
     original, reason = dropped[idx]
     context.chat_data["fix_pending"] = {"index": idx, "original": original}
-    await query.message.reply_text(
+    await _safe_reply_text(query.message, 
         (
             "Введите исправленный адрес для:\n"
             f"`{original}`\n(прежняя причина: {reason})"
@@ -1201,7 +1267,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.all_files.extend(extracted_files)
     current = set(state.to_send)
     current.update(filtered)
-    state.to_send = sorted(current)
+    state.to_send = _drop_truncated_twins(sorted(current), state=state)
     state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
@@ -1308,7 +1374,7 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             report.append("⚠️ Подозрительные:\n" + "\n".join(preview_lines))
     if sample_foreign:
         report.append("🌍 Примеры иностранных:\n" + "\n".join(sample_foreign))
-    await query.message.reply_text(
+    await _safe_reply_text(query.message, 
         "\n\n".join(report) if report else "Показать нечего."
     )
 
@@ -1326,7 +1392,7 @@ async def prompt_manual_email(
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
     context.chat_data.pop("manual_selected_emails", None)
-    await update.message.reply_text(
+    await _safe_reply_text(update.message, 
         (
             "Введите email или список email-адресов "
             "(через запятую/пробел/с новой строки):"
@@ -1349,7 +1415,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if fix_state:
         new_text = text.strip()
         if not new_text:
-            await update.message.reply_text("❌ Введите корректный адрес.")
+            await _safe_reply_text(update.message, "❌ Введите корректный адрес.")
             return
         from pipelines.extract_emails import run_pipeline_on_text
 
@@ -1369,7 +1435,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 item for item in list(preview.get("final", [])) if item != original
             ]
             final_list.append(new_email)
-            preview["final"] = list(dict.fromkeys(final_list))
+            preview["final"] = _drop_truncated_twins(
+                list(dict.fromkeys(final_list)), update_counter=False
+            )
             fixed_list = list(preview.get("fixed", []))
             fixed_list.append({"from": original, "to": new_email})
             preview["fixed"] = fixed_list
@@ -1382,19 +1450,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             to_send_set = set(state.to_send)
             to_send_set.discard(original)
             to_send_set.add(new_email)
-            state.to_send = sorted(to_send_set)
+            state.to_send = _drop_truncated_twins(
+                sorted(to_send_set), state=state
+            )
             preview_allowed = [
                 addr for addr in state.preview_allowed_all if addr != original
             ]
             preview_allowed.append(new_email)
-            state.preview_allowed_all = sorted(set(preview_allowed))
-            await update.message.reply_text(
+            state.preview_allowed_all = _drop_truncated_twins(
+                sorted(set(preview_allowed)), update_counter=False
+            )
+            await _safe_reply_text(update.message, 
                 f"✅ Исправлено: `{original}` → **{new_email}**",
                 parse_mode="Markdown",
             )
         else:
             reason = dropped_new[0][1] if dropped_new else "invalid"
-            await update.message.reply_text(
+            await _safe_reply_text(update.message, 
                 f"❌ Всё ещё некорректно ({reason}). Попробуйте ещё раз или отправьте другой адрес."
             )
         return
@@ -1402,7 +1474,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         clean = _preclean_text_for_emails(text)
         emails = {normalize_email(x) for x in extract_emails_loose(clean) if "@" in x}
         added = [e for e in emails if add_blocked_email(e)]
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
         )
         context.user_data["awaiting_block_email"] = False
@@ -1411,11 +1483,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Единый вход: всё — через единый пайплайн
         found_emails = parse_emails_unified(text)
         emails = dedupe_keep_original(found_emails)
-        emails = drop_leading_char_twins(emails)
+        emails = _drop_truncated_twins(emails, state=get_state(context))
         emails = sorted(emails, key=str.lower)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
-            await update.message.reply_text("❌ Не найдено ни одного email.")
+            await _safe_reply_text(update.message, "❌ Не найдено ни одного email.")
             return
 
         # Скрываем список адресов: считаем только количества
@@ -1457,7 +1529,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboard.append(mode_row)
         keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
 
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -1467,12 +1539,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if urls:
         lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
         if lock.locked():
-            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
+            await _safe_reply_text(update.message, "⏳ Уже идёт анализ этого URL")
             return
         now = time.monotonic()
         last = context.chat_data.get("last_url")
         if last and last.get("urls") == urls and now - last.get("ts", 0) < 10:
-            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
+            await _safe_reply_text(update.message, "⏳ Уже идёт анализ этого URL")
             return
         context.chat_data["last_url"] = {"urls": urls, "ts": now}
         batch_id = secrets.token_hex(8)
@@ -1480,7 +1552,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         mass_state.set_batch(chat_id, batch_id)
         _extraction_url.set_batch(batch_id)
         context.chat_data["entry_url"] = urls[0]
-        await update.message.reply_text("🌐 Загружаем страницы...")
+        await _safe_reply_text(update.message, "🌐 Загружаем страницы...")
         results = []
         async with lock:
             async with aiohttp.ClientSession() as session:
@@ -1522,7 +1594,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state.all_emails.update(allowed_all)
         current = set(state.to_send)
         current.update(filtered)
-        state.to_send = sorted(current)
+        state.to_send = _drop_truncated_twins(sorted(current), state=state)
         foreign_total = set(state.foreign) | set(foreign_all)
         state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
         state.repairs_sample = sample_preview(
@@ -1593,7 +1665,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ]
         )
         report += "\n\nДополнительные действия:"
-        await update.message.reply_text(
+        await _safe_reply_text(update.message, 
             report,
             reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
@@ -1611,7 +1683,7 @@ async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     await query.answer()
     for chunk in _chunk_list(foreign, 60):
-        await query.message.reply_text("🌍 Иностранные домены:\n" + "\n".join(chunk))
+        await _safe_reply_text(query.message, "🌍 Иностранные домены:\n" + "\n".join(chunk))
 
 
 async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1635,13 +1707,16 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 applied += 1
                 if applied <= 12:
                     changed.append(f"{bad} → {good}")
-    state.to_send = sorted(current)
+    state.to_send = _drop_truncated_twins(sorted(current), state=state)
+    state.preview_allowed_all = _drop_truncated_twins(
+        state.preview_allowed_all, update_counter=False
+    )
     txt = f"🧩 Применено исправлений: {applied}."
     if changed:
         txt += "\n" + "\n".join(changed)
         if applied > len(changed):
             txt += f"\n… и ещё {applied - len(changed)}."
-    await query.message.reply_text(txt)
+    await _safe_reply_text(query.message, txt)
 
 
 async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1656,7 +1731,7 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
     pairs = [f"{b} → {g}" for (b, g) in repairs]
     for chunk in _chunk_list(pairs, 60):
-        await query.message.reply_text("🧩 Возможные исправления:\n" + "\n".join(chunk))
+        await _safe_reply_text(query.message, "🧩 Возможные исправления:\n" + "\n".join(chunk))
 
 
 async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1668,7 +1743,7 @@ async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     init_state(context)
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
-    await query.message.reply_text(
+    await _safe_reply_text(query.message, 
         "Сброшено. Нажмите /manual для новой ручной рассылки."
     )
 
@@ -1684,7 +1759,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     override_active = mode == "all"
     data = query.data or ""
     if ":" not in data:
-        await query.message.reply_text(
+        await _safe_reply_text(query.message, 
             "⚠️ Некорректный выбор шаблона. Обновите список и попробуйте снова."
         )
         return
@@ -1697,7 +1772,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         template_info = get_template(group_code_fallback)
         template_path_obj = _template_path(template_info)
         if not template_info or not template_path_obj or not template_path_obj.exists():
-            await query.message.reply_text(
+            await _safe_reply_text(query.message, 
                 "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
             )
             return
@@ -1727,7 +1802,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Если вообще нет исходных адресов — подскажем и выйдем
     if not emails:
-        await query.message.reply_text(
+        await _safe_reply_text(query.message, 
             "Список адресов пуст. Нажмите /manual и введите адреса."
         )
         return
@@ -1741,12 +1816,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines.append(f"Отфильтровано по правилу 180 дней: {len(rejected)}")
     if blocked_manual:
         lines.append(f"Исключено по блок-листу: {len(blocked_manual)}")
-    await query.message.reply_text("\n".join(lines))
+    await _safe_reply_text(query.message, "\n".join(lines))
 
     # Если отправлять нечего (всё отфильтровано) — не запускаем рассылку
     if len(to_send) == 0:
         if allow_override and len(rejected) > 0:
-            await query.message.reply_text(
+            await _safe_reply_text(query.message, 
                 "Все адреса были отфильтрованы правилом 180 дней.\n"
                 "Вы можете нажать «Отправить всем» для игнорирования правила."
             )
@@ -1757,11 +1832,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if blocked_manual:
                 reasons.append("блок-листом")
             reason_txt = " и ".join(reasons) if reasons else "правилами отправки"
-            await query.message.reply_text(
+            await _safe_reply_text(query.message, 
                 f"Все адреса были отфильтрованы {reason_txt}. Отправка не запущена."
             )
         return
 
+    state = get_state(context)
+    to_send = _drop_truncated_twins(to_send, state=state)
     # Сохраняем выбранный набор; дальнейшая логика подхватит эти значения
     context.chat_data["manual_selected_template_code"] = group_code
     context.chat_data["manual_selected_template_label"] = label
@@ -1796,7 +1873,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await notify(query.message, f"❌ IMAP ошибка: {e}", event="error")
             return
 
-        to_send_local = list(to_send)
+        state_snapshot = get_state(context)
+        to_send_local = _drop_truncated_twins(
+            list(to_send), state=state_snapshot
+        )
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
