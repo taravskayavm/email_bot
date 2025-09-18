@@ -14,6 +14,9 @@ from utils.email_deobfuscate import deobfuscate_text
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
 
+# Простые маркеры, указывающие на обфусцированный адрес (например, name(at)domain).
+_AUTO_DEOBF_HINTS = re.compile(r"(?i)(\[[^\]]*(?:at|dot)[^\]]*\]|\([^)]*(?:at|dot)[^)]*\))")
+
 # -------- ЕДИНЫЙ ЧИСТИЛЬЩИК НЕВИДИМЫХ СИМВОЛОВ --------
 # Удаляем невидимые пробелы/переносы/bi-di маркеры, часто попадающие из PDF/OCR.
 # Внимание: чистим исходный текст, НО не лезем внутрь уже матчинговых адресов.
@@ -295,7 +298,12 @@ def _normalize_localparts(text: str) -> str:
         translated = local.translate(_LOCAL_HOMO_MAP)
         if translated.isascii():
             local = translated
-        return f"{local}@{m.group('rest')}"
+        rest = m.group("rest")
+        if "." in rest:
+            rest = re.sub(_DOT_VARIANTS, "", rest)
+        else:
+            rest = re.sub(_DOT_VARIANTS, ".", rest)
+        return f"{local}@{rest}"
 
     try:
         return _LOCAL_CANDIDATE.sub(_fix, text)
@@ -578,7 +586,10 @@ _ASCII_DOMAIN_RE = re.compile(
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
 )
 
-_LOCAL_TLD_GLUE_RE = re.compile(rf"\.({_COMMON_TLD_RE})[A-Za-z]", re.IGNORECASE)
+_LOCAL_TLD_GLUE_CAMEL_RE = re.compile(rf"\.(?i:({_COMMON_TLD_RE}))(?=[A-Z0-9А-ЯЁ])")
+_LOCAL_TLD_GLUE_VOWEL_RE = re.compile(
+    r"\.(?:ru|su|ua|by|kz|kg|uz|tj|tm|az|am|ge|md)(?=[AEIOUYaeiouyАЕЁИОУЫЭЮЯаеёиоуыэюя])"
+)
 _EMAIL_FULL_RE = re.compile(rf"^{_EMAIL_CORE_UNICODE}$", re.IGNORECASE)
 
 def extract_emails(text: str) -> list[str]:
@@ -736,7 +747,8 @@ def parse_emails_unified(text: str, return_meta: bool = False):
 
     deobf_rules: list[str] = []
     deobf_applied = False
-    if OBFUSCATION_ENABLE:
+    should_deobf = OBFUSCATION_ENABLE or bool(_AUTO_DEOBF_HINTS.search(raw))
+    if should_deobf:
         t1 = deobfuscate_text(raw)
         deobf_applied = t1 != raw
         if hasattr(deobfuscate_text, "last_rules"):
@@ -1001,24 +1013,37 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
         local0, domain0 = email.split("@", 1)
         email = f"{_strip_footnotes(local0)}@{domain0}"
 
-    s = _normalize_text(email).lower().replace(" ", "").strip()
+    normalized_text = _normalize_text(email)
+    compact_original = normalized_text.replace(" ", "").strip()
+    s = compact_original.lower()
     before_trim = s
-    s = _PUNCT_TRIM_RE.sub("", s)
-    if s != before_trim and reason is None:
+    s_trimmed = _PUNCT_TRIM_RE.sub("", s)
+    compact_trimmed = _PUNCT_TRIM_RE.sub("", compact_original)
+    if s_trimmed != before_trim and reason is None:
         reason = "punct-trimmed"
-    trimmed_tail = re.sub(r"(\?|\#|/).*$", "", s)
-    if trimmed_tail != s and reason is None:
+    trimmed_tail = re.sub(r"(\?|\#|/).*$", "", s_trimmed)
+    compact_tail = re.sub(r"(\?|\#|/).*$", "", compact_trimmed)
+    if trimmed_tail != s_trimmed and reason is None:
         reason = "trailing-garbage"
     s = trimmed_tail
+    compact_original = compact_tail
 
     if "@" not in s:
         return "", reason
 
     local, domain = s.split("@", 1)
+    original_local = ""
+    if "@" in compact_original:
+        original_local = compact_original.split("@", 1)[0]
+    if not original_local:
+        original_local = local
     before_local = local
     local = local.replace(",", ".")
+    original_local = original_local.replace(",", ".")
     local = re.sub(r"^[-_.]+|[-_.]+$", "", local)
+    original_local = re.sub(r"^[-_.]+|[-_.]+$", "", original_local)
     local = _normalize_dots(local)
+    original_local = _normalize_dots(original_local)
     if local != before_local and reason is None:
         reason = "punct-trimmed"
 
@@ -1028,7 +1053,9 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     if not _ASCII_LOCAL_RE.match(local):
         return "", reason
 
-    if _LOCAL_TLD_GLUE_RE.search(local):
+    if _LOCAL_TLD_GLUE_CAMEL_RE.search(original_local) or _LOCAL_TLD_GLUE_VOWEL_RE.search(
+        original_local
+    ):
         return "", "skleyka-in-local"
 
     domain_ascii, domain_reason = normalize_domain(domain)
