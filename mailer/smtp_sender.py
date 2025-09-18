@@ -4,8 +4,11 @@ import smtplib
 import time
 from typing import Iterable
 from email.message import EmailMessage
+from email.utils import getaddresses
 from smtplib import SMTPResponseException
 
+from emailbot.audit import write_audit_drop
+from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
 from utils.send_stats import log_error, log_success
 
 
@@ -29,6 +32,36 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
     a mysterious ``503 sender already given`` error.
     """
     def _send_one(msg):
+        override_flag = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
+        if override_flag not in {"1", "true", "yes", "on"}:
+            to_values = msg.get_all("To", [])
+            recipients = [addr for _, addr in getaddresses(to_values)]
+            if not recipients:
+                raw_to = msg.get("To", "")
+                if isinstance(raw_to, str) and raw_to:
+                    recipients = [raw_to]
+            if not recipients and msg.get("X-EBOT-Recipient"):
+                recipients = [msg.get("X-EBOT-Recipient")]
+            for addr in recipients:
+                if not addr:
+                    continue
+                skip, skip_reason = should_skip_by_cooldown(addr)
+                if skip:
+                    reason_code = (
+                        skip_reason.split(";", 1)[0]
+                        if skip_reason
+                        else f"cooldown<{COOLDOWN_DAYS}d"
+                    )
+                    try:
+                        write_audit_drop(addr, reason_code, skip_reason)
+                    except Exception:  # pragma: no cover - defensive logging
+                        logger.debug("write_audit_drop failed", exc_info=True)
+                    logger.info(
+                        "Skipping SMTP send to %s due to cooldown: %s",
+                        addr,
+                        skip_reason,
+                    )
+                    return True, None
         try:
             smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
             try:
