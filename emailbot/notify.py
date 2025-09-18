@@ -5,6 +5,57 @@ from __future__ import annotations
 import os
 from typing import Any, Literal
 
+MAX_TG = 4096
+_PARAGRAPH_CHUNK = 3000
+
+
+def _split_for_telegram(text: str) -> list[str]:
+    parts: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        if not block:
+            candidate = current + ("\n\n" if current else "")
+            if len(candidate) <= MAX_TG:
+                current = candidate
+            else:
+                if current:
+                    parts.append(current)
+                current = ""
+            continue
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= MAX_TG:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+            current = ""
+        if len(block) <= MAX_TG:
+            current = block
+            continue
+        start = 0
+        while start < len(block):
+            chunk = block[start : start + _PARAGRAPH_CHUNK]
+            parts.append(chunk)
+            start += _PARAGRAPH_CHUNK
+    if current:
+        parts.append(current)
+    return [part for part in parts if part]
+
+
+async def _safe_reply_text(message, text: str, **kwargs):
+    if not text:
+        return
+    if len(text) <= MAX_TG:
+        await message.reply_text(text, **kwargs)
+        return
+    chunks = _split_for_telegram(text)
+    if not chunks:
+        return
+    first, *rest = chunks
+    await message.reply_text(first, **kwargs)
+    for part in rest:
+        await message.reply_text(part)
+
 # Политика уведомлений:
 #   full  — как раньше (все сообщения)
 #   brief — только старт/финиш, критические ошибки
@@ -44,4 +95,4 @@ async def notify(
         return
     if not force and not _allowed(event):
         return
-    await message.reply_text(text, **kwargs)
+    await _safe_reply_text(message, text, **kwargs)
