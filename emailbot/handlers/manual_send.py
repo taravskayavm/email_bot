@@ -11,6 +11,8 @@ from typing import Dict, List, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from emailbot.notify import notify
+
 from bot.keyboards import build_templates_kb
 
 from emailbot import mass_state, messaging
@@ -145,7 +147,8 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     except Exception:
         pass
-    await query.message.reply_text(f"✅ Выбран шаблон: «{label}»\nФайл: {template_path}")
+    # Короткое подтверждение без раскрытия пути к файлу (см. EBOT-0918-02)
+    await query.message.reply_text(f"✅ Выбран шаблон: «{label}»")
     chat_id = query.message.chat.id
     context.chat_data["preview_source_emails"] = list(emails)
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
@@ -442,9 +445,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             blocked_invalid,
         )
 
-        await query.message.reply_text(report_text)
+        # Безопасная отправка: notify сам разрежет текст на куски < 4096
+        await notify(query.message, report_text, event="finish")
         if errors:
-            await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+            await notify(
+                query.message,
+                "Ошибки:\n" + "\n".join(errors),
+                event="error",
+            )
 
         clear_recent_sent_cache()
         bot_handlers_module.disable_force_send(chat_id)
