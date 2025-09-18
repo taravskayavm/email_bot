@@ -130,14 +130,18 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         group_raw = template_info.get("code") or group_code_fallback
     group_code = bot_handlers_module._normalize_template_code(group_raw)
     template_path = str(template_path_obj)
-    label = bot_handlers_module._template_label(template_info) or group_code
+    template_label = bot_handlers_module._template_label(template_info)
+    if not template_label and group_code:
+        template_label = get_template_label(group_code)
+    if not template_label:
+        template_label = group_code
     state = bot_handlers_module.get_state(context)
     emails = state.to_send
     state.group = group_code
     state.template = template_path
-    state.template_label = label
+    state.template_label = template_label
     context.chat_data["current_template_code"] = group_code
-    context.chat_data["current_template_label"] = label
+    context.chat_data["current_template_label"] = template_label
     context.chat_data["current_template_path"] = template_path
     try:
         await query.message.edit_reply_markup(
@@ -148,7 +152,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         pass
     # Короткое подтверждение без раскрытия пути к файлу (см. EBOT-0918-02)
-    await query.message.reply_text(f"✅ Выбран шаблон: «{label}»")
+    await query.message.reply_text(f"✅ Выбран шаблон: «{template_label}»")
     chat_id = query.message.chat.id
     context.chat_data["preview_source_emails"] = list(emails)
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
@@ -168,7 +172,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         {
             "group": group_code,
             "template": template_path,
-            "template_label": label,
+            "template_label": template_label,
             "pending": ready,
             "blocked_foreign": blocked_foreign,
             "blocked_invalid": blocked_invalid,
@@ -186,7 +190,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update,
         context,
         group_code,
-        label,
+        template_label,
         ready,
         blocked_foreign,
         blocked_invalid,
@@ -221,8 +225,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     await query.answer()
+    group_code = str(group_code)
+    template_label = str(template_label or "")
+    if not template_label and group_code:
+        template_label = get_template_label(group_code)
+    if not template_label and group_code:
+        template_label = group_code
     display_label = template_label or group_code
-    if template_label and template_label.lower() != group_code:
+    if template_label and template_label.lower() != group_code.lower():
         display_label = f"{template_label} ({group_code})"
     await query.message.reply_text(
         "Запущено — выполняю в фоне...\n" f"Шаблон: {display_label}"
@@ -307,6 +317,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 {
                     "group": group_code,
                     "template": template_path,
+                    "template_label": template_label,
                     "pending": to_send,
                     "sent_ok": sent_ok,
                     "blocked_foreign": blocked_foreign,
@@ -348,6 +359,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 {
                     "group": group_code,
                     "template": template_path,
+                    "template_label": template_label,
                     "pending": to_send,
                     "sent_ok": sent_ok,
                     "blocked_foreign": blocked_foreign,
@@ -386,7 +398,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         email_addr,
                         template_path,
                         fixed_from=fixed_map.get(email_addr),
-                        group_title=label,
+                        group_title=template_label,
                         group_key=group_code,
                     )
                     log_sent_email(
@@ -425,6 +437,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     {
                         "group": group_code,
                         "template": template_path,
+                        "template_label": template_label,
                         "pending": to_send,
                         "sent_ok": sent_ok,
                         "blocked_foreign": blocked_foreign,
