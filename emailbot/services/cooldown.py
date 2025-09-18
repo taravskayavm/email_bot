@@ -253,7 +253,13 @@ def should_skip_by_cooldown(
     threshold = timedelta(days=window)
     if delta < threshold:
         remain = threshold - delta
-        hours_left = int(remain.total_seconds() // 3600)
+        total_seconds = int(remain.total_seconds())
+        if total_seconds < 0:
+            total_seconds = 0
+        days_left, remainder = divmod(total_seconds, 86400)
+        hours_left, remainder = divmod(remainder, 3600)
+        mins_left = remainder // 60
+        remain_parts = f"{days_left}d {hours_left}h {mins_left}m"
         parts = [f"cooldown<{window}d", f"last={last.isoformat()}"]
         source = meta.get("source")
         if source:
@@ -261,7 +267,7 @@ def should_skip_by_cooldown(
         group = meta.get("group")
         if group:
             parts.append(f"group={group}")
-        parts.append(f"remain≈{hours_left}h")
+        parts.append(f"remain≈{remain_parts}")
         reason = "; ".join(parts)
         return True, reason
     return False, ""

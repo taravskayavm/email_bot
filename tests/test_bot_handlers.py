@@ -42,6 +42,11 @@ class DummyMessage:
         self.reply_markups.append(reply_markup)
         return self
 
+    async def edit_text(self, text, reply_markup=None, **kwargs):
+        self.replies.append(text)
+        self.reply_markups.append(reply_markup)
+        return self
+
     async def reply_document(
         self, document, caption=None, reply_markup=None, filename=None, **kwargs
     ):
@@ -570,6 +575,170 @@ async def test_manual_send_override_sets_flag(monkeypatch, tmp_path):
         await task
 
     assert overrides and overrides[0] is True
+
+
+def test_manual_override_store_selected_filters_candidates():
+    ctx = DummyContext()
+    ctx.chat_data["manual_override_candidates"] = [
+        {"email": "valid@example.com", "reason": "recent"}
+    ]
+
+    bh._manual_override_store_selected(
+        ctx, {"valid@example.com", "other@example.com"}
+    )
+
+    assert ctx.chat_data["manual_override_selected"] == ["valid@example.com"]
+
+    bh._manual_override_store_selected(ctx, {"valid@example.com"})
+    assert ctx.chat_data["manual_override_selected"] == ["valid@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_manual_ignore_selected_flow():
+    ctx = DummyContext()
+    ctx.chat_data["manual_override_candidates"] = [
+        {"email": "one@example.com", "reason": "recent"},
+        {"email": "two@example.com", "reason": "recent"},
+    ]
+    ctx.chat_data["manual_override_selected"] = []
+    ctx.chat_data["manual_override_days"] = 200
+
+    initial = DummyUpdate(callback_data="manual_ignore_selected:go")
+    await bh.manual_ignore_selected(initial, ctx)
+    message = initial.callback_query.message
+    assert message.replies, "Expected initial list to be rendered"
+
+    toggle = DummyUpdate(callback_data="manual_ignore_selected:toggle:1")
+    toggle.callback_query.message = message
+    await bh.manual_ignore_selected(toggle, ctx)
+    assert ctx.chat_data["manual_override_selected"] == ["two@example.com"]
+
+    apply = DummyUpdate(callback_data="manual_ignore_selected:apply")
+    apply.callback_query.message = message
+    await bh.manual_ignore_selected(apply, ctx)
+    assert ctx.chat_data["manual_override_selected"] == ["two@example.com"]
+
+    clear = DummyUpdate(callback_data="manual_ignore_selected:clear")
+    clear.callback_query.message = message
+    await bh.manual_ignore_selected(clear, ctx)
+    assert ctx.chat_data["manual_override_selected"] == []
+
+    toggle_first = DummyUpdate(callback_data="manual_ignore_selected:toggle:0")
+    toggle_first.callback_query.message = message
+    await bh.manual_ignore_selected(toggle_first, ctx)
+    assert ctx.chat_data["manual_override_selected"] == ["one@example.com"]
+
+    close = DummyUpdate(callback_data="manual_ignore_selected:close")
+    close.callback_query.message = message
+    await bh.manual_ignore_selected(close, ctx)
+
+    assert "Игнорирование правила 200 дней" in message.replies[-1]
+    assert ctx.chat_data["manual_override_selected"] == ["one@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_manual_send_selective_override(monkeypatch, tmp_path):
+    tpl_path = tmp_path / "tourism.html"
+    tpl_path.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bh,
+        "get_template",
+        lambda code: {
+            "code": code,
+            "label": code.title(),
+            "path": str(tpl_path),
+        }
+        if code == "tourism"
+        else None,
+    )
+
+    monkeypatch.setattr(
+        bh,
+        "_filter_by_180",
+        lambda emails, group, days, chat_id=None: (
+            ["allowed@example.com"],
+            ["recent@example.com"],
+        ),
+    )
+
+    overrides: dict[str, bool | None] = {}
+
+    def fake_send(client, imap, folder, addr, path, *a, **kw):
+        overrides[addr] = kw.get("override_180d")
+        return "tok"
+
+    class DummyImap:
+        def login(self, *a, **k):
+            return "OK", []
+
+        def list(self, *a, **k):
+            return "OK", []
+
+        def select(self, *a, **k):
+            return "OK", []
+
+        def logout(self):
+            return None
+
+    class DummySMTP:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(
+        bh,
+        "imaplib",
+        types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()),
+    )
+    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
+    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
+    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+    monkeypatch.setattr(bh.rules, "load_blocklist", lambda: [])
+    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
+
+    tasks: list[asyncio.Task] = []
+
+    def spawn(coro, _):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    monkeypatch.setattr(bh.messaging, "create_task_with_logging", spawn)
+
+    async def dummy_sleep(_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
+
+    update = DummyUpdate(callback_data="manual_tpl:tourism")
+    ctx = DummyContext()
+    ctx.chat_data["manual_all_emails"] = [
+        "allowed@example.com",
+        "recent@example.com",
+    ]
+    ctx.chat_data["manual_send_mode"] = "allowed"
+    ctx.chat_data["manual_override_candidates"] = [
+        {"email": "recent@example.com", "reason": "cooldown"},
+        {"email": "allowed@example.com", "reason": "cooldown"},
+    ]
+    ctx.chat_data["manual_override_selected"] = ["recent@example.com"]
+    ctx.chat_data["manual_override_days"] = 180
+    ctx.chat_data["manual_override_page"] = 0
+
+    await bh.send_manual_email(update, ctx)
+    for task in tasks:
+        await task
+
+    assert overrides["allowed@example.com"] is False
+    assert overrides["recent@example.com"] is True
+
+    assert "manual_override_selected" not in ctx.chat_data
+    assert "manual_override_candidates" not in ctx.chat_data
+    assert "manual_override_page" not in ctx.chat_data
+    assert "manual_override_days" not in ctx.chat_data
 
 
 def test_preview_separates_foreign():
