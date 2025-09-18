@@ -2,6 +2,8 @@ import json, os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+from emailbot.services.cooldown import normalize_email_for_key
+
 try:
     from zoneinfo import ZoneInfo  # py3.9+
 except Exception:  # pragma: no cover - fallback for older Python
@@ -58,9 +60,10 @@ def _to_local(dt_utc: datetime) -> datetime:
 
 
 def log_success(email: str, group: str, extra: dict | None = None) -> None:
+    email_value = normalize_email_for_key(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
-        "email": (email or "").strip(),
+        "email": email_value,
         "group": (group or "").strip().lower(),
         "status": "success",
     }
@@ -72,9 +75,10 @@ def log_success(email: str, group: str, extra: dict | None = None) -> None:
 
 
 def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
+    email_value = normalize_email_for_key(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
-        "email": (email or "").strip(),
+        "email": email_value,
         "group": (group or "").strip().lower(),
         "status": "error",
         "reason": reason[:300],
@@ -87,9 +91,10 @@ def log_error(email: str, group: str, reason: str, extra: dict | None = None) ->
 
 
 def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
+    email_value = normalize_email_for_key(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
-        "email": (email or "").strip(),
+        "email": email_value,
         "status": "bounce",
         "reason": str(reason)[:300],
     }

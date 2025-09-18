@@ -90,3 +90,12 @@ def _isolated_rules_files(tmp_path, monkeypatch):
     monkeypatch.setattr(rules, "HISTORY_PATH", history_path)
     monkeypatch.setattr(rules, "BLOCKLIST_PATH", blocklist_path)
     rules.ensure_dirs()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_send_stats(tmp_path, monkeypatch):
+    stats_path = tmp_path / "send_stats.jsonl"
+    audit_path = tmp_path / "audit.csv"
+    monkeypatch.setenv("SEND_STATS_PATH", str(stats_path))
+    monkeypatch.setenv("AUDIT_PATH", str(audit_path))
+    monkeypatch.setenv("APPEND_TO_SENT", "0")

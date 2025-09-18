@@ -27,6 +27,7 @@ from email import message_from_bytes, message_from_string, policy
 from services.templates import get_template, get_template_by_path
 
 from . import history_service
+from .audit import write_audit_drop
 from .edit_service import apply_edits as apply_saved_edits
 
 from .extraction import normalize_email, strip_html
@@ -49,6 +50,7 @@ from .messaging_utils import (
     upsert_sent_log,
 )
 from .utils import log_error as log_internal_error
+from .services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
 from utils import rules
 from utils.send_stats import log_error, log_success
 from utils.smtp_client import RobustSMTP, send_with_retry
@@ -521,6 +523,27 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
     if not msg.get("From") and EMAIL_ADDRESS:
         msg["From"] = EMAIL_ADDRESS
 
+    override_flag = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
+    allow_send = override_flag in {"1", "true", "yes", "on"}
+    if not allow_send:
+        skip, skip_reason = should_skip_by_cooldown(recipient)
+        if skip:
+            reason_code = (
+                skip_reason.split(";", 1)[0]
+                if skip_reason
+                else f"cooldown<{COOLDOWN_DAYS}d"
+            )
+            try:
+                write_audit_drop(recipient, reason_code, skip_reason)
+            except Exception:  # pragma: no cover - defensive logging
+                logger.debug("write_audit_drop failed", exc_info=True)
+            logger.info(
+                "Skipping SMTP send to %s due to cooldown: %s",
+                recipient,
+                skip_reason,
+            )
+            return
+
     smtp = RobustSMTP()
     try:
         for attempt in range(max_tries):
@@ -824,6 +847,25 @@ def send_email_with_sessions(
         group_key=group_key,
         override_180d=override_180d,
     )
+    header_override = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
+    if not (override_180d or header_override in {"1", "true", "yes", "on"}):
+        skip, skip_reason = should_skip_by_cooldown(recipient)
+        if skip:
+            reason_code = (
+                skip_reason.split(";", 1)[0]
+                if skip_reason
+                else f"cooldown<{COOLDOWN_DAYS}d"
+            )
+            try:
+                write_audit_drop(recipient, reason_code, skip_reason)
+            except Exception:  # pragma: no cover - defensive logging
+                logger.debug("write_audit_drop failed", exc_info=True)
+            logger.info(
+                "Skipping send_with_sessions for %s due to cooldown: %s",
+                recipient,
+                skip_reason,
+            )
+            return ""
     group_code = _message_group_key(msg)
     try:
         send_with_retry(smtp, msg)
