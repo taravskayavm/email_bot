@@ -7,6 +7,7 @@ from utils.email_clean import (
     dedupe_with_variants,
     parse_emails_unified,
 )
+from utils.name_match import extract_names, fio_match_score
 
 
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
@@ -34,8 +35,19 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         role_stats[info_class] += 1
         classified[addr] = info
 
+    # [EBOT-PARSER-FIO-003] FIO matching
+    names = extract_names(text or "")
+    fio_scores: Dict[str, float] = {}
+    for addr in unique:
+        if "@" not in addr:
+            fio_scores[addr] = 0.0
+            continue
+        local = addr.split("@", 1)[0]
+        fio_scores[addr] = max([fio_match_score(local, fio) for fio in names] or [0.0])
+
     meta["role_stats"] = role_stats
     meta["classified"] = classified
+    meta["fio_scores"] = fio_scores
 
     stats = {
         "found_raw": len(items),
@@ -48,6 +60,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "personal": role_stats.get("personal", 0),
         "role": role_stats.get("role", 0),
         "classified": classified,
+        "has_fio": 1 if names else 0,
     }
 
     return unique, stats
