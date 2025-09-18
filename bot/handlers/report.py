@@ -1,6 +1,9 @@
 import random
-from utils.email_clean import parse_emails_unified, drop_leading_char_twins
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from emailbot.notify import notify
+from utils.email_clean import drop_leading_char_twins, parse_emails_unified
 
 
 def build_examples(emails: list[str], k: int = 10) -> list[str]:
@@ -56,9 +59,9 @@ async def send_report(update, context, extractor_result) -> None:
         lines += ["", "🧪 Примеры:", *examples]
 
     if kb:
-        await update.message.reply_text("\n".join(lines), reply_markup=kb)
+        await notify(update.message, "\n".join(lines), reply_markup=kb, event="report")
     else:
-        await update.message.reply_text("\n".join(lines))
+        await notify(update.message, "\n".join(lines), event="report")
     context.user_data["emails_suspects"] = suspects
 
 def make_summary_message(
