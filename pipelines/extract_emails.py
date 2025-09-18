@@ -13,7 +13,8 @@ from utils.name_match import extract_names, fio_match_score
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
-    cleaned, meta = parse_emails_unified(text or "", return_meta=True)
+    raw_text = text or ""
+    cleaned, meta = parse_emails_unified(raw_text, return_meta=True)
     unique = dedupe_with_variants(cleaned)
 
     items = meta.get("items", [])
@@ -22,7 +23,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     dropped = sum(1 for item in items if not item.get("sanitized"))
 
     role_stats: Dict[str, int] = {"personal": 0, "role": 0}
-    ctx = text or ""
+    ctx = raw_text
     classified: Dict[str, Dict[str, object]] = {}
     for addr in unique:
         if "@" not in addr:
@@ -35,8 +36,36 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         role_stats[info_class] += 1
         classified[addr] = info
 
+    # [EBOT-PIPELINE-CONTEXT-004] naive source_context from nearby keywords
+    def guess_context(around: str) -> str:
+        s = around.lower()
+        if any(k in s for k in ("mailto:",)):
+            return "mailto"
+        if any(k in s for k in ("corresponding author", "corresponding", "корреспондир")):
+            return "pdf_corresponding_author"
+        if any(k in s for k in ("author", "автор")):
+            return "author_block"
+        if any(k in s for k in ("footer", "подвал", "copyright")):
+            return "footer"
+        if any(k in s for k in ("contact", "контакт", "связь")):
+            return "contacts"
+        return "unknown"
+
+    window = 180  # chars around email for context
+    contexts: Dict[str, str] = {}
+    raw_text_lower = raw_text.lower()
+    for addr in unique:
+        try:
+            index = raw_text_lower.find(addr.lower())
+            if index >= 0:
+                left = max(0, index - window)
+                right = min(len(raw_text), index + len(addr) + window)
+                contexts[addr] = guess_context(raw_text[left:right])
+        except Exception:
+            contexts[addr] = "unknown"
+
     # [EBOT-PARSER-FIO-003] FIO matching
-    names = extract_names(text or "")
+    names = extract_names(raw_text)
     fio_scores: Dict[str, float] = {}
     for addr in unique:
         if "@" not in addr:
@@ -47,6 +76,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
 
     meta["role_stats"] = role_stats
     meta["classified"] = classified
+    meta["source_context"] = contexts
     meta["fio_scores"] = fio_scores
 
     stats = {
@@ -60,6 +90,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "personal": role_stats.get("personal", 0),
         "role": role_stats.get("role", 0),
         "classified": classified,
+        "contexts_tagged": len(contexts),
         "has_fio": 1 if names else 0,
     }
 
