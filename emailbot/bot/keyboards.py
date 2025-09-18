@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
+from typing import Dict
+
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -20,8 +22,28 @@ def _load_icons() -> dict[str, str]:
     return {}
 
 
+def _icon_for(label: str, icons: Dict[str, str]) -> str:
+    if not label:
+        return ""
+    key = label.strip()
+    if not key:
+        return ""
+    icon = icons.get(key)
+    if icon:
+        return icon
+    capitalized = icons.get(key.capitalize())
+    if capitalized:
+        return capitalized
+    lowered = key.casefold()
+    for stored_key, stored_icon in icons.items():
+        if stored_key.strip().casefold() == lowered:
+            return stored_icon
+    return ""
+
+
 def _label_with_icon(label: str, icons: dict[str, str]) -> str:
-    return f"{icons.get(label, '📧')} {label}"
+    icon = _icon_for(label, icons)
+    return f"{icon} {label}" if icon else label
 
 
 def directions_keyboard(directions: list[str]) -> InlineKeyboardMarkup:

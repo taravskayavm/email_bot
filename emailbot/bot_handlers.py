@@ -31,7 +31,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 from bot.keyboards import build_templates_kb
-from services.templates import get_template
+from services.templates import get_template, get_template_label
 from emailbot.notify import notify
 
 from utils.email_clean import (
@@ -1779,7 +1779,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         group_raw = template_info.get("code") or group_code_fallback
     group_code = _normalize_template_code(group_raw)
     template_path = str(template_path_obj)
-    label = _template_label(template_info) or group_code
+    label = _template_label(template_info)
+    if not label and group_code:
+        label = get_template_label(group_code)
+    if not label:
+        label = group_code
 
     enforce, days, allow_override = _manual_cfg()
     if enforce and mode == "allowed":

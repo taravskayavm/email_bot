@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from emailbot.notify import notify
+from services.templates import get_template_label
 
 from emailbot import history_service, mass_state, messaging
 from emailbot.edit_service import (
@@ -544,6 +545,8 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
     label = context.chat_data.get("current_template_label") or ""
     if not label and state and getattr(state, "template_label", None):
         label = state.template_label or ""
+    if not label and group_code:
+        label = get_template_label(group_code)
     template_path = context.chat_data.get("current_template_path") or ""
     if not template_path and state and getattr(state, "template", None):
         template_path = state.template or ""

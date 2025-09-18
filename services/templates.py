@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Optional
 
 
 def _allowed_exts() -> tuple[str, ...]:
@@ -124,6 +124,25 @@ def get_template(code: str) -> dict[str, Any] | None:
         if _normalize_code(tpl.get("code")) == normalized:
             return tpl
     return None
+
+
+def get_template_label(code: str) -> str:
+    """Return a human-readable label for template ``code``.
+
+    Falls back to the template ``code`` when metadata is missing or incomplete.
+    """
+
+    if not code:
+        return ""
+    template: Optional[Dict[str, Any]] = get_template(code)
+    if isinstance(template, dict):
+        raw_label = template.get("label")
+        if isinstance(raw_label, str):
+            label = raw_label.strip()
+            if label:
+                return label
+    fallback = str(code).strip()
+    return fallback or str(code)
 
 
 def get_template_by_path(path: str | Path) -> dict[str, Any] | None:

@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 
 from services.templates import list_templates
 
-_ICONS = {}
+_ICONS: Dict[str, str] = {}
 _ICONS_PATH = Path("icons.json")
 if _ICONS_PATH.exists():
     try:
@@ -20,7 +20,22 @@ if _ICONS_PATH.exists():
 
 
 def _icon_for(label: str) -> str:
-    return _ICONS.get(label) or _ICONS.get(label.strip()) or ""
+    if not label:
+        return ""
+    key = label.strip()
+    if not key:
+        return ""
+    icon = _ICONS.get(key)
+    if icon:
+        return icon
+    capitalized = _ICONS.get(key.capitalize())
+    if capitalized:
+        return capitalized
+    lowered = key.casefold()
+    for stored_key, stored_icon in _ICONS.items():
+        if stored_key.strip().casefold() == lowered:
+            return stored_icon
+    return ""
 
 
 def _normalize_code(code: str | None) -> str:
@@ -64,7 +79,7 @@ def build_templates_kb(
         base_label = str(info.get("label") or info.get("code") or key)
         display_label = base_label
         # Префиксуем иконкой, если она задана в icons.json
-        icon = _icon_for(display_label)
+        icon = _icon_for(base_label)
         if icon:
             display_label = f"{icon} {display_label}"
         if normalized_current and key == normalized_current:
