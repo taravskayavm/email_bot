@@ -138,6 +138,29 @@ def _last_from_send_stats(email_norm: str) -> Optional[datetime]:
     return last
 
 
+def _last_from_history(email_raw: str) -> tuple[Optional[datetime], Optional[str]]:
+    try:
+        from emailbot import history_service
+    except Exception:
+        return None, None
+
+    try:
+        history_service.ensure_initialized()
+        info = history_service.get_last_sent_any_group(email_raw)
+    except Exception:
+        return None, None
+
+    if not info:
+        return None, None
+
+    group, dt = info
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt, group or None
+
+
 def _last_from_imap(email_norm: str) -> Optional[datetime]:
     if not _append_to_sent_enabled():
         return None
@@ -161,15 +184,40 @@ def _last_from_imap(email_norm: str) -> Optional[datetime]:
         return None
 
 
+def _combine_last_times(
+    email_raw: str, email_norm: str
+) -> tuple[Optional[datetime], dict[str, Optional[str]]]:
+    best: Optional[datetime] = None
+    meta: dict[str, Optional[str]] = {"source": None, "group": None}
+
+    hist_dt, hist_group = _last_from_history(email_raw)
+    if hist_dt is not None:
+        best = hist_dt
+        meta = {"source": "history", "group": hist_group}
+
+    for source, candidate in (
+        ("send_stats", _last_from_send_stats(email_norm)),
+        ("imap", _last_from_imap(email_norm)),
+    ):
+        if candidate is None:
+            continue
+        if candidate.tzinfo is None:
+            candidate = candidate.replace(tzinfo=timezone.utc)
+        else:
+            candidate = candidate.astimezone(timezone.utc)
+        if best is None or candidate > best:
+            best = candidate
+            meta = {"source": source, "group": None}
+
+    return best, meta
+
+
 def get_last_sent_at(email_raw: str) -> Optional[datetime]:
     key = normalize_email_for_key(email_raw)
     if not key:
         return None
-    a = _last_from_send_stats(key)
-    b = _last_from_imap(key)
-    if a and b:
-        return max(a, b)
-    return a or b
+    last, _ = _combine_last_times(email_raw, key)
+    return last
 
 
 def should_skip_by_cooldown(
@@ -187,8 +235,12 @@ def should_skip_by_cooldown(
     else:
         now = now.astimezone(timezone.utc)
 
+    key = normalize_email_for_key(email_raw)
+    if not key:
+        return False, ""
+
     window = _cooldown_days(days)
-    last = get_last_sent_at(email_raw)
+    last, meta = _combine_last_times(email_raw, key)
     if not last:
         return False, ""
 
@@ -202,8 +254,14 @@ def should_skip_by_cooldown(
     if delta < threshold:
         remain = threshold - delta
         hours_left = int(remain.total_seconds() // 3600)
-        reason = (
-            f"cooldown<{window}d; last={last.isoformat()}, remain≈{hours_left}h"
-        )
+        parts = [f"cooldown<{window}d", f"last={last.isoformat()}"]
+        source = meta.get("source")
+        if source:
+            parts.append(f"source={source}")
+        group = meta.get("group")
+        if group:
+            parts.append(f"group={group}")
+        parts.append(f"remain≈{hours_left}h")
+        reason = "; ".join(parts)
         return True, reason
     return False, ""

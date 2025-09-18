@@ -64,3 +64,16 @@ def test_should_allow_after_window(cooldown_module):
     skip, reason = cooldown.should_skip_by_cooldown("пример@почта.рф", now=now, days=180)
     assert skip is False
     assert reason == ""
+
+
+def test_should_use_history_registry(cooldown_module):
+    cooldown, _ = cooldown_module
+    from emailbot import history_service
+
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    history_service.ensure_initialized()
+    history_service.mark_sent("history@example.com", "grp", "msg", now - timedelta(days=5))
+
+    skip, reason = cooldown.should_skip_by_cooldown("history@example.com", now=now, days=180)
+    assert skip is True
+    assert "source=history" in reason

@@ -16,6 +16,7 @@ def test_record_and_query(tmp_path):
 
     history_store.record_sent("user@example.com", "GroupA", "msg2", now)
     assert history_store.was_sent_within("USER@example.com", "GROUPA", 1) is True
+    assert history_store.was_sent_within_any_group("user@example.com", 10) is True
 
 
 def test_get_last_sent_returns_latest(tmp_path):
@@ -32,3 +33,21 @@ def test_get_last_sent_returns_latest(tmp_path):
     assert abs((last - now).total_seconds()) < 1
 
     assert history_store.get_last_sent("absent@example.com", "grp") is None
+
+
+def test_last_send_any_group(tmp_path):
+    db = tmp_path / "state.db"
+    history_store.init_db(db)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past = now - timedelta(days=2)
+
+    history_store.record_sent("user@example.com", "grp1", "m1", past)
+    history_store.record_sent("user@example.com", "grp2", "m2", now)
+
+    info = history_store.last_send_any_group("user@example.com")
+    assert info is not None
+    group, last = info
+    assert group == "grp2"
+    assert abs((last - now).total_seconds()) < 1
+
+    assert history_store.last_send_any_group("absent@example.com") is None

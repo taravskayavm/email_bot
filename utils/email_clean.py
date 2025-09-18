@@ -805,6 +805,17 @@ def normalize_confusables(local: str, domain: str) -> tuple[str, str, bool]:
     new_local = unicodedata.normalize("NFKC", new_local)
     new_domain = unicodedata.normalize("NFKC", new_domain)
 
+    # Не допускаем «смешанных» результатов вроде "Иbah": если после замены
+    # остались символы обоих алфавитов, откатываем изменения, иначе sanitize
+    # забракует адрес как mixed-script-local.
+    if _has_cyrillic(new_local) and _has_latin(new_local):
+        new_local = local
+    if _has_cyrillic(new_domain) and _has_latin(new_domain):
+        new_domain = domain
+
+    if new_local == local and new_domain == domain:
+        return local, domain, False
+
     changed = new_local != local or new_domain != domain
     return new_local, new_domain, changed
 

@@ -41,3 +41,9 @@ def test_get_last_sent(monkeypatch):
     last = history_service.get_last_sent("rec@example.com", "grp")
     assert last is not None
     assert abs((last - now).total_seconds()) < 1
+
+    info = history_service.get_last_sent_any_group("rec@example.com")
+    assert info is not None
+    group, last_any = info
+    assert group == "grp"
+    assert abs((last_any - now).total_seconds()) < 1
