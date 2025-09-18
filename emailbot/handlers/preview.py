@@ -8,6 +8,8 @@ from typing import Any, Iterable, Sequence, TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from emailbot.notify import notify
+
 from emailbot import history_service, mass_state, messaging
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
@@ -328,7 +330,7 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ),
         ]
         lines.extend(preview_lines)
-    await query.message.reply_text("\n".join(lines))
+    await notify(query.message, "\n".join(lines), event="analysis", force=True)
 
 
 def _format_edit_ts(value: str) -> str:

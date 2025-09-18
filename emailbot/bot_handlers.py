@@ -5,6 +5,7 @@ from __future__ import annotations
 # isort:skip_file
 import asyncio
 import csv
+import functools
 import imaplib
 import json
 import logging
@@ -31,6 +32,7 @@ from telegram.ext import ContextTypes
 
 from bot.keyboards import build_templates_kb
 from services.templates import get_template
+from emailbot.notify import notify
 
 from utils.email_clean import (
     canonicalize_email,
@@ -614,7 +616,7 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"  bounces_today: {bounce_today}",
         ]
     )
-    await update.message.reply_text("\n".join(lines))
+    await notify(update.message, "\n".join(lines), event="analysis", force=True)
 
 
 async def dedupe_log_command(
@@ -1145,8 +1147,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     f = await doc.get_file()
     await f.download_to_drive(file_path)
 
-    await update.message.reply_text("Файл загружен. Идёт анализ...")
-    _progress_msg = await update.message.reply_text("🔎 Анализируем...")
+    await notify(update.message, "Файл загружен. Идёт анализ...", event="analysis")
+    await notify(update.message, "🔎 Анализируем...", event="analysis")
 
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
@@ -1269,9 +1271,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ]
     )
     report += "\n\nДополнительные действия:"
-    await update.message.reply_text(
+    await notify(
+        update.message,
         report,
         reply_markup=InlineKeyboardMarkup(extra_buttons),
+        event="analysis",
+        force=True,
     )
 
 
@@ -1762,7 +1767,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.chat_data["manual_selected_template_label"] = label
     context.chat_data["manual_selected_emails"] = to_send
 
-    await query.message.reply_text("Запущено — выполняю в фоне...")
+    await notify(query.message, "Запущено — выполняю в фоне...", event="progress")
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
@@ -1788,7 +1793,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             imap.select(f'"{sent_folder}"')
         except Exception as e:
             log_error(f"imap connect: {e}")
-            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+            await notify(query.message, f"❌ IMAP ошибка: {e}", event="error")
             return
 
         to_send_local = list(to_send)
@@ -1799,25 +1804,31 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "Daily limit reached: %s emails sent today (source=sent_log)",
                 len(sent_today),
             )
-            await update.callback_query.message.reply_text(
+            await notify(
+                update.callback_query.message,
                 (
                     f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
                     "Если вы исправили ошибки — нажмите "
                     "«🚀 Игнорировать лимит» и запустите ещё раз."
-                )
+                ),
+                event="error",
             )
             return
         if not is_force_send(chat_id) and len(to_send_local) > available:
             to_send_local = to_send_local[:available]
-            await query.message.reply_text(
+            await notify(
+                query.message,
                 (
                     f"⚠️ Учитываю дневной лимит: будет отправлено "
                     f"{available} адресов из списка."
-                )
+                ),
+                event="progress",
             )
 
-        await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(to_send_local)} писем..."
+        await notify(
+            query.message,
+            f"✉️ Рассылка начата. Отправляем {len(to_send_local)} писем...",
+            event="start",
         )
 
         sent_count = 0
@@ -1873,33 +1884,53 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             smtp.close()
         imap.logout()
         if cancel_event and cancel_event.is_set():
-            await query.message.reply_text(
-                f"Остановлено. Отправлено писем: {sent_count}"
+            await notify(
+                query.message,
+                f"Остановлено. Отправлено писем: {sent_count}",
+                event="finish",
             )
         else:
-            await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+            await notify(
+                query.message,
+                f"✅ Отправлено писем: {sent_count}",
+                event="finish",
+            )
         if errors:
-            await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+            await notify(
+                query.message,
+                "Ошибки:\n" + "\n".join(errors),
+                event="error",
+            )
 
         context.chat_data["manual_all_emails"] = []
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
-    messaging.create_task_with_logging(long_job(), query.message.reply_text)
+    messaging.create_task_with_logging(
+        long_job(), functools.partial(notify, query.message, event="error")
+    )
 
 
 async def autosync_imap_with_message(query: CallbackQuery) -> None:
     """Synchronize IMAP logs and notify the user via message."""
     await query.answer()
-    await query.message.reply_text("🔄 Синхронизация истории отправки с сервером...")
+    await notify(
+        query.message,
+        "🔄 Синхронизация истории отправки с сервером...",
+        event="analysis",
+        force=True,
+    )
     loop = asyncio.get_running_loop()
     stats = await loop.run_in_executor(None, sync_log_with_imap)
     clear_recent_sent_cache()
-    await query.message.reply_text(
+    await notify(
+        query.message,
         "✅ Синхронизация завершена. "
         f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
         f"пропущено: {stats['skipped_events']}, всего: {stats['total_rows_after']}.\n"
-        f"История отправки обновлена на последние 6 месяцев."
+        f"История отправки обновлена на последние 6 месяцев.",
+        event="analysis",
+        force=True,
     )
 
 
