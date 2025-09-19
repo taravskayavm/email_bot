@@ -10,6 +10,7 @@ import idna
 
 from config import CONFUSABLES_NORMALIZE, OBFUSCATION_ENABLE
 from utils.email_deobfuscate import deobfuscate_text
+from utils.email_role import classify_email_role
 
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
@@ -114,104 +115,6 @@ _CONFUSABLE_TRANSLATION = str.maketrans(
 
 _ASCII_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _ASCII_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9-]+$")
-
-
-ROLE_LOCALS: dict[str, set[str]] = {
-    "ru": {
-        "info",
-        "kontakt",
-        "kafedra",
-        "dekanat",
-        "redak",
-        "press",
-        "priem",
-        "otdel",
-        "spravka",
-        "rekto",
-        "uchsec",
-        "magistr",
-        "bakalavr",
-        "aspirant",
-        "nauka",
-        "kantsel",
-        "public",
-        "office",
-        "support",
-        "help",
-        "sales",
-        "contact",
-        "admin",
-        "admissions",
-        "editor",
-        "journals",
-        "ojs",
-        "noreply",
-        "no-reply",
-        "do-not-reply",
-        "mailer",
-    },
-    "en": {
-        "info",
-        "press",
-        "admissions",
-        "editor",
-        "journals",
-        "ojs",
-        "contact",
-        "office",
-        "support",
-        "help",
-        "sales",
-        "admin",
-        "noreply",
-        "no-reply",
-        "do-not-reply",
-        "mailer",
-        "department",
-        "dean",
-        "career",
-        "hr",
-    },
-}
-
-
-def classify_email_role(local: str, domain: str, context_text: str = "") -> dict[str, object]:
-    """Lightweight heuristic classifier for personal vs role addresses."""
-
-    l = (local or "").lower()
-    reason: list[str] = []
-    score = 0.5
-
-    # 1) obvious role locals (info@, press@, admissions@ etc.)
-    tokens = {t.strip("-_.") for t in l.replace(".", "-").split("-") if t}
-    if tokens & ROLE_LOCALS["en"] or tokens & ROLE_LOCALS["ru"]:
-        return {"class": "role", "score": 0.05, "reason": "role-local"}
-
-    domain_tokens = {
-        t.strip("-_.") for t in (domain or "").lower().replace(".", "-").split("-") if t
-    }
-    if domain_tokens & ROLE_LOCALS["en"] or domain_tokens & ROLE_LOCALS["ru"]:
-        score -= 0.1
-        reason.append("role-domain")
-
-    # 2) looks like fio pattern: ivan.ivanov / i.ivanov / ivanov.ii
-    fio_like = bool(re.match(r"^[a-zа-яё]+(\.[a-zа-яё]+|_[a-zа-яё]+)?(\.[a-zа-яё]{1,3})?$", l))
-    if fio_like:
-        score += 0.3
-        reason.append("fio-like")
-
-    # 3) context hints (author/corresponding author bumps up, department reduces)
-    ctx = (context_text or "").lower()
-    if any(k in ctx for k in ("author", "corresponding", "автор", "корреспондир")):
-        score += 0.2
-        reason.append("author-context")
-    if any(k in ctx for k in ("кафедра", "редакц", "приемн", "отдел", "деканат", "department", "office")):
-        score -= 0.2
-        reason.append("dept-context")
-
-    cls = "personal" if score >= 0.5 else "role"
-    bounded = round(max(0.0, min(1.0, score)), 2)
-    return {"class": cls, "score": bounded, "reason": ",".join(reason) or "baseline"}
 
 
 def _is_cyrillic(ch: str) -> bool:

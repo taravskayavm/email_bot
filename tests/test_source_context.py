@@ -2,21 +2,24 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("text", "expected_email", "expected_context"),
+    ("text", "expected_email", "expected_context", "is_role"),
     [
-        ("Contact us at info@example.com", "info@example.com", "contacts"),
-        ("Link: mailto:support@example.com", "support@example.com", "mailto"),
+        ("Contact us at info@example.com", "info@example.com", "contacts", True),
+        ("Link: mailto:support@example.com", "support@example.com", "mailto", True),
         (
             "Corresponding author: cor@example.com",
             "cor@example.com",
             "pdf_corresponding_author",
+            False,
         ),
-        ("Lead author is lead@example.com", "lead@example.com", "author_block"),
-        ("Footer notes: copy@example.com", "copy@example.com", "footer"),
-        ("Write hi@example.com for details", "hi@example.com", "unknown"),
+        ("Lead author is lead@example.com", "lead@example.com", "author_block", False),
+        ("Footer notes: copy@example.com", "copy@example.com", "footer", False),
+        ("Write hi@example.com for details", "hi@example.com", "unknown", False),
     ],
 )
-def test_extract_emails_pipeline_source_context(monkeypatch, text, expected_email, expected_context):
+def test_extract_emails_pipeline_source_context(
+    monkeypatch, text, expected_email, expected_context, is_role
+):
     captured_meta = {}
 
     from pipelines import extract_emails as pipeline
@@ -34,8 +37,13 @@ def test_extract_emails_pipeline_source_context(monkeypatch, text, expected_emai
 
     emails, stats = pipeline.extract_emails_pipeline(text)
 
-    assert emails == [expected_email]
-    assert stats["contexts_tagged"] == 1
+    if is_role and pipeline.PERSONAL_ONLY:
+        assert expected_email not in emails
+        assert stats.get("role_filtered", 0) >= 1
+    else:
+        assert emails == [expected_email]
+        assert stats["contexts_tagged"] >= 1
 
     contexts = captured_meta["meta"]["source_context"]
     assert contexts.get(expected_email) == expected_context
+    assert stats["contexts_tagged"] >= 1
