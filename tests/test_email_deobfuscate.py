@@ -21,8 +21,9 @@ def test_obfuscated_russian_words():
 
 def test_obfuscated_english_words():
     raw = "support [at] uni [dot] com"
-    final, _ = run_pipeline_on_text(raw)
-    assert "support@uni.com" in final
+    final, dropped = run_pipeline_on_text(raw)
+    assert final == []
+    assert ("support@uni.com", "role-like-prefix") in dropped
 
 
 def test_no_false_positive():

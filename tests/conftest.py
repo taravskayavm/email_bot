@@ -96,6 +96,8 @@ def _isolated_rules_files(tmp_path, monkeypatch):
 def _isolated_send_stats(tmp_path, monkeypatch):
     stats_path = tmp_path / "send_stats.jsonl"
     audit_path = tmp_path / "audit.csv"
+    sqlite_path = tmp_path / "send_history_cache.db"
     monkeypatch.setenv("SEND_STATS_PATH", str(stats_path))
     monkeypatch.setenv("AUDIT_PATH", str(audit_path))
     monkeypatch.setenv("APPEND_TO_SENT", "0")
+    monkeypatch.setenv("SEND_HISTORY_SQLITE_PATH", str(sqlite_path))

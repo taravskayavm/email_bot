@@ -6,6 +6,7 @@ import email.utils
 import json
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -32,6 +33,14 @@ APPEND_TO_SENT = os.getenv("APPEND_TO_SENT", "1") == "1"
 SENT_MAILBOX = os.getenv("SENT_MAILBOX", "Отправленные")
 
 _GMAIL_RE_PLUS = re.compile(r"^([^+]+)\+[^@]+(@gmail\.com)$", re.IGNORECASE)
+_SEND_HISTORY_DB_ENV = "SEND_HISTORY_SQLITE_PATH"
+_DEFAULT_HISTORY_DB = Path("var/send_history.db")
+_SEND_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS send_history_cache (
+    email TEXT PRIMARY KEY,
+    last_sent TEXT NOT NULL
+)
+"""
 
 
 def _send_stats_path() -> Path:
@@ -40,6 +49,107 @@ def _send_stats_path() -> Path:
     if not path.is_absolute():
         path = Path.cwd() / path
     return path
+
+
+def _send_history_path() -> Path:
+    raw = os.getenv(_SEND_HISTORY_DB_ENV)
+    if raw:
+        path = Path(str(raw)).expanduser()
+    else:
+        path = _DEFAULT_HISTORY_DB
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def _ensure_history_db() -> sqlite3.Connection:
+    path = _send_history_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(_SEND_HISTORY_SCHEMA)
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _coerce_utc(value: Optional[datetime] = None) -> datetime:
+    dt = value or datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _load_cached_last(email_norm: str) -> Optional[datetime]:
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = _ensure_history_db()
+        row = conn.execute(
+            "SELECT last_sent FROM send_history_cache WHERE email=?",
+            (email_norm,),
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if not row:
+        return None
+    try:
+        last = datetime.fromisoformat(str(row[0]))
+    except Exception:
+        return None
+    if last.tzinfo is None:
+        return last.replace(tzinfo=timezone.utc)
+    return last.astimezone(timezone.utc)
+
+
+def was_sent_recently(
+    email: str,
+    *,
+    now: Optional[datetime] = None,
+    days: Optional[int] = None,
+) -> bool:
+    key = normalize_email_for_key(email)
+    if not key:
+        return False
+    window = _cooldown_days(days)
+    if window <= 0:
+        return False
+    last = _load_cached_last(key)
+    if last is None:
+        return False
+    current = _coerce_utc(now)
+    return current - last < timedelta(days=window)
+
+
+def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
+    key = normalize_email_for_key(email)
+    if not key:
+        return
+    ts = _coerce_utc(sent_at).isoformat()
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = _ensure_history_db()
+        conn.execute(
+            "INSERT OR REPLACE INTO send_history_cache(email, last_sent) VALUES (?, ?)",
+            (key, ts),
+        )
+        conn.commit()
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _cooldown_days(days: Optional[int]) -> int:

@@ -15,7 +15,6 @@ def enable_obfuscation(monkeypatch):
     "raw,expected",
     [
         ("(a) anton-belousov0@rambler.ru", ["anton-belousov0@rambler.ru"]),
-        ("RCPT TO:<russiavera.kidyaeva@yandex.ru>:", ["russiavera.kidyaeva@yandex.ru"]),
         ("... tsibulnikova2011@yandex.ru> 550 5.7.1 ...", ["tsibulnikova2011@yandex.ru"]),
         ("словоanton-belousov0@rambler.ru", ["anton-belousov0@rambler.ru"]),
         ("name(at)domain(dot)com", ["name@domain.com"]),
@@ -24,3 +23,10 @@ def enable_obfuscation(monkeypatch):
 def test_trim_and_footnotes(raw, expected):
     final, dropped = run_pipeline_on_text(raw)
     assert sorted(final) == sorted(expected)
+
+
+def test_role_prefix_from_bounce_is_filtered():
+    raw = "RCPT TO:<russiavera.kidyaeva@yandex.ru>:"
+    final, dropped = run_pipeline_on_text(raw)
+    assert final == []
+    assert ("russiavera.kidyaeva@yandex.ru", "role-like-prefix") in dropped
