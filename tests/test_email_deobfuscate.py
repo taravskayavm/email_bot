@@ -1,6 +1,7 @@
 import pytest
 
 import config
+import pipelines.extract_emails as pipeline
 import utils.email_clean as email_clean
 from pipelines.extract_emails import run_pipeline_on_text
 
@@ -9,6 +10,7 @@ from pipelines.extract_emails import run_pipeline_on_text
 def enable_obfuscation(monkeypatch):
     monkeypatch.setattr(config, "OBFUSCATION_ENABLE", True, raising=False)
     monkeypatch.setattr(email_clean, "OBFUSCATION_ENABLE", True, raising=False)
+    monkeypatch.setattr(pipeline, "PERSONAL_ONLY", False, raising=False)
 
 
 def test_obfuscated_russian_words():
