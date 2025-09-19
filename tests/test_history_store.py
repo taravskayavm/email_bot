@@ -51,3 +51,38 @@ def test_last_send_any_group(tmp_path):
     assert abs((last - now).total_seconds()) < 1
 
     assert history_store.last_send_any_group("absent@example.com") is None
+
+
+def test_try_reserve_send_blocks_within_window(tmp_path):
+    db = tmp_path / "state.db"
+    history_store.init_db(db)
+    now = datetime.now(timezone.utc)
+
+    first = history_store.try_reserve_send(
+        "user@example.com",
+        "grp",
+        now,
+        cooldown=timedelta(days=180),
+        run_id="run-1",
+    )
+    assert first is True
+
+    blocked = history_store.try_reserve_send(
+        "user@example.com",
+        "grp",
+        now + timedelta(hours=1),
+        cooldown=timedelta(days=180),
+        run_id="run-2",
+    )
+    assert blocked is False
+
+    history_store.delete_send_record("user@example.com", "grp", now)
+
+    allowed_again = history_store.try_reserve_send(
+        "user@example.com",
+        "grp",
+        now + timedelta(hours=2),
+        cooldown=timedelta(days=180),
+        run_id="run-3",
+    )
+    assert allowed_again is True

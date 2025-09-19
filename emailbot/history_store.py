@@ -183,6 +183,101 @@ def _insert_history_row(row: tuple[str, str, str, str | None, str | None, str | 
         conn.close()
 
 
+def try_reserve_send(
+    email_norm: str,
+    group_key: str,
+    sent_at_utc: datetime,
+    *,
+    cooldown: timedelta,
+    message_id: str = "",
+    run_id: str = "",
+    smtp_result: str = "pending",
+) -> bool:
+    """Attempt to register a send while enforcing the cooldown window.
+
+    Returns ``True`` if the record was inserted, ``False`` if an existing
+    entry within the cooldown window blocks the reservation.
+    """
+
+    sent_at_utc = _ensure_utc(sent_at_utc)
+    email_norm = (email_norm or "").strip().lower()
+    if not email_norm:
+        return False
+    group_key = (group_key or "").strip().lower()
+    sent_at_iso = _isoformat(sent_at_utc)
+    cooldown_seconds = max(int(cooldown.total_seconds()), 0)
+    if cooldown_seconds <= 0:
+        _insert_history_row(
+            (
+                email_norm,
+                group_key,
+                sent_at_iso,
+                (message_id or "").strip() or None,
+                (run_id or "").strip() or None,
+                (smtp_result or "").strip() or None,
+            )
+        )
+        return True
+
+    threshold = _ensure_utc(sent_at_utc - cooldown)
+    threshold_iso = _isoformat(threshold)
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        cursor = conn.execute(
+            """
+            INSERT INTO send_history(
+                email_norm, group_key, sent_at_utc, message_id, run_id, smtp_result
+            )
+            SELECT ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM send_history
+                WHERE email_norm = ?
+                  AND group_key = ?
+                  AND sent_at_utc >= ?
+            )
+            """,
+            (
+                email_norm,
+                group_key,
+                sent_at_iso,
+                (message_id or "").strip() or None,
+                (run_id or "").strip() or None,
+                (smtp_result or "").strip() or None,
+                email_norm,
+                group_key,
+                threshold_iso,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def delete_send_record(email_norm: str, group_key: str, sent_at_utc: datetime) -> None:
+    """Remove a send record, typically used to roll back a failed attempt."""
+
+    sent_at_utc = _ensure_utc(sent_at_utc)
+    email_norm = (email_norm or "").strip().lower()
+    if not email_norm:
+        return
+    group_key = (group_key or "").strip().lower()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        conn.execute(
+            """
+            DELETE FROM send_history
+            WHERE email_norm = ? AND group_key = ? AND sent_at_utc = ?
+            """,
+            (email_norm, group_key, _isoformat(sent_at_utc)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def record_send(
     email_norm: str,
     group_key: str,
@@ -405,6 +500,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
 __all__ = [
     "init_db",
+    "try_reserve_send",
+    "delete_send_record",
     "record_send",
     "record_sent",
     "was_sent_within",

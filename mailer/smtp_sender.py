@@ -2,6 +2,7 @@ import logging
 import os
 import smtplib
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Iterable
 from email.message import EmailMessage
@@ -10,7 +11,11 @@ from smtplib import SMTPResponseException
 
 from emailbot.audit import write_audit_drop
 from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
-from emailbot.history_service import ensure_initialized, mark_sent
+from emailbot.history_service import (
+    cancel_send_attempt,
+    mark_sent,
+    register_send_attempt,
+)
 from utils.send_stats import log_error, log_success
 
 
@@ -43,6 +48,22 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 recipients = [raw_to]
         if not recipients and msg.get("X-EBOT-Recipient"):
             recipients = [msg.get("X-EBOT-Recipient")]
+
+        group_key = _extract_group(msg)
+        run_id = msg.get("X-EBOT-Run-ID")
+        if not run_id:
+            run_id = str(uuid.uuid4())
+            msg["X-EBOT-Run-ID"] = run_id
+
+        reservation_map: dict[str, datetime] = {}
+
+        def _release_reservations() -> None:
+            for addr_norm, reserved_at in list(reservation_map.items()):
+                try:
+                    cancel_send_attempt(addr_norm, group_key, reserved_at)
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.debug("history_cancel_failed", exc_info=True)
+
         if override_flag not in {"1", "true", "yes", "on"}:
             for addr in recipients:
                 if not addr:
@@ -65,22 +86,48 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     )
                     return True, None
 
-        def _record_success(to_list: list[str]) -> None:
+            if COOLDOWN_DAYS > 0:
+                seen_for_reserve: set[str] = set()
+                for addr in recipients:
+                    addr_norm = (addr or "").strip()
+                    if not addr_norm:
+                        continue
+                    key = addr_norm.lower()
+                    if key in seen_for_reserve:
+                        continue
+                    seen_for_reserve.add(key)
+                    reserved_at = register_send_attempt(
+                        addr_norm,
+                        group_key,
+                        days=COOLDOWN_DAYS,
+                        run_id=run_id,
+                    )
+                    if reserved_at is None:
+                        reason = f"cooldown<{COOLDOWN_DAYS}d"
+                        details = "db-hit"
+                        try:
+                            write_audit_drop(addr_norm, reason, details)
+                        except Exception:  # pragma: no cover - defensive logging
+                            logger.debug("write_audit_drop failed", exc_info=True)
+                        logger.info(
+                            "Skipping SMTP send to %s due to DB cooldown", addr_norm
+                        )
+                        _release_reservations()
+                        return True, None
+                    reservation_map[key] = reserved_at
+
+        def _record_success(to_list: list[str], reservations: dict[str, datetime]) -> None:
+            extra = {
+                "uuid": msg.get("X-EBOT-UUID", ""),
+                "message_id": msg.get("Message-ID", ""),
+            }
+            if run_id:
+                extra["run_id"] = run_id
             try:
-                log_success(
-                    msg.get("To", ""),
-                    _extract_group(msg),
-                    extra={
-                        "uuid": msg.get("X-EBOT-UUID", ""),
-                        "message_id": msg.get("Message-ID", ""),
-                    },
-                )
+                log_success(msg.get("To", ""), group_key, extra=extra)
             except Exception:
                 pass
             try:
-                ensure_initialized()
-                now = datetime.now(timezone.utc)
-                group_key = _extract_group(msg)
                 message_id = (msg.get("Message-ID") or "").strip() or None
                 seen: set[str] = set()
                 for addr in to_list:
@@ -91,12 +138,21 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     if key in seen:
                         continue
                     seen.add(key)
-                    mark_sent(addr_norm, group_key, message_id, now, smtp_result="ok")
+                    sent_at = reservations.get(key)
+                    mark_sent(
+                        addr_norm,
+                        group_key,
+                        message_id,
+                        sent_at,
+                        run_id=run_id,
+                        smtp_result="ok",
+                    )
             except Exception:
                 logger.warning("history_registry_record_failed", exc_info=True)
+
         try:
             smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
-            _record_success(recipients)
+            _record_success(recipients, reservation_map)
             return True, None
         except SMTPResponseException as e:
             code = e.smtp_code
@@ -109,32 +165,36 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 time.sleep(1)
                 try:
                     smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
-                    _record_success(recipients)
+                    _record_success(recipients, reservation_map)
                     return True, None
                 except Exception as e2:
                     e = e2
+            _release_reservations()
             try:
                 log_error(
                     msg.get("To", ""),
-                    _extract_group(msg),
+                    group_key,
                     f"{code} {text}",
                     extra={
                         "uuid": msg.get("X-EBOT-UUID", ""),
                         "message_id": msg.get("Message-ID", ""),
+                        "run_id": run_id,
                     },
                 )
             except Exception:
                 pass
             return False, e
         except Exception as e:
+            _release_reservations()
             try:
                 log_error(
                     msg.get("To", ""),
-                    _extract_group(msg),
+                    group_key,
                     repr(e),
                     extra={
                         "uuid": msg.get("X-EBOT-UUID", ""),
                         "message_id": msg.get("Message-ID", ""),
+                        "run_id": run_id,
                     },
                 )
             except Exception:
