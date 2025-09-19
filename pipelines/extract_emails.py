@@ -5,9 +5,10 @@ from typing import Dict, List, Tuple
 
 from utils.email_clean import dedupe_with_variants, parse_emails_unified
 from utils.email_role import classify_email_role
-from utils.name_match import extract_names, fio_match_score
+from utils.name_match import fio_candidates, fio_match_score
 
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
+FIO_PERSONAL_THRESHOLD = 0.9
 
 
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
@@ -16,6 +17,24 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     raw_text = text or ""
     cleaned, meta = parse_emails_unified(raw_text, return_meta=True)
     unique = dedupe_with_variants(cleaned)
+    fio_pairs = fio_candidates(raw_text)
+
+    def _merge_reason(reason: str | None, extra: str) -> str:
+        parts = [
+            part
+            for part in str(reason or "").split(",")
+            if part and part != "baseline"
+        ]
+        if extra and extra not in parts:
+            parts.append(extra)
+        return ",".join(parts) if parts else "baseline"
+
+    def _apply_fio_boost(info: Dict[str, object], score: float) -> None:
+        info["fio_score"] = round(float(score or 0.0), 3)
+        if score >= FIO_PERSONAL_THRESHOLD and str(info.get("class")) == "unknown":
+            info["class"] = "personal"
+            info["score"] = max(float(info.get("score", 0.5)), 0.85)
+            info["reason"] = _merge_reason(info.get("reason"), "fio-match")
 
     items = meta.get("items", [])
     deobf_count = meta.get("deobfuscated_count", 0)
@@ -70,9 +89,12 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         snippet = slice_with_context(span_tuple)
         local, _, domain = candidate.partition("@")
         info = classify_email_role(local, domain, context_text=snippet)
+        fio_score = fio_match_score(local, raw_text, candidates=fio_pairs)
+        _apply_fio_boost(info, fio_score)
         item["role_class"] = info.get("class")
         item["role_score"] = info.get("score")
         item["role_reason"] = info.get("reason")
+        item["fio_score"] = fio_score
         key = sanitized if sanitized else candidate
         per_address_infos.setdefault(key, []).append(info)
         if key not in snippets:
@@ -96,40 +118,46 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     classified: Dict[str, Dict[str, object]] = {}
     filtered: List[str] = []
     role_filtered = 0
+    fio_scores: Dict[str, float] = {}
 
     for addr in unique:
         if "@" not in addr:
+            fio_scores[addr] = 0.0
             continue
+
         infos = per_address_infos.get(addr, [])
+        local, _, domain = addr.partition("@")
         if not infos:
-            local, _, domain = addr.partition("@")
-            infos = [
-                classify_email_role(local, domain, context_text=snippets.get(addr, raw_text))
-            ]
+            context = snippets.get(addr, raw_text)
+            info = classify_email_role(local, domain, context_text=context)
+            score = fio_match_score(local, raw_text, candidates=fio_pairs)
+            _apply_fio_boost(info, score)
+            infos = [info]
+        else:
+            missing = [info for info in infos if "fio_score" not in info]
+            if missing:
+                score = fio_match_score(local, raw_text, candidates=fio_pairs)
+                for info in missing:
+                    _apply_fio_boost(info, score)
+
         roles = [info for info in infos if str(info.get("class")) == "role"]
         if roles:
             chosen = min(roles, key=lambda info: float(info.get("score", 0.0)))
         else:
             chosen = max(infos, key=lambda info: float(info.get("score", 0.5)))
+
         info_class = str(chosen.get("class") or "unknown")
         if info_class not in role_stats:
             role_stats[info_class] = 0
         role_stats[info_class] += 1
+
+        fio_scores[addr] = max(float(info.get("fio_score", 0.0)) for info in infos)
         classified[addr] = dict(chosen)
+
         if PERSONAL_ONLY and info_class == "role":
             role_filtered += 1
             continue
         filtered.append(addr)
-
-    # [EBOT-PARSER-FIO-003] FIO matching
-    names = extract_names(raw_text)
-    fio_scores: Dict[str, float] = {}
-    for addr in unique:
-        if "@" not in addr:
-            fio_scores[addr] = 0.0
-            continue
-        local = addr.split("@", 1)[0]
-        fio_scores[addr] = max([fio_match_score(local, fio) for fio in names] or [0.0])
 
     meta["role_stats"] = role_stats
     meta["classified"] = classified
@@ -153,7 +181,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "personal_only": int(PERSONAL_ONLY),
         "classified": classified,
         "contexts_tagged": len(contexts),
-        "has_fio": 1 if names else 0,
+        "has_fio": 1 if fio_pairs else 0,
     }
 
     return filtered, stats
