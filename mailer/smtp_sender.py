@@ -1,8 +1,10 @@
+import copy
 import logging
 import os
 import smtplib
 import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable
 from email.message import EmailMessage
@@ -31,6 +33,44 @@ try:
 except Exception:
     TIMEOUT = 30.0
 
+DOMAIN_RATE_LIMIT = int(os.getenv("DOMAIN_RATE_LIMIT_PER_MIN", "30"))
+_domain_counters = defaultdict(int)
+_last_minute = None
+
+
+def _domain_of(addr: str) -> str:
+    return (addr or "").split("@")[-1].lower().strip()
+
+
+def _rate_plan(addresses: list[str]) -> tuple[list[str], list[str], dict[str, int]]:
+    """Split addresses into immediate send vs. deferred respecting domain limit."""
+
+    if DOMAIN_RATE_LIMIT <= 0:
+        return list(addresses), [], {}
+    global _last_minute
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    if _last_minute is None or now != _last_minute:
+        _domain_counters.clear()
+        _last_minute = now
+    send_now: list[str] = []
+    defer: list[str] = []
+    increments: dict[str, int] = {}
+    for addr in addresses:
+        domain = _domain_of(addr)
+        used = _domain_counters[domain] + increments.get(domain, 0)
+        if used < DOMAIN_RATE_LIMIT:
+            increments[domain] = increments.get(domain, 0) + 1
+            send_now.append(addr)
+        else:
+            defer.append(addr)
+    return send_now, defer, increments
+
+
+def _commit_rate_plan(increments: dict[str, int]) -> None:
+    for domain, count in increments.items():
+        if count:
+            _domain_counters[domain] += count
+
 
 def send_messages(messages: Iterable[EmailMessage], user: str, password: str, host: str) -> None:
     """Send multiple e-mails over a single SMTP connection.
@@ -48,6 +88,15 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 recipients = [raw_to]
         if not recipients and msg.get("X-EBOT-Recipient"):
             recipients = [msg.get("X-EBOT-Recipient")]
+        recipients = [addr for addr in recipients if addr]
+
+        send_now, deferred, rate_increments = _rate_plan(recipients)
+        if deferred:
+            msg["X-EBOT-Deferred"] = ",".join(deferred)
+        elif "X-EBOT-Deferred" in msg:
+            del msg["X-EBOT-Deferred"]
+        if recipients and not send_now:
+            return False, SMTPResponseException(451, b"Domain rate limit reached")
 
         group_key = _extract_group(msg)
         run_id = msg.get("X-EBOT-Run-ID")
@@ -64,8 +113,11 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                 except Exception:  # pragma: no cover - defensive logging
                     logger.debug("history_cancel_failed", exc_info=True)
 
+        if not send_now:
+            return True, None
+
         if override_flag not in {"1", "true", "yes", "on"}:
-            for addr in recipients:
+            for addr in send_now:
                 if not addr:
                     continue
                 skip, skip_reason = should_skip_by_cooldown(addr)
@@ -88,7 +140,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
 
             if COOLDOWN_DAYS > 0:
                 seen_for_reserve: set[str] = set()
-                for addr in recipients:
+                for addr in send_now:
                     addr_norm = (addr or "").strip()
                     if not addr_norm:
                         continue
@@ -124,7 +176,8 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             if run_id:
                 extra["run_id"] = run_id
             try:
-                log_success(msg.get("To", ""), group_key, extra=extra)
+                to_repr = ", ".join(to_list) if to_list else msg.get("To", "")
+                log_success(to_repr, group_key, extra=extra)
             except Exception:
                 pass
             try:
@@ -150,9 +203,27 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             except Exception:
                 logger.warning("history_registry_record_failed", exc_info=True)
 
+        from_addr = os.getenv("EMAIL_ADDRESS", None)
+        target_repr = ", ".join(send_now) if send_now else msg.get("To", "")
+
+        def _deliver_all() -> None:
+            for addr in send_now:
+                if not addr:
+                    continue
+                one = copy.deepcopy(msg)
+                if one.get_all("To"):
+                    try:
+                        one.replace_header("To", addr)
+                    except KeyError:
+                        one["To"] = addr
+                else:
+                    one["To"] = addr
+                smtp.send_message(one, from_addr=from_addr, to_addrs=[addr])
+
         try:
-            smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
-            _record_success(recipients, reservation_map)
+            _deliver_all()
+            _commit_rate_plan(rate_increments)
+            _record_success(send_now, reservation_map)
             return True, None
         except SMTPResponseException as e:
             code = e.smtp_code
@@ -164,15 +235,16 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     pass
                 time.sleep(1)
                 try:
-                    smtp.send_message(msg, from_addr=os.getenv("EMAIL_ADDRESS", None))
-                    _record_success(recipients, reservation_map)
+                    _deliver_all()
+                    _commit_rate_plan(rate_increments)
+                    _record_success(send_now, reservation_map)
                     return True, None
                 except Exception as e2:
                     e = e2
             _release_reservations()
             try:
                 log_error(
-                    msg.get("To", ""),
+                    target_repr,
                     group_key,
                     f"{code} {text}",
                     extra={
@@ -188,7 +260,7 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
             _release_reservations()
             try:
                 log_error(
-                    msg.get("To", ""),
+                    target_repr,
                     group_key,
                     repr(e),
                     extra={

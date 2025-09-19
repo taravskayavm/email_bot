@@ -141,16 +141,26 @@ class RobustSMTP:
 def send_with_retry(
     smtp: RobustSMTP, msg: EmailMessage, retries: int = 3, backoff: float = 1.0
 ):
-    for attempt in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             _throttle_block()
             return smtp.send(msg)
+        except smtplib.SMTPResponseException as e:
+            code = getattr(e, "smtp_code", 0)
+            if 400 <= code < 500:
+                if attempt == retries:
+                    raise
+                time.sleep(backoff * attempt)
+                continue
+            if code >= 500:
+                raise
+            raise
         except (
             smtplib.SMTPServerDisconnected,
             smtplib.SMTPConnectError,
             TimeoutError,
         ):
-            if attempt == retries - 1:
+            if attempt == retries:
                 raise
             time.sleep(backoff)
             backoff *= 2
