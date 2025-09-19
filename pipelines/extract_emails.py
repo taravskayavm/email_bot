@@ -3,11 +3,15 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Tuple
 
-from utils.email_clean import dedupe_with_variants, parse_emails_unified
+from utils.email_clean import (
+    dedupe_with_variants,
+    finalize_email,
+    parse_emails_unified,
+)
 from utils.email_role import classify_email_role
 from utils.name_match import fio_candidates, fio_match_score
 
-from utils.tld_utils import is_foreign_domain
+from utils.tld_utils import is_allowed_domain, is_foreign_domain
 
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
 FIO_PERSONAL_THRESHOLD = 0.9
@@ -18,7 +22,54 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
 
     raw_text = text or ""
     cleaned, meta = parse_emails_unified(raw_text, return_meta=True)
-    unique = dedupe_with_variants(cleaned)
+    items = meta.get("items", [])
+
+    allowed_candidates: List[str] = []
+    rejected: List[dict] = []
+    foreign_filtered_pre = 0
+
+    for item in items:
+        normalized = (item.get("normalized") or "").strip()
+        if "@" not in normalized:
+            continue
+        sanitized_value = (item.get("sanitized") or "").strip()
+        reason_value = item.get("reason")
+        local, _, domain = normalized.partition("@")
+        email_final, finalize_reason, finalize_stage = finalize_email(
+            local,
+            domain,
+            raw_text=raw_text,
+            span=item.get("span"),
+            sanitized=sanitized_value,
+            sanitize_reason=reason_value if isinstance(reason_value, str) else None,
+        )
+        if finalize_reason:
+            item["reason"] = finalize_reason
+            item["stage"] = finalize_stage
+            item["sanitized"] = ""
+            rejected.append(dict(item))
+            continue
+        if not email_final:
+            item["sanitized"] = ""
+            if reason_value:
+                item.setdefault("stage", "sanitize")
+                rejected.append(dict(item))
+            continue
+        final_domain = email_final.rsplit("@", 1)[-1]
+        if not is_allowed_domain(final_domain):
+            item["reason"] = "tld-not-allowed"
+            item["stage"] = "finalize"
+            item["sanitized"] = ""
+            rejected.append(dict(item))
+            foreign_filtered_pre += 1
+            continue
+        item["sanitized"] = email_final
+        allowed_candidates.append(email_final)
+
+    unique = dedupe_with_variants(allowed_candidates)
+    meta["items_rejected"] = rejected
+    meta["suspicious_count"] = len(rejected)
+    meta["dedup_len"] = len(unique)
     fio_pairs = fio_candidates(raw_text)
 
     def _merge_reason(reason: str | None, extra: str) -> str:
@@ -130,7 +181,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     classified: Dict[str, Dict[str, object]] = {}
     filtered: List[str] = []
     drop_reasons: Dict[str, str] = {}
-    foreign_filtered = 0
+    foreign_filtered = foreign_filtered_pre
     role_filtered = 0
     fio_scores: Dict[str, float] = {}
 
@@ -228,6 +279,8 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "drop_reasons": drop_reasons,
         "dropped_candidates": sorted(dropped_candidates.items()),
         "items": items,
+        "items_rejected": rejected,
+        "suspicious_count": len(rejected),
     }
 
     return filtered, stats
