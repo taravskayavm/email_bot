@@ -106,6 +106,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         item["role_score"] = info.get("score")
         item["role_reason"] = info.get("reason")
         item["fio_score"] = fio_score
+        item["fio_match"] = fio_score
         key = sanitized if sanitized else candidate
         per_address_infos.setdefault(key, []).append(info)
         if key not in snippets:
@@ -128,6 +129,8 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     role_stats: Dict[str, int] = {"personal": 0, "role": 0, "unknown": 0}
     classified: Dict[str, Dict[str, object]] = {}
     filtered: List[str] = []
+    drop_reasons: Dict[str, str] = {}
+    foreign_filtered = 0
     role_filtered = 0
     fio_scores: Dict[str, float] = {}
 
@@ -165,8 +168,13 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         fio_scores[addr] = max(float(info.get("fio_score", 0.0)) for info in infos)
         classified[addr] = dict(chosen)
 
+        if is_foreign_domain(domain):
+            foreign_filtered += 1
+            drop_reasons[addr] = "tld-not-allowed"
+            continue
         if PERSONAL_ONLY and info_class == "role":
             role_filtered += 1
+            drop_reasons[addr] = "role-like"
             continue
         filtered.append(addr)
 
@@ -176,6 +184,28 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     meta["fio_scores"] = fio_scores
     meta["role_filter_applied"] = PERSONAL_ONLY
     meta["role_filtered"] = role_filtered
+
+    filtered_set = set(filtered)
+    dropped_candidates: Dict[str, str] = {}
+    for item in items:
+        normalized = (item.get("normalized") or "").strip()
+        sanitized = (item.get("sanitized") or "").strip()
+        candidate = sanitized or normalized
+        if not candidate:
+            continue
+        if sanitized and sanitized in filtered_set:
+            continue
+        reason = ""
+        if sanitized and sanitized in drop_reasons:
+            reason = drop_reasons[sanitized]
+        elif normalized and normalized in drop_reasons:
+            reason = drop_reasons[normalized]
+        elif not sanitized:
+            reason = str(item.get("reason") or "invalid")
+        if reason:
+            dropped_candidates.setdefault(candidate, reason)
+
+    meta["dropped_candidates"] = sorted(dropped_candidates.items())
 
     stats = {
         "found_raw": len(items),
@@ -194,6 +224,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "contexts_tagged": len(contexts),
         "has_fio": 1 if fio_pairs else 0,
         "foreign_domains": foreign,
+        "foreign_filtered": foreign_filtered,
+        "drop_reasons": drop_reasons,
+        "dropped_candidates": sorted(dropped_candidates.items()),
+        "items": items,
     }
 
     return filtered, stats
@@ -204,24 +238,40 @@ def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
 
     cleaned, meta = parse_emails_unified(text or "", return_meta=True)
     final = dedupe_with_variants(cleaned)
-    if PERSONAL_ONLY:
-        filtered_final: List[str] = []
-        for addr in final:
-            if "@" not in addr:
-                continue
-            local, _, domain = addr.partition("@")
-            info = classify_email_role(local, domain, context_text=text or "")
-            if str(info.get("class")) == "role":
-                continue
-            filtered_final.append(addr)
-        final = filtered_final
-    dropped: List[Tuple[str, str]] = []
-    for item in meta.get("items", []):
-        if item.get("sanitized"):
+    filtered_final: List[str] = []
+    drop_reasons: Dict[str, str] = {}
+    for addr in final:
+        if "@" not in addr:
             continue
-        candidate = str(item.get("raw") or item.get("normalized") or "")
-        reason = str(item.get("reason") or "invalid")
-        if candidate:
+        local, _, domain = addr.partition("@")
+        if is_foreign_domain(domain):
+            drop_reasons[addr] = "tld-not-allowed"
+            continue
+        info = classify_email_role(local, domain, context_text=text or "")
+        if PERSONAL_ONLY and str(info.get("class")) == "role":
+            drop_reasons[addr] = "role-like"
+            continue
+        filtered_final.append(addr)
+    final = filtered_final
+
+    dropped: List[Tuple[str, str]] = []
+    final_set = set(final)
+    for item in meta.get("items", []):
+        normalized = (item.get("normalized") or "").strip()
+        sanitized = (item.get("sanitized") or "").strip()
+        candidate = sanitized or normalized or str(item.get("raw") or "")
+        if not candidate:
+            continue
+        if sanitized and sanitized in final_set:
+            continue
+        if sanitized and sanitized in drop_reasons:
+            dropped.append((sanitized, drop_reasons[sanitized]))
+            continue
+        if normalized and normalized in drop_reasons:
+            dropped.append((normalized, drop_reasons[normalized]))
+            continue
+        if not sanitized:
+            reason = str(item.get("reason") or "invalid")
             dropped.append((candidate, reason))
     return final, dropped
 
