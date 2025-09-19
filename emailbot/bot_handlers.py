@@ -1506,7 +1506,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             dropped_current.append((email, "filtered"))
 
-    foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
+    foreign_raw = {e for e in allowed_all | loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
     state = get_state(context)

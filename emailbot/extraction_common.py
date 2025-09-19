@@ -106,6 +106,7 @@ def normalize_text(s: str) -> str:
 
 
 _B64_ALLOWED = re.compile(r"^[A-Za-z0-9+/=\n\r\s]+$")
+_GLUE_JOIN_RE = re.compile(r"[а-яА-Яa-zA-Z0-9]\s*@\s*[а-яА-Яa-zA-Z0-9]")
 
 
 def maybe_decode_base64(s: str) -> str | None:
@@ -141,6 +142,7 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     the local part and therefore was *not* glued to avoid losing that character.
     """
 
+    raw_input = text or ""
     text = normalize_text(text)
 
     # Count occurrences where the guard prevented removal
@@ -157,6 +159,9 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
+
+    if _GLUE_JOIN_RE.search(raw_input):
+        return f"{text} [[JOINED_BY_GLUE]]"
     return text
 
 

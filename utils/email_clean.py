@@ -492,8 +492,16 @@ _ASCII_DOMAIN_RE = re.compile(
 )
 
 ROLE_PREFIX_BLACKLIST = re.compile(
-    r"^(russia|россия|journal|editor|ojs|office|support|contact|press|admissions|department|kafedra|кафедр|faculty|факультет)",
+    r"^(russia|россия|journal|editor|info|ojs|office|support|contact|press|admissions|department|kafedra|кафедр|faculty|факультет)",
     re.IGNORECASE,
+)
+_ROLE_PREFIX_ALWAYS = (
+    "russia",
+    "россия",
+    "journal",
+    "editor",
+    "info",
+    "support",
 )
 GLUE_RISK_CONTEXT = re.compile(
     r"(fig\.?|рис\.?|табл\.?|doi|страна|country|\b[0-9]{2,}\b)",
@@ -660,6 +668,9 @@ def _is_ascii_local(local: str) -> bool:
 def _is_bad_prefix(local: str) -> bool:
     if not local:
         return False
+    lowered = local.lower()
+    if any(lowered.startswith(prefix) for prefix in _ROLE_PREFIX_ALWAYS):
+        return True
     m = ROLE_PREFIX_BLACKLIST.match(local)
     if not m:
         return False

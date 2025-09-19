@@ -50,7 +50,12 @@ from .messaging_utils import (
     upsert_sent_log,
 )
 from .utils import log_error as log_internal_error
-from .services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
+from .services.cooldown import (
+    COOLDOWN_DAYS,
+    mark_sent as cooldown_mark_sent,
+    should_skip_by_cooldown,
+    was_sent_recently as cooldown_was_sent_recently,
+)
 from utils import rules
 from utils.send_stats import log_error, log_success
 from utils.smtp_client import RobustSMTP, send_with_retry
@@ -446,6 +451,11 @@ def was_sent_recently(msg) -> bool:
         return history_service.was_sent_within_days(recipient, group, 1)
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("history_service was_sent_recently failed", exc_info=True)
+    try:
+        if cooldown_was_sent_recently(recipient, days=1):
+            return True
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("cooldown_sqlite was_sent_recently failed", exc_info=True)
     global _sent_idempotency
     if not _sent_idempotency:
         _sent_idempotency = _load_sent_ids()
@@ -467,6 +477,10 @@ def mark_sent(msg) -> None:
         return
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("history_service mark_sent failed", exc_info=True)
+    try:
+        cooldown_mark_sent(recipient)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("cooldown_sqlite mark_sent failed", exc_info=True)
     key = _make_send_key(msg)
     _sent_idempotency.add(key)
     _persist_sent_key(key)

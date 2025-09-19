@@ -19,10 +19,6 @@ def sanitize_email(value: str, strip_footnote: bool = True) -> str:
     [
         ("(a) anton-belousov0@rambler.ru", ["anton-belousov0@rambler.ru"]),
         (
-            "RCPT TO:<russiavera.kidyaeva@yandex.ru>:",
-            ["russiavera.kidyaeva@yandex.ru"],
-        ),
-        (
             "... tsibulnikova2011@yandex.ru> 550 5.7.1 ...",
             ["tsibulnikova2011@yandex.ru"],
         ),
@@ -135,6 +131,19 @@ def test_glued_role_prefix_is_rejected():
     assert parse_emails_unified(src) == []
 
 
-def test_plain_role_address_still_allowed():
+def test_plain_role_address_filtered():
     src = "Связь: support@support.com"
-    assert parse_emails_unified(src) == ["support@support.com"]
+    cleaned, meta = parse_emails_unified(src, return_meta=True)
+    assert cleaned == []
+    reasons = {}
+    for item in meta["items"]:
+        key = item.get("sanitized") or item.get("normalized") or item.get("raw")
+        if key:
+            reasons[key] = item.get("reason")
+    assert reasons.get("support@support.com") == "role-like-prefix"
+
+
+def test_role_prefix_sanitize_reason():
+    addr, reason = _sanitize_email("info@example.com")
+    assert addr == ""
+    assert reason == "role-like-prefix"

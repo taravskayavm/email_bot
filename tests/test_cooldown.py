@@ -9,8 +9,10 @@ import pytest
 @pytest.fixture()
 def cooldown_module(monkeypatch, tmp_path):
     stats_path = tmp_path / "send_stats.jsonl"
+    sqlite_path = tmp_path / "cooldown.sqlite"
     monkeypatch.setenv("SEND_STATS_PATH", str(stats_path))
     monkeypatch.setenv("APPEND_TO_SENT", "0")
+    monkeypatch.setenv("SEND_HISTORY_SQLITE_PATH", str(sqlite_path))
     module = importlib.import_module("emailbot.services.cooldown")
     return importlib.reload(module), stats_path
 
@@ -78,3 +80,12 @@ def test_should_use_history_registry(cooldown_module):
     skip, reason = cooldown.should_skip_by_cooldown("history@example.com", now=now, days=180)
     assert skip is True
     assert "source=history" in reason
+
+
+def test_sqlite_cache_mark_and_check(cooldown_module):
+    cooldown, _ = cooldown_module
+    now = datetime(2024, 1, 10, tzinfo=timezone.utc)
+    earlier = now - timedelta(days=2)
+    cooldown.mark_sent("User@Example.com", sent_at=earlier)
+    assert cooldown.was_sent_recently("user@example.com", now=now, days=3) is True
+    assert cooldown.was_sent_recently("user@example.com", now=now, days=1) is False

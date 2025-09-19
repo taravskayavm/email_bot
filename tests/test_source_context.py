@@ -39,7 +39,12 @@ def test_extract_emails_pipeline_source_context(
 
     if is_role and pipeline.PERSONAL_ONLY:
         assert expected_email not in emails
-        assert stats.get("role_filtered", 0) >= 1
+        items = captured_meta["meta"]["items"]
+        assert any(
+            (item.get("sanitized") or item.get("normalized")) == expected_email
+            and item.get("reason") == "role-like-prefix"
+            for item in items
+        )
     else:
         assert emails == [expected_email]
         assert stats["contexts_tagged"] >= 1
