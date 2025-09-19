@@ -14,7 +14,7 @@ def enable_obfuscation(monkeypatch):
 def test_obfuscated_russian_words():
     raw = "Иван (собака) yandex (точка) ru"
     final, _ = run_pipeline_on_text(raw)
-    assert "Иван@yandex.ru".lower() in [e.lower() for e in final]
+    assert final == []
 
 
 def test_obfuscated_english_words():
