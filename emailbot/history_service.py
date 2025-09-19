@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -17,6 +18,16 @@ _INITIALIZED_PATH: Path | None = None
 _DEFAULT_DB_PATH = Path("var/state.db")
 
 
+def _default_db_path() -> Path:
+    """Return default DB path, isolating pytest runs."""
+
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        base = Path(tempfile.gettempdir()) / "emailbot_test_state"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "state.db"
+    return _DEFAULT_DB_PATH
+
+
 def _resolve_path() -> Path:
     raw = os.getenv("HISTORY_DB_PATH")
     if raw:
@@ -24,7 +35,7 @@ def _resolve_path() -> Path:
         if not path.is_absolute():
             path = Path.cwd() / path
         return path
-    return _DEFAULT_DB_PATH
+    return _default_db_path()
 
 
 def ensure_initialized() -> None:
