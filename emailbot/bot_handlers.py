@@ -45,7 +45,7 @@ from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
 from utils.bounce import sync_bounces
-from utils.tld_utils import is_allowed_domain
+from utils.tld_utils import is_allowed_domain as _is_allowed_domain
 
 STATS_PATH = str(_stats_path())
 
@@ -73,17 +73,64 @@ def apply_numeric_truncation_removal(allowed):
     return allowed, []
 
 
+def _meta_candidate(info, *, prefer_sanitized: bool = False) -> str:
+    """Extract a representative candidate string from parser meta info."""
+
+    if not isinstance(info, dict):
+        return ""
+    keys = ["normalized", "raw"]
+    if prefer_sanitized:
+        keys = ["sanitized", *keys]
+    for key in keys:
+        value = info.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _ingest_meta_to(
+    loose_target: Set[str], suspicious_target: Dict[str, str], stats_obj
+) -> None:
+    """Populate loose candidates and suspicious reasons from meta stats."""
+
+    if not isinstance(stats_obj, dict):
+        return
+    items = stats_obj.get("items")
+    if isinstance(items, list):
+        for item in items:
+            candidate = _meta_candidate(item)
+            if candidate:
+                loose_target.add(candidate)
+    rejected = stats_obj.get("items_rejected", [])
+    if isinstance(rejected, list):
+        for info in rejected:
+            candidate = _meta_candidate(info)
+            if candidate:
+                loose_target.add(candidate)
+            display_candidate = _meta_candidate(info, prefer_sanitized=True)
+            if not display_candidate:
+                continue
+            reason = str(info.get("reason") or "invalid").strip() or "invalid"
+            suspicious_target.setdefault(display_candidate, reason)
+
+
 async def async_extract_emails_from_url(
     url: str, session, chat_id=None, batch_id: str | None = None
 ):
     text = await asyncio.to_thread(_extraction_url.fetch_url, url)
     _ = _extraction.extract_any  # keep reference for tests
-    found = parse_emails_unified(text or " ")
-    cleaned = dedupe_keep_original(found)
-    cleaned = drop_leading_char_twins(cleaned)
-    emails = set(cleaned)
-    foreign = {e for e in emails if not is_allowed_tld(e)}
-    stats: dict = {}
+    allowed, meta = extract_emails_pipeline(text or "")
+    emails = {str(addr).strip() for addr in allowed if addr}
+    meta_dict = meta if isinstance(meta, dict) else {}
+    loose_candidates: Set[str] = set()
+    _ingest_meta_to(loose_candidates, {}, meta_dict)
+    all_found = {addr for addr in emails | loose_candidates if addr}
+    foreign = {
+        addr
+        for addr in all_found
+        if "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
+    }
+    stats: dict = dict(meta_dict)
     logger.info(
         "extraction complete",
         extra={"event": "extract", "source": url, "count": len(emails)},
@@ -129,7 +176,7 @@ def is_allowed_tld(email_addr: str) -> bool:
     if "@" not in addr:
         return False
     domain = addr.rsplit("@", 1)[-1]
-    return is_allowed_domain(domain)
+    return _is_allowed_domain(domain)
 
 
 def sample_preview(items, k: int):
@@ -1472,6 +1519,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     extracted_files: List[str] = []
     repairs: List[tuple[str, str]] = []
     footnote_dupes = 0
+    suspicious_map: Dict[str, str] = {}
 
     try:
         if file_path.lower().endswith(".zip"):
@@ -1482,6 +1530,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             loose_all.update(loose)
             repairs = collect_repairs_from_files(extracted_files)
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
+            _ingest_meta_to(loose_all, suspicious_map, stats)
         else:
             allowed, loose, stats = extract_from_uploaded_file(file_path)
             allowed_all.update(allowed)
@@ -1489,6 +1538,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             extracted_files.append(file_path)
             repairs = collect_repairs_from_files([file_path])
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
+            _ingest_meta_to(loose_all, suspicious_map, stats)
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
 
@@ -1511,24 +1561,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             dropped_current.append((email, "filtered"))
 
-    suspicious_items = []
-    if isinstance(stats, dict):
-        suspicious_items = stats.get("items_rejected", []) or []
-    for info in suspicious_items:
-        if not isinstance(info, dict):
-            continue
-        candidate = (
-            (info.get("sanitized") or "")
-            or (info.get("normalized") or "")
-            or (info.get("raw") or "")
-        )
-        candidate = candidate.strip()
-        if not candidate:
-            continue
-        reason = str(info.get("reason") or "invalid")
+    suspicious_items = sorted(suspicious_map.items())
+    for candidate, reason in suspicious_items:
         dropped_current.append((candidate, reason))
 
-    foreign_raw = {e for e in allowed_all | loose_all if not is_allowed_tld(e)}
+    all_found = {addr for addr in allowed_all | loose_all if addr}
+    foreign_raw = {
+        addr
+        for addr in all_found
+        if "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
+    }
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
     state = get_state(context)
@@ -1876,11 +1918,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         foreign_all: Set[str] = set()
         repairs_all: List[tuple[str, str]] = []
         footnote_dupes = 0
+        loose_meta: Set[str] = set()
+        suspicious_map: Dict[str, str] = {}
         for _, allowed, foreign, repairs, stats in results:
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
+            _ingest_meta_to(loose_meta, suspicious_map, stats)
+
+        if loose_meta:
+            extra_foreign = {
+                addr
+                for addr in loose_meta
+                if addr and "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
+            }
+            foreign_all.update(extra_foreign)
 
         technical_emails = [
             e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
@@ -1899,21 +1952,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             else:
                 dropped_current.append((email, "filtered"))
 
-        suspicious_items = []
-        if isinstance(stats, dict):
-            suspicious_items = stats.get("items_rejected", []) or []
-        for info in suspicious_items:
-            if not isinstance(info, dict):
-                continue
-            candidate = (
-                (info.get("sanitized") or "")
-                or (info.get("normalized") or "")
-                or (info.get("raw") or "")
-            )
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            reason = str(info.get("reason") or "invalid")
+        suspicious_items = sorted(suspicious_map.items())
+        for candidate, reason in suspicious_items:
             dropped_current.append((candidate, reason))
 
         state = get_state(context)
