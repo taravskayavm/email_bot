@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from utils.paths import expand_path, ensure_parent
+
 try:
     from emailbot.extraction_common import normalize_email as _canonical_normalize
 except Exception:  # pragma: no cover - fallback if module layout changes
@@ -28,13 +30,14 @@ def _env_int(name: str, default: int) -> int:
 
 
 COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", 180)
-SEND_STATS_PATH = os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")
+_DEFAULT_SEND_STATS_PATH = expand_path("var/send_stats.jsonl")
+SEND_STATS_PATH = os.getenv("SEND_STATS_PATH", str(_DEFAULT_SEND_STATS_PATH))
 APPEND_TO_SENT = os.getenv("APPEND_TO_SENT", "1") == "1"
 SENT_MAILBOX = os.getenv("SENT_MAILBOX", "Отправленные")
 
 _GMAIL_RE_PLUS = re.compile(r"^([^+]+)\+[^@]+(@gmail\.com)$", re.IGNORECASE)
 _SEND_HISTORY_DB_ENV = "SEND_HISTORY_SQLITE_PATH"
-_DEFAULT_HISTORY_DB = Path("var/send_history.db")
+_DEFAULT_HISTORY_DB: Path = expand_path("var/send_history.db")
 _SEND_HISTORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS send_history_cache (
     email TEXT PRIMARY KEY,
@@ -45,27 +48,22 @@ CREATE TABLE IF NOT EXISTS send_history_cache (
 
 def _send_stats_path() -> Path:
     raw = os.getenv("SEND_STATS_PATH", SEND_STATS_PATH)
-    path = Path(str(raw)).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
+    path = expand_path(str(raw))
+    ensure_parent(path)
     return path
 
 
 def _send_history_path() -> Path:
     raw = os.getenv(_SEND_HISTORY_DB_ENV)
     if raw:
-        path = Path(str(raw)).expanduser()
-    else:
-        path = _DEFAULT_HISTORY_DB
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path
+        return expand_path(str(raw))
+    return _DEFAULT_HISTORY_DB
 
 
 def _ensure_history_db() -> sqlite3.Connection:
     path = _send_history_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent(path)
     except Exception:
         pass
     conn = sqlite3.connect(path)

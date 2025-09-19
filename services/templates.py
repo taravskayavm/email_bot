@@ -5,6 +5,8 @@ import json
 import os
 from typing import Any, Dict, Iterable, Optional
 
+from utils.paths import expand_path
+
 
 def _allowed_exts() -> tuple[str, ...]:
     parts = [
@@ -16,12 +18,7 @@ def _allowed_exts() -> tuple[str, ...]:
 
 
 def _base_dir() -> Path:
-    base = Path(os.getenv("TEMPLATES_DIR", "templates")).expanduser()
-    if not base.is_absolute():
-        base = (Path.cwd() / base).resolve()
-    else:
-        base = base.resolve()
-    return base
+    return expand_path(os.getenv("TEMPLATES_DIR", "templates"))
 
 
 def _labels_path(base: Path) -> Path:

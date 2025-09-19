@@ -13,6 +13,7 @@ from utils.email_deobfuscate import deobfuscate_text
 from utils.email_role import classify_email_role
 
 from utils.tld_utils import is_allowed_domain
+from utils.paths import expand_path, ensure_parent, get_temp_file
 
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
@@ -117,6 +118,15 @@ _CONFUSABLE_TRANSLATION = str.maketrans(
 
 _ASCII_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _ASCII_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9-]+$")
+
+_DEFAULT_DEBUG_LOG = get_temp_file("email_parse_debug.log")
+
+
+def _debug_log_path() -> Path:
+    """Return path for debug logging respecting environment overrides."""
+
+    raw = os.getenv("DEBUG_EMAIL_PARSE_LOG_PATH", str(_DEFAULT_DEBUG_LOG))
+    return expand_path(raw)
 
 
 def _is_cyrillic(ch: str) -> bool:
@@ -621,11 +631,9 @@ def drop_leading_char_twins(emails: list[str]) -> list[str]:
             out.append(e)
 
     if os.getenv("DEBUG_EMAIL_PARSE_LOG") == "1" and log_pairs:
-        log_path = Path(
-            os.getenv("DEBUG_EMAIL_PARSE_LOG_PATH", "var/email_parse_debug.log")
-        )
         try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path = _debug_log_path()
+            ensure_parent(log_path)
             with log_path.open("a", encoding="utf-8") as f:
                 for kept, dropped in log_pairs:
                     f.write(f"DROP_TRIMMED_TWIN: kept={kept} dropped={dropped}\n")
@@ -729,9 +737,9 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     DEBUG_LOG = os.getenv("DEBUG_EMAIL_PARSE_LOG", "1") == "1"
     log_path: Path | None = None
     if DEBUG_PARSE and DEBUG_LOG:
-        log_path = Path(os.getenv("DEBUG_EMAIL_PARSE_LOG_PATH", "var/email_parse_debug.log"))
         try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path = _debug_log_path()
+            ensure_parent(log_path)
         except Exception:
             log_path = None
 

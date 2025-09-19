@@ -7,7 +7,9 @@ import shutil
 import time
 from pathlib import Path
 
-PATH = Path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
+from utils.paths import expand_path
+
+PATH = expand_path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
 MAX_SIZE_MB = int(os.getenv("SEND_STATS_MAX_MB", "50"))
 
 
