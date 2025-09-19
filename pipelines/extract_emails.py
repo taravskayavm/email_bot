@@ -7,6 +7,8 @@ from utils.email_clean import dedupe_with_variants, parse_emails_unified
 from utils.email_role import classify_email_role
 from utils.name_match import fio_candidates, fio_match_score
 
+from utils.tld_utils import is_foreign_domain
+
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
 FIO_PERSONAL_THRESHOLD = 0.9
 
@@ -39,7 +41,16 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     items = meta.get("items", [])
     deobf_count = meta.get("deobfuscated_count", 0)
     conf_count = meta.get("confusables_fixed", 0)
+    foreign = 0
+    for item in items:
+        normalized = (item.get("normalized") or "").strip()
+        if "@" not in normalized:
+            continue
+        domain = normalized.rsplit("@", 1)[1]
+        if is_foreign_domain(domain):
+            foreign += 1
     dropped = sum(1 for item in items if not item.get("sanitized"))
+    meta["foreign_domains"] = foreign
 
     # [EBOT-PIPELINE-CONTEXT-004] naive source_context from nearby keywords
     def guess_context(around: str) -> str:
@@ -182,6 +193,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "classified": classified,
         "contexts_tagged": len(contexts),
         "has_fio": 1 if fio_pairs else 0,
+        "foreign_domains": foreign,
     }
 
     return filtered, stats

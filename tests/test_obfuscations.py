@@ -2,7 +2,7 @@ from utils.email_clean import parse_emails_unified, dedupe_with_variants
 
 CASES = [
     ("name[at]domain[dot]com", {"name@domain.com"}),
-    ("name(at)university(dot)edu", {"name@university.edu"}),
+    ("name(at)university(dot)com", {"name@university.com"}),
     ("mailto:name.surname@domain.com", {"name.surname@domain.com"}),
     ("name\u2022surname@do\u00b7main.com", {"name.surname@domain.com"}),
     ("name@do-\nmain.com", {"name@domain.com"}),

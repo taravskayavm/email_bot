@@ -38,6 +38,7 @@ from .extraction_pdf import (
 )
 from .extraction_zip import extract_emails_from_zip
 from .settings_store import get
+from utils.tld_utils import is_allowed_domain
 from .reporting import log_extract_digest
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -345,7 +346,10 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
         domain_ok = _valid_domain(dom)
         features = {"tld_known": domain_ok}
         if local_ok and domain_ok:
-            if score_candidate(features) >= CANDIDATE_SCORE_THRESHOLD:
+            if not is_allowed_domain(dom):
+                if stats is not None:
+                    stats["foreign_domains"] = stats.get("foreign_domains", 0) + 1
+            elif score_candidate(features) >= CANDIDATE_SCORE_THRESHOLD:
                 emails.append(final_email)
             else:
                 if stats is not None:

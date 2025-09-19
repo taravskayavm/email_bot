@@ -17,6 +17,8 @@ from typing import Dict, Iterable, List, Literal, Tuple
 from .extraction_common import normalize_email as _normalize_email
 from .tld_registry import tld_of
 
+from utils.tld_utils import allowed_tlds
+
 SUPPRESS_PATH = Path(
     "/mnt/data/suppress_list.csv"
 )  # e-mail, code, reason, first_seen, last_seen, hits
@@ -732,42 +734,14 @@ def is_suppressed(email: str) -> bool:
     return False
 
 
-DOMESTIC_CCTLD = {
-    "RU",
-    "SU",
-    "XN--P1AI",
-    "BY",
-    "KZ",
-    "UA",
-    "UZ",
-    "KG",
-    "AM",
-    "AZ",
-    "GE",
-}
+def _split_allowed_tlds() -> tuple[set[str], set[str]]:
+    allowed_upper = {t.upper() for t in allowed_tlds() if t}
+    domestic = {"RU"} & allowed_upper
+    generic = allowed_upper - domestic
+    return domestic, generic
 
-GENERIC_GTLD = {
-    "COM",
-    "ORG",
-    "NET",
-    "INFO",
-    "BIZ",
-    "EDU",
-    "GOV",
-    "IO",
-    "AI",
-    "APP",
-    "DEV",
-    "PRO",
-    "NAME",
-    "CLUB",
-    "SITE",
-    "ONLINE",
-    "XYZ",
-    "TOP",
-    "STORE",
-    "TECH",
-}
+
+DOMESTIC_CCTLD, GENERIC_GTLD = _split_allowed_tlds()
 
 
 def classify_tld(email: str) -> Literal["domestic", "foreign", "generic"]:
@@ -778,9 +752,11 @@ def classify_tld(email: str) -> Literal["domestic", "foreign", "generic"]:
     tld = tld_of(domain)
     if tld is None:
         return "foreign"
-    if tld in DOMESTIC_CCTLD:
+    domestic, generic = _split_allowed_tlds()
+    tld_upper = tld.upper()
+    if tld_upper in domestic:
         return "domestic"
-    if tld in GENERIC_GTLD:
+    if tld_upper in generic:
         return "generic"
     return "foreign"
 

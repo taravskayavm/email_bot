@@ -123,7 +123,7 @@ def test_label_length_and_tld_rules():
     assert sanitize_email(f"user@{long_label}.com") == ""
     assert sanitize_email("user@example.c0m") == ""
     assert sanitize_email("user@example." + "a" * 25) == ""
-    assert sanitize_email("user@example." + "a" * 24) == "user@example." + "a" * 24
+    assert sanitize_email("user@example." + "a" * 24) == ""
 
 
 def test_non_ascii_local_is_rejected():

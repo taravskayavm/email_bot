@@ -6,14 +6,14 @@ from emailbot.extraction import smart_extract_emails
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("\u00b9ivanov@uni.edu", ["ivanov@uni.edu"]),
-        ("1petrov@uni.edu", ["petrov@uni.edu"]),
-        ("apetrov@uni.edu", ["apetrov@uni.edu"]),
-        ("aivanov@uni.edu", ["aivanov@uni.edu"]),
-        ("name-name@dept.domain.co.uk", ["name-name@dept.domain.co.uk"]),
+        ("\u00b9ivanov@uni.com", ["ivanov@uni.com"]),
+        ("1petrov@uni.com", ["petrov@uni.com"]),
+        ("apetrov@uni.com", ["apetrov@uni.com"]),
+        ("aivanov@uni.com", ["aivanov@uni.com"]),
+        ("name-name@dept.domain.com", ["name-name@dept.domain.com"]),
         (
-            "user+tag_2024%eq=ok/part'one~x@sub-domain.xn--80asehdb",
-            ["user+tag_2024%eq=ok/part'one~x@sub-domain.xn--80asehdb"],
+            "user+tag_2024%eq=ok/part'one~x@sub-domain.com",
+            ["user+tag_2024%eq=ok/part'one~x@sub-domain.com"],
         ),
         ("na.me+tag@domain.ru", ["na.me+tag@domain.ru"]),
         ("name-\nname@domain.ru", ["namename@domain.ru"]),
