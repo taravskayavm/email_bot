@@ -259,14 +259,19 @@ def test_handle_text_manual_emails():
 
     run(handle_text(update, ctx))
 
-    assert ctx.chat_data["manual_all_emails"] == [
-        "123@site.com",
-        "1test@site.com",
-        "support@support.com",
-        "user@example.com",
+    assert ctx.chat_data["manual_all_emails"] == ["user@example.com"]
+    assert ctx.chat_data["manual_drop_reasons"] == [
+        ("123@site.com", "role-like"),
+        ("1test@site.com", "role-like"),
+        ("support@support.com", "role-like"),
     ]
     assert ctx.user_data["awaiting_manual_email"] is False
     assert "Адреса получены." in update.message.replies[0]
+    drop_reply = next(
+        (text for text in update.message.replies if "Исключены адреса" in text),
+        "",
+    )
+    assert "support@support.com — role-like" in drop_reply
 
 
 def test_prompt_manual_email_clears_previous_list():

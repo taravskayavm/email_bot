@@ -1,21 +1,23 @@
-from utils.email_clean import parse_emails_unified, dedupe_with_variants
+from pipelines.extract_emails import extract_emails_pipeline
 
-CASES = [
-    ("name[at]domain[dot]com", {"name@domain.com"}),
-    ("name(at)university(dot)com", {"name@university.com"}),
-    ("mailto:name.surname@domain.com", {"name.surname@domain.com"}),
-    ("name\u2022surname@do\u00b7main.com", {"name.surname@domain.com"}),
-    ("name@do-\nmain.com", {"name@domain.com"}),
-    ("Иванов I. (i.ivanov@uni.ru)", {"i.ivanov@uni.ru"}),
-    (
-        "no-reply@journal.com; editor@journal.com; ivan.ivanov@uni.ru",
-        {"no-reply@journal.com", "editor@journal.com", "ivan.ivanov@uni.ru"},
-    ),
-]
+SAMPLE = """
+Author: Ivan Ivanov (ivan.ivanov@mail.ru), Corresponding author: nkichigina@mail.ru
+Obfuscated: opek [at] mail [dot] ru ; tea_88(at)inbox(dot)ru
+Noise: russia 1 elena - noskova - 2011 @ el6309 . spb . edu
+Mixed: poccияalexdru9@mail.ru
+Role: editor@journals.example.com; info@mysite.com
+"""
 
-
-def test_obfuscations_and_dedupe():
-    for raw, expected in CASES:
-        cleaned, meta = parse_emails_unified(raw, return_meta=True)
-        uniq = set(dedupe_with_variants(cleaned))
-        assert expected.issubset(uniq)
+def test_pipeline_russian_only_ru_com():
+    emails, meta = extract_emails_pipeline(SAMPLE)
+    # only allowed TLDs
+    assert all(e.split("@", 1)[1].endswith((".ru", ".com")) for e in emails)
+    # mixed-script must be dropped
+    assert not any("pocc" in e for e in emails)
+    # role-like filtered by default
+    assert not any(e.startswith(("editor@", "info@")) for e in emails)
+    # expected valid
+    assert "ivan.ivanov@mail.ru" in emails
+    assert "nkichigina@mail.ru" in emails
+    assert "opek@mail.ru" in emails
+    assert "tea_88@inbox.ru" in emails

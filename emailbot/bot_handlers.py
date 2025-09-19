@@ -40,6 +40,7 @@ from utils.email_clean import (
     drop_leading_char_twins,
     parse_emails_unified,
 )
+from pipelines.extract_emails import extract_emails_pipeline
 from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
@@ -423,6 +424,71 @@ def _manual_override_store_selected(
     if previous == set(cleaned):
         return
     context.chat_data["manual_override_selected"] = cleaned
+
+
+def _normalize_manual_drop_reason(reason: str) -> str:
+    clean = (reason or "").strip()
+    if not clean:
+        return ""
+    mapping = {
+        "baseline": "invalid",
+        "role-like-prefix": "role-like",
+    }
+    return mapping.get(clean, clean)
+
+
+def _manual_collect_drop_reasons(
+    stats: Dict[str, object] | None,
+    final_emails: Sequence[str],
+    truncated_removed: Sequence[str],
+) -> List[Tuple[str, str]]:
+    if not stats:
+        return []
+    dropped_pairs = stats.get("dropped_candidates") if isinstance(stats, dict) else None
+    if not isinstance(dropped_pairs, list):
+        dropped_pairs = []
+    items = stats.get("items") if isinstance(stats, dict) else None
+    lookup: Dict[str, List[dict]] = {}
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized = str(item.get("normalized") or "").strip()
+            sanitized = str(item.get("sanitized") or "").strip()
+            candidates = [c for c in (sanitized, normalized) if c]
+            if not candidates:
+                raw = str(item.get("raw") or "").strip()
+                if raw:
+                    candidates = [raw]
+            for candidate in candidates:
+                lookup.setdefault(candidate, []).append(item)
+    final_set = set(final_emails)
+    entries: Dict[str, str] = {}
+    for addr, raw_reason in dropped_pairs:
+        if addr in final_set:
+            continue
+        reason = _normalize_manual_drop_reason(str(raw_reason or ""))
+        if not reason:
+            continue
+        meta_list = lookup.get(addr, [])
+        max_fio = 0.0
+        for info in meta_list:
+            try:
+                score = float(info.get("fio_match") or info.get("fio_score") or 0.0)
+            except Exception:
+                continue
+            if score > max_fio:
+                max_fio = score
+        if max_fio >= 1.0:
+            continue
+        entries.setdefault(addr, reason)
+    for addr in truncated_removed:
+        if addr in final_set:
+            continue
+        entries.setdefault(addr, "truncated-duplicate")
+    if not entries:
+        return []
+    return sorted(entries.items(), key=lambda pair: pair[0].lower())
 
 
 def _manual_override_current_page(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1573,6 +1639,7 @@ async def prompt_manual_email(
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
     context.chat_data.pop("manual_selected_emails", None)
+    context.chat_data.pop("manual_drop_reasons", None)
     _manual_override_clear(context)
     await _safe_reply_text(update.message, 
         (
@@ -1662,13 +1729,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        # Единый вход: всё — через единый пайплайн
-        found_emails = parse_emails_unified(text)
-        emails = dedupe_keep_original(found_emails)
-        emails = _drop_truncated_twins(emails, state=get_state(context))
-        emails = sorted(emails, key=str.lower)
+        final_emails, stats = extract_emails_pipeline(text)
+        pre_trunc = list(final_emails)
+        emails_no_trunc = _drop_truncated_twins(pre_trunc, state=get_state(context))
+        truncated_removed = [
+            addr for addr in pre_trunc if addr not in set(emails_no_trunc)
+        ]
+        emails = sorted(emails_no_trunc, key=str.lower)
+        drop_details = _manual_collect_drop_reasons(stats, emails, truncated_removed)
         logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
+            if drop_details:
+                preview_lines = [
+                    f"{addr} — {reason}" for addr, reason in drop_details[:50]
+                ]
+                await _safe_reply_text(update.message,
+                    "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+                )
             await _safe_reply_text(update.message, "❌ Не найдено ни одного email.")
             return
 
@@ -1676,6 +1753,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_manual_email"] = False
         context.chat_data["manual_all_emails"] = emails
         context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
+        context.chat_data["manual_drop_reasons"] = drop_details
 
         template_rows = [
             row[:]
@@ -1731,10 +1809,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboard.append(ignore_row)
         keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
 
-        await _safe_reply_text(update.message, 
+        await _safe_reply_text(update.message,
             "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        if drop_details:
+            preview_lines = [
+                f"{addr} — {reason}" for addr, reason in drop_details[:50]
+            ]
+            await _safe_reply_text(update.message,
+                "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+            )
         return
 
     urls = re.findall(r"https?://\S+", text)
@@ -2039,6 +2124,7 @@ async def manual_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.chat_data.pop("manual_selected_template_code", None)
     context.chat_data.pop("manual_selected_template_label", None)
     context.chat_data.pop("manual_selected_emails", None)
+    context.chat_data.pop("manual_drop_reasons", None)
     _manual_override_clear(context)
     await _safe_reply_text(query.message,
         "Сброшено. Нажмите /manual для новой ручной рассылки."
