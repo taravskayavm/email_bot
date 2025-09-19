@@ -15,19 +15,17 @@ from threading import Lock
 from typing import Iterable, Optional, Tuple
 
 from .extraction_common import normalize_email as _normalize_email
+from utils.paths import expand_path, ensure_parent
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH: Path = Path("var/state.db")
+_DB_PATH: Path = expand_path("var/state.db")
 _INITIALIZED = False
 _LOCK = Lock()
 
 
 def _ensure_path(path: Path | str) -> Path:
-    path = Path(path)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path
+    return expand_path(path)
 
 
 def init_db(path: Path | str | None = None) -> None:
@@ -36,7 +34,7 @@ def init_db(path: Path | str | None = None) -> None:
     global _DB_PATH, _INITIALIZED
     target = path or _DB_PATH
     resolved = _ensure_path(target)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(resolved)
     with _LOCK:
         conn = sqlite3.connect(resolved)
         try:

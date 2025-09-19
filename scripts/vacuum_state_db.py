@@ -3,14 +3,15 @@
 # [EBOT-LOG-ROTATE-006]
 import os
 import sqlite3
-from pathlib import Path
 
-DB = Path(os.getenv("STATE_DB_PATH", "var/state.db"))
+from utils.paths import expand_path, ensure_parent
+
+DB = expand_path(os.getenv("STATE_DB_PATH", "var/state.db"))
 
 
 def main() -> None:
     """Ensure the database path exists and vacuum the SQLite file."""
-    DB.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(DB)
 
     with sqlite3.connect(DB) as connection:
         connection.execute("PRAGMA optimize;")

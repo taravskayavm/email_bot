@@ -3,21 +3,12 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from emailbot.services.cooldown import normalize_email_for_key
+from utils.paths import expand_path, ensure_parent
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
 except Exception:  # pragma: no cover - fallback for older Python
     ZoneInfo = None
-
-
-def _resolve_path(p: str) -> Path:
-    """Return absolute path resolving ``~`` and relative segments."""
-
-    path = Path(p).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path.resolve()
-
 
 _TZ_NAME = (os.getenv("REPORT_TZ", "Europe/Moscow") or "Europe/Moscow").strip()
 
@@ -29,8 +20,8 @@ def _stats_path() -> Path:
     variable, which is important for tests monkeypatching it.
     """
 
-    path = _resolve_path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = expand_path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
+    ensure_parent(path)
     return path
 
 

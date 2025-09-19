@@ -5,9 +5,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from utils.paths import expand_path, ensure_parent
+
 REPORT_TZ = os.getenv("REPORT_TZ", "Europe/Moscow")
-HISTORY_PATH = Path(os.getenv("SEND_HISTORY_PATH", "var/send_history.jsonl"))
-BLOCKLIST_PATH = Path(os.getenv("BLOCKLIST_PATH", "var/blocklist.txt"))
+HISTORY_PATH = expand_path(os.getenv("SEND_HISTORY_PATH", "var/send_history.jsonl"))
+BLOCKLIST_PATH = expand_path(os.getenv("BLOCKLIST_PATH", "var/blocklist.txt"))
 MONTHS_WINDOW = int(os.getenv("RULE_MONTHS_WINDOW", "6"))
 
 
@@ -16,8 +18,8 @@ def _now_utc() -> datetime:
 
 
 def ensure_dirs() -> None:
-    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(HISTORY_PATH)
+    ensure_parent(BLOCKLIST_PATH)
 
 
 def load_blocklist() -> set[str]:
