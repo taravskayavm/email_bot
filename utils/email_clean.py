@@ -580,10 +580,19 @@ _EMAIL_CORE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_ASCII_LOCAL_RE = re.compile(rf"^[{_LOCAL_BODY_CHARS}]+$")
+_ASCII_LOCAL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+$")
 _ASCII_DOMAIN_RE = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59})$"
+)
+
+ROLE_PREFIX_BLACKLIST = re.compile(
+    r"^(russia|россия|journal|editor|ojs|office|support|contact|press|admissions|department|kafedra|кафедр|faculty|факультет)",
+    re.IGNORECASE,
+)
+GLUE_RISK_CONTEXT = re.compile(
+    r"(fig\.?|рис\.?|табл\.?|doi|страна|country|\b[0-9]{2,}\b)",
+    re.IGNORECASE,
 )
 
 _LOCAL_TLD_GLUE_CAMEL_RE = re.compile(rf"\.(?i:({_COMMON_TLD_RE}))(?=[A-Z0-9А-ЯЁ])")
@@ -739,6 +748,40 @@ def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
         pass
 
 
+def _is_ascii_local(local: str) -> bool:
+    return bool(_ASCII_LOCAL_RE.fullmatch(local))
+
+
+def _is_bad_prefix(local: str) -> bool:
+    if not local:
+        return False
+    m = ROLE_PREFIX_BLACKLIST.match(local)
+    if not m:
+        return False
+    rest = local[m.end() :]
+    if not rest:
+        return False
+    return rest[0].isdigit()
+
+
+def _looks_glued_around(text: str, start: int, end: int) -> bool:
+    """
+    Проверяем контекст вокруг найденного адреса: если слева "липкое" слово
+    (таблица/рисунок/doi/страна/числа) и адрес прилип без разделителя,
+    считаем, что это склейка и лучше отбросить.
+    """
+
+    if not text or start <= 0:
+        return False
+    left = text[start - 1]
+    if not left.isalnum():
+        return False
+    L = max(0, start - 24)
+    R = min(len(text), end + 24)
+    ctx = text[L:R]
+    return bool(GLUE_RISK_CONTEXT.search(ctx))
+
+
 def parse_emails_unified(text: str, return_meta: bool = False):
     """Единый вход парсинга с учётом фичефлагов."""
 
@@ -781,7 +824,8 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     items_meta: list[dict[str, object]] = []
     confusables_fixed = 0
 
-    for c in found:
+    for m in matches:
+        c = m.group(0)
         try:
             raw_local, raw_domain = c.split("@", 1)
         except ValueError:
@@ -793,7 +837,12 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             norm_local, norm_domain, conf_fixed = normalize_confusables(raw_local, raw_domain)
 
         candidate = f"{norm_local}@{norm_domain}"
-        sanitized, sanitize_reason = sanitize_email(candidate)
+        start, end = m.span(0)
+        if _looks_glued_around(t2, start, end):
+            sanitized = ""
+            sanitize_reason: str | None = "glued-break"
+        else:
+            sanitized, sanitize_reason = sanitize_email(candidate)
         reverted = False
 
         if not sanitized and sanitize_reason == "invalid-idna" and conf_fixed:
@@ -822,6 +871,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 "reason": final_reason,
                 "confusables_applied": conf_fixed,
                 "reverted": reverted,
+                "span": (start, end),
             }
         )
 
@@ -1050,8 +1100,11 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     if _has_cyrillic(local) and _has_latin(local):
         return "", "mixed-script-local"
 
-    if not _ASCII_LOCAL_RE.match(local):
-        return "", reason
+    if not _is_ascii_local(local):
+        return "", "non-ascii-local"
+
+    if _is_bad_prefix(local):
+        return "", "role-like-prefix"
 
     if _LOCAL_TLD_GLUE_CAMEL_RE.search(original_local) or _LOCAL_TLD_GLUE_VOWEL_RE.search(
         original_local

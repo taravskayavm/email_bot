@@ -124,3 +124,17 @@ def test_label_length_and_tld_rules():
     assert sanitize_email("user@example.c0m") == ""
     assert sanitize_email("user@example." + "a" * 25) == ""
     assert sanitize_email("user@example." + "a" * 24) == "user@example." + "a" * 24
+
+
+def test_non_ascii_local_is_rejected():
+    assert sanitize_email("россияalexdru9@gmail.com") == ""
+
+
+def test_glued_role_prefix_is_rejected():
+    src = "Россия: russia1elena@example.com"
+    assert parse_emails_unified(src) == []
+
+
+def test_plain_role_address_still_allowed():
+    src = "Связь: support@support.com"
+    assert parse_emails_unified(src) == ["support@support.com"]
