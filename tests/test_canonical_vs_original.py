@@ -23,7 +23,7 @@ def test_yandex_plus_is_removed_in_canonical_only():
 
 
 def test_other_domains_keep_dots():
-    originals = ["name.surname@uni.edu", "namesurname@uni.edu"]
+    originals = ["name.surname@uni.com", "namesurname@uni.com"]
     # для других доменов точки значимы → это не дубли
     keep = dedupe_keep_original(originals)
     assert keep == originals

@@ -20,9 +20,9 @@ def test_obfuscated_russian_words():
 
 
 def test_obfuscated_english_words():
-    raw = "support [at] uni [dot] edu"
+    raw = "support [at] uni [dot] com"
     final, _ = run_pipeline_on_text(raw)
-    assert "support@uni.edu" in final
+    assert "support@uni.com" in final
 
 
 def test_no_false_positive():

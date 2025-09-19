@@ -61,8 +61,9 @@ def test_provider_dedupe_mailru_plus():
 
 def test_unicode_domain_punycode_kept_correct():
     src = "test@тест.рф"
-    got = parse_emails_unified(src)
-    assert got == ["test@xn--e1aybc.xn--p1ai"]
+    emails, meta = parse_emails_unified(src, return_meta=True)
+    assert emails == []
+    assert meta["items"][0]["reason"] == "tld-not-allowed"
 
 
 @pytest.mark.parametrize("flag", ["0", "1"])

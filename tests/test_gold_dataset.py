@@ -47,7 +47,7 @@ def test_phone_prefix_stripped():
     html = (
         "+7-913-331-52-25stark_velik@mail.ru.\n"
         "01-37-93-11elena-dzhioeva@yandex.ru\n"
-        "normal: user1@site.ru, help@site.org"
+        "normal: user1@site.ru, help@site.com"
     )
     text = strip_html(html)
     stats: dict = {}
@@ -56,7 +56,7 @@ def test_phone_prefix_stripped():
         "stark_velik@mail.ru",
         "elena-dzhioeva@yandex.ru",
         "user1@site.ru",
-        "help@site.org",
+        "help@site.com",
     } <= emails
     assert "+7-913-331-52-25stark_velik@mail.ru" not in emails
     assert "01-37-93elena-dzhioeva@yandex.ru" not in emails
@@ -89,10 +89,10 @@ def test_obfuscations(tmp_path, httpx_file_server):
 
 
 def test_tld_validator():
-    html = "local@site.ru tri@hlon.org a.d@a.message +m@h.abs"
+    html = "local@site.ru tri@hlon.com a.d@a.message +m@h.abs"
     text = strip_html(html)
     stats: dict = {}
     emails = {e.lower() for e in smart_extract_emails(text, stats)}
-    assert emails == {"local@site.ru", "tri@hlon.org"}
+    assert emails == {"local@site.ru", "tri@hlon.com"}
     assert stats.get("invalid_tld", 0) >= 0
 

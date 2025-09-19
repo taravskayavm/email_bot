@@ -22,7 +22,9 @@ def test_filter_invalid_tld():
 
 def test_smart_extract_skips_unknown_tld():
     text = "+m@h.abs a.d@a.message tri@hlon.org"
-    assert smart_extract_emails(text) == ["tri@hlon.org"]
+    stats = {}
+    assert smart_extract_emails(text, stats) == []
+    assert stats.get("foreign_domains") == 1
 
 
 def test_classify_tld_generic_domestic_foreign():

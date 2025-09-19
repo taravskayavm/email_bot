@@ -14,7 +14,7 @@ def test_strip_leading_superscript_footnote_only():
 
 def test_trim_local_part_edges():
     assert sanitize_email("..test-@site.com") == "test@site.com"
-    assert sanitize_email("__user__@example.org") == "user@example.org"
+    assert sanitize_email("__user__@example.com") == "user@example.com"
 
 
 def test_dedupe_with_variants_prefers_clean():

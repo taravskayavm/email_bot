@@ -12,6 +12,8 @@ from config import CONFUSABLES_NORMALIZE, OBFUSCATION_ENABLE
 from utils.email_deobfuscate import deobfuscate_text
 from utils.email_role import classify_email_role
 
+from utils.tld_utils import is_allowed_domain
+
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
 
@@ -1017,6 +1019,9 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     domain_ascii, domain_reason = normalize_domain(domain)
     if not domain_ascii:
         return "", domain_reason or reason
+
+    if not is_allowed_domain(domain_ascii):
+        return "", "tld-not-allowed"
 
     if AGGR and _POPULAR.match(domain_ascii):
         m = _REPAIR_RE.match(local)
