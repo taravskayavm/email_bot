@@ -123,7 +123,9 @@ def _is_local_char(ch: str) -> bool:
     return ch.isalnum() or ch in _ATEXT_PUNCT
 
 def _valid_local(local: str) -> bool:
-    if not local or local[0] == "." or local[-1] == "." or ".." in local:
+    if not (1 <= len(local) <= 64):
+        return False
+    if local.startswith(".") or local.endswith(".") or ".." in local:
         return False
     return all(_is_local_char(c) for c in local)
 
@@ -370,7 +372,7 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
 
 # --- MANUAL mode (for chat input) ---------------------------------
 
-_EMAIL_CORE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
+_EMAIL_CORE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]{2,63}"
 _RE_ANGLE = re.compile(rf"<\s*({_EMAIL_CORE})\s*>")
 _RE_MAILTO = re.compile(rf"mailto:\s*({_EMAIL_CORE})", re.IGNORECASE)
 # Универсальная юникод-граница:

@@ -17,8 +17,20 @@ from emailbot import settings
 from emailbot.settings_store import get
 
 _OBFUSCATED_RE = re.compile(
-    r"(?P<local>[\w.+-]+)\s*(?P<at>@|\(at\)|\[at\]|{at}|at|собака|arroba)\s*(?P<domain>[\w-]+(?:\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto)\s*[\w-]+)+)",
-    re.I,
+    r"""(?xi)
+    (?P<local>[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+)
+    \s*
+    (?P<at>
+        @
+      | \(at\) | \[at\] | \{at\} | \bat\b
+      | собака | собакa | arroba
+    )
+    \s*
+    (?P<domain>
+        (?:[A-Za-z0-9-]+
+           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto)\s*[A-Za-z0-9-]+)+)
+    )
+    """,
 )
 
 _DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto)\s*", re.I)
@@ -27,17 +39,38 @@ _CACHE: Dict[str, Tuple[float, str]] = {}
 _CACHE_BYTES: Dict[str, Tuple[float, bytes]] = {}
 _CURRENT_BATCH: str | None = None
 _READ_CHUNK = 128 * 1024
+_DEFAULT_FETCH_HEADERS = {
+    "User-Agent": "emailbot/1.0 (+parser)",
+    "Accept": "text/*,application/pdf,application/xml,application/msword,application/vnd.openxmlformats-officedocument.*;q=0.9,*/*;q=0.1",
+}
+
+_ALLOWED_CONTENT_TYPES = (
+    "text/",
+    "pdf",
+    "xml",
+    "html",
+    "msword",
+    "officedocument",
+    "json",
+)
 _SIMPLE_EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
 
 
-def _fetch_get(url: str):
-    return httpx.get(url, timeout=15)
+def _is_allowed_content_type(value: str) -> bool:
+    if not value:
+        return True
+    lowered = value.lower()
+    return any(hint in lowered for hint in _ALLOWED_CONTENT_TYPES)
 
 
-def _fetch_stream(method: str, url: str):
-    return httpx.stream(method, url, timeout=15)
+def _fetch_get(url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    return httpx.get(url, timeout=timeout, headers=headers)
+
+
+def _fetch_stream(method: str, url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    return httpx.stream(method, url, timeout=timeout, headers=headers)
 
 
 class ResponseLike(Protocol):
@@ -65,6 +98,7 @@ def set_batch(batch_id: str | None) -> None:
         _CURRENT_BATCH = batch_id
 
 
+
 def fetch_url(
     url: str,
     stop_event: Optional[object] = None,
@@ -90,12 +124,13 @@ def fetch_url(
             return fetch(url).text
         except Exception:
             return None
+    request_headers = dict(_DEFAULT_FETCH_HEADERS)
     now = time.time()
     cached = _CACHE.get(url)
     if cached and cached[0] > now:
         return cached[1]
     try:
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=request_headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             final_url = getattr(resp, "geturl", lambda: url)()
             final_parsed = urllib.parse.urlparse(final_url)
@@ -107,10 +142,21 @@ def fetch_url(
                 tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
                 if tld not in allowed_tlds:
                     return None
-            headers = getattr(resp, "headers", None)
+            resp_headers = getattr(resp, "headers", None)
             encoding = "utf-8"
-            if headers and hasattr(headers, "get_content_charset"):
-                encoding = headers.get_content_charset() or "utf-8"
+            if resp_headers and hasattr(resp_headers, "get_content_charset"):
+                encoding = resp_headers.get_content_charset() or "utf-8"
+            if resp_headers:
+                content_length = resp_headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_size:
+                            return None
+                    except ValueError:
+                        pass
+                content_type = resp_headers.get("Content-Type", "")
+                if content_type and not _is_allowed_content_type(content_type):
+                    return None
             chunks: List[bytes] = []
             total = 0
             while True:
@@ -124,12 +170,12 @@ def fetch_url(
                 if total >= max_size:
                     break
             data = b"".join(chunks)
-            text = data.decode(encoding, "ignore")
+            text_out = data.decode(encoding, "ignore")
     except TimeoutError:
         return None
     except Exception:
         try:
-            with _fetch_stream("GET", url) as resp:
+            with _fetch_stream("GET", url, timeout=timeout, headers=request_headers) as resp:
                 final_url = str(getattr(resp, "url", url))
                 final_parsed = urllib.parse.urlparse(final_url)
                 if final_parsed.scheme not in allowed_schemes:
@@ -140,6 +186,16 @@ def fetch_url(
                     tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
                     if tld not in allowed_tlds:
                         return None
+                content_length = resp.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_size:
+                            return None
+                    except ValueError:
+                        pass
+                content_type = resp.headers.get("Content-Type", "")
+                if content_type and not _is_allowed_content_type(content_type):
+                    return None
                 encoding = getattr(resp, "encoding", None) or "utf-8"
                 chunks = []
                 total = 0
@@ -151,11 +207,12 @@ def fetch_url(
                     if total >= max_size:
                         break
                 data = b"".join(chunks)
-                text = data.decode(encoding, "ignore")
+                text_out = data.decode(encoding, "ignore")
         except Exception:  # pragma: no cover - network errors
             return None
-    _CACHE[url] = (now + ttl, text)
-    return text
+    _CACHE[url] = (now + ttl, text_out)
+    return text_out
+
 
 
 def fetch_bytes(
@@ -178,13 +235,26 @@ def fetch_bytes(
             return fetch(url).content
         except Exception:
             return None
+    request_headers = dict(_DEFAULT_FETCH_HEADERS)
     now = time.time()
     cached = _CACHE_BYTES.get(url)
     if cached and cached[0] > now:
         return cached[1]
     try:
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=request_headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_headers = getattr(resp, "headers", None)
+            if resp_headers:
+                content_length = resp_headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_size:
+                            return None
+                    except ValueError:
+                        pass
+                content_type = resp_headers.get("Content-Type", "")
+                if content_type and not _is_allowed_content_type(content_type):
+                    return None
             chunks: List[bytes] = []
             total = 0
             while True:
@@ -202,7 +272,17 @@ def fetch_bytes(
         return None
     except Exception:
         try:
-            with _fetch_stream("GET", url) as resp:
+            with _fetch_stream("GET", url, timeout=timeout, headers=request_headers) as resp:
+                content_length = resp.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_size:
+                            return None
+                    except ValueError:
+                        pass
+                content_type = resp.headers.get("Content-Type", "")
+                if content_type and not _is_allowed_content_type(content_type):
+                    return None
                 chunks = []
                 total = 0
                 for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):

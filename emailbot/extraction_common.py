@@ -9,11 +9,14 @@ from datetime import datetime
 from html import unescape
 from typing import Any, Iterable
 
+import idna
+
 from .tld_registry import tld_of, is_known_tld
 
 __all__ = [
     "normalize_text",
     "preprocess_text",
+    "normalize_domain",
     "normalize_email",
     "maybe_decode_base64",
     "is_valid_domain",
@@ -183,6 +186,23 @@ def strip_phone_prefix(local: str, stats: dict | None = None) -> tuple[str, bool
     return local, False
 
 
+def normalize_domain(domain: str) -> str:
+    """Return ``domain`` normalised for comparison and validation."""
+
+    raw = unicodedata.normalize("NFKC", (domain or "")).strip().strip(".")
+    if not raw:
+        return ""
+    folded = raw.casefold()
+    try:
+        ascii_domain = idna.encode(folded, uts46=True).decode("ascii")
+    except idna.IDNAError:
+        try:
+            ascii_domain = folded.encode("ascii", "ignore").decode("ascii")
+        except Exception:
+            ascii_domain = folded
+    return ascii_domain.lower()
+
+
 def normalize_email(s: str) -> str:
     """Normalize an e-mail address for comparison and deduplication.
 
@@ -211,12 +231,7 @@ def normalize_email(s: str) -> str:
         return s.lower()
     local, domain = s.rsplit("@", 1)
 
-    # Convert domain to ASCII using IDNA; fall back to best-effort ASCII.
-    try:
-        domain = domain.encode("idna").decode("ascii")
-    except Exception:
-        domain = domain.encode("ascii", "ignore").decode("ascii")
-    domain = domain.lower()
+    domain = normalize_domain(domain)
 
     # Gmail canonicalisation: ignore dots and "+tag" in the local part.
     if domain in {"gmail.com", "googlemail.com"}:
@@ -229,11 +244,8 @@ def normalize_email(s: str) -> str:
 def is_valid_domain(domain: str) -> bool:
     """Return ``True`` if ``domain`` is syntactically valid and has a known TLD."""
 
-    if not domain or len(domain) > 253:
-        return False
-    try:
-        ascii_domain = domain.encode("idna").decode("ascii")
-    except Exception:
+    ascii_domain = normalize_domain(domain)
+    if not ascii_domain or len(ascii_domain) > 253:
         return False
     labels = ascii_domain.split(".")
     if len(labels) < 2:
