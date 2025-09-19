@@ -11,7 +11,14 @@ import os
 import httpx
 import urllib.request
 
-from .extraction import EmailHit, _valid_local, _valid_domain, extract_emails_document
+from .extraction import (
+    EmailHit,
+    _strip_left_noise,
+    _valid_local,
+    _valid_domain,
+    _is_suspicious_local,
+    extract_emails_document,
+)
 from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
 from emailbot import settings
 from emailbot.settings_store import get
@@ -23,17 +30,34 @@ _OBFUSCATED_RE = re.compile(
     (?P<at>
         @
       | \(at\) | \[at\] | \{at\} | \bat\b
-      | собака | собакa | arroba
+      | собака | собакa | arroba | sobaka
     )
     \s*
     (?P<domain>
         (?:[A-Za-z0-9-]+
-           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto)\s*[A-Za-z0-9-]+)+)
+           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)\s*[A-Za-z0-9-]+)+)
     )
     """,
 )
 
-_DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto)\s*", re.I)
+_DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto|tochka)\s*", re.I)
+
+_SOB_WORD_RE = re.compile(
+    r"(?<!\w)(?:[\[\(\{]\s*)?(?:[сcs][оo0](?:б|b)[аa@][кk][аa@])(?:\s*[\]\)\}])?(?!\w)",
+    re.IGNORECASE,
+)
+_SOB_WORD_ATTACHED_RE = re.compile(
+    r"(?<=\w)(?:[\[\(\{]\s*)?(?:[сcs][оo0](?:б|b)[аa@][кk][аa@])(?:\s*[\]\)\}])?(?=\w)",
+    re.IGNORECASE,
+)
+_DOT_WORD_RE = re.compile(
+    r"(?<!\w)(?:[\[\(\{]\s*)?(?:[тt][оo0](?:ч|ch)[кk][аa@]|dot|ponto)(?:\s*[\]\)\}])?(?!\w)",
+    re.IGNORECASE,
+)
+_DOT_WORD_ATTACHED_RE = re.compile(
+    r"(?<=\w)(?:[\[\(\{]\s*)?(?:[тt][оo0](?:ч|ch)[кk][аa@]|dot|ponto)(?:\s*[\]\)\}])?(?=\w)",
+    re.IGNORECASE,
+)
 
 _CACHE: Dict[str, Tuple[float, str]] = {}
 _CACHE_BYTES: Dict[str, Tuple[float, bytes]] = {}
@@ -52,6 +76,7 @@ _ALLOWED_CONTENT_TYPES = (
     "msword",
     "officedocument",
     "json",
+    "javascript",
 )
 _SIMPLE_EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
@@ -147,14 +172,15 @@ def fetch_url(
             if resp_headers and hasattr(resp_headers, "get_content_charset"):
                 encoding = resp_headers.get_content_charset() or "utf-8"
             if resp_headers:
-                content_length = resp_headers.get("Content-Length")
+                header_get = getattr(resp_headers, "get", None)
+                content_length = header_get("Content-Length") if header_get else None
                 if content_length:
                     try:
                         if int(content_length) > max_size:
                             return None
                     except ValueError:
                         pass
-                content_type = resp_headers.get("Content-Type", "")
+                content_type = header_get("Content-Type", "") if header_get else ""
                 if content_type and not _is_allowed_content_type(content_type):
                     return None
             chunks: List[bytes] = []
@@ -186,14 +212,16 @@ def fetch_url(
                     tld = final_parsed.hostname.rsplit(".", 1)[-1].lower()
                     if tld not in allowed_tlds:
                         return None
-                content_length = resp.headers.get("Content-Length")
+                resp_headers = getattr(resp, "headers", None)
+                header_get = getattr(resp_headers, "get", None)
+                content_length = header_get("Content-Length") if header_get else None
                 if content_length:
                     try:
                         if int(content_length) > max_size:
                             return None
                     except ValueError:
                         pass
-                content_type = resp.headers.get("Content-Type", "")
+                content_type = header_get("Content-Type", "") if header_get else ""
                 if content_type and not _is_allowed_content_type(content_type):
                     return None
                 encoding = getattr(resp, "encoding", None) or "utf-8"
@@ -245,14 +273,15 @@ def fetch_bytes(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp_headers = getattr(resp, "headers", None)
             if resp_headers:
-                content_length = resp_headers.get("Content-Length")
+                header_get = getattr(resp_headers, "get", None)
+                content_length = header_get("Content-Length") if header_get else None
                 if content_length:
                     try:
                         if int(content_length) > max_size:
                             return None
                     except ValueError:
                         pass
-                content_type = resp_headers.get("Content-Type", "")
+                content_type = header_get("Content-Type", "") if header_get else ""
                 if content_type and not _is_allowed_content_type(content_type):
                     return None
             chunks: List[bytes] = []
@@ -273,14 +302,16 @@ def fetch_bytes(
     except Exception:
         try:
             with _fetch_stream("GET", url, timeout=timeout, headers=request_headers) as resp:
-                content_length = resp.headers.get("Content-Length")
+                resp_headers = getattr(resp, "headers", None)
+                header_get = getattr(resp_headers, "get", None)
+                content_length = header_get("Content-Length") if header_get else None
                 if content_length:
                     try:
                         if int(content_length) > max_size:
                             return None
                     except ValueError:
                         pass
-                content_type = resp.headers.get("Content-Type", "")
+                content_type = header_get("Content-Type", "") if header_get else ""
                 if content_type and not _is_allowed_content_type(content_type):
                     return None
                 chunks = []
@@ -537,14 +568,26 @@ def extract_obfuscated_hits(
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
     text = normalize_text(text)
+    text = _SOB_WORD_ATTACHED_RE.sub(" at ", text)
+    text = _SOB_WORD_RE.sub(" at ", text)
+    text = _DOT_WORD_ATTACHED_RE.sub(" dot ", text)
+    text = _DOT_WORD_RE.sub(" dot ", text)
     hits: List[EmailHit] = []
     for m in _OBFUSCATED_RE.finditer(text):
         local = m.group("local")
-        at_token = m.group("at")
         domain_raw = m.group("domain")
         parts = [p for p in _DOT_SPLIT_RE.split(domain_raw) if p]
-        domain = ".".join(parts)
-        email = f"{local}@{domain}".lower()
+        if not parts:
+            continue
+        domain = ".".join(parts).lower()
+
+        local, _ = strip_phone_prefix(local, stats)
+
+        start, end = m.span()
+        pre = text[max(0, start - 16) : start]
+        post = text[end : end + 16]
+        local, _ = _strip_left_noise(local, pre, stats)
+
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
         if strict and local.isdigit():
@@ -553,9 +596,11 @@ def extract_obfuscated_hits(
                     "numeric_from_obfuscation_dropped", 0
                 ) + 1
             continue
-        start, end = m.span()
-        pre = text[max(0, start - 16) : start]
-        post = text[end : end + 16]
+        email = f"{local}@{domain}".lower()
+
+        if _is_suspicious_local(local):
+            if stats is not None:
+                stats["quarantined"] = stats.get("quarantined", 0) + 1
         hits.append(
             EmailHit(email=email, source_ref=source_ref, origin="obfuscation", pre=pre, post=post)
         )

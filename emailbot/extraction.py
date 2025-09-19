@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Извлечение e-mail и очистка HTML, без внешних зависимостей (офлайн).
+Патчи: EB-OBFUSC-STRIP-PHONE, EB-LEFT-GLUE-CLEAN, EB-CLEANING-EQUALIZE
 
 Публичные функции:
 - strip_html(html: str) -> str
@@ -64,6 +65,74 @@ __all__ = [
 
 
 logger = logging.getLogger(__name__)
+
+
+# --- EB-LEFT-GLUE-CLEAN: левошумные токены, часто «пришитые» к локалу слева ---
+_LEFT_NOISE_TOKENS = tuple(
+    normalize_text(t)
+    for t in [
+        "россия",
+        "россий",
+        "russia",
+        "doi",
+        "тел",
+        "tel",
+        "моб",
+        "orcid",
+        "fgauo",
+        "фгао",
+        "вак",
+    ]
+)
+
+
+def _strip_left_noise(local: str, pre: str, stats: Optional[Dict[str, int]] = None) -> tuple[str, bool]:
+    """
+    Если перед локалом в исходном тексте ``pre`` есть «пришитое» слово (без разделителя),
+    пытаемся пометить такую склейку, чтобы downstream-логика могла сбросить артефакты.
+    Возвращает ``(new_local, changed)``.
+    """
+
+    if not pre or not local:
+        return local, False
+
+    pre_norm = normalize_text(pre[-16:])
+    if not pre_norm:
+        return local, False
+
+    last = pre_norm[-1]
+    if last.isspace():
+        return local, False
+    cat = unicodedata.category(last)
+    if cat.startswith("P") or cat.startswith("Z"):
+        return local, False
+
+    changed = False
+    for tok in _LEFT_NOISE_TOKENS:
+        if pre_norm.endswith(tok):
+            if stats is not None:
+                stats["left_noise_detected"] = stats.get("left_noise_detected", 0) + 1
+            changed = True
+            break
+
+    return local, changed
+
+
+def _is_suspicious_local(local: str) -> bool:
+    """
+    EB-SUSPICIOUS-LOCAL-QUAR эвристика: локал начинается с >=5 цифр или >70% цифр.
+    Проверки мягкие и не отбрасывают адрес, лишь уводят в quarantine/stat.
+    """
+
+    if not local:
+        return False
+
+    digits = sum(ch.isdigit() for ch in local)
+    if len(local) >= 5 and all(ch.isdigit() for ch in local[:5]) and (len(local) == digits or digits >= 5):
+        return True
+    if digits / max(1, len(local)) > 0.7:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
