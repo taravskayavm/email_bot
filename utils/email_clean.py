@@ -762,11 +762,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
 
         candidate = f"{norm_local}@{norm_domain}"
         start, end = m.span(0)
-        if _looks_glued_around(t2, start, end):
-            sanitized = ""
-            sanitize_reason: str | None = "glued-break"
-        else:
-            sanitized, sanitize_reason = sanitize_email(candidate)
+        sanitized, sanitize_reason = sanitize_email(candidate)
         reverted = False
 
         if not sanitized and sanitize_reason == "invalid-idna" and conf_fixed:
@@ -775,24 +771,46 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             if reverted:
                 conf_fixed = False
 
+        finalized, finalize_reason, finalize_stage = finalize_email(
+            norm_local,
+            norm_domain,
+            raw_text=t2,
+            span=(start, end),
+            sanitized=sanitized,
+            sanitize_reason=sanitize_reason,
+        )
+
         final_reason = sanitize_reason
-        if sanitized:
+        stage = None
+        sanitized_final = finalized if finalized else ""
+        if finalize_reason:
+            sanitized_final = ""
+            final_reason = finalize_reason
+            stage = finalize_stage
+        elif sanitized_final:
+            if final_reason:
+                stage = "sanitize"
+        else:
+            stage = "sanitize" if final_reason else stage
+
+        if sanitized_final:
             if conf_fixed:
                 confusables_fixed += 1
                 if final_reason is None:
                     final_reason = "confusables-normalized"
             elif final_reason is None and deobf_applied:
-                if c not in raw and sanitized not in raw:
+                if c not in raw and sanitized_final not in raw:
                     final_reason = "obfuscation-applied"
 
-            cleaned.append(sanitized)
+            cleaned.append(sanitized_final)
             final_reasons.append(final_reason)
         items_meta.append(
             {
                 "raw": c,
                 "normalized": candidate,
-                "sanitized": sanitized,
+                "sanitized": sanitized_final,
                 "reason": final_reason,
+                "stage": stage,
                 "confusables_applied": conf_fixed,
                 "reverted": reverted,
                 "span": (start, end),
@@ -1052,6 +1070,47 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     return normalized, reason
 
 
+def finalize_email(
+    local: str,
+    domain: str,
+    *,
+    raw_text: str = "",
+    span=None,
+    sanitized: str | None = None,
+    sanitize_reason: str | None = None,
+) -> tuple[str, str, str]:
+    """Finalize an e-mail candidate validating context-sensitive rules."""
+
+    candidate = f"{local}@{domain}"
+    sanitize_stage = "sanitize"
+
+    start = end = None
+    if span is not None:
+        if isinstance(span, (list, tuple)) and len(span) == 2:
+            try:
+                start = int(span[0])
+                end = int(span[1])
+            except Exception:  # pragma: no cover - defensive conversion
+                start = end = None
+    if (
+        raw_text
+        and start is not None
+        and end is not None
+        and _looks_glued_around(raw_text, start, end)
+    ):
+        return "", "glued-break", "finalize"
+
+    email = sanitized
+    reason = sanitize_reason
+    if email is None:
+        email, reason = sanitize_email(candidate)
+
+    if not email:
+        return "", str(reason or "invalid"), sanitize_stage
+
+    return email, "", "finalize"
+
+
 def dedupe_with_variants(emails: list[str]) -> list[str]:
     """
     Дедуплицируем, учитывая пару (сноской)вариант → чистый вариант.
@@ -1138,3 +1197,5 @@ except NameError:  # pragma: no cover - module attribute guard
 
 if "classify_email_role" not in __all__:
     __all__.append("classify_email_role")
+if "finalize_email" not in __all__:
+    __all__.append("finalize_email")

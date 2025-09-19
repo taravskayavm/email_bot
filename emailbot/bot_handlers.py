@@ -45,6 +45,7 @@ from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
 from utils.bounce import sync_bounces
+from utils.tld_utils import is_allowed_domain
 
 STATS_PATH = str(_stats_path())
 
@@ -124,7 +125,11 @@ def extract_from_uploaded_file(path: str):
 
 
 def is_allowed_tld(email_addr: str) -> bool:
-    return mu.classify_tld(email_addr) != "foreign"
+    addr = (email_addr or "").strip().lower()
+    if "@" not in addr:
+        return False
+    domain = addr.rsplit("@", 1)[-1]
+    return is_allowed_domain(domain)
 
 
 def sample_preview(items, k: int):
@@ -1506,6 +1511,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             dropped_current.append((email, "filtered"))
 
+    suspicious_items = []
+    if isinstance(stats, dict):
+        suspicious_items = stats.get("items_rejected", []) or []
+    for info in suspicious_items:
+        if not isinstance(info, dict):
+            continue
+        candidate = (
+            (info.get("sanitized") or "")
+            or (info.get("normalized") or "")
+            or (info.get("raw") or "")
+        )
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        reason = str(info.get("reason") or "invalid")
+        dropped_current.append((candidate, reason))
+
     foreign_raw = {e for e in allowed_all | loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
@@ -1876,6 +1898,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 dropped_current.append((email, "foreign-domain"))
             else:
                 dropped_current.append((email, "filtered"))
+
+        suspicious_items = []
+        if isinstance(stats, dict):
+            suspicious_items = stats.get("items_rejected", []) or []
+        for info in suspicious_items:
+            if not isinstance(info, dict):
+                continue
+            candidate = (
+                (info.get("sanitized") or "")
+                or (info.get("normalized") or "")
+                or (info.get("raw") or "")
+            )
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            reason = str(info.get("reason") or "invalid")
+            dropped_current.append((candidate, reason))
 
         state = get_state(context)
         state.all_emails.update(allowed_all)
