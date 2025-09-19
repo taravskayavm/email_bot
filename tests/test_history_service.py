@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import importlib
+
 from emailbot import history_service, history_store
 
 
@@ -47,3 +49,39 @@ def test_get_last_sent(monkeypatch):
     group, last_any = info
     assert group == "grp"
     assert abs((last_any - now).total_seconds()) < 1
+
+
+def test_register_send_attempt_and_cancel(monkeypatch, tmp_path):
+    db = tmp_path / "state.db"
+    monkeypatch.setenv("HISTORY_DB_PATH", str(db))
+    service = importlib.reload(history_service)
+
+    now = datetime.now(timezone.utc)
+    reserved = service.register_send_attempt(
+        "user@example.com",
+        "grp",
+        days=30,
+        sent_at=now,
+        run_id="run-a",
+    )
+    assert reserved is not None
+
+    blocked = service.register_send_attempt(
+        "user@example.com",
+        "grp",
+        days=30,
+        sent_at=now + timedelta(hours=1),
+        run_id="run-b",
+    )
+    assert blocked is None
+
+    service.cancel_send_attempt("user@example.com", "grp", reserved)
+
+    allowed = service.register_send_attempt(
+        "user@example.com",
+        "grp",
+        days=30,
+        sent_at=now + timedelta(hours=2),
+        run_id="run-c",
+    )
+    assert allowed is not None

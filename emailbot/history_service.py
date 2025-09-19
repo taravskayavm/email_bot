@@ -90,6 +90,56 @@ def mark_sent(
     )
 
 
+def register_send_attempt(
+    email: str,
+    group: str,
+    *,
+    days: int,
+    sent_at: datetime | None = None,
+    run_id: str = "",
+    message_id: str = "",
+) -> datetime | None:
+    """Reserve a slot for sending while enforcing the cooldown window.
+
+    Returns the timestamp used for the reservation if successful, or
+    ``None`` if the cooldown constraint blocks the send attempt.
+    """
+
+    ensure_initialized()
+    norm_email = _norm_email(email)
+    if not norm_email:
+        return _ensure_utc(sent_at)
+    norm_group = _norm_group(group)
+    ts = _ensure_utc(sent_at)
+    if days <= 0:
+        return ts
+    ok = history_store.try_reserve_send(
+        norm_email,
+        norm_group,
+        ts,
+        cooldown=timedelta(days=days),
+        message_id=(message_id or "").strip(),
+        run_id=run_id,
+        smtp_result="pending",
+    )
+    if not ok:
+        return None
+    return ts
+
+
+def cancel_send_attempt(email: str, group: str, sent_at: datetime | None) -> None:
+    """Rollback a previously reserved send attempt."""
+
+    if sent_at is None:
+        return
+    ensure_initialized()
+    norm_email = _norm_email(email)
+    if not norm_email:
+        return
+    norm_group = _norm_group(group)
+    history_store.delete_send_record(norm_email, norm_group, _ensure_utc(sent_at))
+
+
 def was_sent_within_days(email: str, group: str, days: int) -> bool:
     """Return ``True`` if the address was contacted within ``days`` days."""
 
@@ -158,6 +208,8 @@ def filter_by_days(
 __all__ = [
     "ensure_initialized",
     "mark_sent",
+    "register_send_attempt",
+    "cancel_send_attempt",
     "was_sent_within_days",
     "filter_by_days",
     "get_last_sent",
