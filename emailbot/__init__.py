@@ -1,9 +1,22 @@
 """Helpers for the email bot."""
 
-from . import bot_handlers, extraction, messaging, unsubscribe, reporting
-from .models import EmailEntry
-from .smtp_client import SmtpClient
+import importlib
+
 from .utils import load_env, log_error, setup_logging
+
+extraction = importlib.import_module(".extraction", __name__)
+reporting = importlib.import_module(".reporting", __name__)
+unsubscribe = importlib.import_module(".unsubscribe", __name__)
+
+try:  # pragma: no cover - optional dependency
+    from .models import EmailEntry
+except Exception:  # pragma: no cover - fallback when models can't be imported
+    EmailEntry = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from .smtp_client import SmtpClient
+except Exception:  # pragma: no cover - fallback when SMTP client can't be imported
+    SmtpClient = None  # type: ignore[assignment]
 
 __all__ = [
     "load_env",
@@ -17,3 +30,9 @@ __all__ = [
     "reporting",
     "EmailEntry",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"bot_handlers", "messaging"}:
+        return importlib.import_module(f".{name}", __name__)
+    raise AttributeError(name)
