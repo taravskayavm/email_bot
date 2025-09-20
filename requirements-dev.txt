@@ -2,3 +2,6 @@ pre-commit
 black
 ruff
 isort
+pytest
+pytest-cov
+playwright>=1.45
