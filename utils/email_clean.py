@@ -386,6 +386,16 @@ def _long_alpha_run_no_separators(local: str, min_len: int = 14) -> bool:
     return True
 
 
+def _is_suspect_local(local: str) -> bool:
+    if not local:
+        return False
+    return (
+        _starts_with_long_digits(local)
+        or _starts_with_orcid_like(local)
+        or _long_alpha_run_no_separators(local)
+    )
+
+
 def _is_glued_left_char(ch: str) -> bool:
     if not ch or ch.isspace():
         return False
@@ -687,8 +697,16 @@ def drop_leading_char_twins(emails: list[str]) -> list[str]:
                 continue
             trimmed = local[1:]
             if trimmed in locals_set:
-                to_drop.add((domain, trimmed))
-                log_pairs.append((mapping[local], mapping[trimmed]))
+                drop_local = trimmed
+                keep_local = local
+                if local and not local[0].isalpha() and trimmed and trimmed[0].isalpha():
+                    drop_local = local
+                    keep_local = trimmed
+                to_drop.add((domain, drop_local))
+                kept_email = mapping.get(keep_local) or mapping.get(local)
+                dropped_email = mapping.get(drop_local)
+                if kept_email and dropped_email:
+                    log_pairs.append((kept_email, dropped_email))
 
     out: list[str] = []
     for e in emails:
@@ -851,7 +869,10 @@ def parse_emails_unified(text: str, return_meta: bool = False):
         boundary_lower = boundary_text.lower()
         if candidate_lower:
             raw_pos = boundary_lower.find(candidate_lower)
+            suspect_all = True
+            found_any = False
             while raw_pos != -1:
+                found_any = True
                 left_char = boundary_text[raw_pos - 1] if raw_pos > 0 else ""
                 right_index = raw_pos + len(c)
                 right_char = (
@@ -861,16 +882,38 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 )
                 left_glued = STRICT_LEFT_BOUNDARY and _is_glued_left_char(left_char)
                 right_glued = _is_glued_right_char(right_char)
-                if left_glued or right_glued:
-                    boundary_suspect = True
+                if not (left_glued or right_glued):
+                    suspect_all = False
                     break
                 raw_pos = boundary_lower.find(candidate_lower, raw_pos + 1)
-        if not boundary_suspect:
-            if STRICT_LEFT_BOUNDARY and _prev_is_glued_letter(t2, start):
+            if found_any and suspect_all:
                 boundary_suspect = True
-            if _next_is_glued_letter(t2, end):
-                boundary_suspect = True
-        sanitized, sanitize_reason = sanitize_email(candidate)
+        if STRICT_LEFT_BOUNDARY and _prev_is_glued_letter(t2, start):
+            boundary_suspect = True
+        if _next_is_glued_letter(t2, end):
+            boundary_suspect = True
+        sanitized_variants, sanitize_meta = sanitize_email(candidate, return_meta=True)
+        sanitize_reason = sanitize_meta.get("reason") if isinstance(sanitize_meta, dict) else None
+        sanitized = sanitized_variants[0] if sanitized_variants else ""
+        item_suspects: list[str] = []
+
+        def _push_suspect(candidate_email: str) -> None:
+            if not candidate_email or "@" not in candidate_email:
+                return
+            val = candidate_email.strip().lower()
+            if not val or val in item_suspects:
+                return
+            item_suspects.append(val)
+
+        if isinstance(sanitize_meta, dict):
+            for suspect_value in sanitize_meta.get("suspects") or []:
+                _push_suspect(str(suspect_value))
+        try:
+            candidate_local_part, _candidate_domain = candidate.split("@", 1)
+        except ValueError:
+            candidate_local_part = ""
+        if candidate_local_part and _is_suspect_local(candidate_local_part):
+            _push_suspect(candidate)
         reverted = False
 
         if not sanitized and sanitize_reason == "invalid-idna" and conf_fixed:
@@ -878,6 +921,14 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             reverted = sanitized != ""
             if reverted:
                 conf_fixed = False
+                item_suspects.clear()
+                if sanitized:
+                    try:
+                        suspect_local_tmp, _ = sanitized.split("@", 1)
+                    except ValueError:
+                        suspect_local_tmp = ""
+                    if suspect_local_tmp and _is_suspect_local(suspect_local_tmp):
+                        _push_suspect(sanitized)
 
         finalized, finalize_reason, finalize_stage = finalize_email(
             norm_local,
@@ -901,10 +952,14 @@ def parse_emails_unified(text: str, return_meta: bool = False):
         else:
             stage = "sanitize" if final_reason else stage
 
-        if boundary_suspect and (sanitized_final or final_reason is None):
-            final_reason = _merge_reason(final_reason, "suspect")
-            if stage is None:
-                stage = "sanitize"
+        if boundary_suspect:
+            boundary_candidate = sanitized or candidate
+            if boundary_candidate:
+                _push_suspect(boundary_candidate)
+            if sanitized_final or final_reason is None:
+                final_reason = _merge_reason(final_reason, "suspect")
+                if stage is None:
+                    stage = "sanitize"
 
         if sanitized_final:
             if conf_fixed:
@@ -928,6 +983,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 "reverted": reverted,
                 "span": (start, end),
                 "suspect": boundary_suspect,
+                "suspect_candidates": list(item_suspects),
             }
         )
 
@@ -959,34 +1015,18 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     # === EB-GENERIC-GLUE-SUSPECTS: формируем список "подозрительных" адресов ===
     suspects: list[str] = []
     try:
-        def _candidate_from_item(item: dict[str, object]) -> str:
-            raw_candidate = str(
-                item.get("sanitized")
-                or item.get("normalized")
-                or item.get("raw")
-                or ""
-            ).strip()
-            if not raw_candidate or "@" not in raw_candidate:
-                return ""
-            sanitized_candidate, _ = sanitize_email(raw_candidate)
-            candidate = sanitized_candidate or raw_candidate
-            return candidate.lower()
-
         for item in items_meta:
-            candidate = _candidate_from_item(item)
-            if not candidate or "@" not in candidate:
-                continue
-            loc, _dom = candidate.split("@", 1)
-            if (
-                _starts_with_long_digits(loc)
-                or _starts_with_orcid_like(loc)
-                or _long_alpha_run_no_separators(loc)
-                or bool(item.get("suspect"))
-            ):
-                suspects.append(candidate)
+            for suspect_value in item.get("suspect_candidates") or []:
+                if not suspect_value:
+                    continue
+                candidate = str(suspect_value).strip().lower()
+                if "@" not in candidate:
+                    continue
+                if candidate not in suspects:
+                    suspects.append(candidate)
     except Exception:
         pass
-    suspects = sorted(set(suspects))
+    suspects = sorted(suspects)
 
     deobfuscated_count = sum(
         1 for r in deobf_rules if r and not r.startswith("#")
@@ -1150,11 +1190,33 @@ def _repair_tld_tail_ascii(domain: str) -> str:
     return domain
 
 
-def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | None]:
+def sanitize_email(
+    email: str,
+    strip_footnote: bool = True,
+    *,
+    return_meta: bool = False,
+) -> tuple[str, str | None] | tuple[list[str], dict[str, object]]:
     """Финальная чистка и проверка адреса."""
 
     email_original = email
     reason: str | None = None
+
+    def _finalize(
+        value: str,
+        reason_value: str | None,
+        suspects: list[str] | None = None,
+    ):
+        if not return_meta:
+            return value, reason_value
+        suspects_list = [s for s in (suspects or []) if s]
+        if value and not suspects_list:
+            try:
+                local_part, _ = value.split("@", 1)
+            except ValueError:
+                local_part = ""
+            if local_part and _is_suspect_local(local_part):
+                suspects_list.append(value)
+        return ([value] if value else [], {"reason": reason_value, "suspects": suspects_list})
 
     trimmed = _trim_after_tld(email)
     if trimmed != email:
@@ -1183,7 +1245,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     compact_original = compact_tail
 
     if "@" not in s:
-        return "", reason
+        return _finalize("", reason)
 
     local, domain = s.split("@", 1)
     original_local = ""
@@ -1202,22 +1264,22 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
         reason = "punct-trimmed"
 
     if _has_cyrillic(local) and _has_latin(local):
-        return "", "mixed-script-local"
+        return _finalize("", "mixed-script-local")
 
     if not _is_ascii_local(local):
-        return "", "non-ascii-local"
+        return _finalize("", "non-ascii-local")
 
     if _is_bad_prefix(local):
-        return "", "role-like-prefix"
+        return _finalize("", "role-like-prefix")
 
     if _LOCAL_TLD_GLUE_CAMEL_RE.search(original_local) or _LOCAL_TLD_GLUE_VOWEL_RE.search(
         original_local
     ):
-        return "", "skleyka-in-local"
+        return _finalize("", "skleyka-in-local")
 
     domain_ascii, domain_reason = normalize_domain(domain)
     if not domain_ascii:
-        return "", domain_reason or reason
+        return _finalize("", domain_reason or reason)
 
     tail_repaired = False
     if REPAIR_TLD_TAIL and not is_allowed_domain(domain_ascii):
@@ -1227,7 +1289,7 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
             tail_repaired = True
 
     if not is_allowed_domain(domain_ascii):
-        return "", "tld-not-allowed"
+        return _finalize("", "tld-not-allowed")
 
     if tail_repaired:
         reason = _merge_reason(reason, "tld-repaired")
@@ -1239,7 +1301,15 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
 
     normalized = f"{local}@{domain_ascii}".lower()
     normalized = _preserve_leading_alnum(email_original, normalized)
-    return normalized, reason
+    suspects_out: list[str] = []
+    if normalized:
+        try:
+            suspect_local, _ = normalized.split("@", 1)
+        except ValueError:
+            suspect_local = ""
+        if suspect_local and _is_suspect_local(suspect_local):
+            suspects_out.append(normalized)
+    return _finalize(normalized, reason, suspects_out)
 
 
 def finalize_email(

@@ -7,6 +7,7 @@ from utils.email_clean import (
     dedupe_with_variants,
     finalize_email,
     parse_emails_unified,
+    drop_leading_char_twins,
 )
 from utils.email_role import classify_email_role
 from utils.name_match import fio_candidates, fio_match_score
@@ -76,6 +77,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         blocked = set(suspects)
         send_candidates = [candidate for candidate in send_candidates if candidate not in blocked]
 
+    send_candidates = drop_leading_char_twins(send_candidates)
     unique = dedupe_with_variants(send_candidates)
     meta["items_rejected"] = rejected
     meta["emails_suspects"] = suspects
