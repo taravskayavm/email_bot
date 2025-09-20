@@ -390,11 +390,20 @@ def _prev_is_glued_letter(text: str, start: int) -> bool:
     """
     if start <= 0 or not text:
         return False
-    prev = text[:start].rstrip()
+    prev = text[:start]
     if not prev:
         return False
-    ch = prev[-1]
-    return ch.isalpha()
+    idx = len(prev) - 1
+    while idx >= 0 and prev[idx].isspace():
+        idx -= 1
+    if idx < 0:
+        return False
+    punct_tail = ".,;:!?)]}»›\"'“”«…-–—"
+    while idx >= 0 and prev[idx] in punct_tail:
+        idx -= 1
+    if idx < 0:
+        return False
+    return prev[idx].isalpha()
 
 
 

@@ -112,6 +112,16 @@ def _ingest_meta_to(
                 continue
             reason = str(info.get("reason") or "invalid").strip() or "invalid"
             suspicious_target.setdefault(display_candidate, reason)
+    # EB-REQUIRE-CONFIRM-SUSPECTS: поддержка meta['emails_suspects'] из pipeline
+    suspects = stats_obj.get("emails_suspects") if isinstance(stats_obj, dict) else None
+    if isinstance(suspects, (list, tuple, set)):
+        for entry in suspects:
+            try:
+                addr = str(entry).strip()
+            except Exception:
+                continue
+            if addr:
+                suspicious_target.setdefault(addr, "suspect")
 
 
 async def async_extract_emails_from_url(
@@ -251,6 +261,53 @@ TECH_PATTERNS = [
     "admin",
     "info@",
 ]
+
+# EB-REQUIRE-CONFIRM-SUSPECTS: флаг «подтверждать подозрительные перед отправкой»
+SUSPECTS_REQUIRE_CONFIRM = os.getenv("SUSPECTS_REQUIRE_CONFIRM", "1") == "1"
+
+# Универсальные эвристики «подозрительности» локала (без словарей)
+_ORCID_PREFIX_RE = re.compile(r"^(?:\d{4}-){3,}\d{3,}[-\d]*", re.ASCII)
+
+
+def _starts_with_long_digits(local: str, n: int = 5) -> bool:
+    if not local:
+        return False
+    run = 0
+    for ch in local:
+        if ch.isdigit():
+            run += 1
+            if run >= n:
+                return True
+        else:
+            break
+    return False
+
+
+def _starts_with_orcid_like(local: str) -> bool:
+    return bool(_ORCID_PREFIX_RE.match(local or ""))
+
+
+def _long_alpha_run_no_separators(local: str, min_len: int = 14) -> bool:
+    if not local or len(local) < min_len:
+        return False
+    if not all(ch.isalpha() for ch in local):
+        return False
+    if any(ch in "._+-" for ch in local):
+        return False
+    return True
+
+
+def _is_suspect_email(addr: str) -> bool:
+    addr = (addr or "").strip().lower()
+    if "@" not in addr:
+        return False
+    local = addr.split("@", 1)[0]
+    return (
+        _starts_with_long_digits(local)
+        or _starts_with_orcid_like(local)
+        or _long_alpha_run_no_separators(local)
+    )
+
 
 MAX_TG_MESSAGE = 4096
 _PARAGRAPH_CHUNK = 3000
@@ -1211,11 +1268,44 @@ async def on_accept_suspects(update: Update, context: ContextTypes.DEFAULT_TYPE)
     suspects = context.user_data.get("emails_suspects") or []
     if not suspects:
         return await q.edit_message_text("Подозрительных адресов нет.")
+    state = get_state(context)
+    try:
+        text_blob = "\n".join(str(e) for e in suspects if e)
+        fixed = parse_emails_unified(text_blob)
+    except Exception:
+        fixed = [str(e).strip().lower() for e in suspects if e]
+    fixed = dedupe_keep_original(fixed)
+    fixed = drop_leading_char_twins(fixed)
+    fixed = _drop_truncated_twins(fixed, state=state, update_counter=False)
+    cleaned = [e for e in fixed if e]
     sendable = set(context.user_data.get("emails_for_sending") or [])
-    for e in suspects:
-        sendable.add(e)
+    sendable.update(cleaned)
     context.user_data["emails_for_sending"] = sorted(sendable)
     context.user_data["emails_suspects"] = []
+    suspects_lower = {str(e).strip().lower() for e in suspects if e}
+    preview = context.chat_data.get("send_preview", {}) or {}
+    dropped_list = [
+        (addr, reason)
+        for addr, reason in preview.get("dropped", [])
+        if not (reason == "suspect" and addr.lower() in suspects_lower)
+    ]
+    preview["dropped"] = dropped_list
+    final_list = list(preview.get("final", []))
+    final_seen = {addr.lower() for addr in final_list}
+    for addr in cleaned:
+        if addr.lower() not in final_seen:
+            final_list.append(addr)
+            final_seen.add(addr.lower())
+    preview["final"] = final_list
+    context.chat_data["send_preview"] = preview
+    current = set(state.to_send)
+    current.update(cleaned)
+    state.to_send = _drop_truncated_twins(sorted(current), state=state)
+    preview_allowed = list(state.preview_allowed_all or [])
+    preview_allowed.extend(cleaned)
+    state.preview_allowed_all = _drop_truncated_twins(
+        sorted(set(preview_allowed)), update_counter=False
+    )
     await q.edit_message_text(
         "✅ Подозрительные адреса приняты и добавлены к отправке.\n"
         f"Итого к отправке: {len(sendable)}"
@@ -1239,9 +1329,9 @@ async def on_edit_suspects_input(update: Update, context: ContextTypes.DEFAULT_T
     if not context.user_data.get("await_edit_suspects"):
         return
     text = update.message.text or ""
+    # MANUAL FLOW: без автоправок — только базовая нормализация и дедуп по оригиналам
     fixed = parse_emails_unified(text)
     fixed = dedupe_keep_original(fixed)
-    fixed = _drop_truncated_twins(fixed, state=get_state(context))
     sendable = set(context.user_data.get("emails_for_sending") or [])
     for e in fixed:
         sendable.add(e)
@@ -1549,6 +1639,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     filtered = [
         e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
     ]
+    meta_suspects = {addr for addr, reason in suspicious_map.items() if reason == "suspect"}
+    heuristics_suspects = {addr for addr in filtered if _is_suspect_email(addr)}
+    suspects_set: Set[str] = set(meta_suspects) | heuristics_suspects
+    filtered_set = set(filtered)
+    suspects_removed = suspects_set & filtered_set
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        filtered = [addr for addr in filtered if addr not in suspects_removed]
 
     dropped_current: List[Tuple[str, str]] = []
     for email in sorted(allowed_all):
@@ -1563,7 +1660,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     suspicious_items = sorted(suspicious_map.items())
     for candidate, reason in suspicious_items:
+        if reason == "suspect" and not SUSPECTS_REQUIRE_CONFIRM:
+            continue
         dropped_current.append((candidate, reason))
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        existing_suspects = {addr for addr, reason in suspicious_items if reason == "suspect"}
+        heuristics_only = sorted(suspects_removed - existing_suspects)
+        for addr in heuristics_only:
+            dropped_current.append((addr, "suspect"))
 
     all_found = {addr for addr in allowed_all | loose_all if addr}
     foreign_raw = {
@@ -1579,6 +1683,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     current = set(state.to_send)
     current.update(filtered)
     state.to_send = _drop_truncated_twins(sorted(current), state=state)
+    context.user_data["emails_for_sending"] = list(state.to_send)
     state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
@@ -1600,6 +1705,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
     )
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        context.user_data["emails_suspects"] = sorted(suspects_removed)
+    else:
+        context.user_data["emails_suspects"] = []
+    context.user_data["await_edit_suspects"] = False
     if state.repairs_sample:
         report += "\n\n🧩 Возможные исправления (проверьте вручную):"
         for s in state.repairs_sample:
@@ -1624,6 +1734,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         ]
     )
+    suspects_preview = [addr for addr, reason in dropped_preview if reason == "suspect"]
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_preview:
+        extra_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "✅ Принять подозрительные", callback_data="accept_suspects"
+                ),
+                InlineKeyboardButton(
+                    "✍️ Исправить адреса", callback_data="edit_suspects"
+                ),
+            ]
+        )
     if state.repairs:
         extra_buttons.append(
             [
@@ -1938,12 +2060,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         technical_emails = [
             e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
         ]
-        filtered = sorted(
+        filtered = [
             e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
-        )
+        ]
+        meta_suspects = {
+            addr for addr, reason in suspicious_map.items() if reason == "suspect"
+        }
+        heuristics_suspects = {addr for addr in filtered if _is_suspect_email(addr)}
+        suspects_set: Set[str] = set(meta_suspects) | heuristics_suspects
+        filtered_set_initial = set(filtered)
+        suspects_removed = suspects_set & filtered_set_initial
+        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+            filtered = [addr for addr in filtered if addr not in suspects_removed]
+        filtered = sorted(filtered)
+        filtered_set_final = set(filtered)
+
         dropped_current: List[Tuple[str, str]] = []
         for email in sorted(allowed_all):
-            if email in filtered:
+            if email in filtered_set_final:
                 continue
             if email in technical_emails:
                 dropped_current.append((email, "technical-address"))
@@ -1954,13 +2088,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         suspicious_items = sorted(suspicious_map.items())
         for candidate, reason in suspicious_items:
+            if reason == "suspect" and not SUSPECTS_REQUIRE_CONFIRM:
+                continue
             dropped_current.append((candidate, reason))
+        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+            existing_suspects = {
+                addr for addr, reason in suspicious_items if reason == "suspect"
+            }
+            heuristics_only = sorted(suspects_removed - existing_suspects)
+            for addr in heuristics_only:
+                dropped_current.append((addr, "suspect"))
 
         state = get_state(context)
         state.all_emails.update(allowed_all)
         current = set(state.to_send)
         current.update(filtered)
         state.to_send = _drop_truncated_twins(sorted(current), state=state)
+        context.user_data["emails_for_sending"] = list(state.to_send)
         foreign_total = set(state.foreign) | set(foreign_all)
         state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
         state.repairs_sample = sample_preview(
@@ -1983,6 +2127,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sorted(foreign_total),
             total_footnote,
         )
+        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+            context.user_data["emails_suspects"] = sorted(suspects_removed)
+        else:
+            context.user_data["emails_suspects"] = []
+        context.user_data["await_edit_suspects"] = False
         if state.repairs_sample:
             report += "\n\n🧩 Возможные исправления (проверьте вручную):"
             for s in state.repairs_sample:
@@ -2007,6 +2156,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             ]
         )
+        suspects_preview = [
+            addr for addr, reason in dropped_preview if reason == "suspect"
+        ]
+        if SUSPECTS_REQUIRE_CONFIRM and suspects_preview:
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "✅ Принять подозрительные",
+                        callback_data="accept_suspects",
+                    ),
+                    InlineKeyboardButton(
+                        "✍️ Исправить адреса", callback_data="edit_suspects"
+                    ),
+                ]
+            )
         if state.repairs:
             extra_buttons.append(
                 [
