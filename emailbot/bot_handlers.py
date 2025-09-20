@@ -48,6 +48,7 @@ from utils.bounce import sync_bounces
 from utils.tld_utils import is_allowed_domain as _is_allowed_domain
 
 STATS_PATH = str(_stats_path())
+_FALLBACK_EMAIL_RX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -386,6 +387,7 @@ class SessionState:
     dropped: List[Tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
+    cooldown_blocked: List[str] = field(default_factory=list)
     group: Optional[str] = None  # template code
     template: Optional[str] = None
     template_label: Optional[str] = None
@@ -1514,6 +1516,7 @@ async def _compose_report_and_save(
     dropped: List[Tuple[str, str]],
     foreign: List[str],
     footnote_dupes: int = 0,
+    cooldown_blocked: Sequence[str] | None = None,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
@@ -1521,12 +1524,16 @@ async def _compose_report_and_save(
     state.preview_allowed_all = sorted(filtered)
     state.dropped = list(dropped)
     state.foreign = sorted(foreign)
+    state.cooldown_blocked = sorted(dict.fromkeys(cooldown_blocked or []))
     state.footnote_dupes = footnote_dupes
+
+    cooldown_preview = state.cooldown_blocked
 
     context.chat_data["send_preview"] = {
         "final": list(dict.fromkeys(state.preview_allowed_all)),
         "dropped": list(dropped),
         "fixed": [],
+        "cooldown_blocked": cooldown_preview,
     }
     context.chat_data.pop("fix_pending", None)
 
@@ -1538,6 +1545,7 @@ async def _compose_report_and_save(
         f"Найдено адресов: {len(allowed_all)}",
         f"📧 К отправке: {len(filtered)} адресов",
         f"⚠️ Подозрительные: {len(dropped)} адресов",
+        f"🕒 Под кулдауном (180 дней): {len(cooldown_preview)}",
         f"🌍 Иностранные домены: {len(foreign)}",
     ]
     report = "\n".join(report_lines)
@@ -1555,6 +1563,9 @@ async def _compose_report_and_save(
         ]
         report += "\n" + "\n".join(preview_lines)
         report += "\nНажмите «✏️ Исправить №…» чтобы отредактировать."
+    if cooldown_preview:
+        sample_cooldown = cooldown_preview[: min(10, len(cooldown_preview))]
+        report += "\n\n🕒 Примеры адресов под кулдауном:\n" + "\n".join(sample_cooldown)
     if sample_foreign:
         report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(sample_foreign)
     return report
@@ -1697,6 +1708,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             combined_map[addr] = reason
     dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
 
+    try:
+        cooldown_blocked = [
+            addr
+            for addr in sorted(
+                {
+                    str(candidate).strip().lower()
+                    for candidate in all_allowed
+                    if isinstance(candidate, str) and "@" in candidate
+                }
+            )
+            if messaging._should_skip_by_history(addr)[0]
+        ]
+    except Exception:
+        cooldown_blocked = []
+
     report = await _compose_report_and_save(
         context,
         all_allowed,
@@ -1704,6 +1730,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         dropped_total,
         sorted(foreign_total),
         total_footnote,
+        cooldown_blocked,
     )
     if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
         context.user_data["emails_suspects"] = sorted(suspects_removed)
@@ -1922,18 +1949,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             addr for addr in pre_trunc if addr not in set(emails_no_trunc)
         ]
         emails = sorted(emails_no_trunc, key=str.lower)
-        drop_details = _manual_collect_drop_reasons(stats, emails, truncated_removed)
-        logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
         if not emails:
-            if drop_details:
-                preview_lines = [
-                    f"{addr} — {reason}" for addr, reason in drop_details[:50]
-                ]
-                await _safe_reply_text(update.message,
-                    "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+            fallback_matches = sorted(
+                {m.group(0).lower() for m in _FALLBACK_EMAIL_RX.finditer(text)}
+            )
+            if fallback_matches:
+                emails = fallback_matches
+                truncated_removed = []
+                drop_details = []
+                logger.info(
+                    "Manual input fallback regex: raw=%r emails=%r", text, emails
                 )
-            await _safe_reply_text(update.message, "❌ Не найдено ни одного email.")
-            return
+            else:
+                drop_details = _manual_collect_drop_reasons(
+                    stats, emails, truncated_removed
+                )
+                if drop_details:
+                    preview_lines = [
+                        f"{addr} — {reason}" for addr, reason in drop_details[:50]
+                    ]
+                    await _safe_reply_text(update.message,
+                        "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+                    )
+                await _safe_reply_text(update.message, "❌ Не найдено ни одного email.")
+                return
+        else:
+            drop_details = _manual_collect_drop_reasons(
+                stats, emails, truncated_removed
+            )
+            logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
 
         # Скрываем список адресов: считаем только количества
         context.user_data["awaiting_manual_email"] = False
@@ -2119,6 +2163,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 combined_map[addr] = reason
         dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
 
+        try:
+            cooldown_blocked = [
+                addr
+                for addr in sorted(
+                    {
+                        str(candidate).strip().lower()
+                        for candidate in state.all_emails
+                        if isinstance(candidate, str) and "@" in candidate
+                    }
+                )
+                if messaging._should_skip_by_history(addr)[0]
+            ]
+        except Exception:
+            cooldown_blocked = []
+
         report = await _compose_report_and_save(
             context,
             state.all_emails,
@@ -2126,6 +2185,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             dropped_total,
             sorted(foreign_total),
             total_footnote,
+            cooldown_blocked,
         )
         if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
             context.user_data["emails_suspects"] = sorted(suspects_removed)

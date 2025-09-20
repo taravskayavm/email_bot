@@ -73,9 +73,18 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     # не включаем их в отправку без явного подтверждения.
     REQUIRE_CONFIRM = os.getenv("SUSPECTS_REQUIRE_CONFIRM", "1") == "1"
     send_candidates = [candidate for candidate in allowed_candidates if candidate]
-    if REQUIRE_CONFIRM and suspects:
+    if REQUIRE_CONFIRM:
         blocked = set(suspects)
-        send_candidates = [candidate for candidate in send_candidates if candidate not in blocked]
+
+        def _ascii_local_ok(addr: str) -> bool:
+            local = addr.split("@", 1)[0]
+            return bool(local) and all(0x21 <= ord(ch) <= 0x7E for ch in local)
+
+        send_candidates = [
+            candidate
+            for candidate in send_candidates
+            if candidate not in blocked and _ascii_local_ok(candidate)
+        ]
 
     send_candidates = drop_leading_char_twins(send_candidates)
     unique = dedupe_with_variants(send_candidates)

@@ -368,20 +368,34 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     preview = context.chat_data.get("send_preview") or {}
     dropped = []
+    cooldown_blocked: list[str] = []
     if isinstance(preview, dict):
         dropped = preview.get("dropped", []) or []
+        raw_cooldown = preview.get("cooldown_blocked") or []
+        if isinstance(raw_cooldown, list):
+            cooldown_blocked = [
+                str(item).strip() for item in raw_cooldown if str(item).strip()
+            ]
     lines = [
         "Можно вернуться к редактированию списка.",
         "Используйте кнопки «✏️ Исправить №…» в сообщении с анализом выше.",
     ]
     if dropped:
         preview_lines = [
-            "", "⚠️ Текущие подозрительные:",
+            "",
+            "⚠️ Текущие подозрительные:",
             *(
                 f"{idx + 1}) {addr} — {reason}" for idx, (addr, reason) in enumerate(dropped[:10])
             ),
         ]
         lines.extend(preview_lines)
+    if cooldown_blocked:
+        sample = cooldown_blocked[: min(50, len(cooldown_blocked))]
+        lines.append("")
+        lines.append("🕒 Под кулдауном (180 дней):")
+        lines.extend(sample)
+        if len(cooldown_blocked) > len(sample):
+            lines.append(f"… и ещё {len(cooldown_blocked) - len(sample)}")
     await notify(query.message, "\n".join(lines), event="analysis", force=True)
 
 
