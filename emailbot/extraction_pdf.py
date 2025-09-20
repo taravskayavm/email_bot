@@ -29,6 +29,55 @@ _OCR_TIME_LIMIT = 30  # seconds
 
 logger = logging.getLogger(__name__)
 
+_SOFT_HYPH = "\u00AD"
+
+
+def _join_hyphen_breaks(txt: str) -> str:
+    """Remove soft hyphen artefacts and glue A-\nB sequences into AB."""
+
+    if not txt:
+        return txt
+    txt = txt.replace(_SOFT_HYPH, "")
+    return re.sub(
+        r"([A-Za-zА-Яа-яЁё0-9])-(?:\r?\n|\r)\s*([A-Za-zА-Яа-яЁё0-9])",
+        r"\1\2",
+        txt,
+    )
+
+
+def _join_email_linebreaks(txt: str) -> str:
+    """Glue line breaks around '.' and '@' inside e-mail addresses."""
+
+    if not txt:
+        return txt
+    txt = re.sub(
+        r"([A-Za-z0-9_+\-])\.\s*(?:\r?\n|\r)\s*([A-Za-z0-9_+\-])",
+        r"\1.\2",
+        txt,
+    )
+    txt = re.sub(
+        r"([A-Za-z0-9._+\-])@\s*(?:\r?\n|\r)\s*([A-Za-z0-9.-])",
+        r"\1@\2",
+        txt,
+    )
+    txt = re.sub(
+        r"([A-Za-z0-9-])\s*(?:\r?\n|\r)\s*\.",
+        r"\1.",
+        txt,
+    )
+    return txt
+
+
+def _maybe_join_pdf_breaks(text: str, *, join_hyphen: bool, join_email: bool) -> str:
+    if not text:
+        return text or ""
+    out = text
+    if join_hyphen:
+        out = _join_hyphen_breaks(out)
+    if join_email:
+        out = _join_email_linebreaks(out)
+    return out
+
 
 def _page_text_layout(page) -> str:
     """Return page text reconstructing layout and superscript digits."""
@@ -82,6 +131,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+    join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
+    join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
     try:
         import fitz  # type: ignore
@@ -91,6 +142,11 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 text = f.read().decode("utf-8", "ignore")
         except Exception:
             return [], {"errors": ["cannot open"]}
+        text = _maybe_join_pdf_breaks(
+            text,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
             for e in extract_emails_document(text, stats)
@@ -122,6 +178,11 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
+        text = _maybe_join_pdf_breaks(
+            text,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
         text = preprocess_text(text, stats)
         low_text = text.lower()
         for email in extract_emails_document(text, stats):
@@ -168,6 +229,8 @@ def extract_from_pdf_stream(
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+    join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
+    join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
     try:
         import fitz  # type: ignore
@@ -176,6 +239,11 @@ def extract_from_pdf_stream(
             text = data.decode("utf-8", "ignore")
         except Exception:
             return [], {"errors": ["cannot open"]}
+        text = _maybe_join_pdf_breaks(
+            text,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
         hits = [
             EmailHit(email=e, source_ref=source_ref, origin="direct_at")
             for e in extract_emails_document(text, stats)
@@ -207,6 +275,11 @@ def extract_from_pdf_stream(
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
+        text = _maybe_join_pdf_breaks(
+            text,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
         text = preprocess_text(text, stats)
         low_text = text.lower()
         for email in extract_emails_document(text, stats):

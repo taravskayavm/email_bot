@@ -17,6 +17,8 @@ from utils.paths import expand_path, ensure_parent, get_temp_file
 
 logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
+STRICT_LEFT_BOUNDARY = os.getenv("STRICT_LEFT_BOUNDARY", "1") == "1"
+REPAIR_TLD_TAIL = os.getenv("REPAIR_TLD_TAIL", "1") == "1"
 
 # Простые маркеры, указывающие на обфусцированный адрес (например, name(at)domain).
 _AUTO_DEOBF_HINTS = re.compile(r"(?i)(\[[^\]]*(?:at|dot)[^\]]*\]|\([^)]*(?:at|dot)[^)]*\))")
@@ -343,6 +345,7 @@ def _strip_footnotes_before_email(addr: str) -> str:
 
 
 _ALNUM = set(string.ascii_letters + string.digits)
+_BOUNDARY_LEFT_PUNCT = set(".,;:!?)]}»›\"'“”«…-–—/_")
 
 
 # === EB-GENERIC-GLUE-SUSPECTS helpers (без словаря токенов) ===
@@ -383,27 +386,32 @@ def _long_alpha_run_no_separators(local: str, min_len: int = 14) -> bool:
     return True
 
 
+def _is_glued_left_char(ch: str) -> bool:
+    if not ch or ch.isspace():
+        return False
+    return ch.isalnum() or ch in _BOUNDARY_LEFT_PUNCT
+
+
+def _is_glued_right_char(ch: str) -> bool:
+    if not ch or ch.isspace():
+        return False
+    return ch.isalnum()
+
+
 def _prev_is_glued_letter(text: str, start: int) -> bool:
-    """
-    Перед адресом в исходном тексте стоит буква без разделителя
-    (вероятная «склейка» предыдущего слова с локалом).
-    """
+    """Перед адресом сразу стоит «липкий» символ."""
+
     if start <= 0 or not text:
         return False
-    prev = text[:start]
-    if not prev:
+    return _is_glued_left_char(text[start - 1])
+
+
+def _next_is_glued_letter(text: str, end: int) -> bool:
+    """После адреса сразу идёт «липкий» символ."""
+
+    if not text or end >= len(text):
         return False
-    idx = len(prev) - 1
-    while idx >= 0 and prev[idx].isspace():
-        idx -= 1
-    if idx < 0:
-        return False
-    punct_tail = ".,;:!?)]}»›\"'“”«…-–—"
-    while idx >= 0 and prev[idx] in punct_tail:
-        idx -= 1
-    if idx < 0:
-        return False
-    return prev[idx].isalpha()
+    return _is_glued_right_char(text[end])
 
 
 
@@ -731,6 +739,19 @@ def _dbg(step: str, payload: list | str, limit: int = 5) -> None:
         pass
 
 
+def _merge_reason(reason: str | None, extra: str) -> str:
+    parts = [
+        part
+        for part in str(reason or "").split(",")
+        if part and part != "baseline"
+    ]
+    if extra and extra not in parts:
+        parts.append(extra)
+    if not parts:
+        return extra
+    return ",".join(parts)
+
+
 def _is_ascii_local(local: str) -> bool:
     return bool(_ASCII_LOCAL_RE.fullmatch(local))
 
@@ -824,6 +845,31 @@ def parse_emails_unified(text: str, return_meta: bool = False):
 
         candidate = f"{norm_local}@{norm_domain}"
         start, end = m.span(0)
+        boundary_suspect = False
+        candidate_lower = c.lower()
+        boundary_text = t1
+        boundary_lower = boundary_text.lower()
+        if candidate_lower:
+            raw_pos = boundary_lower.find(candidate_lower)
+            while raw_pos != -1:
+                left_char = boundary_text[raw_pos - 1] if raw_pos > 0 else ""
+                right_index = raw_pos + len(c)
+                right_char = (
+                    boundary_text[right_index]
+                    if right_index < len(boundary_text)
+                    else ""
+                )
+                left_glued = STRICT_LEFT_BOUNDARY and _is_glued_left_char(left_char)
+                right_glued = _is_glued_right_char(right_char)
+                if left_glued or right_glued:
+                    boundary_suspect = True
+                    break
+                raw_pos = boundary_lower.find(candidate_lower, raw_pos + 1)
+        if not boundary_suspect:
+            if STRICT_LEFT_BOUNDARY and _prev_is_glued_letter(t2, start):
+                boundary_suspect = True
+            if _next_is_glued_letter(t2, end):
+                boundary_suspect = True
         sanitized, sanitize_reason = sanitize_email(candidate)
         reverted = False
 
@@ -855,6 +901,11 @@ def parse_emails_unified(text: str, return_meta: bool = False):
         else:
             stage = "sanitize" if final_reason else stage
 
+        if boundary_suspect and (sanitized_final or final_reason is None):
+            final_reason = _merge_reason(final_reason, "suspect")
+            if stage is None:
+                stage = "sanitize"
+
         if sanitized_final:
             if conf_fixed:
                 confusables_fixed += 1
@@ -876,6 +927,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 "confusables_applied": conf_fixed,
                 "reverted": reverted,
                 "span": (start, end),
+                "suspect": boundary_suspect,
             }
         )
 
@@ -929,23 +981,8 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 _starts_with_long_digits(loc)
                 or _starts_with_orcid_like(loc)
                 or _long_alpha_run_no_separators(loc)
+                or bool(item.get("suspect"))
             ):
-                suspects.append(candidate)
-
-        for item in items_meta:
-            span = item.get("span")
-            start = None
-            if isinstance(span, (list, tuple)) and len(span) == 2:
-                try:
-                    start = int(span[0])
-                except Exception:
-                    start = None
-            if start is None:
-                continue
-            if not _prev_is_glued_letter(t2, start):
-                continue
-            candidate = _candidate_from_item(item)
-            if candidate and "@" in candidate:
                 suspects.append(candidate)
     except Exception:
         pass
@@ -1089,6 +1126,28 @@ def _preserve_leading_alnum(original: str, cleaned: str) -> str:
 AGGR = os.getenv("AGGRESSIVE_LOCAL_REPAIR", "0") == "1"
 _POPULAR = re.compile(r"^(?:yandex|ya|gmail|mail|bk|list|rambler|inbox)\.", re.I)
 _REPAIR_RE = re.compile(r"^[a-z]{5,}\d+([a-z0-9._+\-]{4,})$", re.I)
+_TLD_TAIL_SUSPECT_RE = re.compile(r"^(?:comcom|rurussia|ruru|runet)$", re.I)
+
+
+def _repair_tld_tail_ascii(domain: str) -> str:
+    if not domain or "." not in domain:
+        return domain
+    parts = domain.split(".")
+    if len(parts) < 2:
+        return domain
+    last = parts[-1]
+    last_lower = last.lower()
+    if last_lower.startswith("xn--"):
+        return domain
+    if len(last_lower) <= 6 and not _TLD_TAIL_SUSPECT_RE.match(last_lower):
+        return domain
+    prefix = parts[:-1]
+    for k in range(2, min(6, len(last_lower)) + 1):
+        tail = last_lower[:k]
+        candidate = ".".join(prefix + [tail])
+        if is_allowed_domain(candidate):
+            return candidate
+    return domain
 
 
 def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | None]:
@@ -1160,8 +1219,18 @@ def sanitize_email(email: str, strip_footnote: bool = True) -> tuple[str, str | 
     if not domain_ascii:
         return "", domain_reason or reason
 
+    tail_repaired = False
+    if REPAIR_TLD_TAIL and not is_allowed_domain(domain_ascii):
+        repaired = _repair_tld_tail_ascii(domain_ascii)
+        if repaired != domain_ascii:
+            domain_ascii = repaired
+            tail_repaired = True
+
     if not is_allowed_domain(domain_ascii):
         return "", "tld-not-allowed"
+
+    if tail_repaired:
+        reason = _merge_reason(reason, "tld-repaired")
 
     if AGGR and _POPULAR.match(domain_ascii):
         m = _REPAIR_RE.match(local)
