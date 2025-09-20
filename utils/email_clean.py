@@ -345,6 +345,40 @@ def _strip_footnotes_before_email(addr: str) -> str:
 
 
 _ALNUM = set(string.ascii_letters + string.digits)
+
+# --- Дополнительные проверки качества local/domain ---
+_ASCII_ONLY = re.compile(r"^[\x21-\x7E]+$")
+_DOMAIN_LIKE_IN_LOCAL = re.compile(
+    r"^([a-z0-9][a-z0-9.-]{1,}\.(?:[a-z]{2,})(?:\d{0,4})?)([._+-]?[a-z0-9].*)$",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_domain_in_local(local: str) -> tuple[str, bool]:
+    """Отрезаем ведущий домен, случайно «прилипший» к local-part."""
+
+    candidate = local or ""
+    match = _DOMAIN_LIKE_IN_LOCAL.match(candidate)
+    if not match:
+        return local, False
+    domain_part = match.group(1) or ""
+    remainder = match.group(2) or ""
+    base = domain_part.rstrip("0123456789").rstrip(".")
+    if not base:
+        return local, False
+    try:
+        domain_ok = is_allowed_domain(base.lower())
+    except Exception:
+        domain_ok = False
+    if not domain_ok:
+        return local, False
+    return remainder, True
+
+
+def _local_is_ascii_ok(local: str) -> bool:
+    """Проверяем, что local-part состоит только из печатных ASCII-символов."""
+
+    return bool(local) and bool(_ASCII_ONLY.match(local))
 _BOUNDARY_LEFT_PUNCT = set(".,;:!?)]}»›\"'“”«…-–—/_")
 
 
@@ -1260,14 +1294,31 @@ def sanitize_email(
     original_local = re.sub(r"^[-_.]+|[-_.]+$", "", original_local)
     local = _normalize_dots(local)
     original_local = _normalize_dots(original_local)
+    cut_domain_glue = False
+    stripped_local, domain_cut = _strip_leading_domain_in_local(local)
+    if domain_cut:
+        local = stripped_local
+        cut_domain_glue = True
+        if original_local:
+            original_trimmed, original_cut = _strip_leading_domain_in_local(original_local)
+            if original_cut:
+                original_local = original_trimmed
+        if not local:
+            return _finalize("", "invalid-local")
+        reason = _merge_reason(reason, "local-domain-trimmed")
     if local != before_local and reason is None:
         reason = "punct-trimmed"
+
+    ascii_printable_local = _local_is_ascii_ok(local)
+    ascii_local_strict = _is_ascii_local(local)
 
     if _has_cyrillic(local) and _has_latin(local):
         return _finalize("", "mixed-script-local")
 
-    if not _is_ascii_local(local):
-        return _finalize("", "non-ascii-local")
+    if not ascii_local_strict:
+        if ascii_printable_local:
+            return _finalize("", "non-ascii-local")
+        reason = _merge_reason(reason, "non-ascii-local")
 
     if _is_bad_prefix(local):
         return _finalize("", "role-like-prefix")
@@ -1299,16 +1350,25 @@ def sanitize_email(
         if m:
             local = m.group(1)
 
-    normalized = f"{local}@{domain_ascii}".lower()
-    normalized = _preserve_leading_alnum(email_original, normalized)
+    normalized_base = f"{local}@{domain_ascii}".lower()
+    normalized = _preserve_leading_alnum(email_original, normalized_base)
+    suspect_candidate = normalized or normalized_base
     suspects_out: list[str] = []
-    if normalized:
+    if suspect_candidate:
         try:
-            suspect_local, _ = normalized.split("@", 1)
+            suspect_local, _ = suspect_candidate.split("@", 1)
         except ValueError:
             suspect_local = ""
         if suspect_local and _is_suspect_local(suspect_local):
-            suspects_out.append(normalized)
+            suspects_out.append(suspect_candidate)
+    if cut_domain_glue:
+        if suspect_candidate and suspect_candidate not in suspects_out:
+            suspects_out.append(suspect_candidate)
+        normalized = ""
+    if not ascii_printable_local:
+        if suspect_candidate and suspect_candidate not in suspects_out:
+            suspects_out.append(suspect_candidate)
+        normalized = ""
     return _finalize(normalized, reason, suspects_out)
 
 

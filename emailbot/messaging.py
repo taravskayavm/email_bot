@@ -69,6 +69,7 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = 200
+_ASCII_LOCAL_RX = re.compile(r"^[\x21-\x7E]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -505,6 +506,13 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
 
 
 def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries=3):
+    candidate = (recipient or "").strip()
+    if not candidate or not _ASCII_LOCAL_RX.match(candidate):
+        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
+        if candidate:
+            suppress_add(candidate, None, "invalid-local")
+        return
+
     last_exc: Exception | None = None
     grp = ""
     eb_uuid = ""
@@ -1189,6 +1197,14 @@ def get_recently_contacted_emails_cached() -> Set[str]:
 def clear_recent_sent_cache():
     _recent_cache["at"] = None
     _recent_cache["set"] = set()
+
+
+def _should_skip_by_history(email: str) -> tuple[bool, str]:
+    try:
+        return should_skip_by_cooldown(email)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("should_skip_by_cooldown failed", exc_info=True)
+        return False, ""
 
 
 def get_sent_today() -> Set[str]:
