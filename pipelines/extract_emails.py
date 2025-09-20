@@ -21,8 +21,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
     raw_text = text or ""
-    cleaned, meta = parse_emails_unified(raw_text, return_meta=True)
+    cleaned, meta_in = parse_emails_unified(raw_text, return_meta=True)
+    meta = dict(meta_in)
     items = meta.get("items", [])
+    suspects = sorted(set(meta.get("suspects") or []))
 
     allowed_candidates: List[str] = []
     rejected: List[dict] = []
@@ -68,7 +70,8 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
 
     unique = dedupe_with_variants(allowed_candidates)
     meta["items_rejected"] = rejected
-    meta["suspicious_count"] = len(rejected)
+    meta["emails_suspects"] = suspects
+    meta["suspicious_count"] = len(suspects)
     meta["dedup_len"] = len(unique)
     fio_pairs = fio_candidates(raw_text)
 
@@ -280,7 +283,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "dropped_candidates": sorted(dropped_candidates.items()),
         "items": items,
         "items_rejected": rejected,
-        "suspicious_count": len(rejected),
+        "suspicious_count": len(suspects),
     }
 
     return filtered, stats
