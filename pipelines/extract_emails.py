@@ -68,7 +68,15 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         item["sanitized"] = email_final
         allowed_candidates.append(email_final)
 
-    unique = dedupe_with_variants(allowed_candidates)
+    # EB-REQUIRE-CONFIRM-SUSPECTS: отделяем «подозрительные» и (опционально)
+    # не включаем их в отправку без явного подтверждения.
+    REQUIRE_CONFIRM = os.getenv("SUSPECTS_REQUIRE_CONFIRM", "1") == "1"
+    send_candidates = [candidate for candidate in allowed_candidates if candidate]
+    if REQUIRE_CONFIRM and suspects:
+        blocked = set(suspects)
+        send_candidates = [candidate for candidate in send_candidates if candidate not in blocked]
+
+    unique = dedupe_with_variants(send_candidates)
     meta["items_rejected"] = rejected
     meta["emails_suspects"] = suspects
     meta["suspicious_count"] = len(suspects)
