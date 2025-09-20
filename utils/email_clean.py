@@ -345,6 +345,59 @@ def _strip_footnotes_before_email(addr: str) -> str:
 _ALNUM = set(string.ascii_letters + string.digits)
 
 
+# === EB-GENERIC-GLUE-SUSPECTS helpers (без словаря токенов) ===
+def _starts_with_long_digits(local: str, n: int = 5) -> bool:
+    """Локал начинается с >= n цифр подряд."""
+    if not local:
+        return False
+    run = 0
+    for ch in local:
+        if ch.isdigit():
+            run += 1
+            if run >= n:
+                return True
+        else:
+            break
+    return False
+
+
+_ORCID_PREFIX_RE = re.compile(r"^(?:\d{4}-){3,}\d{3,}[-\d]*", re.ASCII)
+
+
+def _starts_with_orcid_like(local: str) -> bool:
+    """Локал начинается с ORCID-подобной цифровой схемы (####-####-####-...)."""
+    return bool(_ORCID_PREFIX_RE.match(local or ""))
+
+
+def _long_alpha_run_no_separators(local: str, min_len: int = 14) -> bool:
+    """
+    Очень длинная буквеная «простыня» без точек/подчёркиваний/плюсов/цифр.
+    Универсальный индикатор склейки слов слева (без словарей).
+    """
+    if not local or len(local) < min_len:
+        return False
+    if not all(ch.isalpha() for ch in local):
+        return False
+    if any(ch in "._+-" for ch in local):
+        return False
+    return True
+
+
+def _prev_is_glued_letter(text: str, start: int) -> bool:
+    """
+    Перед адресом в исходном тексте стоит буква без разделителя
+    (вероятная «склейка» предыдущего слова с локалом).
+    """
+    if start <= 0 or not text:
+        return False
+    prev = text[:start].rstrip()
+    if not prev:
+        return False
+    ch = prev[-1]
+    return ch.isalpha()
+
+
+
 def _fix_hyphen_breaks(s: str) -> str:
     """
     Чиним переносы с дефисом: '-\n' внутри адресов оставляем как дефис,
@@ -842,25 +895,66 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     if not return_meta:
         return cleaned
 
+    # === EB-GENERIC-GLUE-SUSPECTS: формируем список "подозрительных" адресов ===
     suspects: list[str] = []
-    for m in matches:
-        start = m.start(0)
-        if start > 0:
-            prev = t2[:start].rstrip()[-1:]
-            first = m.group(0)[:1].lower()
-            if prev in ".,:;()[]{}-—" and first in "abc":
-                suspect, _ = sanitize_email(m.group(0))
-                if suspect:
-                    suspects.append(suspect)
+    try:
+        def _candidate_from_item(item: dict[str, object]) -> str:
+            raw_candidate = str(
+                item.get("sanitized")
+                or item.get("normalized")
+                or item.get("raw")
+                or ""
+            ).strip()
+            if not raw_candidate or "@" not in raw_candidate:
+                return ""
+            sanitized_candidate, _ = sanitize_email(raw_candidate)
+            candidate = sanitized_candidate or raw_candidate
+            return candidate.lower()
 
-    deobfuscated_count = sum(1 for r in final_reasons if r == "obfuscation-applied")
+        for item in items_meta:
+            candidate = _candidate_from_item(item)
+            if not candidate or "@" not in candidate:
+                continue
+            loc, _dom = candidate.split("@", 1)
+            if (
+                _starts_with_long_digits(loc)
+                or _starts_with_orcid_like(loc)
+                or _long_alpha_run_no_separators(loc)
+            ):
+                suspects.append(candidate)
+
+        for item in items_meta:
+            span = item.get("span")
+            start = None
+            if isinstance(span, (list, tuple)) and len(span) == 2:
+                try:
+                    start = int(span[0])
+                except Exception:
+                    start = None
+            if start is None:
+                continue
+            if not _prev_is_glued_letter(t2, start):
+                continue
+            candidate = _candidate_from_item(item)
+            if candidate and "@" in candidate:
+                suspects.append(candidate)
+    except Exception:
+        pass
+    suspects = sorted(set(suspects))
+
+    deobfuscated_count = sum(
+        1 for r in deobf_rules if r and not r.startswith("#")
+    )
+
+    items = items_meta
 
     meta = {
-        "suspects": suspects,
+        "items": items,
+        "deobfuscated": deobf_applied,
         "deobfuscated_count": deobfuscated_count,
         "confusables_fixed": confusables_fixed,
         "deobfuscation_rules": deobf_rules,
-        "items": items_meta,
+        "suspects": suspects,  # EB-GENERIC-GLUE-SUSPECTS
     }
     return cleaned, meta
 
