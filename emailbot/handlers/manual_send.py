@@ -10,6 +10,7 @@ from typing import Dict, List, Set
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from emailbot.handlers.common import safe_answer
 
 from emailbot.notify import notify
 
@@ -64,7 +65,7 @@ async def manual_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Выбор режима отправки в ручной рассылке."""
 
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data or ""
     context.chat_data["manual_send_mode"] = (
         "allowed" if data.endswith("allowed") else "all"
@@ -83,7 +84,8 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Switch to the mailing group selection step."""
 
     query = update.callback_query
-    await query.answer()
+    # Сначала мгновенно отвечаем на нажатие, чтобы не словить TTL
+    await safe_answer(query)
     current = context.chat_data.get("current_template_code")
     if not current:
         state = context.chat_data.get(bot_handlers_module.SESSION_KEY)
@@ -101,7 +103,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle group selection and prepare messages for sending."""
 
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data or ""
     if ":" not in data:
         await query.message.reply_text(
@@ -216,15 +218,15 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         template_path = state.template
         template_label = state.template_label or ""
     if not emails or not group_code or not template_path:
-        await query.answer("Нет данных для отправки", show_alert=True)
+        await safe_answer(query, text="Нет данных для отправки", show_alert=True)
         return
     if not Path(template_path).exists():
-        await query.answer("Шаблон недоступен", show_alert=True)
+        await safe_answer(query, text="Шаблон недоступен", show_alert=True)
         await query.message.reply_text(
             "⚠️ Шаблон не найден или файл отсутствует. Нажмите «🧭 Сменить группу» и выберите шаблон."
         )
         return
-    await query.answer()
+    await safe_answer(query)
     group_code = str(group_code)
     template_label = str(template_label or "")
     if not template_label and group_code:

@@ -6,13 +6,17 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import warnings
 from pathlib import Path
 
+from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
+    ContextTypes,
     MessageHandler,
     filters,
 )
@@ -37,6 +41,10 @@ logging.basicConfig(
     force=True,
 )
 
+warnings.filterwarnings(
+    "ignore", category=DeprecationWarning, message="builtin type SwigPy"
+)
+
 # Подавляем болтливые логи HTTP-библиотек
 for noisy in ("httpx", "httpcore", "urllib3", "aiohttp", "requests"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -53,6 +61,21 @@ def _safe_add(app, handler, signature: str) -> None:
         return
     seen.add(signature)
     app.add_handler(handler)
+
+
+async def handle_error(
+    update: Update | None, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Log errors and swallow known benign Telegram issues."""
+
+    err = context.error
+    try:
+        msg = str(err)
+    except Exception:
+        msg = repr(err)
+    logger.error("Unhandled error: %s", msg, exc_info=err)
+    if isinstance(err, BadRequest) and "Query is too old" in msg:
+        return
 
 
 def main() -> None:
@@ -343,6 +366,9 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:"),
         "cb:imap_choose",
     )
+
+    # Глобальный обработчик ошибок — в самом конце, после регистрации хендлеров
+    app.add_error_handler(handle_error)
 
     logger.info("Бот запущен.")
     stop_event = threading.Event()
