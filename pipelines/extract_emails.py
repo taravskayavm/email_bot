@@ -243,6 +243,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     meta["role_stats"] = role_stats
     meta["classified"] = classified
     meta["source_context"] = contexts
+    meta_in["source_context"] = contexts
     meta["fio_scores"] = fio_scores
     meta["role_filter_applied"] = PERSONAL_ONLY
     meta["role_filtered"] = role_filtered
