@@ -18,6 +18,12 @@ def allowed_tlds() -> set[str]:
     return set(_DEFAULT_ALLOWED)
 
 
+def get_allowed_tlds() -> set[str]:
+    """Explicit accessor used by parsing helpers."""
+
+    return allowed_tlds()
+
+
 def is_allowed_domain(domain: str) -> bool:
     """Return ``True`` if the domain belongs to the allow-list."""
 
@@ -34,4 +40,4 @@ def is_foreign_domain(domain: str) -> bool:
     return not is_allowed_domain(domain)
 
 
-__all__ = ["allowed_tlds", "is_allowed_domain", "is_foreign_domain"]
+__all__ = ["allowed_tlds", "get_allowed_tlds", "is_allowed_domain", "is_foreign_domain"]

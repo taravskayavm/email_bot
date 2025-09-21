@@ -12,7 +12,7 @@ from config import CONFUSABLES_NORMALIZE, OBFUSCATION_ENABLE
 from utils.email_deobfuscate import deobfuscate_text
 from utils.email_role import classify_email_role
 
-from utils.tld_utils import is_allowed_domain
+from utils.tld_utils import get_allowed_tlds, is_allowed_domain
 from utils.paths import expand_path, ensure_parent, get_temp_file
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,49 @@ def strip_invisibles(text: str) -> str:
 _PUNCT_TRIM_RE = re.compile(
     r'^[\s\(\[\{<«‹"“”„‚’›»>}\]\).,:;—]+|[\s\(\[\{<«‹"“”„‚’›»>}\]\).,:;—]+$'
 )
+_PUNCT = set(".,;:()[]{}<>“”\"'`")
+_SIDE_NOISE = re.compile(
+    r"^(?:"
+    r"\+?\d{3,}"
+    r"|(?:footnote|note)\d+"
+    r"|(?:prim|прим|supp|suppl|табл|table|fig|figure|рис|appendix|app|contact|тел|phone)[\w-]*"
+    r"|(?:russia|россия)"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _strip_side_noise(token_left: str, token_right: str) -> tuple[str, str, bool]:
+    """Strip typical noisy tokens around an e-mail and report if anything was cut."""
+
+    changed = False
+
+    def _clean(token: str) -> str:
+        nonlocal changed
+        if not token:
+            return ""
+        cleaned = token.strip()
+        if not cleaned:
+            return ""
+        cleaned = cleaned.strip("".join(_PUNCT))
+        if not cleaned:
+            return ""
+        lowered = cleaned.lower()
+        if lowered.isdigit():
+            if len(lowered) <= 3:
+                changed = True
+                return ""
+        if re.fullmatch(r"\+?\d{3,}", cleaned):
+            changed = True
+            return ""
+        if _SIDE_NOISE.match(lowered):
+            changed = True
+            return ""
+        return cleaned
+
+    left_clean = _clean(token_left)
+    right_clean = _clean(token_right)
+    return left_clean, right_clean, changed
 
 # Цифровые сноски (включая надстрочные ¹²³ и пр. circled numbers)
 _SUPERSCRIPT_MAP = str.maketrans(
@@ -897,6 +940,12 @@ def parse_emails_unified(text: str, return_meta: bool = False):
 
         candidate = f"{norm_local}@{norm_domain}"
         start, end = m.span(0)
+        left_context = t2[max(0, start - 32) : start]
+        left_parts = left_context.split()
+        left_token = left_parts[-1] if left_parts else ""
+        right_context = t2[end : min(len(t2), end + 32)]
+        right_parts = right_context.split()
+        right_token = right_parts[0] if right_parts else ""
         boundary_suspect = False
         candidate_lower = c.lower()
         boundary_text = t1
@@ -926,7 +975,12 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             boundary_suspect = True
         if _next_is_glued_letter(t2, end):
             boundary_suspect = True
-        sanitized_variants, sanitize_meta = sanitize_email(candidate, return_meta=True)
+        sanitized_variants, sanitize_meta = sanitize_email(
+            candidate,
+            return_meta=True,
+            left=left_token,
+            right=right_token,
+        )
         sanitize_reason = sanitize_meta.get("reason") if isinstance(sanitize_meta, dict) else None
         sanitized = sanitized_variants[0] if sanitized_variants else ""
         item_suspects: list[str] = []
@@ -951,7 +1005,11 @@ def parse_emails_unified(text: str, return_meta: bool = False):
         reverted = False
 
         if not sanitized and sanitize_reason == "invalid-idna" and conf_fixed:
-            sanitized, sanitize_reason = sanitize_email(c)
+            sanitized, sanitize_reason = sanitize_email(
+                c,
+                left=left_token,
+                right=right_token,
+            )
             reverted = sanitized != ""
             if reverted:
                 conf_fixed = False
@@ -1200,28 +1258,29 @@ def _preserve_leading_alnum(original: str, cleaned: str) -> str:
 AGGR = os.getenv("AGGRESSIVE_LOCAL_REPAIR", "0") == "1"
 _POPULAR = re.compile(r"^(?:yandex|ya|gmail|mail|bk|list|rambler|inbox)\.", re.I)
 _REPAIR_RE = re.compile(r"^[a-z]{5,}\d+([a-z0-9._+\-]{4,})$", re.I)
-_TLD_TAIL_SUSPECT_RE = re.compile(r"^(?:comcom|rurussia|ruru|runet)$", re.I)
+def _repair_domain_tail(domain: str) -> tuple[str, bool]:
+    """Attempt to repair domain tail by trimming to the longest allowed TLD."""
 
-
-def _repair_tld_tail_ascii(domain: str) -> str:
     if not domain or "." not in domain:
-        return domain
-    parts = domain.split(".")
-    if len(parts) < 2:
-        return domain
-    last = parts[-1]
-    last_lower = last.lower()
-    if last_lower.startswith("xn--"):
-        return domain
-    if len(last_lower) <= 6 and not _TLD_TAIL_SUSPECT_RE.match(last_lower):
-        return domain
-    prefix = parts[:-1]
-    for k in range(2, min(6, len(last_lower)) + 1):
-        tail = last_lower[:k]
-        candidate = ".".join(prefix + [tail])
-        if is_allowed_domain(candidate):
-            return candidate
-    return domain
+        return domain, False
+    allowed = {t.lstrip(".").lower() for t in get_allowed_tlds() if t}
+    if not allowed:
+        return domain, False
+    domain_lower = domain.lower()
+    best = domain
+    for tld in sorted(allowed, key=lambda t: (t.count(".") + 1, len(t)), reverse=True):
+        suffix = "." + tld
+        idx = domain_lower.rfind(suffix)
+        if idx == -1:
+            continue
+        candidate = domain[: idx + len(suffix)]
+        if "." not in candidate:
+            continue
+        if candidate != domain:
+            return candidate, True
+        best = candidate
+        break
+    return best, False
 
 
 def sanitize_email(
@@ -1229,11 +1288,16 @@ def sanitize_email(
     strip_footnote: bool = True,
     *,
     return_meta: bool = False,
+    left: str = "",
+    right: str = "",
 ) -> tuple[str, str | None] | tuple[list[str], dict[str, object]]:
     """Финальная чистка и проверка адреса."""
 
     email_original = email
     reason: str | None = None
+    _, _, cut_noise = _strip_side_noise(str(left or ""), str(right or ""))
+    if cut_noise:
+        reason = _merge_reason(reason, "boundary-noise")
 
     def _finalize(
         value: str,
@@ -1334,10 +1398,7 @@ def sanitize_email(
 
     tail_repaired = False
     if REPAIR_TLD_TAIL and not is_allowed_domain(domain_ascii):
-        repaired = _repair_tld_tail_ascii(domain_ascii)
-        if repaired != domain_ascii:
-            domain_ascii = repaired
-            tail_repaired = True
+        domain_ascii, tail_repaired = _repair_domain_tail(domain_ascii)
 
     if not is_allowed_domain(domain_ascii):
         return _finalize("", "tld-not-allowed")
@@ -1369,6 +1430,8 @@ def sanitize_email(
         if suspect_candidate and suspect_candidate not in suspects_out:
             suspects_out.append(suspect_candidate)
         normalized = ""
+    if cut_noise and suspect_candidate and suspect_candidate not in suspects_out:
+        suspects_out.append(suspect_candidate)
     return _finalize(normalized, reason, suspects_out)
 
 
