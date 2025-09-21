@@ -919,10 +919,19 @@ def send_email_with_sessions(
     group_title: str | None = None,
     group_key: str | None = None,
     override_180d: bool = False,
-):
+) -> tuple[SendOutcome, str]:
+    recipient_clean = (recipient or "").strip()
+    if not recipient_clean or not _ASCII_LOCAL_RX.match(recipient_clean):
+        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
+        if recipient_clean:
+            suppress_add(recipient_clean, None, "invalid-local")
+        return SendOutcome.BLOCKED, ""
+
+    recipient = recipient_clean
+
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return ""
+        return SendOutcome.COOLDOWN, ""
     msg, token, eb_uuid = build_message(
         recipient,
         html_path,
@@ -949,7 +958,7 @@ def send_email_with_sessions(
                 recipient,
                 skip_reason,
             )
-            return ""
+            return SendOutcome.COOLDOWN, ""
     group_code = _message_group_key(msg)
     try:
         send_with_retry(smtp, msg)
@@ -977,7 +986,7 @@ def send_email_with_sessions(
             rules.append_history(recipient)
         except Exception:  # pragma: no cover - defensive fallback
             logger.debug("rules.append_history failed", exc_info=True)
-        return token
+        return SendOutcome.SENT, token
     except smtplib.SMTPResponseException as e:
         code = getattr(e, "smtp_code", None)
         msg_bytes = getattr(e, "smtp_error", b"")
