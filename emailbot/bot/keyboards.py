@@ -4,46 +4,57 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-
-from typing import Dict
+import os
+import unicodedata
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 ICONS_PATH = Path("icons.json")
+_DEFAULT_ICON = "📄"
+
+
+def _norm(value: str) -> str:
+    """Normalize keys for consistent lookup."""
+
+    return unicodedata.normalize("NFKC", (value or "")).strip().lower()
+
+
+def _normalize_mapping(mapping: object) -> dict[str, str]:
+    if not isinstance(mapping, dict):
+        return {}
+
+    result: dict[str, str] = {}
+    for key, value in mapping.items():
+        normalized_key = _norm(str(key))
+        if not normalized_key:
+            continue
+        result[normalized_key] = str(value)
+    return result
 
 
 def _load_icons() -> dict[str, str]:
+    """Load icons mapping with support for env overrides and normalization."""
+
+    raw = os.getenv("DIRECTION_ICONS_JSON")
+    if raw:
+        try:
+            return _normalize_mapping(json.loads(raw))
+        except Exception:
+            pass
+
     if ICONS_PATH.exists():
         try:
-            return json.loads(ICONS_PATH.read_text(encoding="utf-8"))
+            return _normalize_mapping(json.loads(ICONS_PATH.read_text(encoding="utf-8")))
         except Exception:
             return {}
     return {}
 
 
-def _icon_for(label: str, icons: Dict[str, str]) -> str:
-    if not label:
-        return ""
-    key = label.strip()
-    if not key:
-        return ""
-    icon = icons.get(key)
-    if icon:
-        return icon
-    capitalized = icons.get(key.capitalize())
-    if capitalized:
-        return capitalized
-    lowered = key.casefold()
-    for stored_key, stored_icon in icons.items():
-        if stored_key.strip().casefold() == lowered:
-            return stored_icon
-    return ""
-
-
-def _label_with_icon(label: str, icons: dict[str, str]) -> str:
-    icon = _icon_for(label, icons)
-    return f"{icon} {label}" if icon else label
+def _label_with_icon(direction: str, icons_norm: dict[str, str]) -> str:
+    icon = icons_norm.get(_norm(direction)) or _DEFAULT_ICON
+    icon = unicodedata.normalize("NFKC", icon)
+    return f"{icon} {direction}".strip()
 
 
 def directions_keyboard(directions: list[str]) -> InlineKeyboardMarkup:
