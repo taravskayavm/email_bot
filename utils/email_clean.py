@@ -397,25 +397,44 @@ _DOMAIN_LIKE_IN_LOCAL = re.compile(
 )
 
 
-def _strip_leading_domain_in_local(local: str) -> tuple[str, bool]:
-    """Отрезаем ведущий домен, случайно «прилипший» к local-part."""
+def _strip_leading_domain_in_local(local: str) -> tuple[str, bool, bool]:
+    """Отрезаем ведущий домен, случайно «прилипший» к local-part.
+
+    Возвращает кортеж ``(остаток, обрезано, сноска_цифрой)``.
+    """
 
     candidate = local or ""
     match = _DOMAIN_LIKE_IN_LOCAL.match(candidate)
     if not match:
-        return local, False
+        return local, False, False
     domain_part = match.group(1) or ""
     remainder = match.group(2) or ""
-    base = domain_part.rstrip("0123456789").rstrip(".")
-    if not base:
-        return local, False
-    try:
-        domain_ok = is_allowed_domain(base.lower())
-    except Exception:
-        domain_ok = False
-    if not domain_ok:
-        return local, False
-    return remainder, True
+    if not domain_part:
+        return local, False, False
+
+    for split in range(len(domain_part), 0, -1):
+        prefix = domain_part[:split]
+        suffix = domain_part[split:] + remainder
+        base = prefix.rstrip("0123456789").rstrip(".")
+        if not base:
+            continue
+        try:
+            domain_ok = is_allowed_domain(base.lower())
+        except Exception:
+            domain_ok = False
+        if not domain_ok:
+            continue
+        if not suffix:
+            continue
+        suffix_clean = suffix
+        if suffix_clean[0] in "._+-" and len(suffix_clean) > 1:
+            suffix_clean = suffix_clean[1:]
+        if not suffix_clean or not suffix_clean[0].isalnum():
+            continue
+        had_footnote_digits = prefix.rstrip(".") != base
+        return suffix, True, had_footnote_digits and bool(suffix_clean)
+
+    return local, False, False
 
 
 def _local_is_ascii_ok(local: str) -> bool:
@@ -1359,12 +1378,13 @@ def sanitize_email(
     local = _normalize_dots(local)
     original_local = _normalize_dots(original_local)
     cut_domain_glue = False
-    stripped_local, domain_cut = _strip_leading_domain_in_local(local)
+    domain_glue_footnote = False
+    stripped_local, domain_cut, domain_glue_footnote = _strip_leading_domain_in_local(local)
     if domain_cut:
         local = stripped_local
         cut_domain_glue = True
         if original_local:
-            original_trimmed, original_cut = _strip_leading_domain_in_local(original_local)
+            original_trimmed, original_cut, _ = _strip_leading_domain_in_local(original_local)
             if original_cut:
                 original_local = original_trimmed
         if not local:
@@ -1425,7 +1445,8 @@ def sanitize_email(
     if cut_domain_glue:
         if suspect_candidate and suspect_candidate not in suspects_out:
             suspects_out.append(suspect_candidate)
-        normalized = ""
+        if not domain_glue_footnote:
+            normalized = ""
     if not ascii_printable_local:
         if suspect_candidate and suspect_candidate not in suspects_out:
             suspects_out.append(suspect_candidate)
