@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import imaplib
+import json
 import logging
 import os
+import smtplib
+import time
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -20,6 +23,7 @@ from emailbot import mass_state, messaging
 from emailbot.extraction import normalize_email
 from emailbot.messaging import (
     MAX_EMAILS_PER_DAY,
+    SendOutcome,
     clear_recent_sent_cache,
     get_blocked_emails,
     get_preferred_sent_folder,
@@ -384,7 +388,32 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
+        batch_id = context.chat_data.get("batch_id")
+        audit_path = Path("var") / f"bulk_audit_{batch_id or int(time.time())}.jsonl"
+        try:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.debug("bulk audit mkdir failed", exc_info=True)
+
+        def _audit(email: str, status: str, detail: str = "") -> None:
+            try:
+                with audit_path.open("a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "email": email,
+                                "status": status,
+                                "detail": detail,
+                                "ts": time.time(),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                logger.debug("bulk audit append failed", exc_info=True)
+
         errors: list[str] = []
+        error_addresses: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         smtp = RobustSMTP()
         try:
@@ -393,7 +422,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    token = send_email_with_sessions(
+                    outcome, token = send_email_with_sessions(
                         smtp,
                         imap,
                         sent_folder,
@@ -403,19 +432,60 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         group_title=template_label,
                         group_key=group_code,
                     )
-                    log_sent_email(
-                        email_addr,
-                        group_code,
-                        "ok",
-                        chat_id,
-                        template_path,
-                        unsubscribe_token=token,
+                    if outcome == SendOutcome.SENT:
+                        log_sent_email(
+                            email_addr,
+                            group_code,
+                            "ok",
+                            chat_id,
+                            template_path,
+                            unsubscribe_token=token,
+                        )
+                        sent_ok.append(email_addr)
+                        _audit(email_addr, "sent")
+                        await asyncio.sleep(1.5)
+                    elif outcome == SendOutcome.COOLDOWN:
+                        if email_addr not in skipped_recent:
+                            skipped_recent.append(email_addr)
+                        _audit(email_addr, "cooldown")
+                    elif outcome == SendOutcome.BLOCKED:
+                        if email_addr not in blocked_invalid:
+                            blocked_invalid.append(email_addr)
+                        _audit(email_addr, "blocked")
+                    elif outcome == SendOutcome.ERROR:
+                        if email_addr not in error_addresses:
+                            error_addresses.append(email_addr)
+                        detail = "send outcome error"
+                        errors.append(f"{email_addr} — {detail}")
+                        _audit(email_addr, "error", detail)
+                    else:
+                        if email_addr not in error_addresses:
+                            error_addresses.append(email_addr)
+                        detail = f"outcome {outcome}"
+                        errors.append(f"{email_addr} — {detail}")
+                        _audit(email_addr, "error", detail)
+                except smtplib.SMTPResponseException as e:
+                    code = int(getattr(e, "smtp_code", 0) or 0)
+                    raw = getattr(e, "smtp_error", b"") or b""
+                    if isinstance(raw, (bytes, bytearray)):
+                        msg = raw.decode("utf-8", "ignore")
+                    else:
+                        msg = str(raw)
+                    detail = f"{code} {msg}".strip()
+                    errors.append(f"{email_addr} — {detail}")
+                    add_bounce(email_addr, code, msg, phase="send")
+                    if is_hard_bounce(code, msg):
+                        suppress_add(email_addr, code, "hard bounce on send")
+                    target_list = (
+                        blocked_invalid if is_hard_bounce(code, msg) else error_addresses
                     )
-                    sent_ok.append(email_addr)
-                    await asyncio.sleep(1.5)
+                    if email_addr not in target_list:
+                        target_list.append(email_addr)
+                    _audit(email_addr, "error", detail)
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
-                    code, msg = None, None
+                    code = None
+                    msg = None
                     if (
                         hasattr(e, "recipients")
                         and isinstance(e.recipients, dict)
@@ -431,9 +501,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     add_bounce(email_addr, code, str(msg or e), phase="send")
                     if is_hard_bounce(code, msg):
                         suppress_add(email_addr, code, "hard bounce on send")
-                    log_sent_email(
-                        email_addr, group_code, "error", chat_id, template_path, str(e)
-                    )
+                    if email_addr not in error_addresses:
+                        error_addresses.append(email_addr)
+                    _audit(email_addr, "error", str(e))
                 mass_state.save_chat_state(
                     chat_id,
                     {
@@ -459,6 +529,26 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             blocked_foreign,
             blocked_invalid,
         )
+        if not skipped_recent:
+            report_text = report_text.replace(
+                "\n⏳ Пропущены (<180 дней/идемпотентность): 0", ""
+            )
+            if report_text.startswith("⏳ Пропущены (<180 дней/идемпотентность): 0\n"):
+                report_text = report_text.split("\n", 1)[-1]
+        if "🚫 В блок-листе/недоступны: 0" in report_text:
+            report_text = report_text.replace(
+                "\n🚫 В блок-листе/недоступны: 0", ""
+            )
+            if report_text.startswith("🚫 В блок-листе/недоступны: 0\n"):
+                report_text = report_text.split("\n", 1)[-1]
+        if error_addresses:
+            report_text = (
+                f"{report_text}\n❌ Ошибок при отправке: {len(error_addresses)}"
+                if report_text
+                else f"❌ Ошибок при отправке: {len(error_addresses)}"
+            )
+        if audit_path:
+            report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"
 
         # Безопасная отправка: notify сам разрежет текст на куски < 4096
         await notify(query.message, report_text, event="finish")

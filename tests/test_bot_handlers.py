@@ -7,6 +7,7 @@ import pytest
 from telegram import InlineKeyboardMarkup
 
 import emailbot.bot_handlers as bh
+from emailbot.messaging import SendOutcome
 from emailbot.bot_handlers import (
     SESSION_KEY,
     SessionState,
@@ -399,7 +400,7 @@ def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):
 
     def fake_send(client, imap, folder, addr, path, *a, **kw):
         sent_paths.append(path)
-        return "tok"
+        return SendOutcome.SENT, "tok"
 
     class DummyImap:
         def login(self, *a, **k):
@@ -529,7 +530,7 @@ async def test_manual_send_override_sets_flag(monkeypatch, tmp_path):
 
     def fake_send(client, imap, folder, addr, path, *a, **kw):
         overrides.append(kw.get("override_180d"))
-        return "tok"
+        return SendOutcome.SENT, "tok"
 
     class DummyImap:
         def login(self, *a, **k):
@@ -671,7 +672,7 @@ async def test_manual_send_selective_override(monkeypatch, tmp_path):
 
     def fake_send(client, imap, folder, addr, path, *a, **kw):
         overrides[addr] = kw.get("override_180d")
-        return "tok"
+        return SendOutcome.SENT, "tok"
 
     class DummyImap:
         def login(self, *a, **k):

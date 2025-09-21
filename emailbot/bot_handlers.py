@@ -13,6 +13,7 @@ import os
 import random
 import re
 import secrets
+import smtplib
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -202,6 +203,7 @@ from .messaging import (  # noqa: E402,F401  # isort: skip
     DOWNLOAD_DIR,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
+    SendOutcome,
     add_blocked_email,
     clear_recent_sent_cache,
     count_sent_today,
@@ -2636,7 +2638,34 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             event="start",
         )
 
-        sent_count = 0
+        batch_id = context.chat_data.get("batch_id")
+        audit_path = Path("var") / f"bulk_audit_{batch_id or int(time.time())}.jsonl"
+        try:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.debug("bulk audit mkdir failed", exc_info=True)
+
+        def _audit(email: str, status: str, detail: str = "") -> None:
+            try:
+                with audit_path.open("a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "email": email,
+                                "status": status,
+                                "detail": detail,
+                                "ts": time.time(),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                logger.debug("bulk audit append failed", exc_info=True)
+
+        sent_ok: list[str] = []
+        skipped_recent: list[str] = []
+        blocked_recipients: list[str] = []
+        error_addresses: list[str] = []
         errors: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         smtp = RobustSMTP()
@@ -2645,7 +2674,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if cancel_event and cancel_event.is_set():
                     break
                 try:
-                    token = send_email_with_sessions(
+                    outcome, token = send_email_with_sessions(
                         smtp,
                         imap,
                         sent_folder,
@@ -2656,19 +2685,53 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         group_key=group_code,
                         override_180d=email_addr in override_set_local,
                     )
-                    log_sent_email(
-                        email_addr,
-                        group_code,
-                        "ok",
-                        chat_id,
-                        template_path,
-                        unsubscribe_token=token,
+                    if outcome == SendOutcome.SENT:
+                        log_sent_email(
+                            email_addr,
+                            group_code,
+                            "ok",
+                            chat_id,
+                            template_path,
+                            unsubscribe_token=token,
+                        )
+                        sent_ok.append(email_addr)
+                        _audit(email_addr, "sent")
+                        await asyncio.sleep(1.5)
+                    elif outcome == SendOutcome.COOLDOWN:
+                        if email_addr not in skipped_recent:
+                            skipped_recent.append(email_addr)
+                        _audit(email_addr, "cooldown")
+                    elif outcome == SendOutcome.BLOCKED:
+                        if email_addr not in blocked_recipients:
+                            blocked_recipients.append(email_addr)
+                        _audit(email_addr, "blocked")
+                    else:
+                        if email_addr not in error_addresses:
+                            error_addresses.append(email_addr)
+                        errors.append(f"{email_addr} — outcome {outcome}")
+                        _audit(email_addr, "error", f"outcome {outcome}")
+                except smtplib.SMTPResponseException as e:
+                    code = int(getattr(e, "smtp_code", 0) or 0)
+                    raw = getattr(e, "smtp_error", b"") or b""
+                    if isinstance(raw, (bytes, bytearray)):
+                        msg = raw.decode("utf-8", "ignore")
+                    else:
+                        msg = str(raw)
+                    detail = f"{code} {msg}".strip()
+                    errors.append(f"{email_addr} — {detail}")
+                    add_bounce(email_addr, code, msg, phase="send")
+                    target_list = (
+                        blocked_recipients
+                        if is_hard_bounce(code, msg)
+                        else error_addresses
                     )
-                    sent_count += 1
-                    await asyncio.sleep(1.5)
+                    if email_addr not in target_list:
+                        target_list.append(email_addr)
+                    _audit(email_addr, "error", detail)
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
-                    code, msg = None, None
+                    code = None
+                    msg = None
                     if (
                         hasattr(e, "recipients")
                         and isinstance(e.recipients, dict)
@@ -2682,24 +2745,41 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         code = getattr(e, "smtp_code", None)
                         msg = getattr(e, "smtp_error", None)
                     add_bounce(email_addr, code, str(msg or e), phase="send")
-                    log_sent_email(
-                        email_addr, group_code, "error", chat_id, template_path, str(e)
-                    )
+                    if email_addr not in error_addresses:
+                        error_addresses.append(email_addr)
+                    _audit(email_addr, "error", str(e))
         finally:
             smtp.close()
         imap.logout()
+        summary_text = build_mass_report_text(
+            sent_ok,
+            skipped_recent,
+            None,
+            blocked_recipients,
+        )
+        if not skipped_recent:
+            summary_text = summary_text.replace(
+                "\n⏳ Пропущены (<180 дней/идемпотентность): 0", ""
+            )
+            if summary_text.startswith("⏳ Пропущены (<180 дней/идемпотентность): 0\n"):
+                summary_text = summary_text.split("\n", 1)[-1]
+        if "🚫 В блок-листе/недоступны: 0" in summary_text:
+            summary_text = summary_text.replace(
+                "\n🚫 В блок-листе/недоступны: 0", ""
+            )
+            if summary_text.startswith("🚫 В блок-листе/недоступны: 0\n"):
+                summary_text = summary_text.split("\n", 1)[-1]
+        if error_addresses:
+            summary_text = (
+                f"{summary_text}\n❌ Ошибок при отправке: {len(error_addresses)}"
+                if summary_text
+                else f"❌ Ошибок при отправке: {len(error_addresses)}"
+            )
+        if audit_path:
+            summary_text = f"{summary_text}\n\n📄 Аудит: {audit_path}"
         if cancel_event and cancel_event.is_set():
-            await notify(
-                query.message,
-                f"Остановлено. Отправлено писем: {sent_count}",
-                event="finish",
-            )
-        else:
-            await notify(
-                query.message,
-                f"✅ Отправлено писем: {sent_count}",
-                event="finish",
-            )
+            summary_text = f"🛑 Остановлено.\n{summary_text}"
+        await notify(query.message, summary_text, event="finish")
         if errors:
             await notify(
                 query.message,
