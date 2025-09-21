@@ -421,8 +421,8 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     first = messaging.send_email("u@example.com", str(html), batch_id="b1")
     second = messaging.send_email("u@example.com", str(html), batch_id="b1")
     assert len(sent) == 1
-    assert first is True
-    assert second is False
+    assert first is messaging.SendOutcome.SENT
+    assert second is messaging.SendOutcome.COOLDOWN
 
 
 def test_send_email_respects_cooldown(tmp_path, monkeypatch):
@@ -440,7 +440,7 @@ def test_send_email_respects_cooldown(tmp_path, monkeypatch):
 
     result = messaging.send_email("user@example.com", str(html))
 
-    assert result is False
+    assert result is messaging.SendOutcome.COOLDOWN
     assert called["send"] == 0
 
 
