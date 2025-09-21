@@ -87,8 +87,10 @@ def test_build_mass_report_text_counts_only():
     text = build_mass_report_text(sent_ok, skipped, blocked_foreign, blocked_invalid)
 
     assert "@" not in text
-    assert "✅ Отправлено: 2" in text
-    assert "⏳ Пропущены (<180 дней): 1" in text
+    assert "✉️ Рассылка завершена." in text
+    assert "📦 В очереди было: 5" in text
+    assert "✅ Успешно отправлено: 2" in text
+    assert "⏳ Пропущены (<180 дней/идемпотентность): 1" in text
     assert "🚫 В блок-листе/недоступны: 1" in text
     assert "🌍 Иностранные (отложены): 1" in text
 

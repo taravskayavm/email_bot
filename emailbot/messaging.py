@@ -594,7 +594,7 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                     rules.append_history(recipient)
                 except Exception:  # pragma: no cover - defensive fallback
                     logger.debug("rules.append_history failed", exc_info=True)
-                return
+                return  # success
             except smtplib.SMTPResponseException as e:
                 code = getattr(e, "smtp_code", None)
                 msg_bytes = getattr(e, "smtp_error", b"")
@@ -796,17 +796,41 @@ def send_email(
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     notify_func=None,
     batch_id: str | None = None,
-):
+) -> bool:
     try:
         if not _register_send(recipient, batch_id):
             logger.info(
                 "Skipping duplicate send to %s for batch %s", recipient, batch_id
             )
-            return ""
+            return False
         msg, token, _ = build_message(recipient, html_path, subject)
+        skip, skip_reason = _should_skip_by_history(recipient)
+        if skip:
+            logger.info(
+                "Skipping SMTP send to %s due to cooldown: %s",
+                recipient,
+                skip_reason,
+            )
+            return False
         send_raw_smtp_with_retry(msg, recipient, max_tries=3)
-        save_to_sent_folder(msg)
-        return token
+        try:
+            save_to_sent_folder(msg)
+        except Exception as exc:
+            logger.warning("Append to Sent failed for %s: %s", recipient, exc)
+        group_for_log = (
+            msg.get("X-EBOT-Group-Key")
+            or msg.get("X-EBOT-Group")
+            or Path(html_path).stem
+        )
+        try:
+            log_sent_email(
+                recipient,
+                str(group_for_log or ""),
+                unsubscribe_token=token,
+            )
+        except Exception as exc:
+            logger.debug("log_sent_email failed for %s: %s", recipient, exc)
+        return True
     except Exception as e:
         log_internal_error(f"send_email: {recipient}: {e}")
         if notify_func:
@@ -814,7 +838,7 @@ def send_email(
         raise
 
 
-async def async_send_email(recipient: str, html_path: str) -> str:
+async def async_send_email(recipient: str, html_path: str) -> bool:
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, send_email, recipient, html_path)

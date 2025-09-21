@@ -55,13 +55,16 @@ def build_mass_report_text(
     """
 
     sent_cnt = len(list(sent_ok))
-    recent_cnt = len(list(skipped_recent))
+    skipped_cnt = len(list(skipped_recent))
     blocked_cnt = len(list(blocked_invalid or []))
     foreign_cnt = len(list(blocked_foreign or []))
+    total = sent_cnt + skipped_cnt + blocked_cnt + foreign_cnt
 
     return (
-        f"✅ Отправлено: {sent_cnt}\n"
-        f"⏳ Пропущены (<180 дней): {recent_cnt}\n"
+        "✉️ Рассылка завершена.\n"
+        f"📦 В очереди было: {total}\n"
+        f"✅ Успешно отправлено: {sent_cnt}\n"
+        f"⏳ Пропущены (<180 дней/идемпотентность): {skipped_cnt}\n"
         f"🚫 В блок-листе/недоступны: {blocked_cnt}\n"
         f"🌍 Иностранные (отложены): {foreign_cnt}"
     ).strip()
