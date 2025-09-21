@@ -9,6 +9,8 @@ from utils.email_clean import (
     parse_emails_unified,
     drop_leading_char_twins,
 )
+from utils.dedup import canonical
+from utils.text_normalize import normalize_text
 from utils.email_role import classify_email_role
 from utils.name_match import fio_candidates, fio_match_score
 
@@ -21,7 +23,8 @@ FIO_PERSONAL_THRESHOLD = 0.9
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
-    raw_text = text or ""
+    source_text = text or ""
+    raw_text = normalize_text(source_text)
     cleaned, meta_in = parse_emails_unified(raw_text, return_meta=True)
     meta = dict(meta_in)
     items = meta.get("items", [])
@@ -73,6 +76,13 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     # не включаем их в отправку без явного подтверждения.
     REQUIRE_CONFIRM = os.getenv("SUSPECTS_REQUIRE_CONFIRM", "1") == "1"
     send_candidates = [candidate for candidate in allowed_candidates if candidate]
+    if send_candidates:
+        dedup_canonical: dict[str, str] = {}
+        for candidate in send_candidates:
+            key = canonical(candidate)
+            if key not in dedup_canonical:
+                dedup_canonical[key] = candidate
+        send_candidates = list(dedup_canonical.values())
     if REQUIRE_CONFIRM:
         blocked = set(suspects)
 
@@ -92,7 +102,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     meta["emails_suspects"] = suspects
     meta["suspicious_count"] = len(suspects)
     meta["dedup_len"] = len(unique)
-    fio_pairs = fio_candidates(raw_text)
+    fio_pairs = fio_candidates(source_text)
 
     def _merge_reason(reason: str | None, extra: str) -> str:
         parts = [
@@ -217,13 +227,13 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         if not infos:
             context = snippets.get(addr, raw_text)
             info = classify_email_role(local, domain, context_text=context)
-            score = fio_match_score(local, raw_text, candidates=fio_pairs)
+            score = fio_match_score(local, source_text, candidates=fio_pairs)
             _apply_fio_boost(info, score)
             infos = [info]
         else:
             missing = [info for info in infos if "fio_score" not in info]
             if missing:
-                score = fio_match_score(local, raw_text, candidates=fio_pairs)
+                score = fio_match_score(local, source_text, candidates=fio_pairs)
                 for info in missing:
                     _apply_fio_boost(info, score)
 
