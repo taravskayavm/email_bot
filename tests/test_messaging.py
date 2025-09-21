@@ -111,8 +111,10 @@ def test_mass_report_has_no_addresses():
         ["d@example.com"],
     )
     assert "@" not in text
-    assert "✅ Отправлено: 1" in text
-    assert "⏳ Пропущены (<180 дней): 1" in text
+    assert "✉️ Рассылка завершена." in text
+    assert "📦 В очереди было: 4" in text
+    assert "✅ Успешно отправлено: 1" in text
+    assert "⏳ Пропущены (<180 дней/идемпотентность): 1" in text
     assert "🚫 В блок-листе/недоступны: 1" in text
     assert "🌍 Иностранные (отложены): 1" in text
 
@@ -413,10 +415,33 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
+    monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "log.csv"))
+    monkeypatch.setattr(messaging, "_should_skip_by_history", lambda *_: (False, ""))
 
-    messaging.send_email("u@example.com", str(html), batch_id="b1")
-    messaging.send_email("u@example.com", str(html), batch_id="b1")
+    first = messaging.send_email("u@example.com", str(html), batch_id="b1")
+    second = messaging.send_email("u@example.com", str(html), batch_id="b1")
     assert len(sent) == 1
+    assert first is True
+    assert second is False
+
+
+def test_send_email_respects_cooldown(tmp_path, monkeypatch):
+    html = tmp_path / "t.html"
+    html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
+    monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "log.csv"))
+    monkeypatch.setattr(messaging, "_should_skip_by_history", lambda *_: (True, "cooldown"))
+
+    called = {"send": 0}
+
+    def fake_send(raw, recipient, max_tries=3):
+        called["send"] += 1
+
+    monkeypatch.setattr(messaging, "send_raw_smtp_with_retry", fake_send)
+
+    result = messaging.send_email("user@example.com", str(html))
+
+    assert result is False
+    assert called["send"] == 0
 
 
 def test_domain_rate_limit(monkeypatch, caplog):
