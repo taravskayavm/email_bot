@@ -25,6 +25,8 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 from email import message_from_bytes, message_from_string, policy
 
+from emailbot import config as C
+
 from services.templates import get_template, get_template_by_path
 
 from . import history_service
@@ -102,8 +104,10 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
 _last_domain_send: Dict[str, float] = {}
-_DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
+_DOMAIN_RATE_LIMIT = C.DOMAIN_RATE_LIMIT_SEC
 _batch_idempotency: Set[str] = set()
+
+APPEND_TO_SENT = C.APPEND_TO_SENT
 
 # Persistent idempotency storage (24h)
 MODULE_DIR = Path(__file__).resolve().parent
@@ -838,18 +842,25 @@ def send_email(
         skip, skip_reason = _should_skip_by_history(recipient)
         if skip:
             logger.info(
-                "Skipping SMTP send to %s due to cooldown: %s",
-                recipient,
-                skip_reason,
+                "send_skip",
+                extra={
+                    "email": recipient,
+                    "why": "cooldown",
+                    "detail": skip_reason or "",
+                },
             )
             return SendOutcome.COOLDOWN
 
         send_raw_smtp_with_retry(msg, recipient, max_tries=3)
 
-        try:
-            save_to_sent_folder(msg)
-        except Exception as exc:
-            logger.warning("Append to Sent failed for %s: %s", recipient, exc)
+        if APPEND_TO_SENT:
+            try:
+                save_to_sent_folder(msg)
+            except Exception as exc:
+                logger.warning(
+                    "append_sent_failed",
+                    extra={"email": recipient, "error": str(exc)},
+                )
 
         group_for_log = (
             msg.get("X-EBOT-Group-Key")
@@ -954,15 +965,19 @@ def send_email_with_sessions(
             except Exception:  # pragma: no cover - defensive logging
                 logger.debug("write_audit_drop failed", exc_info=True)
             logger.info(
-                "Skipping send_with_sessions for %s due to cooldown: %s",
-                recipient,
-                skip_reason,
+                "send_skip",
+                extra={
+                    "email": recipient,
+                    "why": "cooldown",
+                    "detail": skip_reason or "",
+                },
             )
             return SendOutcome.COOLDOWN, ""
     group_code = _message_group_key(msg)
     try:
         send_with_retry(smtp, msg)
-        save_to_sent_folder(msg, imap=imap, folder=sent_folder)
+        if APPEND_TO_SENT:
+            save_to_sent_folder(msg, imap=imap, folder=sent_folder)
         try:
             extra = {
                 "uuid": eb_uuid,
