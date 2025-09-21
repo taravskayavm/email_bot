@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
+from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
@@ -61,6 +62,15 @@ from utils.send_stats import log_error, log_success
 from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
+
+
+class SendOutcome(str, Enum):
+    """Outcome of an e-mail sending attempt."""
+
+    SENT = "sent"
+    COOLDOWN = "cooldown"
+    BLOCKED = "blocked"
+    ERROR = "error"
 
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
@@ -796,13 +806,34 @@ def send_email(
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     notify_func=None,
     batch_id: str | None = None,
-) -> bool:
+) -> SendOutcome:
+    recipient_clean = (recipient or "").strip()
+    if not recipient_clean or not _ASCII_LOCAL_RX.match(recipient_clean):
+        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
+        if recipient_clean:
+            try:
+                suppress_add(recipient_clean, None, "invalid-local")
+            except Exception:
+                logger.debug("suppress_add failed for %s", recipient_clean, exc_info=True)
+        return SendOutcome.BLOCKED
+
+    recipient = recipient_clean
+
+    def _notify_failure(message: str) -> None:
+        if not notify_func:
+            return
+        try:
+            notify_func(message)
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("notify_func failed", exc_info=True)
+
     try:
         if not _register_send(recipient, batch_id):
             logger.info(
                 "Skipping duplicate send to %s for batch %s", recipient, batch_id
             )
-            return False
+            return SendOutcome.COOLDOWN
+
         msg, token, _ = build_message(recipient, html_path, subject)
         skip, skip_reason = _should_skip_by_history(recipient)
         if skip:
@@ -811,12 +842,15 @@ def send_email(
                 recipient,
                 skip_reason,
             )
-            return False
+            return SendOutcome.COOLDOWN
+
         send_raw_smtp_with_retry(msg, recipient, max_tries=3)
+
         try:
             save_to_sent_folder(msg)
         except Exception as exc:
             logger.warning("Append to Sent failed for %s: %s", recipient, exc)
+
         group_for_log = (
             msg.get("X-EBOT-Group-Key")
             or msg.get("X-EBOT-Group")
@@ -830,22 +864,26 @@ def send_email(
             )
         except Exception as exc:
             logger.debug("log_sent_email failed for %s: %s", recipient, exc)
-        return True
-    except Exception as e:
-        log_internal_error(f"send_email: {recipient}: {e}")
-        if notify_func:
-            notify_func(f"❌ Ошибка при отправке на {recipient}: {e}")
-        raise
+
+        return SendOutcome.SENT
+    except smtplib.SMTPResponseException as exc:
+        log_internal_error(f"send_email SMTP error for {recipient}: {exc}")
+        _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
+        return SendOutcome.ERROR
+    except Exception as exc:  # pragma: no cover - best-effort safety
+        log_internal_error(f"send_email: {recipient}: {exc}")
+        _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
+        return SendOutcome.ERROR
 
 
-async def async_send_email(recipient: str, html_path: str) -> bool:
+async def async_send_email(recipient: str, html_path: str) -> SendOutcome:
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, send_email, recipient, html_path)
-    except Exception as e:
-        logger.exception(e)
-        log_internal_error(e)
-        raise
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.exception(exc)
+        log_internal_error(f"async_send_email: {exc}")
+        return SendOutcome.ERROR
 
 
 def create_task_with_logging(
@@ -1489,6 +1527,7 @@ __all__ = [
     "save_to_sent_folder",
     "get_preferred_sent_folder",
     "build_message",
+    "SendOutcome",
     "send_email",
     "async_send_email",
     "create_task_with_logging",
