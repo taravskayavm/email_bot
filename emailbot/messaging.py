@@ -34,6 +34,7 @@ from .audit import write_audit_drop
 from .edit_service import apply_edits as apply_saved_edits
 
 from .extraction import normalize_email, strip_html
+from .history_key import normalize_history_key
 from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
     add_bounce,
@@ -134,6 +135,24 @@ def _raw_to_text(raw_message: str | bytes) -> str:
         except Exception:
             return raw_message.decode("utf-8", errors="ignore")
     return str(raw_message)
+
+
+def _normalize_key(email: str) -> str:
+    """Canonical normalisation for history lookups and deduplication."""
+
+    # Единая нормализация адреса для всех проверок/записи истории.
+    # - обрезаем пробелы, приводим к lower
+    # - нормализуем юникод (NFKC)
+    # - домен → IDNA (punycode), локальная часть остаётся как есть
+    return normalize_history_key(email)
+
+
+def _coerce_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 
@@ -359,7 +378,7 @@ def _register_send(recipient: str, batch_id: str | None) -> bool:
 
     if not batch_id:
         return True
-    key = f"{normalize_email(recipient)}|{batch_id}"
+    key = f"{_normalize_key(recipient)}|{batch_id}"
     if key in _batch_idempotency:
         return False
     _batch_idempotency.add(key)
@@ -1100,7 +1119,7 @@ def dedupe_blocked_file():
 def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
     if not os.path.exists(LOG_FILE):
         return False
-    email_norm = normalize_email(email_addr)
+    email_norm = _normalize_key(email_addr)
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -1110,7 +1129,7 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
 
 
 def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
-    email_norm = normalize_email(email_addr)
+    email_norm = _normalize_key(email_addr)
     p = Path(LOG_FILE)
     rows: list[dict] = []
     changed = False
@@ -1123,7 +1142,7 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
                 token is None or row.get("unsubscribe_token") == token
             ):
                 row["unsubscribed"] = "1"
-                row["unsubscribed_at"] = datetime.utcnow().isoformat()
+                row["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
     if changed:
         headers = (
@@ -1174,8 +1193,8 @@ def log_sent_email(
     }
     upsert_sent_log(
         LOG_FILE,
-        normalize_email(email_addr),
-        datetime.utcnow(),
+        _normalize_key(email_addr),
+        datetime.now(timezone.utc),
         group,
         status=status,
         extra=extra,
@@ -1203,10 +1222,10 @@ def was_sent_within(email: str, days: int = 180) -> bool:
         return history_service.was_sent_within_days(email, "", days)
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("history_service was_sent_within failed", exc_info=True)
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     cache = _load_sent_log()
     key = canonical_for_history(email)
-    dt = cache.get(key)
+    dt = _coerce_utc(cache.get(key))
     if dt and dt >= cutoff:
         return True
     recent = get_recently_contacted_emails_cached()
@@ -1219,10 +1238,10 @@ def was_emailed_recently(
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
 ) -> bool:
-    cutoff = datetime.utcnow() - timedelta(days=since_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     cache = _load_sent_log()
     key = canonical_for_history(email_addr)
-    dt = cache.get(key)
+    dt = _coerce_utc(cache.get(key))
     if dt and dt >= cutoff:
         return True
     try:
@@ -1238,7 +1257,9 @@ def was_emailed_recently(
             logger.warning("select %s failed (%s), using Sent", folder, status)
             folder = "Sent"
             imap.select(f'"{folder}"')
-        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
+        date_str = (
+            datetime.now(timezone.utc) - timedelta(days=since_days)
+        ).strftime("%d-%b-%Y")
         status, data = imap.search(None, f'(SINCE {date_str} HEADER To "{email_addr}")')
         return status == "OK" and bool(data and data[0])
     except Exception as e:
@@ -1253,17 +1274,17 @@ def was_emailed_recently(
 
 
 def get_recent_6m_union() -> Set[str]:
-    cutoff = datetime.utcnow() - timedelta(days=180)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=180)
     result: Set[str] = set()
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    dt = datetime.fromisoformat(row["last_sent_at"])
+                    dt = _coerce_utc(datetime.fromisoformat(row["last_sent_at"]))
                 except Exception:
                     continue
-                if dt >= cutoff:
+                if dt and dt >= cutoff:
                     result.add(row["key"])
     return result
 
@@ -1296,7 +1317,7 @@ def _should_skip_by_history(email: str) -> tuple[bool, str]:
 def get_sent_today() -> Set[str]:
     if not os.path.exists(LOG_FILE):
         return set()
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     sent = set()
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1305,11 +1326,13 @@ def get_sent_today() -> Set[str]:
             if status not in {"ok", "sent", "success"}:
                 continue
             try:
-                dt = datetime.fromisoformat(row["last_sent_at"])
+                dt = _coerce_utc(datetime.fromisoformat(row["last_sent_at"]))
             except Exception:
                 continue
-            if dt.date() == today:
-                sent.add(row["email"].lower())
+            if dt and dt.date() == today:
+                norm = _normalize_key(row.get("email", ""))
+                if norm:
+                    sent.add(norm)
     return sent
 
 
@@ -1374,6 +1397,7 @@ def prepare_mass_mailing(
     queue: list[str] = []
     for e in source:
         norm = normalize_email(e)
+        hist_norm = _normalize_key(e)
         if norm and norm in blocklist_rules:
             blocked_invalid.append(e)
             skipped_blocklist_rules += 1
@@ -1381,8 +1405,8 @@ def prepare_mass_mailing(
         if (
             e in blocked
             or norm in blocked
-            or e in sent_today
-            or norm in sent_today
+            or hist_norm in blocked
+            or hist_norm in sent_today
         ):
             continue
         if is_foreign(e):
@@ -1424,7 +1448,7 @@ def prepare_mass_mailing(
     seen: set[str] = set()
     dup_skipped = 0
     for e in queue3:
-        norm = normalize_email(e)
+        norm = _normalize_key(e)
         if norm in seen:
             dup_skipped += 1
         else:
@@ -1467,7 +1491,7 @@ def sync_log_with_imap() -> Dict[str, int]:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
+        date_180 = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
@@ -1488,16 +1512,15 @@ def sync_log_with_imap() -> Dict[str, int]:
                     continue
                 try:
                     dt = email.utils.parsedate_to_datetime(msg.get("Date"))
-                    if dt and dt.tzinfo:
-                        dt = dt.replace(tzinfo=None)
-                    if dt and dt < datetime.utcnow() - timedelta(days=180):
+                    dt = _coerce_utc(dt)
+                    if dt and dt < datetime.now(timezone.utc) - timedelta(days=180):
                         continue
                 except Exception:
                     dt = None
                 inserted, updated = upsert_sent_log(
                     LOG_FILE,
-                    normalize_email(addr),
-                    dt or datetime.utcnow(),
+                    _normalize_key(addr),
+                    dt or datetime.now(timezone.utc),
                     "imap_sync",
                     status="external",
                 )

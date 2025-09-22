@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterable, Optional, Tuple
 
-from .extraction_common import normalize_email as _normalize_email
+from .history_key import normalize_history_key
 from utils.paths import expand_path, ensure_parent
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ def _canonical_email(email: str) -> str:
     if not email:
         return ""
     try:
-        return _normalize_email(email)
+        return normalize_history_key(email)
     except Exception:
         return email.lower()
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterable, List, Tuple
 
-from .extraction_common import normalize_email as _normalize_email
+from .history_key import normalize_history_key
 from . import history_store
 from emailbot.services.cooldown import _env_int
 from utils.paths import expand_path, get_temp_dir
@@ -47,7 +47,7 @@ def ensure_initialized() -> None:
 
 def _norm_email(email: str) -> str:
     try:
-        return _normalize_email(email)
+        return normalize_history_key(email)
     except Exception:
         return (email or "").strip().lower()
 
