@@ -1,4 +1,4 @@
-"""Common helpers for Telegram handlers."""
+"""Общие вспомогательные функции для Telegram-хендлеров."""
 
 from __future__ import annotations
 
@@ -13,17 +13,22 @@ async def safe_answer(
     show_alert: bool = False,
     cache_time: int = 0,
 ) -> None:
-    """Safely answer a callback query ignoring transient errors.
+    """Безопасный ответ для CallbackQuery.
 
-    Telegram raises :class:`BadRequest` for stale queries ("Query is too old"),
-    among other minor issues. They should not crash the handler, so we swallow
-    them quietly. Passing ``None`` for ``query`` is also tolerated.
+    Бывает, что Telegram возвращает ``BadRequest`` для слишком старых
+    запросов («Query is too old») или если ID колбэка уже недействителен.
+    Такие ситуации не являются критическими, поэтому мы их молча
+    игнорируем, продолжая обработку. Передача ``None`` вместо запроса также
+    допустима.
     """
 
-    if query is None:
+    if not query:
         return
     try:
         await query.answer(text=text or "", show_alert=show_alert, cache_time=cache_time)
-    except BadRequest:
-        # "Query is too old" and similar edge cases – ignore.
-        return
+    except BadRequest as err:
+        message = str(err)
+        if "Query is too old" in message or "query id is invalid" in message:
+            # протухший или недействительный id — просто игнорируем
+            return
+        raise
