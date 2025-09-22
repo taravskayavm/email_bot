@@ -7,6 +7,7 @@ import asyncio
 import csv
 import functools
 import imaplib
+import inspect
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import aiohttp
 from telegram import (
@@ -41,7 +42,10 @@ from utils.email_clean import (
     drop_leading_char_twins,
     parse_emails_unified,
 )
-from pipelines.extract_emails import extract_emails_pipeline
+from pipelines.extract_emails import (
+    extract_emails_pipeline,
+    extract_from_url_async,
+)
 from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
@@ -127,13 +131,22 @@ def _ingest_meta_to(
 
 
 async def async_extract_emails_from_url(
-    url: str, session, chat_id=None, batch_id: str | None = None
+    url: str,
+    session,
+    chat_id=None,
+    batch_id: str | None = None,
+    *,
+    deep: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
 ):
-    text = await asyncio.to_thread(_extraction_url.fetch_url, url)
     _ = _extraction.extract_any  # keep reference for tests
-    allowed, meta = extract_emails_pipeline(text or "")
-    emails = {str(addr).strip() for addr in allowed if addr}
-    meta_dict = meta if isinstance(meta, dict) else {}
+    emails_list, stats_raw = await extract_from_url_async(
+        url,
+        deep=deep,
+        progress_cb=progress_cb,
+    )
+    meta_dict = dict(stats_raw) if isinstance(stats_raw, dict) else {}
+    emails = {str(addr).strip() for addr in emails_list if addr}
     loose_candidates: Set[str] = set()
     _ingest_meta_to(loose_candidates, {}, meta_dict)
     all_found = {addr for addr in emails | loose_candidates if addr}
@@ -145,7 +158,12 @@ async def async_extract_emails_from_url(
     stats: dict = dict(meta_dict)
     logger.info(
         "extraction complete",
-        extra={"event": "extract", "source": url, "count": len(emails)},
+        extra={
+            "event": "extract",
+            "source": url,
+            "count": len(emails),
+            "pages": stats.get("pages", 0),
+        },
     )
     return url, emails, foreign, [], stats
 
@@ -1549,6 +1567,7 @@ async def _compose_report_and_save(
         f"⚠️ Подозрительные: {len(dropped)} адресов",
         f"🕒 Под кулдауном (180 дней): {len(cooldown_preview)}",
         f"🌍 Иностранные домены: {len(foreign)}",
+        f"🧭 Просмотрено страниц: {int(context.chat_data.get('crawl_pages', 0))}",
     ]
     report = "\n".join(report_lines)
     if footnote_dupes:
@@ -2071,17 +2090,95 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         mass_state.set_batch(chat_id, batch_id)
         _extraction_url.set_batch(batch_id)
         context.chat_data["entry_url"] = urls[0]
-        await _safe_reply_text(update.message, "🌐 Загружаем страницы...")
+        context.chat_data["crawl_pages"] = 0
+
+        progress_state = {
+            "message_id": None,
+            "chat_id": update.effective_chat.id,
+            "pages": {},
+            "finished": False,
+        }
+        progress_lock = asyncio.Lock()
+
+        async def _update_progress(text: str) -> None:
+            if not text:
+                return
+            try:
+                message_id = progress_state.get("message_id")
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=progress_state["chat_id"],
+                        message_id=message_id,
+                        text=text,
+                    )
+                else:
+                    message = await update.message.reply_text(text)
+                    progress_state["message_id"] = message.message_id
+            except Exception:
+                pass
+
+        await _update_progress("🌐 Загружаем страницы...")
+
+        def _progress_factory(source_url: str):
+            def _progress(pages: int, page_url: str) -> None:
+                if progress_state.get("finished"):
+                    return
+
+                async def _notify() -> None:
+                    async with progress_lock:
+                        if progress_state.get("finished"):
+                            return
+                        progress_state["pages"][source_url] = (pages, page_url)
+                        total = sum(
+                            value[0] for value in progress_state["pages"].values()
+                        )
+                        last_url = page_url or source_url
+                        text = f"🕸️ Сканируем сайт… Просмотрено страниц: {total}"
+                        if last_url:
+                            text += f"\nПоследняя: {last_url}"
+                        await _update_progress(text)
+
+                try:
+                    asyncio.create_task(_notify())
+                except Exception:
+                    pass
+
+            return _progress
+
         results = []
+        mode = context.chat_data.get("urlmode", "deep")
+        deep = mode != "single"
+        extract_fn = async_extract_emails_from_url
+        sig = inspect.signature(extract_fn)
+        accepts_deep = "deep" in sig.parameters
+        accepts_progress = "progress_cb" in sig.parameters
         async with lock:
             async with aiohttp.ClientSession() as session:
-                tasks = [
-                    async_extract_emails_from_url(url, session, chat_id, batch_id)
-                    for url in sorted(urls)
-                ]
+                def _make_task(target_url: str):
+                    kwargs: dict[str, object] = {}
+                    if accepts_deep:
+                        kwargs["deep"] = deep
+                    if accepts_progress:
+                        kwargs["progress_cb"] = _progress_factory(target_url)
+                    return extract_fn(target_url, session, chat_id, batch_id, **kwargs)
+
+                tasks = [_make_task(url) for url in sorted(urls)]
                 results = await asyncio.gather(*tasks)
+        progress_state["finished"] = True
         if batch_id != context.chat_data.get("batch_id"):
             return
+        total_pages = 0
+        for result in results:
+            if not isinstance(result, tuple) or len(result) < 5:
+                continue
+            stats = result[4]
+            if isinstance(stats, dict):
+                total_pages += int(stats.get("pages", 0) or 0)
+        context.chat_data["crawl_pages"] = total_pages
+        if progress_state.get("message_id"):
+            await _update_progress(
+                f"✅ Сканирование завершено. Просмотрено страниц: {total_pages}"
+            )
         allowed_all: Set[str] = set()
         foreign_all: Set[str] = set()
         repairs_all: List[tuple[str, str]] = []
