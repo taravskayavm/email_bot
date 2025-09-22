@@ -12,6 +12,7 @@ from emailbot.handlers.common import safe_answer
 from emailbot.notify import notify
 from services.templates import get_template_label
 
+from emailbot import config as C
 from emailbot import history_service, mass_state, messaging
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
@@ -309,19 +310,21 @@ def _compose_caption(data: PreviewData, rule_days: int) -> str:
 
 
 def _preview_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            [
-                InlineKeyboardButton("Отправить", callback_data="start_sending"),
-                InlineKeyboardButton("Вернуться / Править", callback_data=_BACK_CALLBACK),
-            ],
-            [InlineKeyboardButton("✏️ Исправить адрес", callback_data=_EDIT_CALLBACK)],
-            [
-                InlineKeyboardButton("📄 Показать правки", callback_data=_SHOW_EDITS_CALLBACK),
-                InlineKeyboardButton("♻️ Сбросить правки", callback_data=_CLEAR_EDITS_CALLBACK),
-            ],
+            InlineKeyboardButton("Отправить", callback_data="start_sending"),
+            InlineKeyboardButton("Вернуться / Править", callback_data=_BACK_CALLBACK),
+        ]
+    ]
+    if C.ALLOW_EDIT_AT_PREVIEW:
+        rows.append([InlineKeyboardButton("✏️ Исправить адрес", callback_data=_EDIT_CALLBACK)])
+    rows.append(
+        [
+            InlineKeyboardButton("📄 Показать правки", callback_data=_SHOW_EDITS_CALLBACK),
+            InlineKeyboardButton("♻️ Сбросить правки", callback_data=_CLEAR_EDITS_CALLBACK),
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 async def send_preview_report(
@@ -377,10 +380,13 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             cooldown_blocked = [
                 str(item).strip() for item in raw_cooldown if str(item).strip()
             ]
-    lines = [
-        "Можно вернуться к редактированию списка.",
-        "Используйте кнопки «✏️ Исправить №…» в сообщении с анализом выше.",
-    ]
+    lines = ["Можно вернуться к редактированию списка."]
+    if C.ALLOW_EDIT_AT_PREVIEW:
+        lines.append("Используйте кнопки «✏️ Исправить №…» в сообщении с анализом выше.")
+    else:
+        lines.append(
+            "После выбора направления будут доступны кнопки «✏️ Исправить №…»."
+        )
     if dropped:
         preview_lines = [
             "",

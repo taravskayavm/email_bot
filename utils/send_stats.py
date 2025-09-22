@@ -2,7 +2,6 @@ import json, os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from emailbot.services.cooldown import normalize_email_for_key
 from utils.paths import expand_path, ensure_parent
 
 try:
@@ -50,8 +49,22 @@ def _to_local(dt_utc: datetime) -> datetime:
     return dt_utc.astimezone(_tzinfo())
 
 
+def _normalize_for_stats(email: str) -> str:
+    try:
+        from emailbot.services.cooldown import normalize_email_for_key
+
+        return normalize_email_for_key(email)
+    except Exception:
+        try:
+            from emailbot.history_key import normalize_history_key
+
+            return normalize_history_key(email)
+        except Exception:
+            return (email or "").strip().lower()
+
+
 def log_success(email: str, group: str, extra: dict | None = None) -> None:
-    email_value = normalize_email_for_key(email) or (email or "").strip()
+    email_value = _normalize_for_stats(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": email_value,
@@ -66,7 +79,7 @@ def log_success(email: str, group: str, extra: dict | None = None) -> None:
 
 
 def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
-    email_value = normalize_email_for_key(email) or (email or "").strip()
+    email_value = _normalize_for_stats(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": email_value,
@@ -82,7 +95,7 @@ def log_error(email: str, group: str, reason: str, extra: dict | None = None) ->
 
 
 def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
-    email_value = normalize_email_for_key(email) or (email or "").strip()
+    email_value = _normalize_for_stats(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": email_value,

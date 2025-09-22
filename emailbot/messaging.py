@@ -1307,11 +1307,47 @@ def clear_recent_sent_cache():
 
 
 def _should_skip_by_history(email: str) -> tuple[bool, str]:
-    try:
-        return should_skip_by_cooldown(email)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("should_skip_by_cooldown failed", exc_info=True)
+    """Return ``True`` if the address is blocked by history or suppress lists."""
+
+    norm = _normalize_key(email)
+    if not norm:
         return False, ""
+
+    try:
+        if mu.is_suppressed(email):
+            return True, "suppress"
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("is_suppressed failed", exc_info=True)
+
+    try:
+        last = mu.last_sent_at(email)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("last_sent_at lookup failed", exc_info=True)
+        last = None
+
+    if not last:
+        return False, ""
+
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    else:
+        last = last.astimezone(timezone.utc)
+
+    cooldown_days = COOLDOWN_DAYS
+    cooldown_seconds = max(0, int(cooldown_days * 86400))
+    if cooldown_seconds <= 0:
+        return False, ""
+
+    delta = time.time() - last.timestamp()
+    if delta < cooldown_seconds:
+        remain = int(cooldown_seconds - delta)
+        remain_days = remain // 86400
+        reason = (
+            f"cooldown<{cooldown_days}d; last={last.isoformat()}; remain≈{remain_days}d"
+        )
+        return True, reason
+
+    return False, ""
 
 
 def get_sent_today() -> Set[str]:

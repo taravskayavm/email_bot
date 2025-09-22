@@ -7,6 +7,7 @@ import pytest
 from telegram import InlineKeyboardMarkup
 
 import emailbot.bot_handlers as bh
+from emailbot import config as C
 from emailbot.messaging import SendOutcome
 from emailbot.bot_handlers import (
     SESSION_KEY,
@@ -369,8 +370,12 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
     buttons = markup.inline_keyboard[0]
     assert buttons[0].callback_data == "start_sending"
     assert buttons[1].callback_data == "preview_back"
-    assert len(markup.inline_keyboard) >= 3
-    assert markup.inline_keyboard[1][0].callback_data == "preview_edit"
+    assert len(markup.inline_keyboard) >= 2
+    rows = [btn for row in markup.inline_keyboard for btn in row]
+    if C.ALLOW_EDIT_AT_PREVIEW:
+        assert any(button.callback_data == "preview_edit" for button in rows)
+    else:
+        assert all(button.callback_data != "preview_edit" for button in rows)
     assert "Готово к отправке" in update.callback_query.message.replies[-1]
     doc_entry = update.callback_query.message.documents[-1]
     assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")

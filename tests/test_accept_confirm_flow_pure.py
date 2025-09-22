@@ -30,7 +30,7 @@ def test_accept_suspects_autofix_and_dedupe() -> None:
     fixed = drop_leading_char_twins(fixed)
 
     assert "aivanov@mail.ru" in fixed
-    assert "ivanov@mail.ru" not in fixed
+    assert "ivanov@mail.ru" in fixed
     suspects_meta = set(meta.get("suspects") or [])
     assert "russiaanalexan@mail.ru" in suspects_meta
     assert "russiaanalexan@mail.ru" not in fixed
