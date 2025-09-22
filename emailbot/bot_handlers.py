@@ -1661,6 +1661,45 @@ async def _compose_report_and_save(
     originals: Dict[str, str] = classes["original"]
     dropped_order: List[str] = classes["dropped_order"]
 
+    state_map = context.chat_data.setdefault("history_snapshot", {})
+
+    def _history_key(norm: str) -> str:
+        original = originals.get(norm, norm)
+        return messaging._normalize_key(original)
+
+    frozen_to_send = []
+    frozen_all = []
+    frozen_reason_map: Dict[str, str] = {}
+    frozen_original_map: Dict[str, str] = {}
+
+    for norm in sorted(S_all):
+        key = _history_key(norm)
+        if not key:
+            continue
+        frozen_all.append(key)
+        if norm in S_cool:
+            category = "cooldown"
+        elif norm in S_sus:
+            category = "suspect"
+        elif norm in S_foreign:
+            category = "foreign"
+        else:
+            category = "clean"
+        frozen_reason_map[key] = category
+        frozen_original_map.setdefault(key, originals.get(norm, norm))
+
+    for norm in sorted(S_send):
+        key = _history_key(norm)
+        if not key:
+            continue
+        frozen_to_send.append(key)
+        frozen_original_map.setdefault(key, originals.get(norm, norm))
+
+    state_map["frozen_to_send"] = frozen_to_send
+    state_map["frozen_all"] = frozen_all
+    state_map["frozen_reason_map"] = frozen_reason_map
+    state_map["frozen_original_map"] = frozen_original_map
+
     for addr in foreign:
         norm = _normalize_email_lower(addr)
         if not norm:
@@ -1706,12 +1745,14 @@ async def _compose_report_and_save(
     sample_allowed = sample_preview(final_send, PREVIEW_ALLOWED)
     sample_foreign = sample_preview(foreign_list, PREVIEW_FOREIGN)
 
+    total_allowed_count = len(S_all - S_foreign)
+
     report_lines = [
         "✅ Анализ завершён.",
-        f"Найдено адресов: {len(S_all)}",
-        f"📧 К отправке: {len(S_send)}",
-        f"⚠️ Подозрительные: {len(S_sus)}",
-        f"🕒 Под кулдауном (180 дней): {len(S_cool)}",
+        f"Найдено адресов: {total_allowed_count}",
+        f"📧 К отправке: {len(S_send)} адресов",
+        f"⚠️ Подозрительные: {len(S_sus)} адресов",
+        f"🕒 Под кулдауном (180 дней): {len(S_cool)} адресов",
         f"🌍 Иностранные домены: {len(S_foreign)}",
         f"🧭 Просмотрено страниц: {int(context.chat_data.get('crawl_pages', 0))}",
         f"Возможные сносочные дубликаты удалены: {footnote_dupes}",

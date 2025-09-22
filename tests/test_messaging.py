@@ -2,7 +2,7 @@ import asyncio
 import csv
 import logging
 import smtplib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -97,7 +97,10 @@ def test_log_sent_email_records_entries(temp_files):
     assert len(rows) == 1
     row = rows[0]
     ts = datetime.fromisoformat(row["last_sent_at"])
-    assert abs((datetime.utcnow() - ts).total_seconds()) < 5
+    now = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    assert abs((now - ts).total_seconds()) < 5
     assert row["email"] == "user@example.com"
     assert row["source"] == "group1"
     assert row["status"] == "ok"

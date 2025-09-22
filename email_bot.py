@@ -97,6 +97,7 @@ def main() -> None:
     messaging.dedupe_blocked_file()
 
     app = Application.builder().token(token).build()
+    app.bot_data.setdefault("locks", {})
 
     _safe_add(app, CommandHandler("start", bot_handlers.start), "cmd:start")
     _safe_add(

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Tuple
 
 from .extraction_common import normalize_email as _normalize_email
+from .history_key import normalize_history_key
 from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
@@ -247,16 +248,16 @@ class FileLock:
         self.release()
 
 
+def _normalize_key(email: str) -> str:
+    """Return the canonical form used for history lookups."""
+
+    return normalize_history_key(email)
+
+
 def canonical_for_history(email: str) -> str:
-    """Return canonical key for history deduplication.
+    """Return canonical key for history deduplication."""
 
-    Historically ``messaging_utils`` implemented its own normalisation rules
-    for comparing e‑mail addresses.  The logic now lives in
-    :func:`emailbot.extraction_common.normalize_email`; this thin wrapper keeps
-    the old function name for backward compatibility.
-    """
-
-    return _normalize_email(email)
+    return _normalize_key(email)
 
 
 def detect_sent_folder(imap) -> str:
@@ -691,13 +692,17 @@ def is_soft_bounce(code: int | None, msg: str | bytes | None) -> bool:
 
 
 def suppress_add(email: str, code: int | None, reason: str) -> None:
-    email = (email or "").lower().strip()
+    key = _normalize_key(email)
+    if not key:
+        return
     rows: dict[str, dict] = {}
     if SUPPRESS_PATH.exists():
         with SUPPRESS_PATH.open("r", newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                rows[r["email"].lower()] = r
-    rec = rows.get(email)
+                existing = _normalize_key(r.get("email", ""))
+                if existing:
+                    rows[existing] = r
+    rec = rows.get(key)
     if rec:
         rec["last_seen"] = _now()
         rec["hits"] = str(int(rec.get("hits", "1")) + 1)
@@ -705,14 +710,14 @@ def suppress_add(email: str, code: int | None, reason: str) -> None:
         rec["reason"] = reason or rec.get("reason", "")
     else:
         rec = {
-            "email": email,
+            "email": key,
             "code": str(code or ""),
             "reason": reason or "hard bounce",
             "first_seen": _now(),
             "last_seen": _now(),
             "hits": "1",
         }
-    rows[email] = rec
+    rows[key] = rec
     SUPPRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SUPPRESS_PATH.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
@@ -724,12 +729,13 @@ def suppress_add(email: str, code: int | None, reason: str) -> None:
 
 
 def is_suppressed(email: str) -> bool:
-    email = (email or "").lower().strip()
-    if not email or not SUPPRESS_PATH.exists():
+    key = _normalize_key(email)
+    if not key or not SUPPRESS_PATH.exists():
         return False
     with SUPPRESS_PATH.open("r", newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            if r.get("email", "").lower().strip() == email:
+            existing = _normalize_key(r.get("email", ""))
+            if existing and existing == key:
                 return True
     return False
 

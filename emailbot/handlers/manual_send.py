@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Set
 
+from asyncio import Lock
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from emailbot.handlers.common import safe_answer
@@ -20,7 +22,6 @@ from emailbot.notify import notify
 from bot.keyboards import build_templates_kb
 
 from emailbot import mass_state, messaging
-from emailbot.extraction import normalize_email
 from emailbot.messaging import (
     MAX_EMAILS_PER_DAY,
     SendOutcome,
@@ -38,7 +39,6 @@ from emailbot.messaging_utils import (
     is_suppressed,
     suppress_add,
 )
-from emailbot import history_service
 from emailbot.reporting import build_mass_report_text, log_mass_filter_digest
 from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
@@ -47,6 +47,19 @@ import emailbot.bot_handlers as bot_handlers_module
 from .preview import send_preview_report
 
 logger = logging.getLogger(__name__)
+
+
+def _get_chat_lock(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Lock:
+    app = getattr(context, "application", None)
+    if app is not None:
+        locks = app.bot_data.setdefault("locks", {})
+    else:
+        locks = context.chat_data.setdefault("_locks", {})
+    lock = locks.get(chat_id)
+    if lock is None:
+        lock = Lock()
+        locks[chat_id] = lock
+    return lock
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -160,48 +173,51 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Короткое подтверждение без раскрытия пути к файлу (см. EBOT-0918-02)
     await query.message.reply_text(f"✅ Выбран шаблон: «{template_label}»")
     chat_id = query.message.chat.id
-    context.chat_data["preview_source_emails"] = list(emails)
-    ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(emails, group_code, chat_id=chat_id)
-    )
-    log_mass_filter_digest(
-        {
-            **digest,
-            "batch_id": context.chat_data.get("batch_id"),
-            "chat_id": chat_id,
-            "entry_url": context.chat_data.get("entry_url"),
-        }
-    )
-    state.to_send = ready
-    mass_state.save_chat_state(
-        chat_id,
-        {
-            "group": group_code,
-            "template": template_path,
-            "template_label": template_label,
-            "pending": ready,
-            "blocked_foreign": blocked_foreign,
-            "blocked_invalid": blocked_invalid,
-            "skipped_recent": skipped_recent,
-            "batch_id": context.chat_data.get("batch_id"),
-        },
-    )
-    if not ready:
-        await query.message.reply_text(
-            "Все адреса уже в истории за 180 дней или в блок-листах.",
-            reply_markup=None,
+    chat_lock = _get_chat_lock(context, chat_id)
+
+    async with chat_lock:
+        context.chat_data["preview_source_emails"] = list(emails)
+        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+            messaging.prepare_mass_mailing(emails, group_code, chat_id=chat_id)
         )
-        return
-    await send_preview_report(
-        update,
-        context,
-        group_code,
-        template_label,
-        ready,
-        blocked_foreign,
-        blocked_invalid,
-        skipped_recent,
-    )
+        log_mass_filter_digest(
+            {
+                **digest,
+                "batch_id": context.chat_data.get("batch_id"),
+                "chat_id": chat_id,
+                "entry_url": context.chat_data.get("entry_url"),
+            }
+        )
+        state.to_send = ready
+        mass_state.save_chat_state(
+            chat_id,
+            {
+                "group": group_code,
+                "template": template_path,
+                "template_label": template_label,
+                "pending": ready,
+                "blocked_foreign": blocked_foreign,
+                "blocked_invalid": blocked_invalid,
+                "skipped_recent": skipped_recent,
+                "batch_id": context.chat_data.get("batch_id"),
+            },
+        )
+        if not ready:
+            await query.message.reply_text(
+                "Все адреса уже в истории за 180 дней или в блок-листах.",
+                reply_markup=None,
+            )
+            return
+        await send_preview_report(
+            update,
+            context,
+            group_code,
+            template_label,
+            ready,
+            blocked_foreign,
+            blocked_invalid,
+            skipped_recent,
+        )
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -244,79 +260,170 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Запущено — выполняю в фоне...\n" f"Шаблон: {display_label}"
     )
 
+    chat_lock = _get_chat_lock(context, chat_id)
+
     async def long_job() -> None:
-        lookup_days = history_service.get_days_rule_default()
-        blocked = get_blocked_emails()
-        sent_today = get_sent_today()
-        preview = context.chat_data.get("send_preview", {}) or {}
-        fixed_map: Dict[str, str] = {}
-        for item in preview.get("fixed", []):
-            if isinstance(item, dict):
-                new_addr = item.get("to")
-                original_addr = item.get("from")
-                if new_addr and original_addr:
-                    fixed_map[str(new_addr)] = str(original_addr)
+        async with chat_lock:
+            blocked = get_blocked_emails()
+            blocked_norm = {
+                messaging._normalize_key(addr)
+                for addr in blocked
+                if messaging._normalize_key(addr)
+            }
+            sent_today_norm = get_sent_today()
+            preview = context.chat_data.get("send_preview", {}) or {}
+            fixed_map: Dict[str, str] = {}
+            for item in preview.get("fixed", []):
+                if isinstance(item, dict):
+                    new_addr = item.get("to")
+                    original_addr = item.get("from")
+                    if new_addr and original_addr:
+                        fixed_map[str(new_addr)] = str(original_addr)
 
-        saved_state = mass_state.load_chat_state(chat_id)
-        if saved_state and saved_state.get("pending"):
-            blocked_foreign = saved_state.get("blocked_foreign", [])
-            blocked_invalid = saved_state.get("blocked_invalid", [])
-            skipped_recent = saved_state.get("skipped_recent", [])
-            sent_ok = saved_state.get("sent_ok", [])
-            to_send = saved_state.get("pending", [])
-        else:
-            blocked_foreign: List[str] = []
-            blocked_invalid: List[str] = []
-            skipped_recent: List[str] = []
-            to_send: List[str] = []
-            sent_ok: List[str] = []
+            snapshot = context.chat_data.get("history_snapshot")
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            frozen_norms = list(snapshot.get("frozen_to_send") or [])
+            reason_map = snapshot.get("frozen_reason_map") or {}
+            if not isinstance(reason_map, dict):
+                reason_map = {}
+            frozen_originals = snapshot.get("frozen_original_map") or {}
+            if not isinstance(frozen_originals, dict):
+                frozen_originals = {}
 
-            initial = [e for e in emails if e not in blocked and e not in sent_today]
-            for e in initial:
-                if is_foreign(e):
-                    blocked_foreign.append(e)
-                else:
-                    to_send.append(e)
+            saved_state = mass_state.load_chat_state(chat_id)
+            if saved_state and saved_state.get("pending"):
+                blocked_foreign = list(saved_state.get("blocked_foreign", []))
+                blocked_invalid = list(saved_state.get("blocked_invalid", []))
+                skipped_recent = list(saved_state.get("skipped_recent", []))
+                sent_ok = list(saved_state.get("sent_ok", []))
+                base_candidates = list(saved_state.get("pending", []))
+            else:
+                state_obj = bot_handlers_module.get_state(context)
+                blocked_foreign = list(state_obj.foreign or [])
+                blocked_invalid = []
+                skipped_recent = list(state_obj.cooldown_blocked or [])
+                sent_ok: List[str] = []
+                base_candidates = list(state_obj.to_send or emails)
 
-            queue: List[str] = []
-            for e in to_send:
-                if is_suppressed(e):
-                    blocked_invalid.append(e)
-                else:
-                    queue.append(e)
+            def _order_by_snapshot(candidates: List[str]) -> List[str]:
+                if not frozen_norms:
+                    return [c for c in candidates if c]
+                mapping: Dict[str, List[str]] = {}
+                for addr in candidates:
+                    norm = messaging._normalize_key(addr)
+                    if not norm:
+                        continue
+                    mapping.setdefault(norm, []).append(addr)
+                ordered: List[str] = []
+                for norm in frozen_norms:
+                    pool = mapping.get(norm)
+                    if pool:
+                        ordered.append(pool.pop(0))
+                    else:
+                        original = frozen_originals.get(norm)
+                        if original:
+                            ordered.append(original)
+                return ordered
 
-            try:
-                allowed, rejected = history_service.filter_by_days(
-                    queue, group_code or "", lookup_days
-                )
-            except Exception:  # pragma: no cover - defensive fallback
-                allowed = list(queue)
-                rejected = []
-            to_send = list(allowed)
-            skipped_recent.extend(rejected)
-
-            deduped: List[str] = []
+            ordered_candidates = []
             seen_norm: Set[str] = set()
-            dup_skipped = 0
-            for e in to_send:
-                norm = normalize_email(e)
-                if norm in seen_norm:
-                    dup_skipped += 1
+            for addr in _order_by_snapshot(base_candidates):
+                norm = messaging._normalize_key(addr)
+                if not norm or norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                ordered_candidates.append(addr)
+
+            to_send: List[str] = []
+            for addr in ordered_candidates:
+                norm = messaging._normalize_key(addr)
+                if not norm:
+                    continue
+                if norm in blocked_norm:
+                    if addr not in blocked_invalid:
+                        blocked_invalid.append(addr)
+                    continue
+                if norm in sent_today_norm and not bot_handlers_module.is_force_send(chat_id):
+                    continue
+                if is_foreign(addr):
+                    if addr not in blocked_foreign:
+                        blocked_foreign.append(addr)
+                    continue
+                if is_suppressed(addr):
+                    if addr not in blocked_invalid:
+                        blocked_invalid.append(addr)
+                    continue
+                to_send.append(addr)
+
+            dropped_now: Dict[str, str] = {}
+            ready_after_history: List[str] = []
+            for addr in to_send:
+                norm = messaging._normalize_key(addr)
+                skip, skip_reason = messaging._should_skip_by_history(addr)
+                if skip:
+                    category = reason_map.get(norm)
+                    if not category:
+                        category = "cooldown" if str(skip_reason or "").startswith("cooldown") else "history"
+                    dropped_now[norm] = category
+                    actual = frozen_originals.get(norm, addr)
+                    if category == "foreign":
+                        target = blocked_foreign
+                    elif category == "cooldown":
+                        target = skipped_recent
+                    else:
+                        target = blocked_invalid
+                    if actual not in target:
+                        target.append(actual)
                 else:
-                    seen_norm.add(norm)
-                    deduped.append(e)
-            to_send = deduped
+                    ready_after_history.append(addr)
 
-            log_mass_filter_digest(
-                {
-                    "input_total": len(emails),
-                    "after_suppress": len(queue),
-                    "foreign_blocked": len(blocked_foreign),
-                    "after_180d": len(to_send),
-                    "sent_planned": len(to_send),
-                    "skipped_by_dup_in_batch": dup_skipped,
-                }
-            )
+            to_send = ready_after_history
+
+            if dropped_now:
+                summary: Dict[str, int] = {}
+                for cat in dropped_now.values():
+                    summary[cat] = summary.get(cat, 0) + 1
+                details = "\n".join(
+                    f"• {reason}: {count}" for reason, count in sorted(summary.items())
+                )
+                info_text = "ℹ️ Часть адресов была исключена перед отправкой:\n" + details
+                try:
+                    await context.bot.send_message(chat_id, info_text)
+                except Exception:
+                    pass
+
+            if not to_send:
+                await query.message.reply_text(
+                    "❗ Все адреса уже есть в истории отправок или в блок-листах."
+                )
+                return
+
+            available = max(0, MAX_EMAILS_PER_DAY - len(sent_today_norm))
+            if available <= 0 and not bot_handlers_module.is_force_send(chat_id):
+                logger.info(
+                    "Daily limit reached: %s emails sent today (source=sent_log)",
+                    len(sent_today_norm),
+                )
+                await query.message.reply_text(
+                    (
+                        f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
+                        "Если вы исправили ошибки — нажмите "
+                        "«🚀 Игнорировать лимит» и запустите ещё раз."
+                    )
+                )
+                return
+            if (
+                not bot_handlers_module.is_force_send(chat_id)
+                and len(to_send) > available
+            ):
+                to_send = to_send[:available]
+                await query.message.reply_text(
+                    (
+                        f"⚠️ Учитываю дневной лимит: будет отправлено "
+                        f"{available} адресов из списка."
+                    )
+                )
 
             mass_state.save_chat_state(
                 chat_id,
@@ -332,51 +439,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 },
             )
 
-        if not to_send:
             await query.message.reply_text(
-                "❗ Все адреса уже есть в истории отправок или в блок-листах."
+                f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
             )
-            return
-
-        available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
-        if available <= 0 and not bot_handlers_module.is_force_send(chat_id):
-            logger.info(
-                "Daily limit reached: %s emails sent today (source=sent_log)",
-                len(sent_today),
-            )
-            await query.message.reply_text(
-                (
-                    f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                    "Если вы исправили ошибки — нажмите "
-                    "«🚀 Игнорировать лимит» и запустите ещё раз."
-                )
-            )
-            return
-        if not bot_handlers_module.is_force_send(chat_id) and len(to_send) > available:
-            to_send = to_send[:available]
-            await query.message.reply_text(
-                (
-                    f"⚠️ Учитываю дневной лимит: будет отправлено "
-                    f"{available} адресов из списка."
-                )
-            )
-            mass_state.save_chat_state(
-                chat_id,
-                {
-                    "group": group_code,
-                    "template": template_path,
-                    "template_label": template_label,
-                    "pending": to_send,
-                    "sent_ok": sent_ok,
-                    "blocked_foreign": blocked_foreign,
-                    "blocked_invalid": blocked_invalid,
-                    "skipped_recent": skipped_recent,
-                },
-            )
-
-        await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
-        )
 
         try:
             imap = imaplib.IMAP4_SSL("imap.mail.ru")
