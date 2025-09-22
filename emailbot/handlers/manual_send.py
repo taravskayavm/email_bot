@@ -21,6 +21,7 @@ from emailbot.notify import notify
 
 from bot.keyboards import build_templates_kb
 
+from emailbot import config as C
 from emailbot import mass_state, messaging
 from emailbot.messaging import (
     MAX_EMAILS_PER_DAY,
@@ -218,6 +219,29 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             blocked_invalid,
             skipped_recent,
         )
+
+        if not C.ALLOW_EDIT_AT_PREVIEW:
+            preview = context.chat_data.get("send_preview") or {}
+            dropped_preview = []
+            if isinstance(preview, dict):
+                dropped_preview = list(preview.get("dropped") or [])
+            if dropped_preview:
+                fix_buttons: list[InlineKeyboardButton] = []
+                for idx in range(min(len(dropped_preview), 5)):
+                    fix_buttons.append(
+                        InlineKeyboardButton(
+                            f"✏️ Исправить №{idx + 1}",
+                            callback_data=f"fix:{idx}",
+                        )
+                    )
+                if fix_buttons:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "При необходимости — отредактируйте адреса перед отправкой:"
+                        ),
+                        reply_markup=InlineKeyboardMarkup([fix_buttons]),
+                    )
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

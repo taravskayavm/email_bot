@@ -11,3 +11,7 @@ CRAWL_DELAY_SEC = float(os.getenv("CRAWL_DELAY_SEC", "0.5"))
 CRAWL_USER_AGENT = os.getenv(
     "CRAWL_USER_AGENT", "EmailBotCrawler/1.0 (+contact@example.com)"
 )
+CRAWL_HTTP2 = os.getenv("CRAWL_HTTP2", "1") == "1"
+
+# UX: разрешать редактирование сразу после предпросмотра?
+ALLOW_EDIT_AT_PREVIEW = os.getenv("ALLOW_EDIT_AT_PREVIEW", "0") == "1"

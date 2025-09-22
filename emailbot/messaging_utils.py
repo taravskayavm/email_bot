@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
 from .extraction_common import normalize_email as _normalize_email
 from .history_key import normalize_history_key
@@ -258,6 +258,27 @@ def canonical_for_history(email: str) -> str:
     """Return canonical key for history deduplication."""
 
     return _normalize_key(email)
+
+
+def last_sent_at(email: str) -> Optional[datetime]:
+    """Return the last send timestamp in UTC for the given address."""
+
+    key = _normalize_key(email)
+    if not key:
+        return None
+    try:
+        from emailbot.services.cooldown import (
+            get_last_sent_at as _cooldown_last_sent_at,
+        )
+
+        value = _cooldown_last_sent_at(email)
+    except Exception:  # pragma: no cover - defensive fallback
+        return None
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def detect_sent_folder(imap) -> str:
@@ -780,6 +801,7 @@ __all__ = [
     "LEGACY_MAP",
     "ensure_sent_log_schema",
     "canonical_for_history",
+    "last_sent_at",
     "upsert_sent_log",
     "dedupe_sent_log_inplace",
     "add_bounce",

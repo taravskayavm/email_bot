@@ -34,6 +34,7 @@ from telegram.ext import ContextTypes
 
 from bot.keyboards import build_templates_kb
 from services.templates import get_template, get_template_label
+from emailbot import config as C
 from emailbot.notify import notify
 
 from utils.email_clean import (
@@ -1757,6 +1758,13 @@ async def _compose_report_and_save(
         f"🧭 Просмотрено страниц: {int(context.chat_data.get('crawl_pages', 0))}",
         f"Возможные сносочные дубликаты удалены: {footnote_dupes}",
     ]
+    if len(S_send) == 0 and (
+        len(S_cool) > 0
+        or any(messaging._should_skip_by_history(addr)[0] for addr in S_all)
+    ):
+        report_lines.append(
+            "ℹ️ Почти все адреса исключены историей/блок-листами. Проверьте период 180 дней и suppress."
+        )
     report = "\n".join(report_lines)
 
     if sample_allowed:
@@ -1778,7 +1786,8 @@ async def _compose_report_and_save(
             suffix = f" — {reason}" if reason else ""
             preview_lines.append(f"{idx}) {addr}{suffix}")
         report += "\n" + "\n".join(preview_lines)
-        report += "\nНажмите «✏️ Исправить №…» чтобы отредактировать."
+        if C.ALLOW_EDIT_AT_PREVIEW:
+            report += "\nНажмите «✏️ Исправить №…» чтобы отредактировать."
 
     if cooldown_list:
         sample_cooldown = cooldown_list[: min(10, len(cooldown_list))]
@@ -1962,17 +1971,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             report += f"\n{s}"
     preview = context.chat_data.get("send_preview", {})
     dropped_preview = preview.get("dropped", [])
-    fix_buttons: List[InlineKeyboardButton] = []
-    for idx in range(min(len(dropped_preview), 5)):
-        fix_buttons.append(
-            InlineKeyboardButton(
-                f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
-            )
-        )
-
     extra_buttons: List[List[InlineKeyboardButton]] = []
-    if fix_buttons:
-        extra_buttons.append(fix_buttons)
+    if C.ALLOW_EDIT_AT_PREVIEW:
+        fix_buttons: List[InlineKeyboardButton] = []
+        for idx in range(min(len(dropped_preview), 5)):
+            fix_buttons.append(
+                InlineKeyboardButton(
+                    f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
+                )
+            )
+        if fix_buttons:
+            extra_buttons.append(fix_buttons)
     extra_buttons.append(
         [
             InlineKeyboardButton(
@@ -2495,17 +2504,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 report += f"\n{s}"
         preview = context.chat_data.get("send_preview", {})
         dropped_preview = preview.get("dropped", [])
-        fix_buttons: List[InlineKeyboardButton] = []
-        for idx in range(min(len(dropped_preview), 5)):
-            fix_buttons.append(
-                InlineKeyboardButton(
-                    f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
-                )
-            )
-
         extra_buttons: List[List[InlineKeyboardButton]] = []
-        if fix_buttons:
-            extra_buttons.append(fix_buttons)
+        if C.ALLOW_EDIT_AT_PREVIEW:
+            fix_buttons: List[InlineKeyboardButton] = []
+            for idx in range(min(len(dropped_preview), 5)):
+                fix_buttons.append(
+                    InlineKeyboardButton(
+                        f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
+                    )
+                )
+            if fix_buttons:
+                extra_buttons.append(fix_buttons)
         extra_buttons.append(
             [
                 InlineKeyboardButton(

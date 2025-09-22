@@ -74,37 +74,44 @@ _SIDE_NOISE = re.compile(
     re.IGNORECASE,
 )
 
+_FOOTNOTE_LEFT_NUM = re.compile(
+    r"""^(\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹]\d*)$""",
+    re.X,
+)
+
 
 def _strip_side_noise(token_left: str, token_right: str) -> tuple[str, str, bool]:
     """Strip typical noisy tokens around an e-mail and report if anything was cut."""
 
     changed = False
 
-    def _clean(token: str) -> str:
-        nonlocal changed
+    def _normalize(token: str) -> str:
         if not token:
             return ""
         cleaned = token.strip()
         if not cleaned:
             return ""
-        cleaned = cleaned.strip("".join(_PUNCT))
-        if not cleaned:
-            return ""
-        lowered = cleaned.lower()
-        if lowered.isdigit():
-            if len(lowered) <= 3:
-                changed = True
-                return ""
-        if re.fullmatch(r"\+?\d{3,}", cleaned):
-            changed = True
-            return ""
-        if _SIDE_NOISE.match(lowered):
-            changed = True
-            return ""
-        return cleaned
+        return cleaned.strip("".join(_PUNCT))
 
-    left_clean = _clean(token_left)
-    right_clean = _clean(token_right)
+    left_clean = _normalize(token_left)
+    right_clean = _normalize(token_right)
+
+    if left_clean:
+        if _FOOTNOTE_LEFT_NUM.match(left_clean):
+            left_clean = ""
+            changed = True
+        else:
+            lowered = left_clean.lower()
+            if _SIDE_NOISE.match(lowered) and len(left_clean) >= 2:
+                left_clean = ""
+                changed = True
+
+    if right_clean:
+        lowered = right_clean.lower()
+        if _SIDE_NOISE.match(lowered):
+            right_clean = ""
+            changed = True
+
     return left_clean, right_clean, changed
 
 # Цифровые сноски (включая надстрочные ¹²³ и пр. circled numbers)
@@ -768,63 +775,9 @@ def dedupe_keep_original(emails: list[str]) -> list[str]:
 
 
 def drop_leading_char_twins(emails: list[str]) -> list[str]:
-    """Удаляет адреса, чья локальная часть равна локальной части другого адреса
-    без первого символа, при условии одинакового домена. Сохраняем более длинный
-    адрес, «срезанный» отбрасываем. Сравнение регистронезависимое для домена,
-    регистрозависимое для локала."""
+    """Отключённая эвристика усечённых близнецов — возвращаем исходный список."""
 
-    if len(emails) <= 1:
-        return emails
-
-    groups: dict[str, dict[str, str]] = {}
-    for e in emails:
-        try:
-            local, domain = e.split("@", 1)
-        except ValueError:
-            continue
-        groups.setdefault(domain.lower(), {})[local] = e
-
-    to_drop: set[tuple[str, str]] = set()
-    log_pairs: list[tuple[str, str]] = []
-    for domain, mapping in groups.items():
-        locals_set = set(mapping.keys())
-        for local in locals_set:
-            if len(local) < 2:
-                continue
-            trimmed = local[1:]
-            if trimmed in locals_set:
-                drop_local = trimmed
-                keep_local = local
-                if local and not local[0].isalpha() and trimmed and trimmed[0].isalpha():
-                    drop_local = local
-                    keep_local = trimmed
-                to_drop.add((domain, drop_local))
-                kept_email = mapping.get(keep_local) or mapping.get(local)
-                dropped_email = mapping.get(drop_local)
-                if kept_email and dropped_email:
-                    log_pairs.append((kept_email, dropped_email))
-
-    out: list[str] = []
-    for e in emails:
-        try:
-            local, domain = e.split("@", 1)
-        except ValueError:
-            out.append(e)
-            continue
-        if (domain.lower(), local) not in to_drop:
-            out.append(e)
-
-    if os.getenv("DEBUG_EMAIL_PARSE_LOG") == "1" and log_pairs:
-        try:
-            log_path = _debug_log_path()
-            ensure_parent(log_path)
-            with log_path.open("a", encoding="utf-8") as f:
-                for kept, dropped in log_pairs:
-                    f.write(f"DROP_TRIMMED_TWIN: kept={kept} dropped={dropped}\n")
-        except Exception:
-            pass
-
-    return out
+    return list(emails)
 
 
 # === Unified pipeline =========================================================
