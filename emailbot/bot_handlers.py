@@ -20,7 +20,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import aiohttp
 from telegram import (
@@ -50,7 +50,7 @@ from utils import rules
 from utils.send_stats import summarize_today, summarize_week, current_tz_label
 from utils.send_stats import _stats_path  # только для отображения пути
 from utils.bounce import sync_bounces
-from utils.tld_utils import is_allowed_domain as _is_allowed_domain
+from utils.tld_utils import is_allowed_domain as _is_allowed_domain, is_foreign_domain
 
 STATS_PATH = str(_stats_path())
 _FALLBACK_EMAIL_RX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -215,6 +215,102 @@ def sample_preview(items, k: int):
         return lst
     rng = random.SystemRandom()    # не влияет на глобальное состояние
     return rng.sample(lst, k)
+
+
+def _normalize_email_lower(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        text = str(value).strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    return text.lower()
+
+
+def _classify_emails(
+    emails: Iterable[str],
+    dropped: Sequence[tuple[str, str]] | None = None,
+    cooldown_candidates: Iterable[str] | None = None,
+) -> Dict[str, Any]:
+    """Return disjoint e-mail sets for reporting."""
+
+    dropped = dropped or []
+    originals: Dict[str, str] = {}
+    all_set: Set[str] = set()
+
+    for entry in emails:
+        norm = _normalize_email_lower(entry)
+        if not norm:
+            continue
+        all_set.add(norm)
+        try:
+            originals.setdefault(norm, str(entry).strip())
+        except Exception:
+            originals.setdefault(norm, norm)
+
+    reasons: Dict[str, str] = {}
+    dropped_order: List[str] = []
+    for addr, reason in dropped:
+        norm = _normalize_email_lower(addr)
+        if not norm:
+            continue
+        if norm not in reasons:
+            try:
+                text = "" if reason is None else str(reason)
+            except Exception:
+                text = ""
+            reasons[norm] = text
+            dropped_order.append(norm)
+        try:
+            originals.setdefault(norm, str(addr).strip())
+        except Exception:
+            originals.setdefault(norm, norm)
+
+    foreign_set: Set[str] = set()
+    for addr in all_set:
+        if "@" not in addr:
+            continue
+        domain = addr.rsplit("@", 1)[-1]
+        try:
+            if is_foreign_domain(domain):
+                foreign_set.add(addr)
+        except Exception:
+            foreign_set.add(addr)
+
+    removed = set(reasons)
+    clean_set = all_set - removed - foreign_set
+
+    if cooldown_candidates is None:
+        cooldown_set: Set[str] = set()
+        for addr in clean_set:
+            try:
+                skip, _ = messaging._should_skip_by_history(addr)
+            except Exception:
+                continue
+            if skip:
+                cooldown_set.add(addr)
+    else:
+        cooldown_norm = {
+            _normalize_email_lower(addr) for addr in cooldown_candidates if addr
+        }
+        cooldown_set = {addr for addr in clean_set if addr in cooldown_norm}
+
+    send_set = clean_set - cooldown_set
+    suspect_set = {addr for addr, reason in reasons.items() if reason == "suspect"}
+
+    return {
+        "all": all_set,
+        "sus": suspect_set,
+        "foreign": foreign_set,
+        "clean": clean_set,
+        "cool": cooldown_set,
+        "send": send_set,
+        "reasons": reasons,
+        "original": originals,
+        "dropped_order": dropped_order,
+    }
 
 
 from .messaging import (  # noqa: E402,F401  # isort: skip
@@ -1541,54 +1637,115 @@ async def _compose_report_and_save(
     """Compose a summary report and store samples in session state."""
 
     state = get_state(context)
-    state.preview_allowed_all = sorted(filtered)
-    state.dropped = list(dropped)
-    state.foreign = sorted(foreign)
-    state.cooldown_blocked = sorted(dict.fromkeys(cooldown_blocked or []))
+
+    combined_emails: list[str] = []
+    for addr in allowed_all:
+        if isinstance(addr, str):
+            combined_emails.append(addr)
+    for addr in foreign:
+        if isinstance(addr, str):
+            combined_emails.append(addr)
+
+    classes = _classify_emails(
+        combined_emails,
+        dropped=dropped,
+        cooldown_candidates=cooldown_blocked,
+    )
+
+    S_all: Set[str] = classes["all"]
+    S_sus: Set[str] = classes["sus"]
+    S_foreign: Set[str] = classes["foreign"]
+    S_cool: Set[str] = classes["cool"]
+    S_send: Set[str] = classes["send"]
+    reason_map: Dict[str, str] = classes["reasons"]
+    originals: Dict[str, str] = classes["original"]
+    dropped_order: List[str] = classes["dropped_order"]
+
+    for addr in foreign:
+        norm = _normalize_email_lower(addr)
+        if not norm:
+            continue
+        S_foreign.add(norm)
+        S_all.add(norm)
+        originals.setdefault(norm, str(addr).strip())
+
+    def _restore(addresses: Iterable[str]) -> List[str]:
+        restored: List[str] = []
+        for addr in addresses:
+            restored.append(originals.get(addr, addr))
+        return restored
+
+    final_send = _restore(sorted(S_send))
+    final_send = _drop_truncated_twins(final_send, state=state, update_counter=False)
+    foreign_list = _restore(sorted(S_foreign))
+    cooldown_list = _restore(sorted(S_cool))
+
+    unique_dropped: List[Tuple[str, str]] = []
+    for norm in dropped_order:
+        addr = originals.get(norm, norm)
+        reason = reason_map.get(norm, "")
+        unique_dropped.append((addr, reason))
+
+    state.preview_allowed_all = final_send
+    state.to_send = final_send
+    state.dropped = unique_dropped
+    state.foreign = foreign_list
+    state.cooldown_blocked = cooldown_list
     state.footnote_dupes = footnote_dupes
 
-    cooldown_preview = state.cooldown_blocked
+    context.user_data["emails_for_sending"] = list(final_send)
 
     context.chat_data["send_preview"] = {
-        "final": list(dict.fromkeys(state.preview_allowed_all)),
-        "dropped": list(dropped),
+        "final": final_send,
+        "dropped": unique_dropped,
         "fixed": [],
-        "cooldown_blocked": cooldown_preview,
+        "cooldown_blocked": cooldown_list,
     }
     context.chat_data.pop("fix_pending", None)
 
-    sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
-    sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
+    sample_allowed = sample_preview(final_send, PREVIEW_ALLOWED)
+    sample_foreign = sample_preview(foreign_list, PREVIEW_FOREIGN)
 
     report_lines = [
         "✅ Анализ завершён.",
-        f"Найдено адресов: {len(allowed_all)}",
-        f"📧 К отправке: {len(filtered)} адресов",
-        f"⚠️ Подозрительные: {len(dropped)} адресов",
-        f"🕒 Под кулдауном (180 дней): {len(cooldown_preview)}",
-        f"🌍 Иностранные домены: {len(foreign)}",
+        f"Найдено адресов: {len(S_all)}",
+        f"📧 К отправке: {len(S_send)}",
+        f"⚠️ Подозрительные: {len(S_sus)}",
+        f"🕒 Под кулдауном (180 дней): {len(S_cool)}",
+        f"🌍 Иностранные домены: {len(S_foreign)}",
         f"🧭 Просмотрено страниц: {int(context.chat_data.get('crawl_pages', 0))}",
+        f"Возможные сносочные дубликаты удалены: {footnote_dupes}",
     ]
     report = "\n".join(report_lines)
-    if footnote_dupes:
-        report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
+
     if sample_allowed:
         report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
-    if dropped:
-        preview_lines = [
-            "\n⚠️ Подозрительные адреса:",
-            *(
-                f"{i + 1}) {addr} — {reason}"
-                for i, (addr, reason) in enumerate(dropped[:10])
-            ),
-        ]
+
+    sus_preview: List[Tuple[str, str]] = []
+    seen_sus: Set[str] = set()
+    for addr, reason in unique_dropped:
+        norm = _normalize_email_lower(addr)
+        if norm not in S_sus or norm in seen_sus:
+            continue
+        sus_preview.append((addr, reason))
+        seen_sus.add(norm)
+        if len(sus_preview) >= 10:
+            break
+    if sus_preview:
+        preview_lines = ["\n⚠️ Подозрительные адреса:"]
+        for idx, (addr, reason) in enumerate(sus_preview, 1):
+            suffix = f" — {reason}" if reason else ""
+            preview_lines.append(f"{idx}) {addr}{suffix}")
         report += "\n" + "\n".join(preview_lines)
         report += "\nНажмите «✏️ Исправить №…» чтобы отредактировать."
-    if cooldown_preview:
-        sample_cooldown = cooldown_preview[: min(10, len(cooldown_preview))]
+
+    if cooldown_list:
+        sample_cooldown = cooldown_list[: min(10, len(cooldown_list))]
         report += "\n\n🕒 Примеры адресов под кулдауном:\n" + "\n".join(sample_cooldown)
+
     if sample_foreign:
         report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(sample_foreign)
+
     return report
 
 
