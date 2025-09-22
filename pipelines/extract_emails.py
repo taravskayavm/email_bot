@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Dict, List, Tuple
+import time
+from typing import Callable, Dict, List, Tuple
+
+import httpx
+
+from emailbot import config as C
+from crawler.web_crawler import Crawler
+from utils.charset_helper import best_effort_decode
 
 from utils.email_clean import (
     dedupe_with_variants,
@@ -362,5 +370,104 @@ def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
     return final, dropped
 
 
-__all__ = ["extract_emails_pipeline", "run_pipeline_on_text"]
+def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
+    """Fetch a single URL synchronously and decode using charset-normalizer."""
+
+    headers = {"User-Agent": C.CRAWL_USER_AGENT}
+    try:
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=timeout,
+            headers=headers,
+            http2=True,
+        ) as client:
+            response = client.get(url)
+            content_type = str(response.headers.get("content-type", "")).lower()
+            if content_type and not any(
+                hint in content_type for hint in ("text", "html", "xml", "json")
+            ):
+                return ""
+            return best_effort_decode(response.content)
+    except Exception:
+        return ""
+
+
+async def extract_from_url_async(
+    url: str,
+    *,
+    deep: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> tuple[list[str], dict]:
+    """Extract e-mail addresses from ``url`` asynchronously.
+
+    When ``deep`` is ``True`` the crawler walks the site breadth-first (respecting
+    robots.txt and staying on the same domain if configured) and aggregates all
+    discovered HTML pages. ``progress_cb`` is invoked with ``(pages, page_url)``
+    to report crawling progress; it is throttled internally to avoid flooding.
+    """
+
+    if not deep:
+        html = _http_get_text(url)
+        emails, meta = extract_emails_pipeline(html or "")
+        stats = dict(meta) if isinstance(meta, dict) else {}
+        stats["pages"] = 1 if html else 0
+        stats["unique"] = len(emails)
+        stats["page_urls"] = [url] if html else []
+        return emails, stats
+
+    pages: list[tuple[str, str]] = []
+    last_notify = 0.0
+
+    def _on_page(pages_scanned: int, page_url: str) -> None:
+        nonlocal last_notify
+        if not progress_cb:
+            return
+        now = time.time()
+        if now - last_notify < 0.7:
+            return
+        last_notify = now
+        try:
+            progress_cb(pages_scanned, page_url)
+        except Exception:
+            pass
+
+    crawler = Crawler(url, on_page=_on_page)
+    try:
+        async for page_url, text in crawler.crawl():
+            pages.append((page_url, text))
+    finally:
+        await crawler.close()
+
+    combined_parts: list[str] = []
+    for page_url, text in pages:
+        marker = f"<!-- {page_url} -->"
+        combined_parts.append(f"{marker}\n{text}")
+    combined_text = "\n\n".join(combined_parts)
+
+    if combined_text:
+        emails_raw, meta = extract_emails_pipeline(combined_text)
+    else:
+        emails_raw, meta = [], {}
+
+    emails = list(dict.fromkeys(emails_raw))
+    stats = dict(meta) if isinstance(meta, dict) else {}
+    stats["pages"] = crawler.pages_scanned
+    stats["unique"] = len(emails)
+    stats["page_urls"] = [page_url for page_url, _ in pages]
+    return emails, stats
+
+
+def extract_from_url(url: str, *, deep: bool = True) -> list[str]:
+    """Synchronous wrapper for :func:`extract_from_url_async`."""
+
+    emails, _ = asyncio.run(extract_from_url_async(url, deep=deep))
+    return emails
+
+
+__all__ = [
+    "extract_emails_pipeline",
+    "run_pipeline_on_text",
+    "extract_from_url_async",
+    "extract_from_url",
+]
 
