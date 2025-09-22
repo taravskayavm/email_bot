@@ -12,7 +12,7 @@ from pathlib import Path
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
@@ -63,19 +63,18 @@ def _safe_add(app, handler, signature: str) -> None:
     app.add_handler(handler)
 
 
-async def handle_error(
+async def _on_error(
     update: Update | None, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Log errors and swallow known benign Telegram issues."""
+    """Глобальный перехватчик ошибок для Application."""
 
     err = context.error
-    try:
-        msg = str(err)
-    except Exception:
-        msg = repr(err)
-    logger.error("Unhandled error: %s", msg, exc_info=err)
-    if isinstance(err, BadRequest) and "Query is too old" in msg:
-        return
+    if isinstance(err, BadRequest):
+        message = str(err)
+        if "Query is too old" in message or "query id is invalid" in message:
+            logger.info("Callback ignored: %s", message)
+            return
+    logger.exception("Unhandled error: %s", err)
 
 
 def main() -> None:
@@ -97,7 +96,7 @@ def main() -> None:
     os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
     messaging.dedupe_blocked_file()
 
-    app = ApplicationBuilder().token(token).build()
+    app = Application.builder().token(token).build()
 
     _safe_add(app, CommandHandler("start", bot_handlers.start), "cmd:start")
     _safe_add(
@@ -368,7 +367,7 @@ def main() -> None:
     )
 
     # Глобальный обработчик ошибок — в самом конце, после регистрации хендлеров
-    app.add_error_handler(handle_error)
+    app.add_error_handler(_on_error)
 
     logger.info("Бот запущен.")
     stop_event = threading.Event()

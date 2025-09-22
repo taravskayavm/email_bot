@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence, TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from emailbot.handlers.common import safe_answer
 from emailbot.notify import notify
 from services.templates import get_template_label
 
@@ -365,7 +366,7 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the "Вернуться / Править" button press."""
 
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query, cache_time=0)
     preview = context.chat_data.get("send_preview") or {}
     dropped = []
     cooldown_blocked: list[str] = []
@@ -428,9 +429,10 @@ async def request_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Prompt the user to enter an address correction."""
 
     query = update.callback_query
-    await query.answer()
+    # быстрый ack, чтобы не протухал callback id даже если обработка долгая
+    await safe_answer(query, text="⏳ Обрабатываю…", cache_time=0)
     context.chat_data["preview_edit_pending"] = True
-    await _safe_reply_text(query.message, 
+    await _safe_reply_text(query.message,
         (
             "Введите правку в формате «старый -> новый».\n"
             "Пример: old@example.ru -> new@example.ru"
@@ -442,7 +444,7 @@ async def show_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """Display the list of saved edits for the chat."""
 
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query, cache_time=0)
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     rows = list_saved_edits(chat_id)
@@ -463,7 +465,7 @@ async def reset_edits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Clear all saved edits for the current chat."""
 
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query, cache_time=0)
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     clear_saved_edits(chat_id)
@@ -617,9 +619,9 @@ async def handle_refresh_choice(update: Update, context: ContextTypes.DEFAULT_TY
     """Process the user choice after saving an edit."""
 
     query = update.callback_query
+    await safe_answer(query, cache_time=0)
     data = query.data or ""
     _, _, choice = data.partition(":")
-    await query.answer()
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:  # pragma: no cover - best effort
