@@ -6,6 +6,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+logger = logging.getLogger(__name__)
+
+
 def load_env(script_dir: Path) -> None:
     """Load environment variables from .env files."""
     try:
@@ -25,9 +28,6 @@ def setup_logging(log_file: Path) -> None:
             logging.FileHandler(log_file, encoding="utf-8"),
         ],
     )
-
-
-logger = logging.getLogger(__name__)
 
 
 def log_error(msg: str) -> None:

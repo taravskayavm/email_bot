@@ -25,7 +25,16 @@ from utils.name_match import fio_candidates, fio_match_score
 from utils.tld_utils import is_allowed_domain, is_foreign_domain
 
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
-FIO_PERSONAL_THRESHOLD = 0.9
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float((os.getenv(name, "") or "").strip())
+    except Exception:
+        return default
+
+
+FIO_PERSONAL_THRESHOLD = _env_float("EMAIL_ROLE_PERSONAL_THRESHOLD", 0.9)
 
 
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:

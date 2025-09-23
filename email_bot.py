@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import signal
 import threading
 import warnings
 from pathlib import Path
@@ -97,8 +99,12 @@ def main() -> None:
     os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
     messaging.dedupe_blocked_file()
 
+    # централизованный обработчик ошибок
+    # (ранее мог не регистрироваться, если вызывали вне этого файла)
+    # Подробнее: https://docs.python-telegram-bot.org/
     app = Application.builder().token(token).build()
     app.bot_data.setdefault("locks", {})
+    app.add_error_handler(_on_error)
 
     _safe_add(app, CommandHandler("start", bot_handlers.start), "cmd:start")
     _safe_add(
@@ -375,17 +381,37 @@ def main() -> None:
         "cb:imap_choose",
     )
 
-    # Глобальный обработчик ошибок — в самом конце, после регистрации хендлеров
-    app.add_error_handler(_on_error)
-
     logger.info("Бот запущен.")
     stop_event = threading.Event()
     t = threading.Thread(
         target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
     )
     t.start()
+
+    def _signal_handler(signum, frame):
+        logger.warning("Received signal %s — shutting down bot...", signum)
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _signal_handler)
+        except Exception:
+            pass
+
+    async def _run():
+        async with app:
+            await app.start()
+            await app.updater.start_polling()
+            while not stop_event.is_set():
+                if not app.updater.running:
+                    stop_event.set()
+                    break
+                await asyncio.sleep(0.25)
+            await app.updater.stop()
+            await app.stop()
+
     try:
-        app.run_polling()
+        asyncio.run(_run())
     finally:
         stop_event.set()
         t.join()
