@@ -287,14 +287,14 @@ def test_limit_not_triggered_by_external(tmp_path, monkeypatch):
     assert available == messaging.MAX_EMAILS_PER_DAY
 
 
-def test_limit_triggered_after_200_sent(tmp_path, monkeypatch):
+def test_limit_triggered_after_cap_sent(tmp_path, monkeypatch):
     log = tmp_path / "sent_log.csv"
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
     today = datetime.utcnow()
     with open(log, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["key", "email", "last_sent_at", "source", "status"])
         w.writeheader()
-        for i in range(200):
+        for i in range(messaging.MAX_EMAILS_PER_DAY):
             email = f"ok{i}@e.com"
             w.writerow({
                 "key": mu.canonical_for_history(email),

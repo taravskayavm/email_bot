@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 from email import message_from_bytes, message_from_string, policy
 
 from emailbot import config as C
+from emailbot import settings as S
 
 from services.templates import get_template, get_template_by_path
 
@@ -81,7 +82,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
-MAX_EMAILS_PER_DAY = 200
+MAX_EMAILS_PER_DAY = int(os.getenv("DAILY_SEND_LIMIT", str(S.DAILY_SEND_LIMIT)))
 _ASCII_LOCAL_RX = re.compile(r"^[\x21-\x7E]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 # Text of the signature without styling. The surrounding block and
