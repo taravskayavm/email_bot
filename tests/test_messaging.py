@@ -397,6 +397,82 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
     assert row["unsubscribed"] == "1"
 
 
+def test_process_unsubscribe_requests_skips_without_imap_config(monkeypatch):
+    monkeypatch.setenv("IMAP_HOST", "")
+    monkeypatch.setenv("EMAIL_ADDRESS", "")
+    monkeypatch.setenv("EMAIL_PASSWORD", "")
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "")
+    monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "")
+
+    called = {"imap": False}
+
+    def fake_imap(*args, **kwargs):
+        called["imap"] = True
+        return object()
+
+    monkeypatch.setattr(messaging.imaplib, "IMAP4_SSL", fake_imap)
+    messaging.process_unsubscribe_requests()
+    assert called["imap"] is False
+
+
+def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
+    unsubscribed: list[str] = []
+    monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("IMAP_PORT", "1143")
+    monkeypatch.setenv("IMAP_TIMEOUT", "3.5")
+    monkeypatch.setenv("EMAIL_ADDRESS", "env@example.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "env-secret")
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "module@example.com")
+    monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "module-secret")
+    monkeypatch.setattr(messaging, "mark_unsubscribed", lambda addr: unsubscribed.append(addr))
+
+    calls: dict[str, object] = {}
+
+    class DummyIMAP:
+        def __init__(self, host, port=993, **kwargs):
+            calls["host"] = host
+            calls["port"] = port
+            calls["timeout"] = kwargs.get("timeout")
+
+        def login(self, user, password):
+            calls["user"] = user
+            calls["password"] = password
+
+        def select(self, mailbox):
+            calls["mailbox"] = mailbox
+            return "OK", [b""]
+
+        def search(self, charset, criteria):
+            calls["search"] = (charset, criteria)
+            return "OK", [b"1"]
+
+        def fetch(self, num, spec):
+            calls.setdefault("fetch", []).append((num, spec))
+            raw = b"From: User <unsubscribe@example.com>\r\n\r\nBody"
+            return "OK", [(b"1 (RFC822 {42}", raw)]
+
+        def store(self, num, command, flags):
+            calls.setdefault("store", []).append((num, command, flags))
+
+        def logout(self):
+            calls["logout"] = True
+
+    monkeypatch.setattr(messaging.imaplib, "IMAP4_SSL", DummyIMAP)
+    messaging.process_unsubscribe_requests()
+
+    assert unsubscribed == ["unsubscribe@example.com"]
+    assert calls["host"] == "imap.example.com"
+    assert calls["port"] == 1143
+    assert calls["timeout"] == 3.5
+    assert calls["user"] == "env@example.com"
+    assert calls["password"] == "env-secret"
+    assert calls["mailbox"] == "INBOX"
+    assert calls["search"] == (None, '(UNSEEN SUBJECT "unsubscribe")')
+    assert calls["fetch"] == [(b"1", "(RFC822)")]
+    assert calls["store"] == [(b"1", "+FLAGS", "\\Seen")]
+    assert calls.get("logout") is True
+
+
 def test_send_email_idempotent(tmp_path, monkeypatch):
     html = tmp_path / "t.html"
     html.write_text("<html><body>Hi</body></html>", encoding="utf-8")

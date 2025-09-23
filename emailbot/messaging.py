@@ -1063,22 +1063,68 @@ def send_email_with_sessions(
 
 
 def process_unsubscribe_requests():
+    imap = None
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        imap.select("INBOX")
-        result, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
+        host = (os.getenv("IMAP_HOST", "imap.mail.ru") or "").strip()
+        user = (os.getenv("EMAIL_ADDRESS") or EMAIL_ADDRESS or "").strip()
+        password = (os.getenv("EMAIL_PASSWORD") or EMAIL_PASSWORD or "").strip()
+        if not host:
+            logger.debug("IMAP_HOST is empty; skip unsubscribe processing")
+            return
+        if not user or not password:
+            logger.debug("IMAP credentials are missing; skip unsubscribe processing")
+            return
+        try:
+            port = int(os.getenv("IMAP_PORT", "993") or "993")
+        except ValueError:
+            port = 993
+        try:
+            timeout = float(os.getenv("IMAP_TIMEOUT", "15") or "15")
+        except ValueError:
+            timeout = 15.0
+
+        imap = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+        imap.login(user, password)
+
+        status, _ = imap.select("INBOX")
+        if status != "OK":
+            logger.warning("IMAP select INBOX failed: %s", status)
+            return
+
+        status, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
+        if status != "OK":
+            logger.warning("IMAP search failed: %s", status)
+            return
+
         for num in data[0].split() if data and data[0] else []:
-            _, msg_data = imap.fetch(num, "(RFC822)")
-            raw_email = msg_data[0][1]
+            status, msg_data = imap.fetch(num, "(RFC822)")
+            if status != "OK" or not msg_data:
+                continue
+            raw_email = None
+            for part in msg_data:
+                if (
+                    isinstance(part, tuple)
+                    and len(part) > 1
+                    and isinstance(part[1], (bytes, bytearray, memoryview))
+                    and part[1]
+                ):
+                    raw_email = bytes(part[1])
+                    break
+            if not raw_email:
+                continue
             msg = email.message_from_bytes(raw_email)
             sender = email.utils.parseaddr(msg.get("From"))[1]
             if sender:
                 mark_unsubscribed(sender)
             imap.store(num, "+FLAGS", "\\Seen")
-        imap.logout()
     except Exception as e:
         log_internal_error(f"process_unsubscribe_requests: {e}")
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception as e:
+                log_internal_error(f"process_unsubscribe_requests logout: {e}")
 
 
 def _canonical_blocked(email_str: str) -> str:
