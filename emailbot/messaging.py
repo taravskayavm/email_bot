@@ -117,6 +117,56 @@ SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
 _sent_idempotency: Set[str] = set()
 
 
+def _load_sent_idempotency() -> None:
+    """
+    Best-effort загрузка ранее сохранённых идентификаторов отправок
+    (для предотвращения дубликатов между перезапусками).
+    """
+
+    global _sent_idempotency
+    try:
+        if SENT_IDS_FILE.exists():
+            cutoff = time.time() - 86400
+            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = (line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    sid = str(obj.get("id") or "").strip()
+                    if not sid:
+                        continue
+                    try:
+                        ts = float(obj.get("ts", 0) or 0)
+                    except Exception:
+                        ts = 0.0
+                    if ts and ts < cutoff:
+                        continue
+                    _sent_idempotency.add(sid)
+    except Exception as exc:
+        logger.debug("idempotency load failed: %r", exc)
+
+
+def _append_sent_idempotency(sid: str) -> None:
+    """
+    Атомарная дозапись нового идентификатора в jsonl (без блокировок на NFS).
+    """
+
+    try:
+        SENT_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": sid, "ts": time.time()}) + "\n")
+    except Exception as exc:
+        logger.debug("idempotency append failed: %r", exc)
+
+
+# при импорте — подхватить прошлую историю
+_load_sent_idempotency()
+
+
 def _smtp_reason(exc: Exception) -> str:
     reason = getattr(exc, "smtp_error", None)
     if isinstance(reason, (bytes, bytearray)):
@@ -426,39 +476,18 @@ def _make_send_key(msg) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _load_sent_ids() -> Set[str]:
-    ids: Set[str] = set()
-    if SENT_IDS_FILE.exists():
-        try:
-            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        key = obj.get("key")
-                        ts = float(obj.get("ts", 0))
-                        if (
-                            datetime.now(timezone.utc).timestamp() - ts
-                        ) <= 86400 and key:
-                            ids.add(key)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-    return ids
+def mark_idempotent_and_persist(unique_key: str) -> None:
+    """
+    Сохраняем уникальный ключ отправки в оперативный и дисковый кэш,
+    чтобы предотвратить повтор в пределах 24 ч и между перезапусками.
+    """
 
-
-def _persist_sent_key(key: str) -> None:
-    try:
-        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
-            f.write(
-                json.dumps({"key": key, "ts": datetime.now(timezone.utc).timestamp()})
-                + "\n"
-            )
-    except Exception:
-        pass
+    key = (unique_key or "").strip()
+    if not key:
+        return
+    if key not in _sent_idempotency:
+        _sent_idempotency.add(key)
+        _append_sent_idempotency(key)
 
 
 def _primary_recipient(msg) -> str:
@@ -491,9 +520,6 @@ def was_sent_recently(msg) -> bool:
             return True
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("cooldown_sqlite was_sent_recently failed", exc_info=True)
-    global _sent_idempotency
-    if not _sent_idempotency:
-        _sent_idempotency = _load_sent_ids()
     key = _make_send_key(msg)
     return key in _sent_idempotency
 
@@ -517,8 +543,7 @@ def mark_sent(msg) -> None:
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("cooldown_sqlite mark_sent failed", exc_info=True)
     key = _make_send_key(msg)
-    _sent_idempotency.add(key)
-    _persist_sent_key(key)
+    mark_idempotent_and_persist(key)
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
@@ -628,6 +653,10 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                     rules.append_history(recipient)
                 except Exception:  # pragma: no cover - defensive fallback
                     logger.debug("rules.append_history failed", exc_info=True)
+                try:
+                    mark_idempotent_and_persist(_make_send_key(msg))
+                except Exception:  # pragma: no cover - defensive fallback
+                    logger.debug("mark_idempotent_and_persist failed", exc_info=True)
                 return  # success
             except smtplib.SMTPResponseException as e:
                 code = getattr(e, "smtp_code", None)
@@ -892,6 +921,7 @@ def send_email(
                 recipient,
                 str(group_for_log or ""),
                 unsubscribe_token=token,
+                message_key=_make_send_key(msg),
             )
         except Exception as exc:
             logger.debug("log_sent_email failed for %s: %s", recipient, exc)
@@ -1021,6 +1051,10 @@ def send_email_with_sessions(
             rules.append_history(recipient)
         except Exception:  # pragma: no cover - defensive fallback
             logger.debug("rules.append_history failed", exc_info=True)
+        try:
+            mark_idempotent_and_persist(_make_send_key(msg))
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("mark_idempotent_and_persist failed", exc_info=True)
         return SendOutcome.SENT, token
     except smtplib.SMTPResponseException as e:
         code = getattr(e, "smtp_code", None)
@@ -1227,6 +1261,7 @@ def log_sent_email(
     unsubscribe_token="",
     unsubscribed="",
     unsubscribed_at="",
+    message_key: str | None = None,
 ):
     if status not in {"ok", "sent", "success"}:
         return
@@ -1246,6 +1281,8 @@ def log_sent_email(
         status=status,
         extra=extra,
     )
+    if message_key:
+        mark_idempotent_and_persist(message_key)
     global _log_cache
     _log_cache = None
 
