@@ -20,6 +20,16 @@ INITIAL_SURNAME_RE = re.compile(
     re.UNICODE,
 )
 
+_HYPHEN_SURNAME_TOKEN_RE = re.compile(
+    r"^[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)+$"
+)
+_INITIAL_SURNAME_TOKEN_RE = re.compile(
+    r"^[A-Za-zА-Яа-яЁё]\.[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*$"
+)
+_SURNAME_INITIAL_TOKEN_RE = re.compile(
+    r"^[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*\.[A-Za-zА-Яа-яЁё]$"
+)
+
 _TRANSLIT_TABLE = str.maketrans(
     {
         "а": "a",
@@ -97,6 +107,7 @@ def fio_candidates(text: str) -> List[Tuple[str, str]]:
 
     seen: set[Tuple[str, str]] = set()
     raw = text or ""
+    hints: list[Tuple[str, str]] = []
 
     for match in NAME_RE.finditer(raw):
         parts = [part for part in match.groups() if part]
@@ -120,6 +131,49 @@ def fio_candidates(text: str) -> List[Tuple[str, str]]:
             if first_initial and last:
                 seen.add((first_initial, last))
                 seen.add((last, first_initial))
+
+    for token in re.findall(r"[A-Za-zА-Яа-яЁё.\-]+", raw):
+        candidate = token.strip()
+        if not candidate:
+            continue
+        if _HYPHEN_SURNAME_TOKEN_RE.match(candidate):
+            hints.append(("hyphen-fam", candidate))
+            slug_token = _slug(candidate)
+            parts = [part for part in candidate.split("-") if part]
+            slug_parts = [_slug(part) for part in parts if part]
+            for slug_part in slug_parts:
+                if slug_token and slug_part:
+                    seen.add((slug_part, slug_token))
+                    seen.add((slug_token, slug_part))
+            if len(slug_parts) >= 2:
+                for left in slug_parts:
+                    for right in slug_parts:
+                        if left and right and left != right:
+                            seen.add((left, right))
+        elif _INITIAL_SURNAME_TOKEN_RE.match(candidate):
+            hints.append(("initials", candidate))
+            try:
+                initial_part, surname_part = candidate.split(".", 1)
+            except ValueError:
+                continue
+            first_slug = _slug(initial_part[:1])
+            last_slug = _slug(surname_part)
+            if first_slug and last_slug:
+                seen.add((first_slug, last_slug))
+                seen.add((last_slug, first_slug))
+        elif _SURNAME_INITIAL_TOKEN_RE.match(candidate):
+            hints.append(("initials", candidate))
+            try:
+                surname_part, initial_part = candidate.rsplit(".", 1)
+            except ValueError:
+                continue
+            surname_slug = _slug(surname_part)
+            initial_slug = _slug(initial_part[:1])
+            if surname_slug and initial_slug:
+                seen.add((surname_slug, initial_slug))
+                seen.add((initial_slug, surname_slug))
+
+    fio_candidates.last_hints = hints  # type: ignore[attr-defined]
 
     return sorted(seen)
 

@@ -16,6 +16,7 @@ from utils.email_clean import (
     finalize_email,
     parse_emails_unified,
     drop_leading_char_twins,
+    preclean_obfuscations,
 )
 from utils.dedup import canonical
 from utils.text_normalize import normalize_text
@@ -41,6 +42,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
     source_text = text or ""
+    source_text = preclean_obfuscations(source_text)
     raw_text = normalize_text(source_text)
     cleaned, meta_in = parse_emails_unified(raw_text, return_meta=True)
     meta = dict(meta_in)
@@ -50,6 +52,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     allowed_candidates: List[str] = []
     rejected: List[dict] = []
     foreign_filtered_pre = 0
+    role_rejected_early = 0
 
     for item in items:
         normalized = (item.get("normalized") or "").strip()
@@ -86,6 +89,16 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
             rejected.append(dict(item))
             foreign_filtered_pre += 1
             continue
+        if PERSONAL_ONLY:
+            local_candidate = email_final.split("@", 1)[0]
+            info = classify_email_role(local_candidate, final_domain)
+            if str(info.get("class")) == "role":
+                item["reason"] = "role-address"
+                item["stage"] = "classify"
+                item["sanitized"] = ""
+                rejected.append(dict(item))
+                role_rejected_early += 1
+                continue
         item["sanitized"] = email_final
         allowed_candidates.append(email_final)
 
@@ -119,6 +132,11 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     meta["emails_suspects"] = suspects
     meta["suspicious_count"] = len(suspects)
     meta["dedup_len"] = len(unique)
+    meta["role_rejected"] = role_rejected_early
+    try:
+        meta_in["role_rejected"] = role_rejected_early
+    except Exception:
+        pass
     fio_pairs = fio_candidates(source_text)
 
     def _merge_reason(reason: str | None, extra: str) -> str:
@@ -320,6 +338,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "role": role_stats.get("role", 0),
         "unknown": role_stats.get("unknown", 0),
         "role_filtered": role_filtered,
+        "role_rejected": role_rejected_early + role_filtered,
         "personal_only": int(PERSONAL_ONLY),
         "classified": classified,
         "contexts_tagged": len(contexts),

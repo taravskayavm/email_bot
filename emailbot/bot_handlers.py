@@ -20,7 +20,18 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import aiohttp
 from telegram import (
@@ -70,6 +81,48 @@ from .services.cooldown import should_skip_by_cooldown
 from .services.cooldown import COOLDOWN_DAYS
 
 
+# --- EB-2025-09-23-17: user-friendly preview after extraction -----------------
+
+def _format_preview_text(
+    found: Iterable[str] | None,
+    allowed: Iterable[str] | None,
+    rejected: Iterable[object] | None,
+    stats: Mapping[str, Any] | None,
+) -> str:
+    found_unique = {
+        str(entry).strip()
+        for entry in (found or [])
+        if isinstance(entry, str) and "@" in entry
+    }
+    allowed_list: list[str] = []
+    if allowed:
+        allowed_list = list(
+            dict.fromkeys(
+                [
+                    str(entry).strip()
+                    for entry in allowed
+                    if isinstance(entry, str) and "@" in entry
+                ]
+            )
+        )
+    _ = rejected  # retained for future use / signature compatibility
+    stats_map: Mapping[str, Any] = stats or {}
+    suspicious = int(stats_map.get("suspicious_count", 0) or 0)
+    role_rejected = int(stats_map.get("role_rejected", 0) or 0)
+    foreign = int(stats_map.get("foreign_domains", 0) or 0)
+    sample = "\n".join(f"• {addr}" for addr in allowed_list[:10]) or "—"
+    lines = [
+        "✅ Предварительный результат:",
+        f"• найдено адресов: {len(found_unique)}",
+        f"• к отправке (после фильтров): {len(allowed_list)}",
+        f"• отсечено подозрительных: {suspicious}",
+        f"• рольовых (info/support и т.п.): {role_rejected}",
+        f"• иностранных доменов: {foreign}",
+        f"Примеры:\n{sample}",
+    ]
+    return "\n".join(lines)
+
+
 # --- Новое состояние для ручного ввода исправлений ---
 EDIT_SUSPECTS_INPUT = 9301
 
@@ -95,6 +148,36 @@ def _meta_candidate(info, *, prefer_sanitized: bool = False) -> str:
         if value:
             return str(value).strip()
     return ""
+
+
+def _collect_preview_found(stats: Mapping[str, Any] | None) -> set[str]:
+    found: set[str] = set()
+    if not isinstance(stats, Mapping):
+        return found
+
+    for key in ("items", "items_rejected"):
+        entries = stats.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            candidate = _meta_candidate(entry, prefer_sanitized=True) or _meta_candidate(entry)
+            candidate = candidate.strip()
+            if candidate and "@" in candidate:
+                found.add(candidate)
+
+    suspects = stats.get("emails_suspects")
+    if isinstance(suspects, (list, tuple, set)):
+        for entry in suspects:
+            try:
+                candidate = str(entry).strip()
+            except Exception:
+                continue
+            if candidate and "@" in candidate:
+                found.add(candidate)
+
+    return found
 
 
 def _ingest_meta_to(
@@ -1874,6 +1957,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     repairs: List[tuple[str, str]] = []
     footnote_dupes = 0
     suspicious_map: Dict[str, str] = {}
+    role_rejected_total = 0
 
     try:
         if file_path.lower().endswith(".zip"):
@@ -1885,6 +1969,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             repairs = collect_repairs_from_files(extracted_files)
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
             _ingest_meta_to(loose_all, suspicious_map, stats)
+            if isinstance(stats, dict):
+                try:
+                    role_rejected_total += int(stats.get("role_rejected", 0) or 0)
+                except Exception:
+                    pass
         else:
             allowed, loose, stats = extract_from_uploaded_file(file_path)
             allowed_all.update(allowed)
@@ -1893,6 +1982,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             repairs = collect_repairs_from_files([file_path])
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
             _ingest_meta_to(loose_all, suspicious_map, stats)
+            if isinstance(stats, dict):
+                try:
+                    role_rejected_total += int(stats.get("role_rejected", 0) or 0)
+                except Exception:
+                    pass
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
 
@@ -1940,6 +2034,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
     }
     foreign = sorted(collapse_footnote_variants(foreign_raw))
+
+    preview_stats = {
+        "suspicious_count": len(suspicious_map),
+        "foreign_domains": len(foreign_raw),
+        "role_rejected": role_rejected_total,
+    }
+    preview_message: str | None = None
+    if all_found or filtered or preview_stats["suspicious_count"] or preview_stats["role_rejected"]:
+        preview_message = _format_preview_text(
+            all_found,
+            filtered,
+            dropped_current,
+            preview_stats,
+        )
 
     state = get_state(context)
     state.all_emails.update(allowed_all)
@@ -2057,6 +2165,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         event="analysis",
         force=True,
     )
+    if preview_message:
+        await _safe_reply_text(update.message, preview_message)
 
 
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2197,6 +2307,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if context.user_data.get("awaiting_manual_email"):
         final_emails, stats = extract_emails_pipeline(text)
         pre_trunc = list(final_emails)
+        preview_message: str | None = None
         emails_no_trunc = _drop_truncated_twins(pre_trunc, state=get_state(context))
         truncated_removed = [
             addr for addr in pre_trunc if addr not in set(emails_no_trunc)
@@ -2231,6 +2342,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 stats, emails, truncated_removed
             )
             logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
+
+        if emails:
+            preview_stats = dict(stats) if isinstance(stats, dict) else {}
+            preview_found = _collect_preview_found(preview_stats)
+            if preview_found or preview_stats or emails:
+                preview_message = _format_preview_text(
+                    preview_found,
+                    emails,
+                    preview_stats.get("items_rejected"),
+                    preview_stats,
+                )
 
         # Скрываем список адресов: считаем только количества
         context.user_data["awaiting_manual_email"] = False
@@ -2296,6 +2418,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        if preview_message:
+            await _safe_reply_text(update.message, preview_message)
         if drop_details:
             preview_lines = [
                 f"{addr} — {reason}" for addr, reason in drop_details[:50]
@@ -2417,12 +2541,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         footnote_dupes = 0
         loose_meta: Set[str] = set()
         suspicious_map: Dict[str, str] = {}
+        role_rejected_total = 0
         for _, allowed, foreign, repairs, stats in results:
             allowed_all.update(allowed)
             foreign_all.update(foreign)
             repairs_all.extend(repairs)
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
             _ingest_meta_to(loose_meta, suspicious_map, stats)
+            if isinstance(stats, dict):
+                try:
+                    role_rejected_total += int(stats.get("role_rejected", 0) or 0)
+                except Exception:
+                    pass
 
         if loose_meta:
             extra_foreign = {
@@ -2473,6 +2603,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             heuristics_only = sorted(suspects_removed - existing_suspects)
             for addr in heuristics_only:
                 dropped_current.append((addr, "suspect"))
+
+        all_found = {addr for addr in allowed_all | loose_meta if addr}
+        preview_stats = {
+            "suspicious_count": len(suspicious_map),
+            "foreign_domains": len(foreign_all),
+            "role_rejected": role_rejected_total,
+        }
+        preview_message: str | None = None
+        if all_found or filtered or preview_stats["suspicious_count"] or preview_stats["role_rejected"]:
+            preview_message = _format_preview_text(
+                all_found,
+                filtered,
+                dropped_current,
+                preview_stats,
+            )
 
         state = get_state(context)
         state.all_emails.update(allowed_all)
@@ -2586,10 +2731,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ]
         )
         report += "\n\nДополнительные действия:"
-        await _safe_reply_text(update.message, 
+        await _safe_reply_text(update.message,
             report,
             reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
+        if preview_message:
+            await _safe_reply_text(update.message, preview_message)
         return
 
 

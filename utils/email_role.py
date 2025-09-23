@@ -12,50 +12,117 @@ from typing import Dict, Iterable
 # The list combines English and Russian cues that previously lived in
 # ``utils.email_clean`` and a couple of extra synonyms that show up in the
 # gold fixtures (editorial, journal, press, reception, etc.).
-ROLE_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "info",
-        "kontakt",
-        "contact",
-        "service",
-        "support",
-        "help",
-        "sales",
-        "office",
-        "press",
-        "pressa",
-        "editor",
-        "editors",
-        "editorial",
-        "journals",
-        "journal",
-        "admissions",
-        "career",
-        "hr",
-        "department",
-        "dean",
-        "reception",
-        "priem",
-        "otdel",
-        "kafedra",
-        "dekanat",
-        "spravka",
-        "redak",
-        "rekto",
-        "uchsec",
-        "magistr",
-        "bakalavr",
-        "aspirant",
-        "nauka",
-        "kantsel",
-        "public",
-        "ojs",
-        "mailer",
-        "mail",
-        "postmaster",
-        "webmaster",
-    }
-)
+_ROLE_KEYWORDS_BASE: set[str] = {
+    "info",
+    "kontakt",
+    "contact",
+    "service",
+    "support",
+    "help",
+    "sales",
+    "office",
+    "press",
+    "pressa",
+    "editor",
+    "editors",
+    "editorial",
+    "journals",
+    "journal",
+    "admissions",
+    "career",
+    "hr",
+    "department",
+    "dean",
+    "reception",
+    "priem",
+    "otdel",
+    "kafedra",
+    "dekanat",
+    "spravka",
+    "redak",
+    "rekto",
+    "uchsec",
+    "magistr",
+    "bakalavr",
+    "aspirant",
+    "nauka",
+    "kantsel",
+    "public",
+    "ojs",
+    "mailer",
+    "mail",
+    "postmaster",
+    "webmaster",
+}
+
+_ROLE_FRAGMENT_HINTS: set[str] = {
+    "admin",
+    "marketing",
+    "media",
+    "jobs",
+    "recruit",
+    "hello",
+    "hi",
+    "team",
+    "newsletter",
+    "services",
+    "editor",
+    "editorial",
+    "press",
+    "career",
+    "hr",
+    "postmaster",
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "do-not-reply",
+    "service",
+    "support",
+    "sales",
+    "kafedra",
+    "кафедра",
+    "dekanat",
+    "деканат",
+    "priem",
+    "прием",
+    "priemnaya",
+    "приемная",
+    "redakciya",
+    "редакция",
+    "otdel",
+    "отдел",
+    "buh",
+    "бухг",
+    "kadr",
+    "кадр",
+    "ucheb",
+    "учебн",
+    "biblioteka",
+    "библиотека",
+    "magistratura",
+    "магистратура",
+    "aspirantura",
+    "аспирантура",
+    "kanc",
+    "канцеляр",
+    "iis",
+    "it-otdel",
+    "it",
+    "lab",
+    "лаборатория",
+    "dep",
+    "department",
+    "faculty",
+    "fac",
+    "fakultet",
+    "факультет",
+    "kurs",
+    "курс",
+    "metod",
+    "метод",
+}
+
+ROLE_KEYWORDS: frozenset[str] = frozenset(_ROLE_KEYWORDS_BASE | _ROLE_FRAGMENT_HINTS)
 
 
 def _load_extra_role_keywords() -> set[str]:
@@ -84,6 +151,18 @@ _EXTRA_ROLE = _load_extra_role_keywords()
 if _EXTRA_ROLE:
     # Preserve frozenset semantics while extending with external values.
     ROLE_KEYWORDS = frozenset(set(ROLE_KEYWORDS) | _EXTRA_ROLE)
+    _ROLE_FRAGMENT_HINTS.update(_EXTRA_ROLE)
+
+_ROLE_FRAGMENT_RE = (
+    re.compile(
+        r"(?<![A-Za-zА-Яа-яЁё0-9])(" 
+        + "|".join(sorted(re.escape(token) for token in _ROLE_FRAGMENT_HINTS))
+        + r")(?![A-Za-zА-Яа-яЁё])",
+        re.IGNORECASE,
+    )
+    if _ROLE_FRAGMENT_HINTS
+    else None
+)
 
 # Patterns that should always be treated as role accounts even when tokenisation
 # does not catch them (e.g. ``do-not-reply`` → tokens ``{"do", "not", "reply"}``).
@@ -161,6 +240,9 @@ def classify_email_role(
 
     if ROLE_LOCAL_RE.match(local_lower):
         return {"class": "role", "score": 0.0, "reason": "role-local"}
+
+    if _ROLE_FRAGMENT_RE and _ROLE_FRAGMENT_RE.search(local_lower):
+        return {"class": "role", "score": 0.0, "reason": "role-fragment"}
 
     tokens = _tokenise(local_lower)
     if tokens & ROLE_KEYWORDS:
