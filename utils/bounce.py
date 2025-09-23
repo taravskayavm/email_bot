@@ -1,7 +1,12 @@
-import os, re, ssl, socket, imaplib, email, time
+import os, ssl, socket, imaplib, email, time
 from datetime import datetime, timedelta, timezone
 from .send_stats import log_bounce
 from .bounce_pop3 import sync_bounces_pop3
+from .bounce_common import (
+    is_bounce_from,
+    extract_original_message,
+    extract_recipient_fallback,
+)
 
 BOUNCE_SINCE_DAYS = int(os.getenv("BOUNCE_SINCE_DAYS","7"))
 INBOX_MAILBOX = os.getenv("INBOX_MAILBOX","INBOX")
@@ -13,7 +18,6 @@ IMAP_TIMEOUT = int(os.getenv("IMAP_TIMEOUT","15"))
 IMAP_RETRIES = int(os.getenv("IMAP_RETRIES","3"))
 PREFER_IPV4 = os.getenv("IMAP_IPV4_ONLY","0") == "1"
 
-BOUNCE_FROM = re.compile(r"(mailer-daemon|postmaster)@", re.I)
 
 def _imap_connect():
     addrinfos = socket.getaddrinfo(IMAP_HOST, IMAP_PORT, 0, socket.SOCK_STREAM)
@@ -74,27 +78,15 @@ def sync_bounces():
         if typ != "OK" or not msgd:
             continue
         m = email.message_from_bytes(msgd[0][1])
-        if not BOUNCE_FROM.search(m.get('From','')):
+        if not is_bounce_from(m.get('From','')):
             continue
 
-        # Ищем вложенный оригинал
-        orig = None
-        for part in m.walk():
-            ctype = part.get_content_type()
-            if ctype == 'message/rfc822':
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        orig = email.message_from_bytes(payload)
-                        break
-                except Exception:
-                    pass
+        orig = extract_original_message(m)
 
         if not orig:
             # fallback: иногда поле Diagnostic-Code в тексте даёт получателя
-            rcpt = m.get('Final-Recipient','') or m.get('Original-Recipient','')
+            rcpt = extract_recipient_fallback(m)
             if rcpt:
-                rcpt = rcpt.split(';')[-1].strip()
                 log_bounce(rcpt, m.get('Subject','(bounce)'))
                 count += 1
             continue

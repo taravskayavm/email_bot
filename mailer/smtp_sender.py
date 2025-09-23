@@ -34,8 +34,45 @@ except Exception:
     TIMEOUT = 30.0
 
 DOMAIN_RATE_LIMIT = int(os.getenv("DOMAIN_RATE_LIMIT_PER_MIN", "30"))
-_domain_counters = defaultdict(int)
-_last_minute = None
+
+
+class DomainRateLimiter:
+    """Ограничитель отправок по домену в расчёте на минуту."""
+
+    def __init__(self, limit_per_min: int) -> None:
+        self.limit = max(0, int(limit_per_min))
+        self._counters: dict[str, int] = defaultdict(int)
+        self._window = None  # type: datetime | None
+
+    def plan(
+        self, addresses: list[str]
+    ) -> tuple[list[str], list[str], dict[str, int]]:
+        if self.limit <= 0:
+            return list(addresses), [], {}
+        now = datetime.utcnow().replace(second=0, microsecond=0)
+        if self._window is None or now != self._window:
+            self._counters.clear()
+            self._window = now
+        send_now: list[str] = []
+        defer: list[str] = []
+        increments: dict[str, int] = {}
+        for addr in addresses:
+            domain = _domain_of(addr)
+            used = self._counters[domain] + increments.get(domain, 0)
+            if used < self.limit:
+                increments[domain] = increments.get(domain, 0) + 1
+                send_now.append(addr)
+            else:
+                defer.append(addr)
+        return send_now, defer, increments
+
+    def commit(self, increments: dict[str, int]) -> None:
+        for domain, count in increments.items():
+            if count:
+                self._counters[domain] += count
+
+
+_rate_limiter = DomainRateLimiter(DOMAIN_RATE_LIMIT)
 
 
 def _domain_of(addr: str) -> str:
@@ -43,33 +80,15 @@ def _domain_of(addr: str) -> str:
 
 
 def _rate_plan(addresses: list[str]) -> tuple[list[str], list[str], dict[str, int]]:
-    """Split addresses into immediate send vs. deferred respecting domain limit."""
+    """Back-compat обёртка для планирования по доменам."""
 
-    if DOMAIN_RATE_LIMIT <= 0:
-        return list(addresses), [], {}
-    global _last_minute
-    now = datetime.utcnow().replace(second=0, microsecond=0)
-    if _last_minute is None or now != _last_minute:
-        _domain_counters.clear()
-        _last_minute = now
-    send_now: list[str] = []
-    defer: list[str] = []
-    increments: dict[str, int] = {}
-    for addr in addresses:
-        domain = _domain_of(addr)
-        used = _domain_counters[domain] + increments.get(domain, 0)
-        if used < DOMAIN_RATE_LIMIT:
-            increments[domain] = increments.get(domain, 0) + 1
-            send_now.append(addr)
-        else:
-            defer.append(addr)
-    return send_now, defer, increments
+    return _rate_limiter.plan(addresses)
 
 
 def _commit_rate_plan(increments: dict[str, int]) -> None:
-    for domain, count in increments.items():
-        if count:
-            _domain_counters[domain] += count
+    """Back-compat обёртка фиксации квоты."""
+
+    _rate_limiter.commit(increments)
 
 
 def send_messages(messages: Iterable[EmailMessage], user: str, password: str, host: str) -> None:
