@@ -275,6 +275,7 @@ def _build_preview_data(
     blocked_invalid: Sequence[str],
     skipped_recent: Sequence[str],
     rule_days: int,
+    ready_count_override: int | None = None,
 ) -> PreviewData:
     state = _get_state(context)
     preview_chat = context.chat_data.get("send_preview") or {}
@@ -292,11 +293,20 @@ def _build_preview_data(
         suspicious=suspicious_rows,
         blocked=blocked_rows,
         duplicates=duplicates_rows,
+        planned_ready_count=ready_count_override,
     )
 
 
 def _compose_caption(data: PreviewData, rule_days: int) -> str:
-    lines = [f"✉️ Готово к отправке: {len(data.valid)} адресов."]
+    ready_planned = (
+        data.planned_ready_count if data.planned_ready_count is not None else len(data.valid)
+    )
+    lines = [f"✉️ Готово к отправке: {ready_planned} адресов."]
+    if data.planned_ready_count is not None and data.planned_ready_count < len(data.valid):
+        lines.append(
+            "ℹ️ Учтён дневной лимит "
+            f"{messaging.MAX_EMAILS_PER_DAY}: отправим {ready_planned} из {len(data.valid)}."
+        )
     if data.rejected_180d:
         lines.append(f"⏳ Отложено по правилу {rule_days} дн.: {len(data.rejected_180d)}")
     if data.blocked:
@@ -313,6 +323,35 @@ def _preview_keyboard() -> InlineKeyboardMarkup:
     return send_flow_keyboard()
 
 
+def _effective_ready_count(ready: Sequence[str], chat_id: int) -> int:
+    total = len(ready)
+    if total == 0:
+        return 0
+    cap = messaging.MAX_EMAILS_PER_DAY
+    if cap <= 0:
+        return total
+    try:
+        from emailbot import bot_handlers as bot_handlers_module  # local import to avoid cycles
+    except Exception:  # pragma: no cover - defensive fallback
+        bot_handlers_module = None
+    ignore_limit = False
+    if bot_handlers_module is not None and chat_id:
+        try:
+            ignore_limit = bot_handlers_module.is_force_send(chat_id)
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("is_force_send lookup failed", exc_info=True)
+            ignore_limit = False
+    if ignore_limit:
+        return total
+    try:
+        sent_today = messaging.get_sent_today()
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("get_sent_today failed", exc_info=True)
+        return total
+    remaining = max(0, cap - len(sent_today))
+    return min(total, remaining)
+
+
 async def send_preview_report(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -326,6 +365,10 @@ async def send_preview_report(
     """Generate an XLSX preview report and send it to the user."""
 
     rule_days = history_service.get_days_rule_default()
+    chat = update.effective_chat
+    chat_id = chat.id if chat else 0
+    planned_ready = _effective_ready_count(ready, chat_id)
+
     data = _build_preview_data(
         context,
         group_code,
@@ -335,9 +378,8 @@ async def send_preview_report(
         blocked_invalid,
         skipped_recent,
         rule_days,
+        ready_count_override=planned_ready,
     )
-    chat = update.effective_chat
-    chat_id = chat.id if chat else 0
     path = PREVIEW_DIR / f"preview_{chat_id}.xlsx"
     file_path = path
     try:

@@ -93,7 +93,10 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
                     if abs(page_long - page_short) > settings.FOOTNOTE_RADIUS_PAGES:
                         continue
                     added = loc_long[0]
-                    if not (added.isalnum() or _is_superscript(added)):
+                    # Раньше «сносочным» считался любой буквенно-цифровой префикс,
+                    # из-за чего отрезались первые буквы (a/b/c) у реальных адресов.
+                    # Теперь разрешаем только цифровые маркеры (в т.ч. надстрочные).
+                    if not (added.isdigit() or _is_superscript(added)):
                         continue
                     prev_short = _last_visible(short.pre)
                     prev_long = _last_visible(long.pre)
