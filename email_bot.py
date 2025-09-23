@@ -22,6 +22,7 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging
+from emailbot.handlers.manual_send import handle_send_flow_actions
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 
@@ -280,6 +281,13 @@ def main() -> None:
         app,
         CallbackQueryHandler(bot_handlers.select_group, pattern="^tpl:"),
         "cb:select_group",
+    )
+    _safe_add(
+        app,
+        CallbackQueryHandler(
+            handle_send_flow_actions, pattern=r"^bulk:send:(start|back|edit)$"
+        ),
+        "cb:bulk_send_flow",
     )
     _safe_add(
         app,

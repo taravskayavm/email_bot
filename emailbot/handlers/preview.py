@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence, TYPE_CHECKING
@@ -21,6 +22,8 @@ from emailbot.edit_service import (
     save_edit as save_edit_record,
 )
 from emailbot.report_preview import PreviewData, build_preview_workbook
+from emailbot.utils_preview_export import build_preview_excel
+from bot.keyboards import send_flow_keyboard
 from utils.email_clean import (
     dedupe_keep_original,
     drop_leading_char_twins,
@@ -30,12 +33,9 @@ from utils.email_clean import (
 if TYPE_CHECKING:  # pragma: no cover - typing helpers only
     from emailbot.bot_handlers import SessionState
 
+logger = logging.getLogger(__name__)
 
 PREVIEW_DIR = Path("var")
-_BACK_CALLBACK = "preview_back"
-_EDIT_CALLBACK = "preview_edit"
-_SHOW_EDITS_CALLBACK = "preview_edits_show"
-_CLEAR_EDITS_CALLBACK = "preview_edits_reset"
 _REFRESH_PREFIX = "preview_refresh:"
 
 MAX_TG = 4096
@@ -310,21 +310,7 @@ def _compose_caption(data: PreviewData, rule_days: int) -> str:
 
 
 def _preview_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton("Отправить", callback_data="start_sending"),
-            InlineKeyboardButton("Вернуться / Править", callback_data=_BACK_CALLBACK),
-        ]
-    ]
-    if C.ALLOW_EDIT_AT_PREVIEW:
-        rows.append([InlineKeyboardButton("✏️ Исправить адрес", callback_data=_EDIT_CALLBACK)])
-    rows.append(
-        [
-            InlineKeyboardButton("📄 Показать правки", callback_data=_SHOW_EDITS_CALLBACK),
-            InlineKeyboardButton("♻️ Сбросить правки", callback_data=_CLEAR_EDITS_CALLBACK),
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
+    return send_flow_keyboard()
 
 
 async def send_preview_report(
@@ -353,13 +339,22 @@ async def send_preview_report(
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     path = PREVIEW_DIR / f"preview_{chat_id}.xlsx"
-    build_preview_workbook(data, path)
+    file_path = path
+    try:
+        build_preview_workbook(data, path)
+    except Exception:  # pragma: no cover - fallback for optional deps
+        logger.exception("Failed to build detailed preview workbook; using fallback export.")
+        fallback_path = build_preview_excel(
+            (row.get("email", "") for row in data.valid),
+            (row.get("email", "") for row in data.suspicious),
+        )
+        file_path = Path(fallback_path)
     caption = _compose_caption(data, rule_days)
     keyboard = _preview_keyboard()
-    with path.open("rb") as fh:
+    with file_path.open("rb") as fh:
         await update.callback_query.message.reply_document(
             document=fh,
-            filename=path.name,
+            filename=file_path.name,
             caption=caption,
             reply_markup=keyboard,
         )
@@ -382,10 +377,12 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ]
     lines = ["Можно вернуться к редактированию списка."]
     if C.ALLOW_EDIT_AT_PREVIEW:
-        lines.append("Используйте кнопки «✏️ Исправить №…» в сообщении с анализом выше.")
+        lines.append(
+            "Используйте кнопку «✏️ Исправить адрес» в сообщении с анализом выше."
+        )
     else:
         lines.append(
-            "После выбора направления будут доступны кнопки «✏️ Исправить №…»."
+            "После выбора направления будет доступна кнопка «✏️ Исправить адрес»."
         )
     if dropped:
         preview_lines = [

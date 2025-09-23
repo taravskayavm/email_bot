@@ -1,4 +1,5 @@
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -38,3 +39,11 @@ def log_error(msg: str) -> None:
             f.write(f"{datetime.now().isoformat()} {msg}\n")
     except Exception:
         pass
+
+
+try:  # pragma: no cover - optional bridge for legacy imports
+    from . import utils_preview_export as _preview_export
+
+    sys.modules[__name__ + ".preview_export"] = _preview_export
+except Exception:  # pragma: no cover - ignore if optional dependency missing
+    pass

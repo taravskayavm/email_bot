@@ -69,3 +69,14 @@ def directions_keyboard(directions: list[str]) -> InlineKeyboardMarkup:
         )
     builder.adjust(1)
     return builder.as_markup()
+
+
+def send_flow_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown before sending bulk e-mails."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🚀 Отправить", callback_data="bulk:send:start")
+    builder.button(text="↩️ Вернуться / Править", callback_data="bulk:send:back")
+    builder.button(text="✏️ Исправить адрес", callback_data="bulk:send:edit")
+    builder.adjust(1)
+    return builder.as_markup()
