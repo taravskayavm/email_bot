@@ -65,35 +65,47 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
 
     removed: set[int] = set()
 
-    for base, lst in grouped.items():
-        for i, (idx_long, long, page_long) in enumerate(lst):
-            loc_long, dom_long = long.email.split("@", 1)
-            for j, (idx_short, short, page_short) in enumerate(lst):
-                if i == j or idx_short in removed or idx_long in removed:
+    for _base, lst in grouped.items():
+        # Group by domain first to avoid redundant cross-domain checks.
+        by_domain: dict[str, list[tuple[int, "EmailHit", int, str]]] = {}
+        for idx, hit, page in lst:
+            local, dom = hit.email.split("@", 1)
+            by_domain.setdefault(dom, []).append((idx, hit, page, local))
+
+        for domain_items in by_domain.values():
+            short_map: dict[str, list[tuple[int, "EmailHit", int]]] = {}
+            long_items: list[tuple[int, "EmailHit", int, str]] = []
+            for idx, hit, page, local in domain_items:
+                if local:
+                    short_map.setdefault(local, []).append((idx, hit, page))
+                long_items.append((idx, hit, page, local))
+
+            for idx_long, long, page_long, loc_long in long_items:
+                if len(loc_long) < 2:
                     continue
-                if abs(page_long - page_short) > settings.FOOTNOTE_RADIUS_PAGES:
+                loc_short = loc_long[1:]
+                candidates = short_map.get(loc_short)
+                if not candidates:
                     continue
-                loc_short, dom_short = short.email.split("@", 1)
-                if dom_long != dom_short:
-                    continue
-                if len(loc_long) != len(loc_short) + 1:
-                    continue
-                if not loc_long.endswith(loc_short):
-                    continue
-                added = loc_long[0]
-                if not (added.isalnum() or _is_superscript(added)):
-                    continue
-                prev_short = _last_visible(short.pre)
-                prev_long = _last_visible(long.pre)
-                cond = False
-                if prev_short and (prev_short.isdigit() or _is_superscript(prev_short)):
-                    cond = True
-                if prev_long and (prev_long.isdigit() or _is_superscript(prev_long)):
-                    cond = True
-                if not cond:
-                    continue
-                removed.add(idx_short)
-                stats["footnote_pairs_merged"] = stats.get("footnote_pairs_merged", 0) + 1
+                for idx_short, short, page_short in candidates:
+                    if idx_short == idx_long or idx_short in removed or idx_long in removed:
+                        continue
+                    if abs(page_long - page_short) > settings.FOOTNOTE_RADIUS_PAGES:
+                        continue
+                    added = loc_long[0]
+                    if not (added.isalnum() or _is_superscript(added)):
+                        continue
+                    prev_short = _last_visible(short.pre)
+                    prev_long = _last_visible(long.pre)
+                    cond = False
+                    if prev_short and (prev_short.isdigit() or _is_superscript(prev_short)):
+                        cond = True
+                    if prev_long and (prev_long.isdigit() or _is_superscript(prev_long)):
+                        cond = True
+                    if not cond:
+                        continue
+                    removed.add(idx_short)
+                    stats["footnote_pairs_merged"] = stats.get("footnote_pairs_merged", 0) + 1
 
     return [h for idx, h in enumerate(hits) if idx not in removed]
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from typing import Dict, Iterable
 
@@ -54,6 +56,34 @@ ROLE_KEYWORDS: frozenset[str] = frozenset(
         "webmaster",
     }
 )
+
+
+def _load_extra_role_keywords() -> set[str]:
+    """Load additional role keywords from ``ROLE_KEYWORDS_FILE`` if provided."""
+
+    env_value = os.getenv("ROLE_KEYWORDS_FILE", "").strip()
+    if not env_value:
+        return set()
+
+    try:
+        candidate_path = os.path.expanduser(os.path.expandvars(env_value))
+        if os.path.exists(candidate_path):
+            with open(candidate_path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        else:
+            data = json.loads(env_value)
+    except Exception:
+        return set()
+
+    if isinstance(data, list):
+        return {str(item).strip().lower() for item in data if str(item).strip()}
+    return set()
+
+
+_EXTRA_ROLE = _load_extra_role_keywords()
+if _EXTRA_ROLE:
+    # Preserve frozenset semantics while extending with external values.
+    ROLE_KEYWORDS = frozenset(set(ROLE_KEYWORDS) | _EXTRA_ROLE)
 
 # Patterns that should always be treated as role accounts even when tokenisation
 # does not catch them (e.g. ``do-not-reply`` → tokens ``{"do", "not", "reply"}``).
