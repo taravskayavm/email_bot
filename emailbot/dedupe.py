@@ -65,32 +65,32 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
 
     removed: set[int] = set()
 
-    for _base, lst in grouped.items():
-        # Group by domain first to avoid redundant cross-domain checks.
+    for base, lst in grouped.items():
+        # Прединдексация по домену и локальной части для снижения числа сравнений
         by_domain: dict[str, list[tuple[int, "EmailHit", int, str]]] = {}
-        for idx, hit, page in lst:
-            local, dom = hit.email.split("@", 1)
-            by_domain.setdefault(dom, []).append((idx, hit, page, local))
+        for idx, h, page in lst:
+            local, dom = h.email.split("@", 1)
+            by_domain.setdefault(dom, []).append((idx, h, page, local))
 
-        for domain_items in by_domain.values():
+        for dom, items in by_domain.items():
+            # Карта коротких локальных частей (кандидаты для суффикс-сопоставления)
             short_map: dict[str, list[tuple[int, "EmailHit", int]]] = {}
             long_items: list[tuple[int, "EmailHit", int, str]] = []
-            for idx, hit, page, local in domain_items:
-                if local:
-                    short_map.setdefault(local, []).append((idx, hit, page))
-                long_items.append((idx, hit, page, local))
+            for idx, h, page, local in items:
+                short_map.setdefault(local, []).append((idx, h, page))
+                long_items.append((idx, h, page, local))
 
             for idx_long, long, page_long, loc_long in long_items:
                 if len(loc_long) < 2:
                     continue
                 loc_short = loc_long[1:]
-                candidates = short_map.get(loc_short)
-                if not candidates:
-                    continue
-                for idx_short, short, page_short in candidates:
-                    if idx_short == idx_long or idx_short in removed or idx_long in removed:
+                for idx_short, short, page_short in short_map.get(loc_short, []):
+                    if idx_short in removed or idx_long in removed or idx_short == idx_long:
                         continue
                     if abs(page_long - page_short) > settings.FOOTNOTE_RADIUS_PAGES:
+                        continue
+                    # домен уже одинаковый, длина проверена префильтром
+                    if not loc_long.endswith(loc_short):
                         continue
                     added = loc_long[0]
                     # Раньше «сносочным» считался любой буквенно-цифровой префикс,
