@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import imaplib
 import logging
 import os
 import signal
@@ -96,8 +97,71 @@ def main() -> None:
         SecretFilter([token, messaging.EMAIL_PASSWORD, messaging.EMAIL_ADDRESS])
     )
 
+    try:
+        templates_dir = SCRIPT_DIR / "templates"
+        required = {
+            "medicine.html",
+            "sport.html",
+            "tourism.html",
+            "psychology.html",
+            "geography.html",
+            "bioinformatics.html",
+        }
+        existing = {
+            path.name for path in templates_dir.glob("*.html")
+        } if templates_dir.exists() else set()
+        missing = sorted(required - existing)
+        if missing:
+            logger.warning(
+                "Templates missing in ./templates: %s (бот продолжит работу; "
+                "используйте templates/examples/ как образец)",
+                ", ".join(missing),
+            )
+    except Exception as exc:
+        logger.debug("templates check failed: %r", exc)
+
     os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
     messaging.dedupe_blocked_file()
+
+    try:
+        imap_cache = messaging.IMAP_FOLDER_FILE
+        need_probe = True
+        if imap_cache.exists():
+            try:
+                cached_name = imap_cache.read_text(encoding="utf-8").strip()
+                need_probe = not cached_name
+            except OSError:
+                need_probe = True
+        if need_probe:
+            imap_host = os.getenv("IMAP_HOST", "")
+            raw_port = os.getenv("IMAP_PORT", "")
+            try:
+                imap_port = int(raw_port) if raw_port else 993
+            except ValueError:
+                imap_port = 993
+            user = messaging.EMAIL_ADDRESS or os.getenv("EMAIL_ADDRESS", "")
+            password = messaging.EMAIL_PASSWORD or os.getenv("EMAIL_PASSWORD", "")
+            if imap_host and user and password:
+                imap = imaplib.IMAP4_SSL(imap_host, imap_port)
+                logged_in = False
+                try:
+                    imap.login(user, password)
+                    logged_in = True
+                    messaging.detect_sent_folder(imap)
+                finally:
+                    if logged_in:
+                        try:
+                            imap.logout()
+                        except Exception:
+                            pass
+                    try:
+                        imap.shutdown()
+                    except Exception:
+                        pass
+            else:
+                logger.debug("IMAP sent folder warmup skipped: missing credentials")
+    except Exception as exc:
+        logger.debug("IMAP sent folder warmup skipped: %r", exc)
 
     # централизованный обработчик ошибок
     # (ранее мог не регистрироваться, если вызывали вне этого файла)

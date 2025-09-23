@@ -36,6 +36,7 @@ from bot.keyboards import build_templates_kb
 from services.templates import get_template, get_template_label
 from emailbot import config as C
 from emailbot.notify import notify
+from .diag import build_diag_text, env_snapshot, imap_ping, smtp_ping, smtp_settings
 
 from utils.email_clean import (
     canonicalize_email,
@@ -66,6 +67,7 @@ from .extraction import normalize_email, smart_extract_emails
 from .reporting import build_mass_report_text, log_mass_filter_digest
 from .settings_store import DEFAULTS
 from .services.cooldown import should_skip_by_cooldown
+from .services.cooldown import COOLDOWN_DAYS
 
 
 # --- Новое состояние для ручного ввода исправлений ---
@@ -321,7 +323,6 @@ from .messaging import (  # noqa: E402,F401  # isort: skip
     SendOutcome,
     add_blocked_email,
     clear_recent_sent_cache,
-    count_sent_today,
     dedupe_blocked_file,
     get_blocked_emails,
     get_preferred_sent_folder,
@@ -898,7 +899,7 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to toggle experimental features."""
+    """Show key feature flags and provide toggles for advanced settings."""
 
     user = update.effective_user
     if not user or user.id not in ADMIN_IDS:
@@ -906,6 +907,49 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     settings.load()
+
+    def _env_or_default(name: str, fallback: str) -> str:
+        value = os.getenv(name)
+        if value is None or value == "":
+            return fallback
+        return value
+
+    def _summary() -> str:
+        append_default = "on" if messaging.APPEND_TO_SENT else "off"
+        parts = ["⚙️ Включённые функции"]
+        parts.append(
+            f"• DAILY_SEND_LIMIT: {_env_or_default('DAILY_SEND_LIMIT', str(settings.DAILY_SEND_LIMIT))}"
+        )
+        parts.append(
+            f"• COOLDOWN_DAYS: {_env_or_default('COOLDOWN_DAYS', str(COOLDOWN_DAYS))}"
+        )
+        parts.append(
+            f"• APPEND_TO_SENT: {_env_or_default('APPEND_TO_SENT', f'default({append_default})')}"
+        )
+        parts.append(
+            f"• OBFUSCATION_ENABLE: {_env_or_default('OBFUSCATION_ENABLE', '0')}"
+        )
+        parts.append(
+            f"• CONFUSABLES_NORMALIZE: {_env_or_default('CONFUSABLES_NORMALIZE', '0')}"
+        )
+        parts.append(
+            f"• STRICT_DOMAIN_VALIDATE: {_env_or_default('STRICT_DOMAIN_VALIDATE', '0')}"
+        )
+        parts.append(
+            f"• IDNA_DOMAIN_NORMALIZE: {_env_or_default('IDNA_DOMAIN_NORMALIZE', '0')}"
+        )
+        parts.append(f"• INLINE_LOGO: {_env_or_default('INLINE_LOGO', '0')}")
+        parts.append(
+            f"• EMAIL_ROLE_PERSONAL_ONLY: {_env_or_default('EMAIL_ROLE_PERSONAL_ONLY', '1')}"
+        )
+        parts.append(
+            f"• STRICT_OBFUSCATION: {'on' if settings.STRICT_OBFUSCATION else 'off'}"
+        )
+        parts.append(
+            f"• PDF_LAYOUT_AWARE: {'on' if settings.PDF_LAYOUT_AWARE else 'off'}"
+        )
+        parts.append(f"• ENABLE_OCR: {'on' if settings.ENABLE_OCR else 'off'}")
+        return "\n".join(parts)
 
     def _status() -> str:
         lines = []
@@ -970,9 +1014,9 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "PDF-layout — OFF, OCR — OFF."
         )
 
-    await _safe_reply_text(update.message, 
-        f"{_status()}\n\n{_doc()}", reply_markup=_keyboard()
-    )
+    summary = _summary()
+    text = f"{summary}\n\n{_status()}\n\n{_doc()}"
+    await _safe_reply_text(update.message, text, reply_markup=_keyboard())
 
 
 async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1107,57 +1151,11 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user or user.id not in ADMIN_IDS:
         return
 
-    import csv
-    import sys
-    from datetime import datetime
-
-    import aiohttp
-    import telegram
-
-    from .messaging_utils import BOUNCE_LOG_PATH
-
-    versions = {
-        "python": sys.version.split()[0],
-        "telegram": telegram.__version__,
-        "aiohttp": aiohttp.__version__,
-    }
-    bounce_today = 0
-    if BOUNCE_LOG_PATH.exists():
-        today = datetime.utcnow().date()
-        with BOUNCE_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                try:
-                    dt = datetime.fromisoformat(row.get("ts", ""))
-                    if dt.date() == today:
-                        bounce_today += 1
-                except Exception:
-                    pass
-
-    flags = {
-        "STRICT_OBFUSCATION": settings.STRICT_OBFUSCATION,
-        "PDF_LAYOUT_AWARE": settings.PDF_LAYOUT_AWARE,
-        "ENABLE_OCR": settings.ENABLE_OCR,
-    }
-
-    lines = [
-        "Versions:",
-        f"  Python: {versions['python']}",
-        f"  telegram: {versions['telegram']}",
-        f"  aiohttp: {versions['aiohttp']}",
-        "Limits:",
-        f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
-        "Flags:",
-    ]
-    for k, v in flags.items():
-        lines.append(f"  {k}: {v}")
-    lines.extend(
-        [
-            "Counters:",
-            f"  sent_today: {count_sent_today()}",
-            f"  bounces_today: {bounce_today}",
-        ]
-    )
-    await notify(update.message, "\n".join(lines), event="analysis", force=True)
+    try:
+        text = build_diag_text()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        text = f"Диагностика: ошибка {type(exc).__name__}: {exc}"
+    await notify(update.message, text, event="analysis", force=True)
 
 
 async def dedupe_log_command(
@@ -1375,6 +1373,33 @@ async def handle_reports_debug(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Время сейчас (UTC): {now_utc}",
             f"TZ отчёта: {current_tz_label()}",
         ]
+        try:
+            snap = env_snapshot()
+            host, port, mode, use_ssl, use_starttls = smtp_settings(snap)
+            smtp_result = smtp_ping(host, port, mode, use_ssl=use_ssl, use_starttls=use_starttls)
+            imap_host = snap.get("IMAP_HOST") or "imap.mail.ru"
+            try:
+                imap_port = int(snap.get("IMAP_PORT") or "993")
+            except Exception:
+                imap_port = 993
+            imap_result = imap_ping(imap_host, imap_port)
+            msg.extend(
+                [
+                    "",
+                    (
+                        "SMTP ping: "
+                        f"{'OK' if smtp_result.ok else 'FAIL'} ({smtp_result.latency_ms} ms)"
+                        + (f" – {smtp_result.detail}" if not smtp_result.ok else "")
+                    ),
+                    (
+                        "IMAP ping: "
+                        f"{'OK' if imap_result.ok else 'FAIL'} ({imap_result.latency_ms} ms)"
+                        + (f" – {imap_result.detail}" if not imap_result.ok else "")
+                    ),
+                ]
+            )
+        except Exception:
+            pass
         await _safe_reply_text(update.message, "\n".join(msg))
     except Exception as e:  # pragma: no cover - best effort
         await _safe_reply_text(update.message, f"Diag error: {e!r}")

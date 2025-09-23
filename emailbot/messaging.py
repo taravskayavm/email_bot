@@ -105,6 +105,7 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 
 IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
+_smtp_mode = os.getenv("SMTP_MODE", "auto").strip().lower() or "auto"
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = C.DOMAIN_RATE_LIMIT_SEC
 _batch_idempotency: Set[str] = set()
@@ -177,6 +178,16 @@ def _smtp_reason(exc: Exception) -> str:
     if reason:
         return str(reason)
     return str(exc)
+
+
+def _smtp_context_str() -> str:
+    port = os.getenv("SMTP_PORT", "")
+    ssl_flag = os.getenv("SMTP_SSL", "")
+    timeout = os.getenv("SMTP_TIMEOUT", "")
+    return (
+        f"host={SMTP_HOST} port={port or 'default'} ssl={ssl_flag or 'default'} "
+        f"mode={_smtp_mode} timeout={timeout or 'default'}"
+    )
 
 
 def _raw_to_text(raw_message: str | bytes) -> str:
@@ -693,7 +704,12 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                 break
             except Exception as e:
                 last_exc = e
-                logger.warning("SMTP send failed to %s: %s", recipient, e)
+                logger.warning(
+                    "SMTP send failed to %s: %s | %s",
+                    recipient,
+                    e,
+                    _smtp_context_str(),
+                )
                 try:
                     log_error(
                         recipient,
@@ -928,11 +944,15 @@ def send_email(
 
         return SendOutcome.SENT
     except smtplib.SMTPResponseException as exc:
-        log_internal_error(f"send_email SMTP error for {recipient}: {exc}")
+        log_internal_error(
+            f"send_email SMTP error for {recipient}: {exc} | {_smtp_context_str()}"
+        )
         _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
         return SendOutcome.ERROR
     except Exception as exc:  # pragma: no cover - best-effort safety
-        log_internal_error(f"send_email: {recipient}: {exc}")
+        log_internal_error(
+            f"send_email: {recipient}: {exc} | {_smtp_context_str()}"
+        )
         _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
         return SendOutcome.ERROR
 
@@ -1078,7 +1098,12 @@ def send_email_with_sessions(
             pass
         raise
     except Exception as e:
-        logger.warning("SMTP send failed to %s: %s", recipient, e)
+        logger.warning(
+            "SMTP send failed to %s: %s | %s",
+            recipient,
+            e,
+            _smtp_context_str(),
+        )
         try:
             extra = {
                 "uuid": eb_uuid,
