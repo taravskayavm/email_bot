@@ -11,8 +11,8 @@ def load_env(script_dir: Path) -> None:
     try:
         load_dotenv(dotenv_path=script_dir / ".env")
         load_dotenv()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("load_env failed: %r", exc)
 
 
 def setup_logging(log_file: Path) -> None:
@@ -37,13 +37,13 @@ def log_error(msg: str) -> None:
         err_file = Path(__file__).resolve().parent / "bot_errors.log"
         with err_file.open("a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} {msg}\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("log_error append failed: %r", exc)
 
 
 try:  # pragma: no cover - optional bridge for legacy imports
     from . import utils_preview_export as _preview_export
 
     sys.modules[__name__ + ".preview_export"] = _preview_export
-except Exception:  # pragma: no cover - ignore if optional dependency missing
-    pass
+except Exception as exc:  # pragma: no cover - ignore if optional dependency missing
+    logger.debug("preview_export bridge not available: %r", exc)
