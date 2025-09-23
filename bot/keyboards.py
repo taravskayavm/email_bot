@@ -100,3 +100,23 @@ def build_templates_kb(
         storage[prefix] = mapping
 
     return InlineKeyboardMarkup(rows)
+
+
+def send_flow_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard shown before starting bulk send."""
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🚀 Отправить", callback_data="bulk:send:start")],
+            [
+                InlineKeyboardButton(
+                    "↩️ Вернуться / Править", callback_data="bulk:send:back"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адрес", callback_data="bulk:send:edit"
+                )
+            ],
+        ]
+    )

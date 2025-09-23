@@ -367,15 +367,16 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
     assert path.exists()
     markup = update.callback_query.message.reply_markups[-1]
     assert isinstance(markup, InlineKeyboardMarkup)
-    buttons = markup.inline_keyboard[0]
-    assert buttons[0].callback_data == "start_sending"
-    assert buttons[1].callback_data == "preview_back"
-    assert len(markup.inline_keyboard) >= 2
-    rows = [btn for row in markup.inline_keyboard for btn in row]
-    if C.ALLOW_EDIT_AT_PREVIEW:
-        assert any(button.callback_data == "preview_edit" for button in rows)
-    else:
-        assert all(button.callback_data != "preview_edit" for button in rows)
+    callbacks = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+    assert callbacks == [
+        "bulk:send:start",
+        "bulk:send:back",
+        "bulk:send:edit",
+    ]
     assert "Готово к отправке" in update.callback_query.message.replies[-1]
     doc_entry = update.callback_query.message.documents[-1]
     assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")

@@ -13,7 +13,7 @@ from typing import Dict, List, Set
 
 from asyncio import Lock
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from emailbot.handlers.common import safe_answer
 
@@ -45,7 +45,11 @@ from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
 
 import emailbot.bot_handlers as bot_handlers_module
-from .preview import send_preview_report
+from .preview import (
+    go_back as preview_go_back,
+    request_edit as preview_request_edit,
+    send_preview_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,29 +223,6 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             blocked_invalid,
             skipped_recent,
         )
-
-        if not C.ALLOW_EDIT_AT_PREVIEW:
-            preview = context.chat_data.get("send_preview") or {}
-            dropped_preview = []
-            if isinstance(preview, dict):
-                dropped_preview = list(preview.get("dropped") or [])
-            if dropped_preview:
-                fix_buttons: list[InlineKeyboardButton] = []
-                for idx in range(min(len(dropped_preview), 5)):
-                    fix_buttons.append(
-                        InlineKeyboardButton(
-                            f"✏️ Исправить №{idx + 1}",
-                            callback_data=f"fix:{idx}",
-                        )
-                    )
-                if fix_buttons:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            "При необходимости — отредактируйте адреса перед отправкой:"
-                        ),
-                        reply_markup=InlineKeyboardMarkup([fix_buttons]),
-                    )
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -652,3 +633,22 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         bot_handlers_module.disable_force_send(chat_id)
 
     messaging.create_task_with_logging(long_job(), query.message.reply_text)
+
+
+async def handle_send_flow_actions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Route inline keyboard actions shown before bulk send."""
+
+    query = update.callback_query
+    data = (query.data or "").strip()
+    if data == "bulk:send:start":
+        await send_all(update, context)
+        return
+    if data == "bulk:send:back":
+        await preview_go_back(update, context)
+        return
+    if data == "bulk:send:edit":
+        await preview_request_edit(update, context)
+        return
+    await safe_answer(query)
