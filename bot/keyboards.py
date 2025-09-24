@@ -34,6 +34,13 @@ def build_parse_mode_kb(
             )
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔎 Предложить разделы", callback_data=f"parse|suggest|{value}"
+            )
+        ]
+    )
     if last_sections:
         human = ", ".join(last_sections[:3])
         if len(last_sections) > 3:
@@ -53,6 +60,33 @@ def build_parse_mode_kb(
             ]
         )
     return InlineKeyboardMarkup(rows)
+
+
+def build_sections_suggest_kb(
+    token: str, candidates: list[str], selected: set[str] | None
+) -> InlineKeyboardMarkup:
+    """Build keyboard for interactive section selection."""
+
+    active = selected or set()
+    rows: list[list[InlineKeyboardButton]] = []
+    for prefix in candidates:
+        mark = "✅" if prefix in active else "⬜"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark} {prefix}",
+                    callback_data=f"sect|toggle|{token}|{prefix}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton("▶️ Старт", callback_data=f"sect|run|{token}"),
+            InlineKeyboardButton("✖️ Отмена", callback_data=f"sect|cancel|{token}"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
 
 from services.templates import list_templates
 
