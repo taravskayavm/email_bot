@@ -2277,6 +2277,7 @@ async def handle_text_with_url(
     if not url:
         return False
 
+    domain = _domain_of(url)
     prefixes: list[str] = []
     for match in SECTIONS_RX.finditer(text):
         normalized = _norm_prefix(match.group(1))
@@ -2290,7 +2291,7 @@ async def handle_text_with_url(
         chat_id = chat.id if chat else None
         if chat_id is not None:
             try:
-                save_sections_for_domain(chat_id, _domain_of(url), prefixes)
+                save_sections_for_domain(chat_id, domain, prefixes)
             except Exception:
                 pass
         await _run_url_extraction(
@@ -2314,14 +2315,18 @@ async def handle_text_with_url(
     if chat_id is not None:
         try:
             last_sections = (
-                get_last_sections_for_domain(chat_id, _domain_of(url)) or []
+                get_last_sections_for_domain(chat_id, domain) or []
             )
         except Exception:
             last_sections = []
     try:
         prompt = await message.reply_text(
             "Нашла ссылку. Как парсить?",
-            reply_markup=build_parse_mode_kb(token, last_sections=last_sections),
+            reply_markup=build_parse_mode_kb(
+                token,
+                last_sections=last_sections,
+                domain=domain,
+            ),
         )
     except Exception:
         mapping.pop(token, None)
@@ -2636,6 +2641,7 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    domain = _domain_of(url)
     origin_message_id = (
         query.message.message_id
         if query.message and hasattr(query.message, "message_id")
@@ -2660,16 +2666,14 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         last_sections: list[str] = []
         if chat_id is not None:
             try:
-                last_sections = (
-                    get_last_sections_for_domain(chat_id, _domain_of(url)) or []
-                )
+                last_sections = get_last_sections_for_domain(chat_id, domain) or []
             except Exception:
                 last_sections = []
         if not last_sections:
             try:
                 await query.edit_message_text(
                     "Для этого домена сохранённых разделов нет. Выбери «🕸️ Выбрать разделы…».",
-                    reply_markup=build_parse_mode_kb(token),
+                    reply_markup=build_parse_mode_kb(token, domain=domain),
                 )
             except Exception:
                 pass

@@ -10,7 +10,9 @@ from telegram.ext import ContextTypes
 
 
 def build_parse_mode_kb(
-    token: str, last_sections: list[str] | None = None
+    token: str,
+    last_sections: list[str] | None = None,
+    domain: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Keyboard offering parse mode selection for a detected URL token."""
 
@@ -36,10 +38,16 @@ def build_parse_mode_kb(
         human = ", ".join(last_sections[:3])
         if len(last_sections) > 3:
             human += "…"
+        domain_label = (domain or "").strip()
+        if domain_label:
+            domain_label = domain_label.lower()
+            label = f"♻️ Разделы для {domain_label}: {human}"
+        else:
+            label = f"♻️ Разделы по умолчанию: {human}"
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"♻️ Разделы по умолчанию: {human}",
+                    label,
                     callback_data=f"parse|use_last|{value}",
                 )
             ]
