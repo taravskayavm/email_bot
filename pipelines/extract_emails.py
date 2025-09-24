@@ -403,22 +403,20 @@ def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
     """Fetch a single URL synchronously and decode using charset-normalizer."""
 
     headers = {"User-Agent": C.CRAWL_USER_AGENT}
-    try:
-        with httpx.Client(
-            follow_redirects=True,
-            timeout=timeout,
-            headers=headers,
-            http2=True,
-        ) as client:
-            response = client.get(url)
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if content_type and not any(
-                hint in content_type for hint in ("text", "html", "xml", "json")
-            ):
-                return ""
-            return best_effort_decode(response.content)
-    except Exception:
-        return ""
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=timeout,
+        headers=headers,
+        http2=True,
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        content_type = str(response.headers.get("content-type", "")).lower()
+        if content_type and not any(
+            hint in content_type for hint in ("text", "html", "xml", "json")
+        ):
+            return ""
+        return best_effort_decode(response.content)
 
 
 async def extract_from_url_async(
@@ -457,7 +455,16 @@ async def extract_from_url_async(
                 progress_cb(1, url)
             except Exception:
                 pass
-        html = _http_get_text(url)
+        try:
+            html = _http_get_text(url)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"HTTP ошибка при загрузке {url}: {exc.__class__.__name__}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Не удалось загрузить {url}: {exc.__class__.__name__}"
+            ) from exc
         emails, meta = extract_emails_pipeline(html or "")
         stats = dict(meta) if isinstance(meta, dict) else {}
         stats["pages"] = 1 if html else 0
@@ -486,8 +493,27 @@ async def extract_from_url_async(
     try:
         async for page_url, text in crawler.crawl():
             pages.append((page_url, text))
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"HTTP ошибка при загрузке {url}: {exc.__class__.__name__}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Не удалось загрузить {url}: {exc.__class__.__name__}"
+        ) from exc
     finally:
         await crawler.close()
+
+    if not pages:
+        last_error = getattr(crawler, "last_error", None)
+        if last_error is not None:
+            if isinstance(last_error, httpx.HTTPError):
+                raise RuntimeError(
+                    f"HTTP ошибка при загрузке {url}: {last_error.__class__.__name__}"
+                ) from last_error
+            raise RuntimeError(
+                f"Не удалось загрузить {url}: {last_error.__class__.__name__}"
+            ) from last_error
 
     combined_parts: list[str] = []
     for page_url, text in pages:

@@ -191,6 +191,16 @@ def main() -> None:
         "cmd:reports_debug",
     )
 
+    _safe_add(
+        app,
+        MessageHandler(
+            (filters.Entity("url") | filters.Regex(r"https?://\S+"))
+            & ~filters.COMMAND,
+            bot_handlers.message_router,
+        ),
+        "msg:url_router",
+    )
+
     # Inline-кнопки для подозрительных адресов
     _safe_add(
         app,
