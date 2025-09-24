@@ -213,6 +213,11 @@ def main() -> None:
     )
     _safe_add(
         app,
+        CallbackQueryHandler(bot_handlers.sections_cb, pattern=r"^sect\|"),
+        "cb:sections",
+    )
+    _safe_add(
+        app,
         ConversationHandler(
             entry_points=[],
             states={

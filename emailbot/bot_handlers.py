@@ -43,12 +43,17 @@ from telegram import (
 )
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
-from bot.keyboards import build_parse_mode_kb, build_templates_kb
+from bot.keyboards import (
+    build_parse_mode_kb,
+    build_sections_suggest_kb,
+    build_templates_kb,
+)
 from services.templates import get_template, get_template_label
 from emailbot import config as C
 from emailbot.notify import notify
 from .diag import build_diag_text, env_snapshot, imap_ping, smtp_ping, smtp_settings
 from .sections_prefs import get_last_sections_for_domain, save_sections_for_domain
+from crawler.section_discovery import discover_sections
 
 from utils.email_clean import (
     canonicalize_email,
@@ -2662,6 +2667,56 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
         return
 
+    if mode == "suggest":
+        try:
+            max_candidates = int(os.getenv("DISCOVERY_MAX_CANDIDATES", "12") or "12")
+        except Exception:
+            max_candidates = 12
+        try:
+            candidates = await asyncio.to_thread(
+                discover_sections,
+                url,
+                max_candidates=max_candidates,
+            )
+        except Exception:
+            candidates = []
+        candidates = candidates or []
+        if not candidates:
+            mapping.pop(token, None)
+            try:
+                await query.edit_message_text(
+                    "Не удалось предложить разделы автоматически. Укажи их руками: /news, /journals"
+                )
+            except Exception:
+                pass
+            return
+
+        last_saved: set[str] = set()
+        if chat_id is not None:
+            try:
+                last_saved = set(
+                    get_last_sections_for_domain(chat_id, domain) or []
+                )
+            except Exception:
+                last_saved = set()
+        state_map = context.user_data.setdefault("section_suggest_state", {})
+        state_map[token] = {
+            "url": url,
+            "domain": domain,
+            "candidates": list(candidates),
+            "selected": set(last_saved),
+        }
+        try:
+            await query.edit_message_text(
+                "Отметь разделы, по которым сканировать сайт:",
+                reply_markup=build_sections_suggest_kb(token, list(candidates), last_saved),
+            )
+        except Exception:
+            state_map.pop(token, None)
+            return
+        mapping.pop(token, None)
+        return
+
     if mode == "use_last":
         last_sections: list[str] = []
         if chat_id is not None:
@@ -2707,6 +2762,101 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         url,
         deep=deep,
         origin_message_id=origin_message_id,
+    )
+
+
+async def sections_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle interactive section selection callbacks."""
+
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    parts = (query.data or "").split("|", 3)
+    if len(parts) < 3:
+        return
+    _, action, token, *rest = parts
+
+    state_map: dict[str, dict[str, object]] = context.user_data.get(
+        "section_suggest_state", {}
+    )
+    state = state_map.get(token)
+    if not state:
+        try:
+            await query.edit_message_text(
+                "Состояние выбора разделов потерялось. Попробуй ещё раз."
+            )
+        except Exception:
+            pass
+        return
+
+    candidates = list(state.get("candidates") or [])
+    selected = set(state.get("selected") or set())
+
+    if action == "toggle":
+        prefix = rest[0] if rest else ""
+        prefix = prefix.strip()
+        if not prefix:
+            return
+        if prefix in selected:
+            selected.remove(prefix)
+        else:
+            selected.add(prefix)
+        state["selected"] = selected
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=build_sections_suggest_kb(token, candidates, selected)
+            )
+        except Exception:
+            pass
+        return
+
+    url = str(state.get("url") or "")
+    domain = str(state.get("domain") or "")
+    origin_message_id = (
+        query.message.message_id
+        if query.message and hasattr(query.message, "message_id")
+        else None
+    )
+    state_map.pop(token, None)
+    context.user_data.get("parse_mode_urls", {}).pop(token, None)
+
+    if action == "cancel":
+        try:
+            await query.edit_message_text("Выбор разделов отменён.")
+        except Exception:
+            pass
+        return
+
+    if action != "run":
+        return
+
+    if not url:
+        try:
+            await query.edit_message_text(
+                "Ссылка потерялась. Нажми «🔎 Предложить разделы» ещё раз."
+            )
+        except Exception:
+            pass
+        return
+
+    ordered_prefixes = [prefix for prefix in candidates if prefix in selected]
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    if chat_id is not None and ordered_prefixes:
+        try:
+            save_sections_for_domain(chat_id, domain, ordered_prefixes)
+        except Exception:
+            pass
+
+    await _run_url_extraction(
+        update,
+        context,
+        url,
+        deep=True,
+        origin_message_id=origin_message_id,
+        path_prefixes=ordered_prefixes or None,
     )
 
 
