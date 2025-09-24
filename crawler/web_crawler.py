@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable, Optional, Sequence
 from urllib import robotparser
+from urllib.parse import urlparse
 
 import httpx
 
@@ -51,8 +52,10 @@ class Crawler:
         max_pages: int | None = None,
         max_depth: int | None = None,
         on_page: Optional[Callable[[int, str], None]] = None,
+        path_prefixes: Sequence[str] | None = None,
     ) -> None:
         self.start = start_url
+        self.start_canonical = canonicalize(start_url, start_url) or start_url
         self.max_pages = max_pages or C.CRAWL_MAX_PAGES
         self.max_depth = max_depth or C.CRAWL_MAX_DEPTH
         self.client = httpx.AsyncClient(
@@ -64,12 +67,39 @@ class Crawler:
         self.robots = robotparser.RobotFileParser()
         self.pages_scanned = 0
         self.on_page = on_page
+        self.allowed_prefixes = self._normalize_prefixes(path_prefixes)
         try:
             robots_url = canonicalize(start_url, "/robots.txt") or start_url
             self.robots.set_url(robots_url)
             self.robots.read()
         except Exception:
             pass
+
+    @staticmethod
+    def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
+        result: list[str] = []
+        if not prefixes:
+            return result
+        for raw in prefixes:
+            if not isinstance(raw, str):
+                continue
+            cleaned = raw.strip()
+            if not cleaned:
+                continue
+            if not cleaned.startswith("/"):
+                cleaned = "/" + cleaned
+            if cleaned not in result:
+                result.append(cleaned)
+        return result
+
+    def _path_allowed(self, url: str) -> bool:
+        if not self.allowed_prefixes:
+            return True
+        try:
+            path = urlparse(url).path or "/"
+        except Exception:
+            return False
+        return any(path.startswith(prefix) for prefix in self.allowed_prefixes)
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -122,7 +152,7 @@ class Crawler:
         """Iterate over fetched pages yielding ``(url, html)`` pairs."""
 
         queue: deque[tuple[str, int]] = deque()
-        start_url = canonicalize(self.start, self.start) or self.start
+        start_url = self.start_canonical
         queue.append((start_url, 0))
         seen: set[str] = set()
         queued: set[str] = {start_url}
@@ -145,19 +175,23 @@ class Crawler:
                 continue
             target_url = final_url or url
             seen.add(target_url)
-            self.pages_scanned += 1
-            if self.on_page:
-                try:
-                    self.on_page(self.pages_scanned, target_url)
-                except Exception:
-                    pass
-            yield target_url, html
+            include_page = self._path_allowed(target_url)
+            if include_page:
+                self.pages_scanned += 1
+                if self.on_page:
+                    try:
+                        self.on_page(self.pages_scanned, target_url)
+                    except Exception:
+                        pass
+                yield target_url, html
             if depth >= self.max_depth:
                 continue
             for link in self.extract_links(target_url, html):
                 if link in seen or link in queued:
                     continue
                 if C.CRAWL_SAME_DOMAIN and not same_domain(self.start, link):
+                    continue
+                if not self._path_allowed(link):
                     continue
                 queue.append((link, depth + 1))
                 queued.add(link)
