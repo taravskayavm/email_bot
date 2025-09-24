@@ -43,7 +43,7 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from bot.keyboards import build_templates_kb
+from bot.keyboards import build_templates_kb, build_parse_mode_kb
 from services.templates import get_template, get_template_label
 from emailbot import config as C
 from emailbot.notify import notify
@@ -67,6 +67,7 @@ from utils.tld_utils import is_allowed_domain as _is_allowed_domain, is_foreign_
 
 STATS_PATH = str(_stats_path())
 _FALLBACK_EMAIL_RX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -2217,13 +2218,60 @@ async def prompt_manual_email(
     context.chat_data.pop("manual_selected_emails", None)
     context.chat_data.pop("manual_drop_reasons", None)
     _manual_override_clear(context)
-    await _safe_reply_text(update.message, 
+    await _safe_reply_text(update.message,
         (
             "Введите email или список email-адресов "
             "(через запятую/пробел/с новой строки):"
         )
     )
     context.user_data["awaiting_manual_email"] = True
+
+
+def _first_url(text: str | None) -> str | None:
+    """Return the first URL found in ``text`` or ``None`` if absent."""
+
+    match = URL_RX.search(text or "")
+    return match.group(0) if match else None
+
+
+async def handle_text_with_url(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Show mode selection keyboard when a text message contains a URL."""
+
+    message = update.message
+    if not message or not message.text:
+        return False
+    url = _first_url(message.text)
+    if not url:
+        return False
+
+    token = secrets.token_hex(6)
+    mapping = context.user_data.setdefault("parse_mode_urls", {})
+    mapping[token] = url
+    tokens_by_message = context.user_data.setdefault(
+        "parse_mode_tokens_by_message", {}
+    )
+    try:
+        prompt = await message.reply_text(
+            f"Нашла ссылку:\n{url}\nКак парсить?",
+            reply_markup=build_parse_mode_kb(token),
+        )
+    except Exception:
+        mapping.pop(token, None)
+        return False
+    if hasattr(prompt, "message_id"):
+        tokens_by_message[prompt.message_id] = token
+    # keep mapping reasonably small
+    if len(mapping) > 24:
+        for stale in list(mapping)[:-24]:
+            mapping.pop(stale, None)
+    if len(tokens_by_message) > 48:
+        for stale_id in list(tokens_by_message)[:-48]:
+            token_id = tokens_by_message.pop(stale_id, None)
+            if token_id and token_id not in tokens_by_message.values():
+                mapping.pop(token_id, None)
+    return True
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2429,315 +2477,502 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
-    urls = re.findall(r"https?://\S+", text)
-    if urls:
-        lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
-        if lock.locked():
-            await _safe_reply_text(update.message, "⏳ Уже идёт анализ этого URL")
+    if await handle_text_with_url(update, context):
+        return
+
+
+async def page_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Однократный парсинг страницы по команде /page <URL>."""
+
+    args = context.args or []
+    message = update.effective_message
+    text = message.text if message and message.text else ""
+    candidate = args[0] if args else _first_url(text)
+    url = (candidate or "").strip()
+    if not url:
+        if message:
+            await _safe_reply_text(
+                message,
+                "Укажи ссылку: /page https://пример.ру/статья",
+            )
+        return
+    await _run_url_extraction(update, context, url, deep=False)
+
+
+async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик inline-кнопок выбора режима парсинга."""
+
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+    parts = data.split("|", 2)
+    if len(parts) < 3:
+        try:
+            await query.edit_message_text("Не поняла выбор. Повтори, пожалуйста.")
+        except Exception:
+            pass
+        return
+    _, mode, token = parts
+    mapping = context.user_data.get("parse_mode_urls", {})
+    tokens_by_message = context.user_data.get("parse_mode_tokens_by_message", {})
+    if query.message and hasattr(query.message, "message_id"):
+        tokens_by_message.pop(query.message.message_id, None)
+    url = mapping.pop(token, None)
+    if not url:
+        await query.answer(
+            "Ссылка потерялась, отправь снова, пожалуйста.", show_alert=True
+        )
+        return
+    deep = mode == "deep"
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    origin_message_id = (
+        query.message.message_id
+        if query.message and hasattr(query.message, "message_id")
+        else None
+    )
+    await _run_url_extraction(
+        update,
+        context,
+        url,
+        deep=deep,
+        origin_message_id=origin_message_id,
+    )
+
+
+async def _run_url_extraction(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    url: str,
+    *,
+    deep: bool,
+    origin_message_id: int | None = None,
+) -> None:
+    """Общий раннер: запускает парсинг URL и управляет прогрессом/выводом."""
+
+    message = update.effective_message
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    clean_url = (url or "").strip()
+    if not clean_url:
+        if message:
+            await _safe_reply_text(message, "Ссылка не распознана. Пришли ещё раз.")
+        return
+    if chat_id is None and message:
+        chat_id = message.chat_id
+
+    lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
+    if lock.locked():
+        if message:
+            await _safe_reply_text(message, "⏳ Уже идёт анализ этого URL")
+        return
+
+    now = time.monotonic()
+    last = context.chat_data.get("last_url")
+    if last:
+        last_url_value = str(last.get("url") or "")
+        try:
+            last_ts = float(last.get("ts", 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        last_deep = bool(last.get("deep", True))
+        if (
+            last_url_value == clean_url
+            and last_deep == bool(deep)
+            and now - last_ts < 10.0
+        ):
+            if message:
+                await _safe_reply_text(message, "⏳ Уже идёт анализ этого URL")
             return
-        now = time.monotonic()
-        last = context.chat_data.get("last_url")
-        if last and last.get("urls") == urls and now - last.get("ts", 0) < 10:
-            await _safe_reply_text(update.message, "⏳ Уже идёт анализ этого URL")
-            return
-        context.chat_data["last_url"] = {"urls": urls, "ts": now}
-        batch_id = secrets.token_hex(8)
-        context.chat_data["batch_id"] = batch_id
+
+    context.chat_data["last_url"] = {"url": clean_url, "deep": deep, "ts": now}
+    batch_id = secrets.token_hex(8)
+    context.chat_data["batch_id"] = batch_id
+    if chat_id is not None:
         mass_state.set_batch(chat_id, batch_id)
-        _extraction_url.set_batch(batch_id)
-        context.chat_data["entry_url"] = urls[0]
-        context.chat_data["crawl_pages"] = 0
+    _extraction_url.set_batch(batch_id)
+    context.chat_data["entry_url"] = clean_url
+    context.chat_data["crawl_pages"] = 0
 
-        progress_state = {
-            "message_id": None,
-            "chat_id": update.effective_chat.id,
-            "pages": {},
-            "finished": False,
-        }
-        progress_lock = asyncio.Lock()
+    if origin_message_id is not None and chat_id is not None:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=origin_message_id, reply_markup=None
+            )
+        except Exception:
+            pass
 
-        async def _update_progress(text: str) -> None:
-            if not text:
-                return
+    mode_label = "🕸️ Сканируем сайт" if deep else "📄 Парсим страницу"
+    status_chat_id = chat_id
+    status_message_id: int | None = None
+    if message is not None:
+        try:
+            status_msg = await message.reply_text(
+                f"{mode_label}…\nПросмотрено страниц: 0\nПоследняя: {clean_url}"
+            )
+            status_chat_id = status_msg.chat_id
+            status_message_id = status_msg.message_id
+        except Exception:
+            status_msg = None
+    elif chat_id is not None:
+        try:
+            status_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{mode_label}…\nПросмотрено страниц: 0\nПоследняя: {clean_url}",
+            )
+            status_chat_id = status_msg.chat_id
+            status_message_id = status_msg.message_id
+        except Exception:
+            status_msg = None
+    else:
+        status_msg = None
+
+    visited = 0
+    last_url_seen = clean_url
+    last_edit_ts = 0.0
+    progress_cancelled = False
+    try:
+        max_updates = int(
+            os.getenv("PROGRESS_MAX_UPDATES_PER_MINUTE", "100") or "100"
+        )
+    except Exception:
+        max_updates = 100
+    max_updates = max(1, min(300, max_updates))
+    min_interval = 60.0 / float(max_updates)
+
+    def progress_cb(count: int, current_url: str) -> None:
+        nonlocal visited, last_url_seen, last_edit_ts, progress_cancelled
+        if progress_cancelled:
+            return
+        visited = count
+        if current_url:
+            last_url_seen = current_url
+        now_ts = time.time()
+        if now_ts - last_edit_ts < min_interval:
+            return
+        last_edit_ts = now_ts
+        if status_message_id is None or status_chat_id is None:
+            return
+
+        async def _apply() -> None:
             try:
-                message_id = progress_state.get("message_id")
-                if message_id:
-                    await context.bot.edit_message_text(
-                        chat_id=progress_state["chat_id"],
-                        message_id=message_id,
-                        text=text,
-                    )
-                else:
-                    message = await update.message.reply_text(text)
-                    progress_state["message_id"] = message.message_id
+                await context.bot.edit_message_text(
+                    chat_id=status_chat_id,
+                    message_id=status_message_id,
+                    text=(
+                        f"{mode_label}…\n"
+                        f"Просмотрено страниц: {visited}\n"
+                        f"Последняя: {last_url_seen}"
+                    ),
+                )
             except Exception:
                 pass
 
-        await _update_progress("🌐 Загружаем страницы...")
-
-        def _progress_factory(source_url: str):
-            def _progress(pages: int, page_url: str) -> None:
-                if progress_state.get("finished"):
-                    return
-
-                async def _notify() -> None:
-                    async with progress_lock:
-                        if progress_state.get("finished"):
-                            return
-                        progress_state["pages"][source_url] = (pages, page_url)
-                        total = sum(
-                            value[0] for value in progress_state["pages"].values()
-                        )
-                        last_url = page_url or source_url
-                        text = f"🕸️ Сканируем сайт… Просмотрено страниц: {total}"
-                        if last_url:
-                            text += f"\nПоследняя: {last_url}"
-                        await _update_progress(text)
-
-                try:
-                    asyncio.create_task(_notify())
-                except Exception:
-                    pass
-
-            return _progress
-
-        results = []
-        mode = context.chat_data.get("urlmode", "deep")
-        deep = mode != "single"
-        extract_fn = async_extract_emails_from_url
-        sig = inspect.signature(extract_fn)
-        accepts_deep = "deep" in sig.parameters
-        accepts_progress = "progress_cb" in sig.parameters
-        async with lock:
-            async with aiohttp.ClientSession() as session:
-                def _make_task(target_url: str):
-                    kwargs: dict[str, object] = {}
-                    if accepts_deep:
-                        kwargs["deep"] = deep
-                    if accepts_progress:
-                        kwargs["progress_cb"] = _progress_factory(target_url)
-                    return extract_fn(target_url, session, chat_id, batch_id, **kwargs)
-
-                tasks = [_make_task(url) for url in sorted(urls)]
-                results = await asyncio.gather(*tasks)
-        progress_state["finished"] = True
-        if batch_id != context.chat_data.get("batch_id"):
-            return
-        total_pages = 0
-        for result in results:
-            if not isinstance(result, tuple) or len(result) < 5:
-                continue
-            stats = result[4]
-            if isinstance(stats, dict):
-                total_pages += int(stats.get("pages", 0) or 0)
-        context.chat_data["crawl_pages"] = total_pages
-        if progress_state.get("message_id"):
-            await _update_progress(
-                f"✅ Сканирование завершено. Просмотрено страниц: {total_pages}"
-            )
-        allowed_all: Set[str] = set()
-        foreign_all: Set[str] = set()
-        repairs_all: List[tuple[str, str]] = []
-        footnote_dupes = 0
-        loose_meta: Set[str] = set()
-        suspicious_map: Dict[str, str] = {}
-        role_rejected_total = 0
-        for _, allowed, foreign, repairs, stats in results:
-            allowed_all.update(allowed)
-            foreign_all.update(foreign)
-            repairs_all.extend(repairs)
-            footnote_dupes += stats.get("footnote_pairs_merged", 0)
-            _ingest_meta_to(loose_meta, suspicious_map, stats)
-            if isinstance(stats, dict):
-                try:
-                    role_rejected_total += int(stats.get("role_rejected", 0) or 0)
-                except Exception:
-                    pass
-
-        if loose_meta:
-            extra_foreign = {
-                addr
-                for addr in loose_meta
-                if addr and "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
-            }
-            foreign_all.update(extra_foreign)
-
-        technical_emails = [
-            e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
-        ]
-        filtered = [
-            e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
-        ]
-        meta_suspects = {
-            addr for addr, reason in suspicious_map.items() if reason == "suspect"
-        }
-        heuristics_suspects = {addr for addr in filtered if _is_suspect_email(addr)}
-        suspects_set: Set[str] = set(meta_suspects) | heuristics_suspects
-        filtered_set_initial = set(filtered)
-        suspects_removed = suspects_set & filtered_set_initial
-        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
-            filtered = [addr for addr in filtered if addr not in suspects_removed]
-        filtered = sorted(filtered)
-        filtered_set_final = set(filtered)
-
-        dropped_current: List[Tuple[str, str]] = []
-        for email in sorted(allowed_all):
-            if email in filtered_set_final:
-                continue
-            if email in technical_emails:
-                dropped_current.append((email, "technical-address"))
-            elif not is_allowed_tld(email):
-                dropped_current.append((email, "foreign-domain"))
-            else:
-                dropped_current.append((email, "filtered"))
-
-        suspicious_items = sorted(suspicious_map.items())
-        for candidate, reason in suspicious_items:
-            if reason == "suspect" and not SUSPECTS_REQUIRE_CONFIRM:
-                continue
-            dropped_current.append((candidate, reason))
-        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
-            existing_suspects = {
-                addr for addr, reason in suspicious_items if reason == "suspect"
-            }
-            heuristics_only = sorted(suspects_removed - existing_suspects)
-            for addr in heuristics_only:
-                dropped_current.append((addr, "suspect"))
-
-        all_found = {addr for addr in allowed_all | loose_meta if addr}
-        preview_stats = {
-            "suspicious_count": len(suspicious_map),
-            "foreign_domains": len(foreign_all),
-            "role_rejected": role_rejected_total,
-        }
-        preview_message: str | None = None
-        if all_found or filtered or preview_stats["suspicious_count"] or preview_stats["role_rejected"]:
-            preview_message = _format_preview_text(
-                all_found,
-                filtered,
-                dropped_current,
-                preview_stats,
-            )
-
-        state = get_state(context)
-        state.all_emails.update(allowed_all)
-        current = set(state.to_send)
-        current.update(filtered)
-        state.to_send = _drop_truncated_twins(sorted(current), state=state)
-        context.user_data["emails_for_sending"] = list(state.to_send)
-        foreign_total = set(state.foreign) | set(foreign_all)
-        state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
-        state.repairs_sample = sample_preview(
-            [f"{b} → {g}" for (b, g) in state.repairs], 6
-        )
-        total_footnote = state.footnote_dupes + footnote_dupes
-
-        existing = list(state.dropped or [])
-        combined_map: dict[str, str] = {}
-        for addr, reason in existing + dropped_current:
-            if addr not in combined_map:
-                combined_map[addr] = reason
-        dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
-
         try:
-            cooldown_blocked = [
-                addr
-                for addr in sorted(
-                    {
-                        str(candidate).strip().lower()
-                        for candidate in state.all_emails
-                        if isinstance(candidate, str) and "@" in candidate
-                    }
-                )
-                if messaging._should_skip_by_history(addr)[0]
-            ]
+            asyncio.create_task(_apply())
         except Exception:
-            cooldown_blocked = []
+            pass
 
-        report = await _compose_report_and_save(
-            context,
-            state.all_emails,
-            state.to_send,
-            dropped_total,
-            sorted(foreign_total),
-            total_footnote,
-            cooldown_blocked,
-        )
-        if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
-            context.user_data["emails_suspects"] = sorted(suspects_removed)
+    results: list[tuple] = []
+    extract_fn = async_extract_emails_from_url
+    sig = inspect.signature(extract_fn)
+    accepts_deep = "deep" in sig.parameters
+    accepts_progress = "progress_cb" in sig.parameters
+    error: Exception | None = None
+    async with lock:
+        async with aiohttp.ClientSession() as session:
+            kwargs: dict[str, object] = {}
+            if accepts_deep:
+                kwargs["deep"] = deep
+            if accepts_progress:
+                kwargs["progress_cb"] = progress_cb
+            try:
+                result = await extract_fn(
+                    clean_url, session, chat_id, batch_id, **kwargs
+                )
+                results = [result]
+            except Exception as exc:
+                error = exc
+    progress_cancelled = True
+
+    if error is not None:
+        logger.exception("URL extraction failed: %s", error)
+        error_text = str(error) or error.__class__.__name__
+        if len(error_text) > 180:
+            error_text = error_text[:177] + "…"
+        if status_message_id is not None and status_chat_id is not None:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=status_chat_id,
+                    message_id=status_message_id,
+                    text=f"❌ Ошибка при разборе: {error_text}",
+                )
+            except Exception:
+                pass
+        elif message:
+            await _safe_reply_text(message, f"❌ Ошибка при разборе: {error_text}")
+        return
+
+    if batch_id != context.chat_data.get("batch_id"):
+        return
+
+    total_pages = 0
+    stats_sequence: list[dict] = []
+    for result in results:
+        if not isinstance(result, tuple) or len(result) < 5:
+            continue
+        stats = result[4]
+        if isinstance(stats, dict):
+            stats_sequence.append(stats)
+            try:
+                total_pages += int(stats.get("pages", 0) or 0)
+            except Exception:
+                pass
+    context.chat_data["crawl_pages"] = total_pages
+
+    allowed_all: Set[str] = set()
+    foreign_all: Set[str] = set()
+    repairs_all: List[tuple[str, str]] = []
+    footnote_dupes = 0
+    loose_meta: Set[str] = set()
+    suspicious_map: Dict[str, str] = {}
+    role_rejected_total = 0
+    for entry in results:
+        if not isinstance(entry, tuple) or len(entry) < 5:
+            continue
+        _, allowed, foreign, repairs, stats = entry
+        allowed_all.update(allowed)
+        foreign_all.update(foreign)
+        repairs_all.extend(repairs)
+        if isinstance(stats, dict):
+            footnote_dupes += int(stats.get("footnote_pairs_merged", 0) or 0)
+        _ingest_meta_to(loose_meta, suspicious_map, stats)
+        if isinstance(stats, dict):
+            try:
+                role_rejected_total += int(stats.get("role_rejected", 0) or 0)
+            except Exception:
+                pass
+
+    if loose_meta:
+        extra_foreign = {
+            addr
+            for addr in loose_meta
+            if addr and "@" in addr and not _is_allowed_domain(addr.rsplit("@", 1)[-1])
+        }
+        foreign_all.update(extra_foreign)
+
+    technical_emails = [
+        e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
+    ]
+    filtered = [
+        e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
+    ]
+    meta_suspects = {
+        addr for addr, reason in suspicious_map.items() if reason == "suspect"
+    }
+    heuristics_suspects = {addr for addr in filtered if _is_suspect_email(addr)}
+    suspects_set: Set[str] = set(meta_suspects) | heuristics_suspects
+    filtered_set_initial = set(filtered)
+    suspects_removed = suspects_set & filtered_set_initial
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        filtered = [addr for addr in filtered if addr not in suspects_removed]
+    filtered = sorted(filtered)
+    filtered_set_final = set(filtered)
+
+    dropped_current: List[Tuple[str, str]] = []
+    for email in sorted(allowed_all):
+        if email in filtered_set_final:
+            continue
+        if email in technical_emails:
+            dropped_current.append((email, "technical-address"))
+        elif not is_allowed_tld(email):
+            dropped_current.append((email, "foreign-domain"))
         else:
-            context.user_data["emails_suspects"] = []
-        context.user_data["await_edit_suspects"] = False
-        if state.repairs_sample:
-            report += "\n\n🧩 Возможные исправления (проверьте вручную):"
-            for s in state.repairs_sample:
-                report += f"\n{s}"
-        preview = context.chat_data.get("send_preview", {})
-        dropped_preview = preview.get("dropped", [])
-        extra_buttons: List[List[InlineKeyboardButton]] = []
-        if C.ALLOW_EDIT_AT_PREVIEW:
-            fix_buttons: List[InlineKeyboardButton] = []
-            for idx in range(min(len(dropped_preview), 5)):
-                fix_buttons.append(
-                    InlineKeyboardButton(
-                        f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
-                    )
-                )
-            if fix_buttons:
-                extra_buttons.append(fix_buttons)
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🔁 Показать ещё примеры", callback_data="refresh_preview"
-                )
-            ]
+            dropped_current.append((email, "filtered"))
+
+    suspicious_items = sorted(suspicious_map.items())
+    for candidate, reason in suspicious_items:
+        if reason == "suspect" and not SUSPECTS_REQUIRE_CONFIRM:
+            continue
+        dropped_current.append((candidate, reason))
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        existing_suspects = {
+            addr for addr, reason in suspicious_items if reason == "suspect"
+        }
+        heuristics_only = sorted(suspects_removed - existing_suspects)
+        for addr in heuristics_only:
+            dropped_current.append((addr, "suspect"))
+
+    all_found = {addr for addr in allowed_all | loose_meta if addr}
+    preview_stats = {
+        "suspicious_count": len(suspicious_map),
+        "foreign_domains": len(foreign_all),
+        "role_rejected": role_rejected_total,
+    }
+    preview_message: str | None = None
+    if (
+        all_found
+        or filtered
+        or preview_stats["suspicious_count"]
+        or preview_stats["role_rejected"]
+    ):
+        preview_message = _format_preview_text(
+            all_found,
+            filtered,
+            dropped_current,
+            preview_stats,
         )
-        suspects_preview = [
-            addr for addr, reason in dropped_preview if reason == "suspect"
+
+    state = get_state(context)
+    state.all_emails.update(allowed_all)
+    current = set(state.to_send)
+    current.update(filtered)
+    state.to_send = _drop_truncated_twins(sorted(current), state=state)
+    context.user_data["emails_for_sending"] = list(state.to_send)
+    foreign_total = set(state.foreign) | set(foreign_all)
+    state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
+    state.repairs_sample = sample_preview(
+        [f"{b} → {g}" for (b, g) in state.repairs], 6
+    )
+    total_footnote = state.footnote_dupes + footnote_dupes
+
+    existing = list(state.dropped or [])
+    combined_map: dict[str, str] = {}
+    for addr, reason in existing + dropped_current:
+        if addr not in combined_map:
+            combined_map[addr] = reason
+    dropped_total = [(addr, combined_map[addr]) for addr in combined_map]
+
+    try:
+        cooldown_blocked = [
+            addr
+            for addr in sorted(
+                {
+                    str(candidate).strip().lower()
+                    for candidate in state.all_emails
+                    if isinstance(candidate, str) and "@" in candidate
+                }
+            )
+            if messaging._should_skip_by_history(addr)[0]
         ]
-        if SUSPECTS_REQUIRE_CONFIRM and suspects_preview:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "✅ Принять подозрительные",
-                        callback_data="accept_suspects",
-                    ),
-                    InlineKeyboardButton(
-                        "✍️ Исправить адреса", callback_data="edit_suspects"
-                    ),
-                ]
+    except Exception:
+        cooldown_blocked = []
+
+    report = await _compose_report_and_save(
+        context,
+        state.all_emails,
+        state.to_send,
+        dropped_total,
+        sorted(foreign_total),
+        total_footnote,
+        cooldown_blocked,
+    )
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_removed:
+        context.user_data["emails_suspects"] = sorted(suspects_removed)
+    else:
+        context.user_data["emails_suspects"] = []
+    context.user_data["await_edit_suspects"] = False
+    if state.repairs_sample:
+        report += "\n\n🧩 Возможные исправления (проверьте вручную):"
+        for s in state.repairs_sample:
+            report += f"\n{s}"
+    preview = context.chat_data.get("send_preview", {})
+    dropped_preview = preview.get("dropped", [])
+    extra_buttons: List[List[InlineKeyboardButton]] = []
+    if C.ALLOW_EDIT_AT_PREVIEW:
+        fix_buttons: List[InlineKeyboardButton] = []
+        for idx in range(min(len(dropped_preview), 5)):
+            fix_buttons.append(
+                InlineKeyboardButton(
+                    f"✏️ Исправить №{idx + 1}", callback_data=f"fix:{idx}"
+                )
             )
-        if state.repairs:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"🧩 Применить исправления ({len(state.repairs)})",
-                        callback_data="apply_repairs",
-                    )
-                ]
+        if fix_buttons:
+            extra_buttons.append(fix_buttons)
+    extra_buttons.append(
+        [
+            InlineKeyboardButton(
+                "🔁 Показать ещё примеры", callback_data="refresh_preview"
             )
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🧩 Показать все исправления", callback_data="show_repairs"
-                    )
-                ]
-            )
+        ]
+    )
+    suspects_preview = [
+        addr for addr, reason in dropped_preview if reason == "suspect"
+    ]
+    if SUSPECTS_REQUIRE_CONFIRM and suspects_preview:
         extra_buttons.append(
             [
                 InlineKeyboardButton(
-                    "▶️ Перейти к выбору направления", callback_data="proceed_group"
+                    "✅ Принять подозрительные",
+                    callback_data="accept_suspects",
+                ),
+                InlineKeyboardButton(
+                    "✍️ Исправить адреса", callback_data="edit_suspects"
+                ),
+            ]
+        )
+    if state.repairs:
+        extra_buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"🧩 Применить исправления ({len(state.repairs)})",
+                    callback_data="apply_repairs",
                 )
             ]
         )
-        report += "\n\nДополнительные действия:"
-        await _safe_reply_text(update.message,
+        extra_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🧩 Показать все исправления", callback_data="show_repairs"
+                )
+            ]
+        )
+    extra_buttons.append(
+        [
+            InlineKeyboardButton(
+                "▶️ Перейти к выбору направления", callback_data="proceed_group"
+            )
+        ]
+    )
+    report += "\n\nДополнительные действия:"
+
+    visited = max(visited, total_pages)
+    last_from_stats = None
+    for stats in stats_sequence:
+        last_candidate = stats.get("last_url") if isinstance(stats, dict) else None
+        if last_candidate:
+            last_from_stats = last_candidate
+    final_last = last_from_stats or last_url_seen or clean_url
+    final_found = len(all_found)
+    final_text = (
+        f"Готово. Найдено адресов: {final_found}\n"
+        f"Просмотрено страниц: {visited}\n"
+        f"Последняя: {final_last}"
+    )
+    if status_message_id is not None and status_chat_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                text=final_text,
+            )
+        except Exception:
+            pass
+    elif message:
+        await _safe_reply_text(message, final_text)
+
+    if message:
+        await _safe_reply_text(
+            message,
             report,
             reply_markup=InlineKeyboardMarkup(extra_buttons),
         )
         if preview_message:
-            await _safe_reply_text(update.message, preview_message)
-        return
+            await _safe_reply_text(message, preview_message)
 
 
 async def show_foreign_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3319,10 +3554,12 @@ __all__ = [
     "dedupe_log_command",
     "handle_document",
     "refresh_preview",
+    "parse_mode_cb",
     "proceed_to_group",
     "select_group",
     "prompt_manual_email",
     "handle_text",
+    "page_url_command",
     "request_fix",
     "show_foreign_list",
     "apply_repairs",

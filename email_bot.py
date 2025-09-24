@@ -180,6 +180,7 @@ def main() -> None:
     _safe_add(
         app, CommandHandler("features", bot_handlers.features), "cmd:features"
     )
+    _safe_add(app, CommandHandler("page", bot_handlers.page_url_command), "cmd:page")
     _safe_add(
         app, CommandHandler("reports", bot_handlers.handle_reports), "cmd:reports"
     )
@@ -203,6 +204,11 @@ def main() -> None:
             bot_handlers.on_edit_suspects, pattern="^edit_suspects$"
         ),
         "cb:edit_suspects",
+    )
+    _safe_add(
+        app,
+        CallbackQueryHandler(bot_handlers.parse_mode_cb, pattern=r"^parse\|"),
+        "cb:parse_mode",
     )
     _safe_add(
         app,

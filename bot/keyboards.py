@@ -8,6 +8,24 @@ from typing import Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+
+def build_parse_mode_kb(token: str) -> InlineKeyboardMarkup:
+    """Keyboard offering parse mode selection for a detected URL token."""
+
+    value = (token or "").strip()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📄 Только эта страница", callback_data=f"parse|single|{value}"
+                ),
+                InlineKeyboardButton(
+                    "🕸️ Сканировать сайт", callback_data=f"parse|deep|{value}"
+                ),
+            ]
+        ]
+    )
+
 from services.templates import list_templates
 
 _ICONS: Dict[str, str] = {}

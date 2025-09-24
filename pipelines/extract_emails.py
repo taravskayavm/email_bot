@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import httpx
 
 from emailbot import config as C
 from crawler.web_crawler import Crawler
 from utils.charset_helper import best_effort_decode
+
+ProgressCB = Optional[Callable[[int, str], None]]
 
 from utils.email_clean import (
     dedupe_with_variants,
@@ -424,7 +425,7 @@ async def extract_from_url_async(
     url: str,
     *,
     deep: bool = True,
-    progress_cb: Callable[[int, str], None] | None = None,
+    progress_cb: ProgressCB = None,
 ) -> tuple[list[str], dict]:
     """Extract e-mail addresses from ``url`` asynchronously.
 
@@ -435,25 +436,29 @@ async def extract_from_url_async(
     """
 
     if not deep:
+        if progress_cb:
+            try:
+                progress_cb(1, url)
+            except Exception:
+                pass
         html = _http_get_text(url)
         emails, meta = extract_emails_pipeline(html or "")
         stats = dict(meta) if isinstance(meta, dict) else {}
         stats["pages"] = 1 if html else 0
         stats["unique"] = len(emails)
         stats["page_urls"] = [url] if html else []
+        stats["last_url"] = url
         return emails, stats
 
     pages: list[tuple[str, str]] = []
-    last_notify = 0.0
+    last_seen = url
 
     def _on_page(pages_scanned: int, page_url: str) -> None:
-        nonlocal last_notify
+        nonlocal last_seen
+        if page_url:
+            last_seen = page_url
         if not progress_cb:
             return
-        now = time.time()
-        if now - last_notify < 0.7:
-            return
-        last_notify = now
         try:
             progress_cb(pages_scanned, page_url)
         except Exception:
@@ -482,6 +487,7 @@ async def extract_from_url_async(
     stats["pages"] = crawler.pages_scanned
     stats["unique"] = len(emails)
     stats["page_urls"] = [page_url for page_url, _ in pages]
+    stats["last_url"] = last_seen
     return emails, stats
 
 

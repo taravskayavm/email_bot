@@ -76,6 +76,7 @@ class DummyUpdate:
     ):
         self.message = DummyMessage(text=text, document=document, chat_id=chat_id)
         self.effective_chat = types.SimpleNamespace(id=chat_id)
+        self.effective_message = self.message
         if callback_data is not None:
 
             class DummyQuery:
@@ -91,6 +92,7 @@ class DummyUpdate:
                     return self.message
 
             self.callback_query = DummyQuery(callback_data, chat_id)
+            self.effective_message = self.callback_query.message
 
 
 class DummyContext:
