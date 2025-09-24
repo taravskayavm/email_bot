@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import csv
-import email.utils
 import imaplib  # noqa: F401
 import logging
 import os
@@ -11,6 +10,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
@@ -19,6 +19,26 @@ from .history_key import normalize_history_key
 from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
+
+
+# --- TZ helpers --------------------------------------------------------------
+def ensure_aware_utc(dt: datetime | None) -> datetime:
+    """Return a timezone-aware datetime in UTC."""
+
+    value = dt or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def parse_imap_date_to_utc(date_str: str | None) -> datetime:
+    """Best-effort parsing of IMAP date strings into aware UTC datetimes."""
+
+    try:
+        dt = parsedate_to_datetime(date_str) if date_str else None
+    except Exception:
+        dt = None
+    return ensure_aware_utc(dt)
 
 SUPPRESS_PATH = Path(
     "/mnt/data/suppress_list.csv"
@@ -366,15 +386,15 @@ def _normalize_ts(value: str) -> str:
         dt = datetime.fromisoformat(value)
     except Exception:
         try:
-            dt = email.utils.parsedate_to_datetime(value)
-            if dt.tzinfo:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            dt = parsedate_to_datetime(value)
         except Exception:
             try:
                 dt = datetime.fromtimestamp(float(value))
             except Exception:
                 return value
-    return dt.isoformat()
+    if dt is None:
+        return value
+    return ensure_aware_utc(dt).isoformat()
 
 
 def ensure_sent_log_schema(path: str) -> List[str]:
@@ -444,7 +464,7 @@ def load_sent_log(path: Path) -> Dict[str, datetime]:
                     dt = datetime.fromisoformat(row["last_sent_at"])
                 except Exception:
                     continue
-                data[row["key"]] = dt
+                data[row["key"]] = ensure_aware_utc(dt)
     return data
 
 
@@ -457,6 +477,8 @@ def upsert_sent_log(
     extra: Dict[str, str] | None = None,
 ) -> Tuple[bool, bool]:
     """Insert or update ``sent_log`` row."""
+
+    ts = ensure_aware_utc(ts)
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -476,8 +498,10 @@ def upsert_sent_log(
                     existing_dt = datetime.fromisoformat(existing_ts)
                 except Exception:
                     existing_dt = None
-                if existing_dt and ts <= existing_dt:
-                    return False, False
+                if existing_dt is not None:
+                    existing_dt = ensure_aware_utc(existing_dt)
+                    if ts <= existing_dt:
+                        return False, False
                 row.update(
                     {
                         "email": email.strip(),
@@ -532,13 +556,23 @@ def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     for r in rows:
         key = r.get("key") or canonical_for_history(r.get("email", ""))
         try:
-            ts = datetime.fromisoformat(r.get("last_sent_at", ""))
+            ts_parsed = datetime.fromisoformat(r.get("last_sent_at", ""))
         except Exception:
             continue
+        ts = ensure_aware_utc(ts_parsed)
         current = best.get(key)
-        if current is None or datetime.fromisoformat(current["last_sent_at"]) < ts:
+        current_dt = None
+        if current is not None:
+            try:
+                current_dt = datetime.fromisoformat(current["last_sent_at"])
+            except Exception:
+                current_dt = None
+            else:
+                current_dt = ensure_aware_utc(current_dt)
+        if current is None or current_dt is None or current_dt < ts:
             r = dict(r)
             r["key"] = key
+            r["last_sent_at"] = ts.isoformat()
             best[key] = r
     before = len(rows)
     after = len(best)
@@ -799,6 +833,7 @@ __all__ = [
     "SYNC_SEEN_EVENTS_PATH",
     "REQUIRED_FIELDS",
     "LEGACY_MAP",
+    "ensure_aware_utc",
     "ensure_sent_log_schema",
     "canonical_for_history",
     "last_sent_at",
@@ -809,6 +844,7 @@ __all__ = [
     "is_soft_bounce",
     "suppress_add",
     "is_suppressed",
+    "parse_imap_date_to_utc",
     "classify_tld",
     "DOMESTIC_CCTLD",
     "GENERIC_GTLD",

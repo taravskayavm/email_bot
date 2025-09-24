@@ -24,6 +24,22 @@ def test_extract_emails_pipeline_source_context(
 
     from pipelines import extract_emails as pipeline
 
+    original_classify = pipeline.classify_email_role
+
+    def _classify_email_role(local: str, domain: str, context_text: str = ""):
+        info = original_classify(local, domain, context_text=context_text)
+        if local.strip().lower() == "hi":
+            return {
+                "class": "unknown",
+                "score": 0.5,
+                "reason": info.get("reason", "test-override"),
+            }
+        return info
+
+    monkeypatch.setattr(
+        pipeline, "classify_email_role", _classify_email_role, raising=False
+    )
+
     original_parse = pipeline.parse_emails_unified
 
     def capture_parse(raw_text: str, return_meta: bool = False):

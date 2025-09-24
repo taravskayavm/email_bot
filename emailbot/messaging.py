@@ -42,11 +42,13 @@ from .messaging_utils import (
     append_to_sent,
     canonical_for_history,
     detect_sent_folder,
+    ensure_aware_utc,
     ensure_sent_log_schema,
     is_foreign,
     is_hard_bounce,
     is_soft_bounce,
     is_suppressed,
+    parse_imap_date_to_utc,
     load_seen_events,
     load_sent_log,
     save_seen_events,
@@ -212,9 +214,7 @@ def _normalize_key(email: str) -> str:
 def _coerce_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    return ensure_aware_utc(dt)
 
 
 
@@ -1636,7 +1636,9 @@ def sync_log_with_imap() -> Dict[str, int]:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        date_180 = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%d-%b-%Y")
+        since_threshold = datetime.now(timezone.utc) - timedelta(days=180)
+        date_180 = since_threshold.strftime("%d-%b-%Y")
+        cutoff_dt = ensure_aware_utc(since_threshold)
         result, data = imap.search(None, f"SINCE {date_180}")
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
@@ -1655,17 +1657,13 @@ def sync_log_with_imap() -> Dict[str, int]:
                 if msgid and (msgid, key) in seen_events:
                     stats["skipped_events"] += 1
                     continue
-                try:
-                    dt = email.utils.parsedate_to_datetime(msg.get("Date"))
-                    dt = _coerce_utc(dt)
-                    if dt and dt < datetime.now(timezone.utc) - timedelta(days=180):
-                        continue
-                except Exception:
-                    dt = None
+                msg_dt = parse_imap_date_to_utc(msg.get("Date"))
+                if msg_dt < cutoff_dt:
+                    continue
                 inserted, updated = upsert_sent_log(
                     LOG_FILE,
                     _normalize_key(addr),
-                    dt or datetime.now(timezone.utc),
+                    msg_dt,
                     "imap_sync",
                     status="external",
                 )
