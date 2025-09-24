@@ -182,6 +182,13 @@ def main() -> None:
     )
     _safe_add(app, CommandHandler("page", bot_handlers.page_url_command), "cmd:page")
     _safe_add(app, CommandHandler("sections", bot_handlers.sections_command), "cmd:sections")
+    # Когда бот ждёт ввод разделов, ответы вида "/e_arctic" Telegram помечает как COMMAND.
+    # Этот fallback ловит такие "команды" и передаёт их в обработчик разделов.
+    _safe_add(
+        app,
+        MessageHandler(filters.COMMAND, bot_handlers.sections_cmd_fallback),
+        "msg:sections_cmd_fallback",
+    )
     _safe_add(
         app, CommandHandler("reports", bot_handlers.handle_reports), "cmd:reports"
     )
