@@ -20,11 +20,25 @@ async def test_batch_isolation(monkeypatch):
 
     monkeypatch.setattr(bh, "async_extract_emails_from_url", slow_extract)
 
-    task1 = asyncio.create_task(bh.handle_text(update1, ctx))
+    await bh.handle_text(update1, ctx)
+    token1 = next(
+        key
+        for key, value in ctx.user_data.get("parse_mode_urls", {}).items()
+        if "one" in value
+    )
+    callback1 = DummyUpdate(chat_id=1, callback_data=f"parse|deep|{token1}")
+    task1 = asyncio.create_task(bh.parse_mode_cb(callback1, ctx))
     await asyncio.sleep(0.05)
     clear_update = DummyUpdate(text="/clear", chat_id=1)
     await bh.reset_email_list(clear_update, ctx)
     await bh.handle_text(update2, ctx)
+    token2 = next(
+        key
+        for key, value in ctx.user_data.get("parse_mode_urls", {}).items()
+        if "two" in value
+    )
+    callback2 = DummyUpdate(chat_id=1, callback_data=f"parse|deep|{token2}")
+    await bh.parse_mode_cb(callback2, ctx)
     await task1
 
     state = ctx.chat_data[bh.SESSION_KEY]
@@ -45,9 +59,14 @@ async def test_single_flight(monkeypatch):
 
     monkeypatch.setattr(bh, "async_extract_emails_from_url", slow_extract)
 
-    t1 = asyncio.create_task(bh.handle_text(update, ctx))
+    await bh.handle_text(update, ctx)
+    token = next(iter(ctx.user_data.get("parse_mode_urls", {})))
+    cb_update = DummyUpdate(chat_id=1, callback_data=f"parse|deep|{token}")
+    t1 = asyncio.create_task(bh.parse_mode_cb(cb_update, ctx))
     await asyncio.sleep(0.01)
-    t2 = asyncio.create_task(bh.handle_text(update, ctx))
-    await asyncio.gather(t1, t2)
+    # Повторный клик по кнопке не должен запускать второй парсер
+    cb_update_again = DummyUpdate(chat_id=1, callback_data=f"parse|deep|{token}")
+    await bh.parse_mode_cb(cb_update_again, ctx)
+    await t1
 
     assert counter["calls"] == 1
