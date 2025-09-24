@@ -20,6 +20,9 @@ from utils.email_clean import (
     preclean_obfuscations,
 )
 from utils.dedup import canonical
+from utils.domain_typos import autocorrect_domain
+from utils.dns_check import domain_has_mx
+from utils.email_norm import sanitize_for_send
 from utils.text_normalize import normalize_text
 from utils.email_role import classify_email_role
 from utils.name_match import fio_candidates, fio_match_score
@@ -100,8 +103,35 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
                 rejected.append(dict(item))
                 role_rejected_early += 1
                 continue
-        item["sanitized"] = email_final
-        allowed_candidates.append(email_final)
+        final_for_send = sanitize_for_send(email_final)
+        if not final_for_send:
+            item["reason"] = "sanitize-send"
+            item["stage"] = "send-normalize"
+            item["sanitized"] = ""
+            rejected.append(dict(item))
+            continue
+        if os.getenv("AUTOCORRECT_COMMON_DOMAINS", "1") == "1":
+            fixed, changed, typo_reason = autocorrect_domain(final_for_send)
+            if changed:
+                final_for_send = fixed
+                meta["typo_fixes"] = int(meta.get("typo_fixes", 0) or 0) + 1
+                typo_list = list(meta.get("typo_list") or [])
+                typo_list.append(typo_reason)
+                meta["typo_list"] = typo_list
+        domain_for_check = final_for_send.split("@", 1)[-1]
+        if (
+            os.getenv("MX_CHECK_BEFORE_SEND", "1") == "1"
+            and not domain_has_mx(domain_for_check)
+        ):
+            rejected_item = dict(item)
+            rejected_item["reason"] = "no-mx"
+            rejected_item["stage"] = "precheck"
+            rejected_item["sanitized"] = ""
+            rejected.append(rejected_item)
+            meta["mx_missing"] = int(meta.get("mx_missing", 0) or 0) + 1
+            continue
+        item["sanitized"] = final_for_send
+        allowed_candidates.append(final_for_send)
 
     # EB-REQUIRE-CONFIRM-SUSPECTS: отделяем «подозрительные» и (опционально)
     # не включаем их в отправку без явного подтверждения.

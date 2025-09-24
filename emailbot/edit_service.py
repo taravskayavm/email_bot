@@ -9,9 +9,9 @@ from typing import Dict, Iterable, List, Set, Tuple
 
 from utils.dedup import canonical as _canon
 from utils.email_clean import preclean_obfuscations
+from utils.email_norm import sanitize_for_send
 
 from . import history_store
-from .extraction import normalize_email
 
 
 _DROP_TOKENS: Set[str] = {"-", "—", "x", "✖", "удалить", "delete", "drop"}
@@ -31,12 +31,9 @@ def _norm_key(value: str) -> str:
 
 
 def _norm_email_safe(value: str) -> str:
-    """Safely normalise ``value`` to ``local@domain`` when possible."""
+    """Prepare an e-mail for sending without altering the local part."""
 
-    try:
-        return normalize_email(value or "").strip()
-    except Exception:
-        return (value or "").strip().lower()
+    return sanitize_for_send(value or "")
 
 
 def _as_drop(value: str) -> bool:
@@ -54,13 +51,13 @@ def _build_edit_maps(
     drops: Set[str] = set()
     for old_raw, new_raw in raw_pairs or []:
         old_key = _norm_key(old_raw)
-        new_key = _norm_key(new_raw)
         if _as_drop(new_raw):
             if old_key:
                 drops.add(old_key)
             continue
-        if old_key and new_key:
-            mapping[old_key] = new_key
+        sanitized_new = _norm_email_safe(new_raw)
+        if old_key and sanitized_new:
+            mapping[old_key] = sanitized_new
     return mapping, drops
 
 

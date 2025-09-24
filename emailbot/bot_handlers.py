@@ -120,6 +120,8 @@ def _format_preview_text(
     suspicious = int(stats_map.get("suspicious_count", 0) or 0)
     role_rejected = int(stats_map.get("role_rejected", 0) or 0)
     foreign = int(stats_map.get("foreign_domains", 0) or 0)
+    typos = int(stats_map.get("typo_fixes", 0) or 0)
+    mx_missing = int(stats_map.get("mx_missing", 0) or 0)
     sample = "\n".join(f"• {addr}" for addr in allowed_list[:10]) or "—"
     lines = [
         "✅ Предварительный результат:",
@@ -128,9 +130,11 @@ def _format_preview_text(
         f"• отсечено подозрительных: {suspicious}",
         f"• рольовых (info/support и т.п.): {role_rejected}",
         f"• иностранных доменов: {foreign}",
+        (f"• исправлено доменных опечаток: {typos}" if typos else ""),
+        (f"• без MX (отброшено): {mx_missing}" if mx_missing else ""),
         f"Примеры:\n{sample}",
     ]
-    return "\n".join(lines)
+    return "\n".join([line for line in lines if line])
 
 
 # --- Новое состояние для ручного ввода исправлений ---
