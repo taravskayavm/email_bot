@@ -44,6 +44,7 @@ from .messaging_utils import (
     detect_sent_folder,
     ensure_aware_utc,
     ensure_sent_log_schema,
+    SENT_CACHE_FILE,
     is_foreign,
     is_hard_bounce,
     is_soft_bounce,
@@ -105,7 +106,7 @@ EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 
-IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+IMAP_FOLDER_FILE = SENT_CACHE_FILE
 
 _smtp_mode = os.getenv("SMTP_MODE", "auto").strip().lower() or "auto"
 _last_domain_send: Dict[str, float] = {}
