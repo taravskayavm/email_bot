@@ -225,12 +225,14 @@ async def async_extract_emails_from_url(
     *,
     deep: bool = True,
     progress_cb: Callable[[int, str], None] | None = None,
+    path_prefixes: Sequence[str] | None = None,
 ):
     _ = _extraction.extract_any  # keep reference for tests
     emails_list, stats_raw = await extract_from_url_async(
         url,
         deep=deep,
         progress_cb=progress_cb,
+        path_prefixes=path_prefixes,
     )
     meta_dict = dict(stats_raw) if isinstance(stats_raw, dict) else {}
     emails = {str(addr).strip() for addr in emails_list if addr}
@@ -2227,6 +2229,15 @@ async def prompt_manual_email(
     context.user_data["awaiting_manual_email"] = True
 
 
+def _norm_prefix(value: str) -> str:
+    """Normalize section prefix ensuring it starts with ``/``."""
+
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    return raw if raw.startswith("/") else "/" + raw
+
+
 def _first_url(text: str | None) -> str | None:
     """Return the first URL found in ``text`` or ``None`` if absent."""
 
@@ -2499,6 +2510,50 @@ async def page_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _run_url_extraction(update, context, url, deep=False)
 
 
+async def sections_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Глубокий парсинг только выбранных разделов: /sections <URL> <paths>."""
+
+    args = context.args or []
+    message = update.effective_message
+    text = message.text if message and message.text else ""
+    candidate = args[0] if args else _first_url(text)
+    url = (candidate or "").strip()
+    if not url:
+        if message:
+            await _safe_reply_text(
+                message,
+                "Укажи адрес сайта и разделы: /sections https://example.com /news,/authors",
+            )
+        return
+
+    if len(args) > 1:
+        raw = " ".join(args[1:])
+    else:
+        raw = text.replace(url, "", 1)
+    parts = re.split(r"[;,\s]+", raw)
+    prefixes: list[str] = []
+    for part in parts:
+        normalized = _norm_prefix(part)
+        if normalized:
+            prefixes.append(normalized)
+    prefixes = list(dict.fromkeys(prefixes))
+    if not prefixes:
+        if message:
+            await _safe_reply_text(
+                message,
+                "Укажи хотя бы один раздел, например: /sections https://example.com /news,/journals",
+            )
+        return
+
+    await _run_url_extraction(
+        update,
+        context,
+        url,
+        deep=True,
+        path_prefixes=prefixes,
+    )
+
+
 async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик inline-кнопок выбора режима парсинга."""
 
@@ -2551,6 +2606,7 @@ async def _run_url_extraction(
     *,
     deep: bool,
     origin_message_id: int | None = None,
+    path_prefixes: Sequence[str] | None = None,
 ) -> None:
     """Общий раннер: запускает парсинг URL и управляет прогрессом/выводом."""
 
@@ -2564,6 +2620,23 @@ async def _run_url_extraction(
         return
     if chat_id is None and message:
         chat_id = message.chat_id
+
+    prefixes_list: list[str] = []
+    if path_prefixes:
+        seen: list[str] = []
+        for raw in path_prefixes:
+            try:
+                normalized = _norm_prefix(str(raw))
+            except Exception:
+                normalized = ""
+            if not normalized:
+                continue
+            if normalized not in seen:
+                seen.append(normalized)
+        prefixes_list = seen
+    filters_line = (
+        f"Фильтры разделов: {', '.join(prefixes_list)}\n" if prefixes_list else ""
+    )
 
     lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
     if lock.locked():
@@ -2612,7 +2685,10 @@ async def _run_url_extraction(
     if message is not None:
         try:
             status_msg = await message.reply_text(
-                f"{mode_label}…\nПросмотрено страниц: 0\nПоследняя: {clean_url}"
+                f"{mode_label}…\n"
+                f"Просмотрено страниц: 0\n"
+                f"{filters_line}"
+                f"Последняя: {clean_url}"
             )
             status_chat_id = status_msg.chat_id
             status_message_id = status_msg.message_id
@@ -2622,7 +2698,12 @@ async def _run_url_extraction(
         try:
             status_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"{mode_label}…\nПросмотрено страниц: 0\nПоследняя: {clean_url}",
+                text=(
+                    f"{mode_label}…\n"
+                    f"Просмотрено страниц: 0\n"
+                    f"{filters_line}"
+                    f"Последняя: {clean_url}"
+                ),
             )
             status_chat_id = status_msg.chat_id
             status_message_id = status_msg.message_id
@@ -2666,6 +2747,7 @@ async def _run_url_extraction(
                     text=(
                         f"{mode_label}…\n"
                         f"Просмотрено страниц: {visited}\n"
+                        f"{filters_line}"
                         f"Последняя: {last_url_seen}"
                     ),
                 )
@@ -2682,6 +2764,7 @@ async def _run_url_extraction(
     sig = inspect.signature(extract_fn)
     accepts_deep = "deep" in sig.parameters
     accepts_progress = "progress_cb" in sig.parameters
+    accepts_prefixes = "path_prefixes" in sig.parameters
     error: Exception | None = None
     async with lock:
         async with aiohttp.ClientSession() as session:
@@ -2690,6 +2773,8 @@ async def _run_url_extraction(
                 kwargs["deep"] = deep
             if accepts_progress:
                 kwargs["progress_cb"] = progress_cb
+            if accepts_prefixes and prefixes_list:
+                kwargs["path_prefixes"] = list(prefixes_list)
             try:
                 result = await extract_fn(
                     clean_url, session, chat_id, batch_id, **kwargs
@@ -2951,6 +3036,7 @@ async def _run_url_extraction(
     final_text = (
         f"Готово. Найдено адресов: {final_found}\n"
         f"Просмотрено страниц: {visited}\n"
+        f"{filters_line}"
         f"Последняя: {final_last}"
     )
     if status_message_id is not None and status_chat_id is not None:

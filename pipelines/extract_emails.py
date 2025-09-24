@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -426,6 +426,7 @@ async def extract_from_url_async(
     *,
     deep: bool = True,
     progress_cb: ProgressCB = None,
+    path_prefixes: Optional[Sequence[str]] = None,
 ) -> tuple[list[str], dict]:
     """Extract e-mail addresses from ``url`` asynchronously.
 
@@ -433,7 +434,22 @@ async def extract_from_url_async(
     robots.txt and staying on the same domain if configured) and aggregates all
     discovered HTML pages. ``progress_cb`` is invoked with ``(pages, page_url)``
     to report crawling progress; it is throttled internally to avoid flooding.
+    ``path_prefixes`` (if provided) limits the deep crawl to URLs whose path
+    starts with one of the prefixes.
     """
+
+    prefixes_list: list[str] = []
+    if path_prefixes:
+        seen: list[str] = []
+        for raw in path_prefixes:
+            if not isinstance(raw, str):
+                continue
+            cleaned = raw.strip()
+            if not cleaned:
+                continue
+            if cleaned not in seen:
+                seen.append(cleaned)
+        prefixes_list = seen
 
     if not deep:
         if progress_cb:
@@ -448,6 +464,8 @@ async def extract_from_url_async(
         stats["unique"] = len(emails)
         stats["page_urls"] = [url] if html else []
         stats["last_url"] = url
+        if prefixes_list:
+            stats["path_prefixes"] = list(prefixes_list)
         return emails, stats
 
     pages: list[tuple[str, str]] = []
@@ -464,7 +482,7 @@ async def extract_from_url_async(
         except Exception:
             pass
 
-    crawler = Crawler(url, on_page=_on_page)
+    crawler = Crawler(url, on_page=_on_page, path_prefixes=prefixes_list)
     try:
         async for page_url, text in crawler.crawl():
             pages.append((page_url, text))
@@ -488,6 +506,8 @@ async def extract_from_url_async(
     stats["unique"] = len(emails)
     stats["page_urls"] = [page_url for page_url, _ in pages]
     stats["last_url"] = last_seen
+    if prefixes_list:
+        stats["path_prefixes"] = list(prefixes_list)
     return emails, stats
 
 

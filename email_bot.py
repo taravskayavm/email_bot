@@ -181,6 +181,7 @@ def main() -> None:
         app, CommandHandler("features", bot_handlers.features), "cmd:features"
     )
     _safe_add(app, CommandHandler("page", bot_handlers.page_url_command), "cmd:page")
+    _safe_add(app, CommandHandler("sections", bot_handlers.sections_command), "cmd:sections")
     _safe_add(
         app, CommandHandler("reports", bot_handlers.handle_reports), "cmd:reports"
     )
