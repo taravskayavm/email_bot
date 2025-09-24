@@ -16,6 +16,8 @@ from services.templates import get_template_label
 from emailbot import config as C
 from emailbot import history_service, mass_state, messaging
 from emailbot.edit_service import (
+    _as_drop as _edit_is_drop,
+    _norm_key as _edit_norm_key,
     apply_edits as apply_saved_edits,
     clear_edits as clear_saved_edits,
     list_edits as list_saved_edits,
@@ -541,19 +543,22 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _safe_reply_text(update.message, "❌ Старый адрес должен содержать символ @.")
         return
 
-    parsed = parse_emails_unified(new_raw)
-    parsed = dedupe_keep_original(parsed)
-    parsed = drop_leading_char_twins(parsed)
-    if not parsed:
-        context.chat_data["preview_edit_pending"] = True
-        await _safe_reply_text(update.message, "❌ Не удалось распознать новый адрес.")
-        return
-    if len(parsed) > 1:
-        context.chat_data["preview_edit_pending"] = True
-        await _safe_reply_text(update.message, "❌ Укажите только один новый адрес.")
-        return
+    if _edit_is_drop(new_raw):
+        new_email = new_raw.strip()
+    else:
+        parsed = parse_emails_unified(new_raw)
+        parsed = dedupe_keep_original(parsed)
+        parsed = drop_leading_char_twins(parsed)
+        if not parsed:
+            context.chat_data["preview_edit_pending"] = True
+            await _safe_reply_text(update.message, "❌ Не удалось распознать новый адрес.")
+            return
+        if len(parsed) > 1:
+            context.chat_data["preview_edit_pending"] = True
+            await _safe_reply_text(update.message, "❌ Укажите только один новый адрес.")
+            return
 
-    new_email = parsed[0]
+        new_email = parsed[0]
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     save_edit_record(chat_id, old_raw, new_email)
@@ -574,8 +579,19 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ]
         ]
     )
-    await _safe_reply_text(update.message, 
-        f"✅ Правка сохранена:\n{old_raw} → {new_email}\nОбновить предпросмотр?",
+    okey = _edit_norm_key(old_raw)
+    nkey = _edit_norm_key(new_email)
+    hint = ""
+    if _edit_is_drop(new_email):
+        hint = "\n(адрес будет исключён из рассылки)"
+    elif okey and nkey and okey == nkey and old_raw != new_email:
+        hint = (
+            "\nℹ️ Похоже, это форматирование (после очистки адрес тот же). "
+            "Чтобы исключить адрес из рассылки, введите:  «{} -> -»".format(old_raw)
+        )
+
+    await _safe_reply_text(update.message,
+        f"✅ Правка сохранена:\n{old_raw} → {new_email}{hint}\nОбновить предпросмотр?",
         reply_markup=keyboard,
     )
 

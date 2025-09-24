@@ -4,8 +4,57 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, Iterable, List, Set, Tuple
+
+from utils.dedup import canonical as _canon
+from utils.email_clean import preclean_obfuscations
 
 from . import history_store
+from .extraction import normalize_email
+
+
+_DROP_TOKENS: Set[str] = {"-", "—", "x", "✖", "удалить", "delete", "drop"}
+
+
+def _norm_key(value: str) -> str:
+    """Return a canonical key for ``value`` suitable for matching edits."""
+
+    cleaned = preclean_obfuscations(value or "")
+    return _canon((cleaned or "").strip().lower())
+
+
+def _norm_email_safe(value: str) -> str:
+    """Safely normalise ``value`` to ``local@domain`` when possible."""
+
+    try:
+        return normalize_email(value or "").strip()
+    except Exception:
+        return (value or "").strip().lower()
+
+
+def _as_drop(value: str) -> bool:
+    """Return ``True`` if ``value`` indicates that the address should be removed."""
+
+    return (value or "").strip().lower() in _DROP_TOKENS
+
+
+def _build_edit_maps(
+    raw_pairs: List[Tuple[str, str]]
+) -> Tuple[Dict[str, str], Set[str]]:
+    """Prepare canonical replacement and drop maps from stored ``raw_pairs``."""
+
+    mapping: Dict[str, str] = {}
+    drops: Set[str] = set()
+    for old_raw, new_raw in raw_pairs or []:
+        old_key = _norm_key(old_raw)
+        new_key = _norm_key(new_raw)
+        if _as_drop(new_raw):
+            if old_key:
+                drops.add(old_key)
+            continue
+        if old_key and new_key:
+            mapping[old_key] = new_key
+    return mapping, drops
 
 
 def _db_path() -> Path:
@@ -42,15 +91,26 @@ def clear_edits(chat_id: int) -> None:
         con.commit()
 
 
-def apply_edits(emails: list[str], chat_id: int) -> list[str]:
+def apply_edits(emails: Iterable[str], chat_id: int) -> list[str]:
     path = _db_path()
-    mapping = {}
     with sqlite3.connect(path) as con:
         cur = con.execute(
             "SELECT old_email, new_email FROM edits WHERE chat_id=?", (chat_id,)
         )
-        mapping = {row[0].lower(): row[1] for row in cur.fetchall()}
-    out = []
-    for e in emails:
-        out.append(mapping.get(e.lower(), e))
-    return out
+        raw_pairs: List[Tuple[str, str]] = [(row[0], row[1]) for row in cur.fetchall()]
+
+    map_canon, drops = _build_edit_maps(raw_pairs)
+    seen: Set[str] = set()
+    result: List[str] = []
+    for item in emails:
+        raw = (item or "").strip()
+        canon = _norm_key(raw)
+        if canon in drops:
+            continue
+        replacement = map_canon.get(canon)
+        target = replacement if replacement is not None else raw
+        final = _norm_email_safe(target)
+        if final and final not in seen:
+            seen.add(final)
+            result.append(final)
+    return result
