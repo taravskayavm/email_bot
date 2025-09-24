@@ -63,6 +63,11 @@ def strip_invisibles(text: str) -> str:
 
 _ZW_CLEAN_RE = re.compile(r"[\u200B-\u200D\uFEFF\u2060\u180E]")
 _SP_COMPACT_RE = re.compile(r"\s+")
+# Сноски/маркировки, которые могут «прилипать» к адресу слева
+# ****name@, • name@, [1] name@, ¹² name@
+_FOOTNOTE_LEAD_RX = re.compile(r'(?:(?<=\s)|^)[*\u2022\u00B7\u2043\u2020\u2021]+(?=\s*[A-Za-z0-9._%+-]+@)')
+_BRACKETED_FOOTNOTE_RX = re.compile(r'(?:(?<=\s)|^)\[(?:\d{1,3}|[ivxlcdm]+)\]\s*(?=[A-Za-z0-9._%+-]+@)', re.IGNORECASE)
+_SUPERSCRIPT_FOOTNOTE_RX = re.compile(r'(?:(?<=\s)|^)[¹²³⁴⁵⁶⁷⁸⁹⁰]+\s*(?=[A-Za-z0-9._%+-]+@)')
 _AT_WORDS = r"(at|обака|собака|sobaka|\(at\)|\[at\]|\{at\}|\(собака\)|\[собака\]|\{собака\}|\(на\)|\[на\]|\{на\})"
 _DOT_WORDS = r"(dot|точка|tochka|\(dot\)|\[dot\]|\{dot\}|\(точка\)|\[точка\]|\{точка\})"
 _OBF_SEP = r"[\s\(\)\[\]\{\}]*"
@@ -85,6 +90,10 @@ def preclean_obfuscations(text: str) -> str:
     s = unicodedata.normalize("NFKC", str(text))
     s = _ZW_CLEAN_RE.sub("", s)
     s = strip_invisibles(s)
+    # Убираем сноски, прилипшие к началу токена с e-mail
+    s = _FOOTNOTE_LEAD_RX.sub("", s)
+    s = _BRACKETED_FOOTNOTE_RX.sub("", s)
+    s = _SUPERSCRIPT_FOOTNOTE_RX.sub("", s)
     s = re.sub(r"\s*@\s*", "@", s)
     s = re.sub(r"\s*\.\s*", ".", s)
     for regex, replacement in _OBFUSCATION_REPLACEMENTS:

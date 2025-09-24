@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
@@ -15,11 +16,17 @@ from .extraction import normalize_email
 
 _DROP_TOKENS: Set[str] = {"-", "—", "x", "✖", "удалить", "delete", "drop"}
 
+# Маркеры сносок/масок, которые нередко «прилипают» к началу адреса из PDF
+# * • · ⁃ † ‡ « » " ( ) [ ] и пробелы
+_MASK_CHARS_RX = re.compile(r'^[*\u2022\u00B7\u2043\u2020\u2021"«»()\[\]\s]+')
+
 
 def _norm_key(value: str) -> str:
     """Return a canonical key for ``value`` suitable for matching edits."""
 
     cleaned = preclean_obfuscations(value or "")
+    # Срезаем лидирующие маркеры сносок у «старого»/«нового» значения
+    cleaned = _MASK_CHARS_RX.sub("", cleaned or "")
     return _canon((cleaned or "").strip().lower())
 
 
