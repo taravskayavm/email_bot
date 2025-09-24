@@ -41,7 +41,7 @@ from emailbot.messaging_utils import (
     suppress_add,
 )
 from emailbot.reporting import build_mass_report_text, log_mass_filter_digest
-from emailbot.utils import log_error
+from emailbot.utils import log_error, safe_send_message
 from utils.smtp_client import RobustSMTP
 
 import emailbot.bot_handlers as bot_handlers_module
@@ -394,7 +394,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 info_text = "ℹ️ Часть адресов была исключена перед отправкой:\n" + details
                 try:
-                    await context.bot.send_message(chat_id, info_text)
+                    await safe_send_message(context.bot, chat_id, info_text)
                 except Exception:
                     pass
 

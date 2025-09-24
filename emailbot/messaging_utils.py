@@ -150,14 +150,10 @@ def build_email(
     return msg
 
 # A small cache file is used to remember the IMAP folder where
-# outgoing messages should be stored.  The file lives alongside this
-# module so the path is deterministic and independent of the working
-# directory.
-SCRIPT_DIR = Path(__file__).resolve().parent
-# Name of the file storing the detected "Sent" folder name.
-SENT_CACHE_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+# outgoing messages should be stored.
+SENT_CACHE_FILE = Path("var/sent_mailbox.cache")
 
-_SENT_CANDIDATES = [
+COMMON_SENT_NAMES = [
     "Sent",
     "Sent Items",
     "Sent Mail",
@@ -166,9 +162,28 @@ _SENT_CANDIDATES = [
     "[Google Mail]/Sent Mail",
     "Отправленные",
     "Отправленные письма",
+    "Отправленное",
+    "Отправленные элементы",
+    "Исходящие",
 ]
 _SENT_FLAG_RX = re.compile(rb"\\Sent\\b", re.IGNORECASE)
 _MBX_QUOTED_RX = re.compile(rb'".*?"\s+"(.*?)"$')
+
+
+def _read_cached_sent_name() -> str | None:
+    try:
+        cached = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return cached or None
+
+
+def _write_cached_sent_name(name: str) -> None:
+    try:
+        SENT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+    except Exception:
+        pass
 
 
 class SecretFilter(logging.Filter):
@@ -296,7 +311,7 @@ def _list_and_pick_sent(imap: imaplib.IMAP4) -> str | None:
             if name and _try_select(imap, name):
                 return name
     # Fall back to heuristic candidates.
-    for candidate in _SENT_CANDIDATES:
+    for candidate in COMMON_SENT_NAMES:
         if _try_select(imap, candidate):
             return candidate
     return None
@@ -382,40 +397,38 @@ def last_sent_at(email: str) -> Optional[datetime]:
 def detect_sent_folder(imap: imaplib.IMAP4) -> str:
     """Locate the "Sent" folder, honouring overrides and caching the result."""
 
-    env_override = os.getenv("SENT_MAILBOX", "").strip()
-    if env_override and _try_select(imap, env_override):
-        try:
-            SENT_CACHE_FILE.write_text(env_override, encoding="utf-8")
-        except Exception:
-            pass
-        return env_override
+    env_sent = os.getenv("SENT_MAILBOX", "").strip()
+    cached = _read_cached_sent_name()
 
-    cached_name = ""
-    try:
-        cached_name = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        cached_name = ""
-    if cached_name:
-        if _try_select(imap, cached_name):
-            return cached_name
-        logger.warning(
-            "Stored sent folder %s not selectable, falling back", cached_name
-        )
+    candidates: list[str] = []
+    if env_sent:
+        candidates.append(env_sent)
+    if cached and cached not in candidates:
+        candidates.append(cached)
+    for name in COMMON_SENT_NAMES:
+        if name not in candidates:
+            candidates.append(name)
+
+    for cand in candidates:
+        if not cand:
+            continue
+        if _try_select(imap, cand):
+            if cand != cached:
+                _write_cached_sent_name(cand)
+            return cand
 
     picked = _list_and_pick_sent(imap)
     if picked:
-        try:
-            SENT_CACHE_FILE.write_text(picked, encoding="utf-8")
-        except Exception:
-            pass
+        if picked != cached:
+            _write_cached_sent_name(picked)
         return picked
 
-    fallback = "Sent"
-    try:
-        SENT_CACHE_FILE.write_text(fallback, encoding="utf-8")
-    except Exception:
-        pass
-    return fallback
+    logger.warning(
+        "Sent mailbox not selectable, fell back to INBOX (env=%r, cached=%r)",
+        env_sent,
+        cached,
+    )
+    return "INBOX"
 
 
 def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> tuple[str, object]:
