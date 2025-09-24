@@ -323,6 +323,15 @@ def main() -> None:
     )
     _safe_add(
         app,
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            bot_handlers.message_router,
+            block=False,
+        ),
+        "msg:router",
+    )
+    _safe_add(
+        app,
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text),
         "msg:handle_text",
     )

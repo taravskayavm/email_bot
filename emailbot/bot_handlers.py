@@ -41,13 +41,14 @@ from telegram import (
     ReplyKeyboardMarkup,
     Update,
 )
-from telegram.ext import ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes
 
-from bot.keyboards import build_templates_kb, build_parse_mode_kb
+from bot.keyboards import build_parse_mode_kb, build_templates_kb
 from services.templates import get_template, get_template_label
 from emailbot import config as C
 from emailbot.notify import notify
 from .diag import build_diag_text, env_snapshot, imap_ping, smtp_ping, smtp_settings
+from .sections_prefs import get_last_sections_for_domain, save_sections_for_domain
 
 from utils.email_clean import (
     canonicalize_email,
@@ -68,6 +69,7 @@ from utils.tld_utils import is_allowed_domain as _is_allowed_domain, is_foreign_
 STATS_PATH = str(_stats_path())
 _FALLBACK_EMAIL_RX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)
+SECTIONS_RX = re.compile(r"(?:^|\s)(/[A-Za-z0-9_\-./]+)(?:[,\s;]|$)")
 
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
@@ -126,6 +128,7 @@ def _format_preview_text(
 
 # --- Новое состояние для ручного ввода исправлений ---
 EDIT_SUSPECTS_INPUT = 9301
+SECTIONS_WAIT_INPUT = 12901
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -2238,6 +2241,22 @@ def _norm_prefix(value: str) -> str:
     return raw if raw.startswith("/") else "/" + raw
 
 
+def _domain_of(url: str) -> str:
+    """Return the lower-cased domain part of ``url``."""
+
+    text = (url or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:
+        return ""
+    host = parsed.netloc or ""
+    if not host and parsed.path:
+        host = parsed.path.split("/", 1)[0]
+    return host.lower()
+
+
 def _first_url(text: str | None) -> str | None:
     """Return the first URL found in ``text`` or ``None`` if absent."""
 
@@ -2253,9 +2272,35 @@ async def handle_text_with_url(
     message = update.message
     if not message or not message.text:
         return False
-    url = _first_url(message.text)
+    text = message.text
+    url = _first_url(text)
     if not url:
         return False
+
+    prefixes: list[str] = []
+    for match in SECTIONS_RX.finditer(text):
+        normalized = _norm_prefix(match.group(1))
+        if not normalized or normalized == "/":
+            continue
+        if normalized not in prefixes:
+            prefixes.append(normalized)
+
+    if prefixes:
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        if chat_id is not None:
+            try:
+                save_sections_for_domain(chat_id, _domain_of(url), prefixes)
+            except Exception:
+                pass
+        await _run_url_extraction(
+            update,
+            context,
+            url,
+            deep=True,
+            path_prefixes=prefixes,
+        )
+        return True
 
     token = secrets.token_hex(6)
     mapping = context.user_data.setdefault("parse_mode_urls", {})
@@ -2263,10 +2308,20 @@ async def handle_text_with_url(
     tokens_by_message = context.user_data.setdefault(
         "parse_mode_tokens_by_message", {}
     )
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    last_sections: list[str] = []
+    if chat_id is not None:
+        try:
+            last_sections = (
+                get_last_sections_for_domain(chat_id, _domain_of(url)) or []
+            )
+        except Exception:
+            last_sections = []
     try:
         prompt = await message.reply_text(
-            f"Нашла ссылку:\n{url}\nКак парсить?",
-            reply_markup=build_parse_mode_kb(token),
+            "Нашла ссылку. Как парсить?",
+            reply_markup=build_parse_mode_kb(token, last_sections=last_sections),
         )
     except Exception:
         mapping.pop(token, None)
@@ -2574,22 +2629,74 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     tokens_by_message = context.user_data.get("parse_mode_tokens_by_message", {})
     if query.message and hasattr(query.message, "message_id"):
         tokens_by_message.pop(query.message.message_id, None)
-    url = mapping.pop(token, None)
+    url = mapping.get(token)
     if not url:
         await query.answer(
             "Ссылка потерялась, отправь снова, пожалуйста.", show_alert=True
         )
         return
-    deep = mode == "deep"
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+
     origin_message_id = (
         query.message.message_id
         if query.message and hasattr(query.message, "message_id")
         else None
     )
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+
+    if mode == "sections":
+        mapping.pop(token, None)
+        context.user_data["sections_url"] = url
+        context.user_data["state"] = SECTIONS_WAIT_INPUT
+        try:
+            await query.edit_message_text(
+                "Укажи разделы (через запятую или пробел): например: /news, /journals, /e_arctic"
+            )
+        except Exception:
+            pass
+        return
+
+    if mode == "use_last":
+        last_sections: list[str] = []
+        if chat_id is not None:
+            try:
+                last_sections = (
+                    get_last_sections_for_domain(chat_id, _domain_of(url)) or []
+                )
+            except Exception:
+                last_sections = []
+        if not last_sections:
+            try:
+                await query.edit_message_text(
+                    "Для этого домена сохранённых разделов нет. Выбери «🕸️ Выбрать разделы…».",
+                    reply_markup=build_parse_mode_kb(token),
+                )
+            except Exception:
+                pass
+            if query.message and hasattr(query.message, "message_id"):
+                tokens_by_message[query.message.message_id] = token
+            return
+        mapping.pop(token, None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _run_url_extraction(
+            update,
+            context,
+            url,
+            deep=True,
+            origin_message_id=origin_message_id,
+            path_prefixes=last_sections,
+        )
+        return
+
+    mapping.pop(token, None)
+    deep = mode == "deep"
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await _run_url_extraction(
         update,
         context,
@@ -2597,6 +2704,60 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         deep=deep,
         origin_message_id=origin_message_id,
     )
+
+
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает временные состояния перед общим текстовым хендлером."""
+
+    if context.user_data.get("state") != SECTIONS_WAIT_INPUT:
+        return
+
+    context.user_data["state"] = None
+    message = update.message
+    text = message.text if message and message.text else ""
+    url = context.user_data.pop("sections_url", "")
+    if not url:
+        if message:
+            await _safe_reply_text(
+                message, "Ссылка потерялась. Нажми «🕸️ Выбрать разделы…» ещё раз."
+            )
+        raise ApplicationHandlerStop()
+    parts = re.split(r"[;,\s]+", text)
+    prefixes: list[str] = []
+    for part in parts:
+        stripped = part.strip()
+        if not stripped.startswith("/"):
+            continue
+        normalized = _norm_prefix(stripped)
+        if not normalized or normalized == "/":
+            continue
+        if normalized not in prefixes:
+            prefixes.append(normalized)
+
+    if not prefixes:
+        if message:
+            await _safe_reply_text(
+                message, "Не увидела разделов. Повтори форматом: /news, /journals"
+            )
+        raise ApplicationHandlerStop()
+
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    if chat_id is not None:
+        try:
+            save_sections_for_domain(chat_id, _domain_of(url), prefixes)
+        except Exception:
+            pass
+
+    await _run_url_extraction(
+        update,
+        context,
+        url,
+        deep=True,
+        path_prefixes=prefixes,
+    )
+
+    raise ApplicationHandlerStop()
 
 
 async def _run_url_extraction(
