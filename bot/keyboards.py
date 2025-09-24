@@ -9,22 +9,42 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 
-def build_parse_mode_kb(token: str) -> InlineKeyboardMarkup:
+def build_parse_mode_kb(
+    token: str, last_sections: list[str] | None = None
+) -> InlineKeyboardMarkup:
     """Keyboard offering parse mode selection for a detected URL token."""
 
     value = (token or "").strip()
-    return InlineKeyboardMarkup(
+    rows = [
         [
-            [
-                InlineKeyboardButton(
-                    "📄 Только эта страница", callback_data=f"parse|single|{value}"
-                ),
-                InlineKeyboardButton(
-                    "🕸️ Сканировать сайт", callback_data=f"parse|deep|{value}"
-                ),
-            ]
+            InlineKeyboardButton(
+                "📄 Только эта страница", callback_data=f"parse|single|{value}"
+            ),
+            InlineKeyboardButton(
+                "🕸️ Сканировать сайт", callback_data=f"parse|deep|{value}"
+            ),
+        ]
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🕸️ Выбрать разделы…", callback_data=f"parse|sections|{value}"
+            )
         ]
     )
+    if last_sections:
+        human = ", ".join(last_sections[:3])
+        if len(last_sections) > 3:
+            human += "…"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"♻️ Разделы по умолчанию: {human}",
+                    callback_data=f"parse|use_last|{value}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
 
 from services.templates import list_templates
 
