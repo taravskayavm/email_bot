@@ -4,9 +4,41 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from telegram import constants
 
 
 logger = logging.getLogger(__name__)
+
+
+def _chunk_text(text: str, limit: int) -> list[str]:
+    """Split ``text`` into Telegram-friendly chunks."""
+
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        newline = text.rfind("\n", start, end)
+        if newline == -1 or newline < start + int(limit * 0.5):
+            newline = end
+        parts.append(text[start:newline])
+        start = newline
+    return [part for part in parts if part]
+
+
+async def safe_send_message(bot, chat_id: int, text: str, **kwargs):
+    """Send ``text`` in chunks to avoid Telegram 4096 limit."""
+
+    limit = constants.MessageLimit.MAX_TEXT_LENGTH
+    first = True
+    for chunk in _chunk_text(text, limit):
+        if first:
+            await bot.send_message(chat_id=chat_id, text=chunk, **kwargs)
+            first = False
+        else:
+            follow_kwargs = {k: v for k, v in kwargs.items() if k != "reply_markup"}
+            await bot.send_message(chat_id=chat_id, text=chunk, **follow_kwargs)
 
 
 def load_env(script_dir: Path) -> None:

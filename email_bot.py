@@ -10,6 +10,7 @@ import os
 import signal
 import threading
 import warnings
+from contextlib import suppress
 from pathlib import Path
 
 from telegram import Update
@@ -55,6 +56,33 @@ for noisy in ("httpx", "httpcore", "urllib3", "aiohttp", "requests"):
 
 logger = logging.getLogger(__name__)
 
+LOCK_PATH = Path("var/app.lock")
+_LOCK_ACQUIRED = False
+
+
+def _acquire_single_instance_lock() -> None:
+    """Ensure only one bot instance is running at a time."""
+
+    global _LOCK_ACQUIRED
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(LOCK_PATH, "x", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except FileExistsError as exc:
+        raise SystemExit(
+            "Another instance is running (lock file exists: var/app.lock)."
+        ) from exc
+    _LOCK_ACQUIRED = True
+
+
+def _release_single_instance_lock() -> None:
+    global _LOCK_ACQUIRED
+    if not _LOCK_ACQUIRED:
+        return
+    with suppress(Exception):
+        LOCK_PATH.unlink()
+    _LOCK_ACQUIRED = False
+
 
 def _safe_add(app, handler, signature: str) -> None:
     """Register ``handler`` only once per application."""
@@ -81,7 +109,9 @@ async def _on_error(
     logger.exception("Unhandled error: %s", err)
 
 
-def main() -> None:
+async def main_async() -> None:
+    _acquire_single_instance_lock()
+
     load_env(SCRIPT_DIR)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -495,12 +525,14 @@ def main() -> None:
         "cb:imap_choose",
     )
 
-    logger.info("Бот запущен.")
+    logger.info("Бот запускается…")
     stop_event = threading.Event()
-    t = threading.Thread(
-        target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
+    background_thread = threading.Thread(
+        target=messaging.periodic_unsubscribe_check,
+        args=(stop_event,),
+        daemon=True,
     )
-    t.start()
+    background_thread.start()
 
     def _signal_handler(signum, frame):
         logger.warning("Received signal %s — shutting down bot...", signum)
@@ -512,23 +544,25 @@ def main() -> None:
         except Exception:
             pass
 
-    async def _run():
-        async with app:
-            await app.start()
-            await app.updater.start_polling()
-            while not stop_event.is_set():
-                if not app.updater.running:
-                    stop_event.set()
-                    break
-                await asyncio.sleep(0.25)
-            await app.updater.stop()
-            await app.stop()
+    async def _post_shutdown(_: Application) -> None:
+        stop_event.set()
+
+    app.post_shutdown = _post_shutdown
 
     try:
-        asyncio.run(_run())
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Bot polling starting…")
+        await app.run_polling(close_loop=False)
     finally:
         stop_event.set()
-        t.join()
+        background_thread.join(timeout=5.0)
+
+
+def main() -> None:
+    try:
+        asyncio.run(main_async())
+    finally:
+        _release_single_instance_lock()
 
 
 if __name__ == "__main__":
