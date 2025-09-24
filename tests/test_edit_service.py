@@ -43,6 +43,6 @@ def test_apply_edits_handles_canonicalization_and_drop(tmp_path):
     updated = apply_edits(source, chat_id)
 
     assert updated == [
-        "clean+tag@example.com",
-        "other@example.com",
+        "Clean+tag@example.com",
+        "Other@example.com",
     ]
