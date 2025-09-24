@@ -17,6 +17,7 @@ import secrets
 import smtplib
 import time
 import urllib.parse
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2861,56 +2862,73 @@ async def sections_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает временные состояния перед общим текстовым хендлером."""
+    """Универсальный маршрутизатор для URL в текстовых сообщениях."""
 
-    if context.user_data.get("state") != SECTIONS_WAIT_INPUT:
+    message = update.message
+
+    if context.user_data.get("state") == SECTIONS_WAIT_INPUT:
+        context.user_data["state"] = None
+        text = message.text if message and message.text else ""
+        url = context.user_data.pop("sections_url", "")
+        if not url:
+            if message:
+                await _safe_reply_text(
+                    message, "Ссылка потерялась. Нажми «🕸️ Выбрать разделы…» ещё раз."
+                )
+            raise ApplicationHandlerStop()
+        parts = re.split(r"[;,\s]+", text)
+        prefixes: list[str] = []
+        for part in parts:
+            stripped = part.strip()
+            if not stripped.startswith("/"):
+                continue
+            normalized = _norm_prefix(stripped)
+            if not normalized or normalized == "/":
+                continue
+            if normalized not in prefixes:
+                prefixes.append(normalized)
+
+        if not prefixes:
+            if message:
+                await _safe_reply_text(
+                    message, "Не увидела разделов. Повтори форматом: /news, /journals"
+                )
+            raise ApplicationHandlerStop()
+
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        if chat_id is not None:
+            try:
+                save_sections_for_domain(chat_id, _domain_of(url), prefixes)
+            except Exception:
+                pass
+
+        await _run_url_extraction(
+            update,
+            context,
+            url,
+            deep=True,
+            path_prefixes=prefixes,
+        )
+
+        raise ApplicationHandlerStop()
+
+    if not message or not message.text:
         return
 
-    context.user_data["state"] = None
-    message = update.message
-    text = message.text if message and message.text else ""
-    url = context.user_data.pop("sections_url", "")
-    if not url:
-        if message:
-            await _safe_reply_text(
-                message, "Ссылка потерялась. Нажми «🕸️ Выбрать разделы…» ещё раз."
-            )
-        raise ApplicationHandlerStop()
-    parts = re.split(r"[;,\s]+", text)
-    prefixes: list[str] = []
-    for part in parts:
-        stripped = part.strip()
-        if not stripped.startswith("/"):
-            continue
-        normalized = _norm_prefix(stripped)
-        if not normalized or normalized == "/":
-            continue
-        if normalized not in prefixes:
-            prefixes.append(normalized)
+    text = message.text.strip()
+    match = URL_RX.search(text)
+    if not match:
+        return
+    url = match.group(0)
 
-    if not prefixes:
-        if message:
-            await _safe_reply_text(
-                message, "Не увидела разделов. Повтори форматом: /news, /journals"
-            )
+    handled = False
+    with suppress(Exception):
+        handled = await handle_text_with_url(update, context)
+    if handled:
         raise ApplicationHandlerStop()
 
-    chat = update.effective_chat
-    chat_id = chat.id if chat else None
-    if chat_id is not None:
-        try:
-            save_sections_for_domain(chat_id, _domain_of(url), prefixes)
-        except Exception:
-            pass
-
-    await _run_url_extraction(
-        update,
-        context,
-        url,
-        deep=True,
-        path_prefixes=prefixes,
-    )
-
+    await _run_url_extraction(update, context, url, deep=False)
     raise ApplicationHandlerStop()
 
 
@@ -3101,20 +3119,26 @@ async def _run_url_extraction(
 
     if error is not None:
         logger.exception("URL extraction failed: %s", error)
-        error_text = str(error) or error.__class__.__name__
-        if len(error_text) > 180:
-            error_text = error_text[:177] + "…"
+        root_error = error.__cause__ if getattr(error, "__cause__", None) else error
+        reason = type(root_error).__name__
+        failure_text = (
+            "❌ Не удалось загрузить страницу.\n"
+            f"Причина: {reason}\n"
+            f"URL: {clean_url}\n"
+            "Попробуй «📄 Только эта страница» или другой раздел."
+        )
+        delivered = False
         if status_message_id is not None and status_chat_id is not None:
-            try:
+            with suppress(Exception):
                 await context.bot.edit_message_text(
                     chat_id=status_chat_id,
                     message_id=status_message_id,
-                    text=f"❌ Ошибка при разборе: {error_text}",
+                    text=failure_text,
                 )
-            except Exception:
-                pass
-        elif message:
-            await _safe_reply_text(message, f"❌ Ошибка при разборе: {error_text}")
+                delivered = True
+        if not delivered and message:
+            with suppress(Exception):
+                await _safe_reply_text(message, failure_text)
         return
 
     if batch_id != context.chat_data.get("batch_id"):

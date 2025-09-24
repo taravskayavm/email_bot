@@ -68,6 +68,7 @@ class Crawler:
         self.pages_scanned = 0
         self.on_page = on_page
         self.allowed_prefixes = self._normalize_prefixes(path_prefixes)
+        self.last_error: Exception | None = None
         try:
             robots_url = canonicalize(start_url, "/robots.txt") or start_url
             self.robots.set_url(robots_url)
@@ -124,13 +125,16 @@ class Crawler:
             response = await self.client.get(url)
             content_type = str(response.headers.get("content-type", "")).lower()
             if content_type and "html" not in content_type and "text" not in content_type:
+                self.last_error = None
                 return str(response.url), None
             text = best_effort_decode(response.content)
             if not text:
                 response.encoding = response.encoding or "utf-8"
                 text = response.text
+            self.last_error = None
             return str(response.url), text
-        except Exception:
+        except Exception as exc:
+            self.last_error = exc
             return None, None
 
     def extract_links(self, base: str, html: str) -> list[str]:
