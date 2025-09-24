@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
@@ -161,13 +162,12 @@ COMMON_SENT_NAMES = [
     "[Gmail]/Sent Mail",
     "[Google Mail]/Sent Mail",
     "Отправленные",
-    "Отправленные письма",
     "Отправленное",
-    "Отправленные элементы",
+    "Отправленные письма",
     "Исходящие",
+    "Отправленные элементы",
 ]
-_SENT_FLAG_RX = re.compile(rb"\\Sent\\b", re.IGNORECASE)
-_MBX_QUOTED_RX = re.compile(rb'".*?"\s+"(.*?)"$')
+_LIST_RE = re.compile(r"\((?P<flags>[^)]*)\)\s+\"(?P<delim>[^\"]+)\"\s+(?P<name>.+)$")
 
 
 def _read_cached_sent_name() -> str | None:
@@ -212,109 +212,112 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _decode_modified_utf7(s: str) -> str:
+def _imap_utf7_encode(s: str) -> str:
+    """Unicode -> IMAP modified UTF-7."""
+
     res: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if not buf:
+            return
+        chunk = "".join(buf).encode("utf-16-be")
+        enc = base64.b64encode(chunk).decode("ascii").rstrip("=").replace("/", ",")
+        res.append("&" + enc + "-")
+        buf.clear()
+
+    for ch in s:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E and ch != "&":
+            flush()
+            res.append(ch)
+        elif ch == "&":
+            flush()
+            res.append("&-")
+        else:
+            buf.append(ch)
+    flush()
+    return "".join(res)
+
+
+def _imap_utf7_decode(s: str) -> str:
+    """IMAP modified UTF-7 -> Unicode."""
+
+    out: list[str] = []
     i = 0
-    while i < len(s):
-        c = s[i]
-        if c == "&":
-            j = i + 1
-            while j < len(s) and s[j] != "-":
-                j += 1
-            if j == i + 1:
-                res.append("&")
-            else:
-                chunk = s[i + 1 : j].replace(",", "/")
-                pad = "=" * (-len(chunk) % 4)
-                res.append(base64.b64decode(chunk + pad).decode("utf-16-be", "ignore"))
-            i = j + 1
-        else:
-            res.append(c)
+    n = len(s)
+    while i < n:
+        if s[i] != "&":
+            out.append(s[i])
             i += 1
-    return "".join(res)
-
-
-def _encode_modified_utf7(s: str) -> str:
-    res: list[str] = []
-    for part in re.split(r"([\u0080-\uFFFF]+)", s):
-        if not part:
             continue
-        if ord(part[0]) < 128:
-            res.append(part.replace("&", "&-"))
+        j = s.find("-", i)
+        if j == -1:
+            out.append(s[i:])
+            break
+        token = s[i + 1 : j]
+        if not token:
+            out.append("&")
         else:
-            b = (
-                base64.b64encode(part.encode("utf-16-be"))
-                .decode("ascii")
-                .replace("/", ",")
-                .rstrip("=")
-            )
-            res.append("&" + b + "-")
-    return "".join(res)
+            b64 = token.replace(",", "/")
+            pad = "=" * ((4 - len(b64) % 4) % 4)
+            data = base64.b64decode(b64 + pad)
+            out.append(data.decode("utf-16-be", errors="strict"))
+        i = j + 1
+    return "".join(out)
 
 
-def _extract_mailbox_name(row: bytes | str) -> str | None:
-    if isinstance(row, str):
-        row_bytes = row.encode("utf-8", errors="ignore")
-    else:
-        row_bytes = row or b""
-    if not row_bytes:
-        return None
-    match = _MBX_QUOTED_RX.search(row_bytes)
-    raw: bytes | None
+def _normalize_list_line(row: bytes | str) -> str:
+    if isinstance(row, bytes):
+        return row.decode("utf-8", "ignore")
+    return str(row)
+
+
+def _parse_list_line(line: str) -> tuple[set[str], str, str]:
+    """Return (flags, raw_ascii_name, human_name)."""
+
+    match = _LIST_RE.match(line.strip())
+    flags: set[str] = set()
+    raw_name = ""
     if match:
-        raw = match.group(1)
+        flags = set((match.group("flags") or "").split())
+        raw_name = (match.group("name") or "").strip()
+        if raw_name.startswith('"') and raw_name.endswith('"'):
+            raw_name = raw_name[1:-1]
     else:
-        parts = row_bytes.strip().split()
-        raw = parts[-1] if parts else None
-        if raw is not None:
-            raw = raw.strip(b'"')
-    if not raw:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        ascii_name = raw.decode("ascii")
-    except UnicodeDecodeError:
-        ascii_name = raw.decode("utf-8", errors="ignore")
-    ascii_name = ascii_name.strip()
-    if not ascii_name:
-        return None
-    decoded = _decode_modified_utf7(ascii_name)
-    return decoded or ascii_name
+        parts = line.strip().rsplit(" ", 1)
+        raw_name = parts[-1].strip('"') if parts else ""
+
+    decoded = _imap_utf7_decode(raw_name)
+    return flags, raw_name, decoded
 
 
-def _try_select(imap: imaplib.IMAP4, name: str) -> bool:
-    if not name:
+def _imap_enable_utf8_accept(imap: imaplib.IMAP4) -> None:
+    with suppress(Exception):
+        imap.enable("UTF8=ACCEPT")
+
+
+def _try_select_decoded(imap: imaplib.IMAP4, decoded_name: str) -> bool:
+    if not decoded_name:
         return False
-    try:
-        status, _ = imap.select(name, readonly=True)
-    except Exception:
+    with suppress(Exception):
+        code, _ = imap.select(decoded_name, readonly=True)
+        if code == "OK":
+            return True
+    encoded = _imap_utf7_encode(decoded_name)
+    with suppress(Exception):
+        code, _ = imap.select(encoded, readonly=True)
+        return code == "OK"
+    return False
+
+
+def _try_select_raw_ascii(imap: imaplib.IMAP4, raw_ascii: str) -> bool:
+    if not raw_ascii:
         return False
-    return status == "OK"
-
-
-def _list_and_pick_sent(imap: imaplib.IMAP4) -> str | None:
-    try:
-        status, data = imap.list()
-    except Exception:
-        return None
-    if status != "OK" or not data:
-        return None
-    # Prefer folders explicitly flagged with \Sent.
-    for row in data:
-        if not row or not isinstance(row, (bytes, str)):
-            continue
-        haystack = row.encode("utf-8", errors="ignore") if isinstance(row, str) else row
-        if _SENT_FLAG_RX.search(haystack):
-            name = _extract_mailbox_name(row)
-            if name and _try_select(imap, name):
-                return name
-    # Fall back to heuristic candidates.
-    for candidate in COMMON_SENT_NAMES:
-        if _try_select(imap, candidate):
-            return candidate
-    return None
+    with suppress(Exception):
+        code, _ = imap.select(raw_ascii, readonly=True)
+        return code == "OK"
+    return False
 
 
 REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
@@ -397,31 +400,43 @@ def last_sent_at(email: str) -> Optional[datetime]:
 def detect_sent_folder(imap: imaplib.IMAP4) -> str:
     """Locate the "Sent" folder, honouring overrides and caching the result."""
 
-    env_sent = os.getenv("SENT_MAILBOX", "").strip()
     cached = _read_cached_sent_name()
+    env_sent = (os.getenv("SENT_MAILBOX") or "").strip()
 
-    candidates: list[str] = []
-    if env_sent:
-        candidates.append(env_sent)
-    if cached and cached not in candidates:
-        candidates.append(cached)
-    for name in COMMON_SENT_NAMES:
-        if name not in candidates:
-            candidates.append(name)
+    _imap_enable_utf8_accept(imap)
 
-    for cand in candidates:
-        if not cand:
-            continue
-        if _try_select(imap, cand):
-            if cand != cached:
-                _write_cached_sent_name(cand)
-            return cand
+    if cached and _try_select_decoded(imap, cached):
+        return cached
 
-    picked = _list_and_pick_sent(imap)
-    if picked:
-        if picked != cached:
-            _write_cached_sent_name(picked)
-        return picked
+    if env_sent and _try_select_decoded(imap, env_sent):
+        if env_sent != cached:
+            _write_cached_sent_name(env_sent)
+        return env_sent
+
+    with suppress(Exception):
+        status, data = imap.list()
+        if status == "OK" and data:
+            candidates: list[tuple[set[str], str, str]] = []
+            for row in data:
+                line = _normalize_list_line(row)
+                flags, raw_ascii, human = _parse_list_line(line)
+                candidates.append((flags, raw_ascii, human))
+
+            for flags, raw_ascii, human in candidates:
+                if any(flag.upper() == r"\SENT" for flag in flags):
+                    if _try_select_raw_ascii(imap, raw_ascii):
+                        to_cache = human or raw_ascii
+                        if to_cache != cached:
+                            _write_cached_sent_name(to_cache)
+                        return to_cache
+
+            known = {name.lower() for name in COMMON_SENT_NAMES}
+            for _flags, _raw_ascii, human in candidates:
+                if human and human.lower() in known:
+                    if _try_select_decoded(imap, human):
+                        if human != cached:
+                            _write_cached_sent_name(human)
+                        return human
 
     logger.warning(
         "Sent mailbox not selectable, fell back to INBOX (env=%r, cached=%r)",
