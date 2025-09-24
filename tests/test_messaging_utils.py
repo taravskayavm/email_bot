@@ -84,7 +84,7 @@ def test_schema_migration_from_legacy_headers(tmp_path):
         reader = csv.DictReader(f)
         assert reader.fieldnames == mu.REQUIRED_FIELDS
         rows = list(reader)
-    assert rows[0]["last_sent_at"] == "2023-01-01T00:00:00"
+    assert rows[0]["last_sent_at"] == "2023-01-01T00:00:00+00:00"
     assert rows[0]["email"] == "User@Example.com"
 
 
