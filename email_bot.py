@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import imaplib
 import logging
 import os
@@ -109,9 +108,7 @@ async def _on_error(
     logger.exception("Unhandled error: %s", err)
 
 
-async def main_async() -> None:
-    _acquire_single_instance_lock()
-
+def _run_bot() -> None:
     load_env(SCRIPT_DIR)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -547,20 +544,27 @@ async def main_async() -> None:
     async def _post_shutdown(_: Application) -> None:
         stop_event.set()
 
+    async def _post_init(app_: Application) -> None:
+        await messaging.start_background_jobs(app_)
+
     app.post_shutdown = _post_shutdown
+    app.post_init = _post_init
 
     try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Bot polling starting…")
-        await app.run_polling(close_loop=False)
+        app.run_polling(
+            allowed_updates=getattr(bot_handlers, "ALLOWED_UPDATES", None),
+            drop_pending_updates=True,
+        )
     finally:
         stop_event.set()
         background_thread.join(timeout=5.0)
 
 
 def main() -> None:
+    _acquire_single_instance_lock()
     try:
-        asyncio.run(main_async())
+        _run_bot()
     finally:
         _release_single_instance_lock()
 
