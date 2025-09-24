@@ -74,6 +74,7 @@ from utils.tld_utils import is_allowed_domain as _is_allowed_domain, is_foreign_
 
 STATS_PATH = str(_stats_path())
 _FALLBACK_EMAIL_RX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+EMAIL_RX = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)
 SECTIONS_RX = re.compile(r"(?:^|\s)(/[A-Za-z0-9_\-./]+)(?:[,\s;]|$)")
 
@@ -135,6 +136,7 @@ def _format_preview_text(
 # --- Новое состояние для ручного ввода исправлений ---
 EDIT_SUSPECTS_INPUT = 9301
 SECTIONS_WAIT_INPUT = 12901
+MANUAL_WAIT_INPUT = 12902  # state: ждём e-mail для ручной отправки
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -991,6 +993,7 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for key in ["awaiting_block_email", "awaiting_manual_email"]:
         context.user_data[key] = False
+    context.user_data["state"] = None
 
 
 async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2236,6 +2239,7 @@ async def prompt_manual_email(
         )
     )
     context.user_data["awaiting_manual_email"] = True
+    context.user_data["state"] = MANUAL_WAIT_INPUT
 
 
 def _norm_prefix(value: str) -> str:
@@ -2351,6 +2355,165 @@ async def handle_text_with_url(
     return True
 
 
+async def start_manual_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    raw_text: str,
+    *,
+    pre_parsed: Sequence[str] | None = None,
+) -> None:
+    """Prepare manual sending preview after collecting text input."""
+
+    message = update.message
+    if not message:
+        return
+
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    text = raw_text or ""
+
+    try:
+        final_emails, stats = extract_emails_pipeline(text)
+    except Exception as exc:
+        logger.exception("Manual input parsing failed: %s", exc)
+        final_emails, stats = [], {}
+
+    pre_trunc = list(final_emails)
+    preview_message: str | None = None
+    state = get_state(context)
+    emails_no_trunc = _drop_truncated_twins(pre_trunc, state=state)
+    truncated_removed = [addr for addr in pre_trunc if addr not in set(emails_no_trunc)]
+    emails = sorted(emails_no_trunc, key=str.lower)
+
+    fallback_used = False
+    if not emails and pre_parsed:
+        seen: set[str] = set()
+        dedup: list[str] = []
+        for candidate in pre_parsed:
+            normalized = normalize_email(candidate)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                dedup.append(normalized)
+        if dedup:
+            emails = dedup
+            truncated_removed = []
+            fallback_used = True
+            logger.info(
+                "Manual input pre-parsed fallback: raw=%r emails=%r", text, emails
+            )
+
+    if not emails:
+        fallback_matches = sorted(
+            {m.group(0).lower() for m in _FALLBACK_EMAIL_RX.finditer(text)}
+        )
+        if fallback_matches:
+            emails = fallback_matches
+            truncated_removed = []
+            fallback_used = True
+            logger.info(
+                "Manual input fallback regex: raw=%r emails=%r", text, emails
+            )
+        else:
+            drop_details = _manual_collect_drop_reasons(
+                stats, emails, truncated_removed
+            )
+            if drop_details:
+                preview_lines = [
+                    f"{addr} — {reason}" for addr, reason in drop_details[:50]
+                ]
+                await _safe_reply_text(
+                    message,
+                    "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+                )
+            await _safe_reply_text(message, "❌ Не найдено ни одного email.")
+            return
+
+    drop_details = _manual_collect_drop_reasons(stats, emails, truncated_removed)
+    if not fallback_used:
+        logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
+
+    preview_stats = dict(stats) if isinstance(stats, dict) else {}
+    preview_found = _collect_preview_found(preview_stats)
+    if preview_found or preview_stats or emails:
+        preview_message = _format_preview_text(
+            preview_found,
+            emails,
+            preview_stats.get("items_rejected"),
+            preview_stats,
+        )
+
+    context.user_data["awaiting_manual_email"] = False
+    context.user_data["state"] = None
+    context.chat_data["manual_all_emails"] = emails
+    context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
+    context.chat_data["manual_drop_reasons"] = drop_details
+
+    template_rows = [
+        row[:]
+        for row in build_templates_kb(
+            context,
+            current_code=context.chat_data.get("manual_selected_template_code"),
+            prefix="manual_tpl:",
+        ).inline_keyboard
+    ]
+
+    enforce, days, allow_override = _manual_cfg()
+    if enforce:
+        allowed, rejected = _filter_by_180(emails, group="", days=days, chat_id=chat_id)
+    else:
+        allowed, rejected = (emails, [])
+
+    context.chat_data["manual_allowed_preview"] = allowed
+    context.chat_data["manual_rejected_preview"] = rejected
+    if allow_override and enforce and rejected:
+        _manual_override_prepare(context, rejected, days)
+    else:
+        _manual_override_clear(context)
+
+    lines = ["Адреса получены.", f"К отправке (предварительно): {len(allowed)}"]
+    if rejected:
+        lines.append(f"Отфильтровано по правилу {days} дней: {len(rejected)}")
+    selected_override = _manual_override_selected_set(context)
+    if selected_override:
+        lines.append(f"Для игнорирования выбрано адресов: {len(selected_override)}")
+
+    mode_row: list[InlineKeyboardButton] = []
+    if allow_override and rejected:
+        mode_row = [
+            InlineKeyboardButton(
+                "Отправить только разрешённым", callback_data="manual_mode_allowed"
+            ),
+            InlineKeyboardButton("Отправить всем", callback_data="manual_mode_all"),
+        ]
+    ignore_row: list[InlineKeyboardButton] = []
+    if allow_override and enforce and rejected:
+        ignore_row = [
+            InlineKeyboardButton(
+                "Игнорировать (выбранные)", callback_data="manual_ignore_selected:go"
+            )
+        ]
+    keyboard = [*template_rows]
+    if mode_row:
+        keyboard.append(mode_row)
+    if ignore_row:
+        keyboard.append(ignore_row)
+    keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
+
+    await _safe_reply_text(
+        message,
+        "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    if preview_message:
+        await _safe_reply_text(message, preview_message)
+    if drop_details:
+        preview_lines = [f"{addr} — {reason}" for addr, reason in drop_details[:50]]
+        await _safe_reply_text(
+            message,
+            "Исключены адреса и причины:\n" + "\n".join(preview_lines),
+        )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process text messages for uploads, blocking or manual lists."""
 
@@ -2430,128 +2593,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        final_emails, stats = extract_emails_pipeline(text)
-        pre_trunc = list(final_emails)
-        preview_message: str | None = None
-        emails_no_trunc = _drop_truncated_twins(pre_trunc, state=get_state(context))
-        truncated_removed = [
-            addr for addr in pre_trunc if addr not in set(emails_no_trunc)
-        ]
-        emails = sorted(emails_no_trunc, key=str.lower)
-        if not emails:
-            fallback_matches = sorted(
-                {m.group(0).lower() for m in _FALLBACK_EMAIL_RX.finditer(text)}
-            )
-            if fallback_matches:
-                emails = fallback_matches
-                truncated_removed = []
-                drop_details = []
-                logger.info(
-                    "Manual input fallback regex: raw=%r emails=%r", text, emails
-                )
-            else:
-                drop_details = _manual_collect_drop_reasons(
-                    stats, emails, truncated_removed
-                )
-                if drop_details:
-                    preview_lines = [
-                        f"{addr} — {reason}" for addr, reason in drop_details[:50]
-                    ]
-                    await _safe_reply_text(update.message,
-                        "Исключены адреса и причины:\n" + "\n".join(preview_lines),
-                    )
-                await _safe_reply_text(update.message, "❌ Не найдено ни одного email.")
-                return
-        else:
-            drop_details = _manual_collect_drop_reasons(
-                stats, emails, truncated_removed
-            )
-            logger.info("Manual input parsing: raw=%r emails=%r", text, emails)
-
-        if emails:
-            preview_stats = dict(stats) if isinstance(stats, dict) else {}
-            preview_found = _collect_preview_found(preview_stats)
-            if preview_found or preview_stats or emails:
-                preview_message = _format_preview_text(
-                    preview_found,
-                    emails,
-                    preview_stats.get("items_rejected"),
-                    preview_stats,
-                )
-
-        # Скрываем список адресов: считаем только количества
-        context.user_data["awaiting_manual_email"] = False
-        context.chat_data["manual_all_emails"] = emails
-        context.chat_data["manual_send_mode"] = "allowed"  # allowed|all
-        context.chat_data["manual_drop_reasons"] = drop_details
-
-        template_rows = [
-            row[:]
-            for row in build_templates_kb(
-                context,
-                current_code=context.chat_data.get("manual_selected_template_code"),
-                prefix="manual_tpl:",
-            ).inline_keyboard
-        ]
-
-        enforce, days, allow_override = _manual_cfg()
-        if enforce:
-            allowed, rejected = _filter_by_180(emails, group="", days=days, chat_id=chat_id)
-        else:
-            allowed, rejected = (emails, [])
-
-        context.chat_data["manual_allowed_preview"] = allowed
-        context.chat_data["manual_rejected_preview"] = rejected
-        if allow_override and enforce and rejected:
-            _manual_override_prepare(context, rejected, days)
-        else:
-            _manual_override_clear(context)
-
-        lines = ["Адреса получены.", f"К отправке (предварительно): {len(allowed)}"]
-        if rejected:
-            lines.append(f"Отфильтровано по правилу {days} дней: {len(rejected)}")
-        selected_override = _manual_override_selected_set(context)
-        if selected_override:
-            lines.append(
-                f"Для игнорирования выбрано адресов: {len(selected_override)}"
-            )
-
-        mode_row: list[InlineKeyboardButton] = []
-        if allow_override and rejected:
-            mode_row = [
-                InlineKeyboardButton(
-                    "Отправить только разрешённым", callback_data="manual_mode_allowed"
-                ),
-                InlineKeyboardButton("Отправить всем", callback_data="manual_mode_all"),
-            ]
-        ignore_row: list[InlineKeyboardButton] = []
-        if allow_override and enforce and rejected:
-            ignore_row = [
-                InlineKeyboardButton(
-                    "Игнорировать (выбранные)",
-                    callback_data="manual_ignore_selected:go",
-                )
-            ]
-        keyboard = [*template_rows]
-        if mode_row:
-            keyboard.append(mode_row)
-        if ignore_row:
-            keyboard.append(ignore_row)
-        keyboard.append([InlineKeyboardButton("♻️ Сброс", callback_data="manual_reset")])
-
-        await _safe_reply_text(update.message,
-            "\n".join(lines) + "\n\n⬇️ Выберите направление письма:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        if preview_message:
-            await _safe_reply_text(update.message, preview_message)
-        if drop_details:
-            preview_lines = [
-                f"{addr} — {reason}" for addr, reason in drop_details[:50]
-            ]
-            await _safe_reply_text(update.message,
-                "Исключены адреса и причины:\n" + "\n".join(preview_lines),
-            )
+        await start_manual_preview(update, context, text)
         return
 
     if await handle_text_with_url(update, context):
@@ -2929,6 +2971,80 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         raise ApplicationHandlerStop()
 
     await _run_url_extraction(update, context, url, deep=False)
+    raise ApplicationHandlerStop()
+
+
+async def manual_input_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Высокоприоритетный маршрутизатор для режима «✉️ Ручная»."""
+
+    if context.user_data.get("state") != MANUAL_WAIT_INPUT:
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    raw = message.text.strip()
+    if not raw:
+        return
+
+    seen: set[str] = set()
+    emails: list[str] = []
+    for match in EMAIL_RX.finditer(raw):
+        candidate = normalize_email(match.group(0))
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            emails.append(candidate)
+
+    if not emails:
+        await _safe_reply_text(
+            message,
+            "Не увидела ни одного адреса. Введи e-mail (или несколько — через запятую/пробел/с новой строки).",
+        )
+        raise ApplicationHandlerStop()
+
+    try:
+        days = int(os.getenv("COOLDOWN_DAYS", "180") or "180")
+    except ValueError:
+        days = 180
+    enforce = os.getenv("MANUAL_ENFORCE_180", "1") == "1"
+
+    to_send: list[str] = []
+    skipped_cd: list[str] = []
+    if enforce:
+        for email in emails:
+            skip, _reason = should_skip_by_cooldown(email, days=days)
+            if skip:
+                skipped_cd.append(email)
+            else:
+                to_send.append(email)
+    else:
+        to_send = emails[:]
+
+    lines = [
+        "✅ Ручная отправка — предпросмотр:",
+        f"• получено: {len(emails)}",
+        f"• к отправке: {len(to_send)}",
+    ]
+    if enforce:
+        lines.append(f"• под кулдауном ({days} дн.): {len(skipped_cd)}")
+    if to_send:
+        lines.append("Примеры:")
+        lines.extend(f"• {addr}" for addr in to_send[:10])
+
+    await _safe_reply_text(message, "\n".join(lines))
+
+    try:
+        await start_manual_preview(update, context, raw, pre_parsed=emails)
+    except Exception as exc:
+        logger.exception("Manual preview preparation failed: %s", exc)
+        await _safe_reply_text(
+            message, "⚠️ Не удалось подготовить предпросмотр. Попробуй ещё раз."
+        )
+        context.user_data["state"] = MANUAL_WAIT_INPUT
+        context.user_data["awaiting_manual_email"] = True
     raise ApplicationHandlerStop()
 
 

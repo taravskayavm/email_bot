@@ -191,6 +191,7 @@ def main() -> None:
         "cmd:reports_debug",
     )
 
+    # Ловим URL в любом состоянии (до общих текстовых/состояний "жду файл")
     _safe_add(
         app,
         MessageHandler(
@@ -199,6 +200,16 @@ def main() -> None:
             bot_handlers.message_router,
         ),
         "msg:url_router",
+    )
+
+    # Ввод для режима "✉️ Ручная" ловим раньше, чем общий текст
+    _safe_add(
+        app,
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            bot_handlers.manual_input_router,  # внутри проверяет state "жду e-mail"
+        ),
+        "msg:manual_input_router",
     )
 
     # Inline-кнопки для подозрительных адресов
