@@ -136,6 +136,17 @@ def _format_preview_text(
 # --- Новое состояние для ручного ввода исправлений ---
 EDIT_SUSPECTS_INPUT = 9301
 SECTIONS_WAIT_INPUT = 12901
+_SECT_TOKEN_RX = re.compile(r"/[A-Za-z0-9_\-./]+")  # находим /e_arctic, /news и т.п.
+_KNOWN_BOT_COMMANDS = {
+    "/start",
+    "/retry_last",
+    "/diag",
+    "/features",
+    "/page",
+    "/sections",
+    "/reports",
+    "/reports_debug",
+}
 MANUAL_WAIT_INPUT = 12902  # state: ждём e-mail для ручной отправки
 
 
@@ -2251,6 +2262,81 @@ def _norm_prefix(value: str) -> str:
     return raw if raw.startswith("/") else "/" + raw
 
 
+def _collect_section_prefixes(text: str) -> list[str]:
+    """Extract unique section prefixes from ``text`` preserving order."""
+
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for token in _SECT_TOKEN_RX.findall(text or ""):
+        normalized = _norm_prefix(token)
+        if not normalized or normalized == "/":
+            continue
+        if normalized in seen:
+            continue
+        prefixes.append(normalized)
+        seen.add(normalized)
+    return prefixes
+
+
+def _extract_primary_command(text: str) -> str:
+    """Return the main command token from ``text`` (e.g. ``/start``)."""
+
+    if not text:
+        return ""
+    token = text.strip().split()[0]
+    if not token.startswith("/"):
+        return ""
+    token = token.split("@", 1)[0]
+    return token.rstrip(",;:. ").lower()
+
+
+async def _process_sections_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    text: str,
+) -> bool:
+    """Handle section prefixes provided by the user.
+
+    Returns ``True`` if extraction has been started.
+    """
+
+    message = update.message
+    url = context.user_data.pop("sections_url", "")
+    if not url:
+        if message:
+            await _safe_reply_text(
+                message,
+                "Ссылка потерялась. Нажми «🕸️ Выбрать разделы…» ещё раз.",
+            )
+        return False
+
+    prefixes = _collect_section_prefixes(text)
+    if not prefixes:
+        if message:
+            await _safe_reply_text(
+                message,
+                "Не увидела разделов. Пример: /news, /journals, /e_arctic",
+            )
+        return False
+
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    if chat_id is not None:
+        with suppress(Exception):
+            save_sections_for_domain(chat_id, _domain_of(url), prefixes)
+
+    await _run_url_extraction(
+        update,
+        context,
+        url,
+        deep=True,
+        path_prefixes=prefixes,
+    )
+
+    return True
+
+
 def _domain_of(url: str) -> str:
     """Return the lower-cased domain part of ``url``."""
 
@@ -2704,7 +2790,7 @@ async def parse_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data["state"] = SECTIONS_WAIT_INPUT
         try:
             await query.edit_message_text(
-                "Укажи разделы (через запятую или пробел): например: /news, /journals, /e_arctic"
+                "Укажи разделы (через запятую или пробел). Можно писать с «/»: например /news, /journals, /e_arctic"
             )
         except Exception:
             pass
@@ -2911,48 +2997,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if context.user_data.get("state") == SECTIONS_WAIT_INPUT:
         context.user_data["state"] = None
         text = message.text if message and message.text else ""
-        url = context.user_data.pop("sections_url", "")
-        if not url:
-            if message:
-                await _safe_reply_text(
-                    message, "Ссылка потерялась. Нажми «🕸️ Выбрать разделы…» ещё раз."
-                )
-            raise ApplicationHandlerStop()
-        parts = re.split(r"[;,\s]+", text)
-        prefixes: list[str] = []
-        for part in parts:
-            stripped = part.strip()
-            if not stripped.startswith("/"):
-                continue
-            normalized = _norm_prefix(stripped)
-            if not normalized or normalized == "/":
-                continue
-            if normalized not in prefixes:
-                prefixes.append(normalized)
-
-        if not prefixes:
-            if message:
-                await _safe_reply_text(
-                    message, "Не увидела разделов. Повтори форматом: /news, /journals"
-                )
-            raise ApplicationHandlerStop()
-
-        chat = update.effective_chat
-        chat_id = chat.id if chat else None
-        if chat_id is not None:
-            try:
-                save_sections_for_domain(chat_id, _domain_of(url), prefixes)
-            except Exception:
-                pass
-
-        await _run_url_extraction(
-            update,
-            context,
-            url,
-            deep=True,
-            path_prefixes=prefixes,
-        )
-
+        await _process_sections_input(update, context, text=text)
         raise ApplicationHandlerStop()
 
     if not message or not message.text:
@@ -2971,6 +3016,28 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         raise ApplicationHandlerStop()
 
     await _run_url_extraction(update, context, url, deep=False)
+    raise ApplicationHandlerStop()
+
+
+async def sections_cmd_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fallback for command-like section inputs while awaiting prefixes."""
+
+    if context.user_data.get("state") != SECTIONS_WAIT_INPUT:
+        return
+
+    message = update.message
+    text = message.text if message and message.text else ""
+    primary = _extract_primary_command(text)
+    if primary and primary in _KNOWN_BOT_COMMANDS:
+        return
+
+    context.user_data["state"] = None
+
+    if not message:
+        context.user_data.pop("sections_url", None)
+        return
+
+    await _process_sections_input(update, context, text=text)
     raise ApplicationHandlerStop()
 
 
