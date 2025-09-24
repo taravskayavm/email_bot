@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
-import imaplib  # noqa: F401
+import imaplib
 import logging
 import os
 import re
@@ -157,6 +157,19 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Name of the file storing the detected "Sent" folder name.
 SENT_CACHE_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
+_SENT_CANDIDATES = [
+    "Sent",
+    "Sent Items",
+    "Sent Mail",
+    "Sent Messages",
+    "[Gmail]/Sent Mail",
+    "[Google Mail]/Sent Mail",
+    "Отправленные",
+    "Отправленные письма",
+]
+_SENT_FLAG_RX = re.compile(rb"\\Sent\\b", re.IGNORECASE)
+_MBX_QUOTED_RX = re.compile(rb'".*?"\s+"(.*?)"$')
+
 
 class SecretFilter(logging.Filter):
     """Logging filter that masks sensitive values in records."""
@@ -222,6 +235,71 @@ def _encode_modified_utf7(s: str) -> str:
             )
             res.append("&" + b + "-")
     return "".join(res)
+
+
+def _extract_mailbox_name(row: bytes | str) -> str | None:
+    if isinstance(row, str):
+        row_bytes = row.encode("utf-8", errors="ignore")
+    else:
+        row_bytes = row or b""
+    if not row_bytes:
+        return None
+    match = _MBX_QUOTED_RX.search(row_bytes)
+    raw: bytes | None
+    if match:
+        raw = match.group(1)
+    else:
+        parts = row_bytes.strip().split()
+        raw = parts[-1] if parts else None
+        if raw is not None:
+            raw = raw.strip(b'"')
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        ascii_name = raw.decode("ascii")
+    except UnicodeDecodeError:
+        ascii_name = raw.decode("utf-8", errors="ignore")
+    ascii_name = ascii_name.strip()
+    if not ascii_name:
+        return None
+    decoded = _decode_modified_utf7(ascii_name)
+    return decoded or ascii_name
+
+
+def _try_select(imap: imaplib.IMAP4, name: str) -> bool:
+    if not name:
+        return False
+    try:
+        status, _ = imap.select(name, readonly=True)
+    except Exception:
+        return False
+    return status == "OK"
+
+
+def _list_and_pick_sent(imap: imaplib.IMAP4) -> str | None:
+    try:
+        status, data = imap.list()
+    except Exception:
+        return None
+    if status != "OK" or not data:
+        return None
+    # Prefer folders explicitly flagged with \Sent.
+    for row in data:
+        if not row or not isinstance(row, (bytes, str)):
+            continue
+        haystack = row.encode("utf-8", errors="ignore") if isinstance(row, str) else row
+        if _SENT_FLAG_RX.search(haystack):
+            name = _extract_mailbox_name(row)
+            if name and _try_select(imap, name):
+                return name
+    # Fall back to heuristic candidates.
+    for candidate in _SENT_CANDIDATES:
+        if _try_select(imap, candidate):
+            return candidate
+    return None
 
 
 REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
@@ -301,62 +379,37 @@ def last_sent_at(email: str) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
-def detect_sent_folder(imap) -> str:
-    r"""Determine the IMAP folder name for "Sent" messages.
+def detect_sent_folder(imap: imaplib.IMAP4) -> str:
+    """Locate the "Sent" folder, honouring overrides and caching the result."""
 
-    The function tries a cached value first.  If none is found it inspects
-    the output of ``imap.list()`` searching for a mailbox flagged with
-    ``\Sent``.  If still not found, a list of common folder names is checked.
-    The chosen value is stored in :data:`SENT_CACHE_FILE` for future calls.
-    """
+    env_override = os.getenv("SENT_MAILBOX", "").strip()
+    if env_override and _try_select(imap, env_override):
+        try:
+            SENT_CACHE_FILE.write_text(env_override, encoding="utf-8")
+        except Exception:
+            pass
+        return env_override
 
-    # 1) Cached value
+    cached_name = ""
     try:
-        if SENT_CACHE_FILE.exists():
-            cached = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
-            if cached:
-                return cached
+        cached_name = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
     except Exception:
-        pass
+        cached_name = ""
+    if cached_name:
+        if _try_select(imap, cached_name):
+            return cached_name
+        logger.warning(
+            "Stored sent folder %s not selectable, falling back", cached_name
+        )
 
-    candidates: List[str] = []
-    # 2) Ask the server
-    try:
-        status, data = imap.list()
-        if status == "OK" and data:
-            for raw in data:
-                # В IMAP имена ящиков в modified UTF-7
-                try:
-                    line = raw.decode("imap4-utf-7", "ignore")
-                except LookupError:
-                    line = _decode_modified_utf7(raw.decode("ascii", "ignore"))
-                candidates.append(line)
-    except Exception:
-        candidates = []
+    picked = _list_and_pick_sent(imap)
+    if picked:
+        try:
+            SENT_CACHE_FILE.write_text(picked, encoding="utf-8")
+        except Exception:
+            pass
+        return picked
 
-    # Prefer a folder explicitly flagged as Sent
-    for line in candidates:
-        if "\\Sent" in line:
-            # Формат: (<flags>) "<sep>" "<mailbox>"
-            name = line.rsplit('"', 2)[1] if '"' in line else line.split()[-1]
-            try:
-                SENT_CACHE_FILE.write_text(name, encoding="utf-8")
-            except Exception:
-                pass
-            return name
-
-    # Common fallbacks (English and Russian variants)
-    COMMON = ["Sent", "Отправленные", "Отправленные письма"]
-    for line in candidates:
-        for name in COMMON:
-            if f'"{name}"' in line or line.endswith(name):
-                try:
-                    SENT_CACHE_FILE.write_text(name, encoding="utf-8")
-                except Exception:
-                    pass
-                return name
-
-    # Last resort
     fallback = "Sent"
     try:
         SENT_CACHE_FILE.write_text(fallback, encoding="utf-8")

@@ -1349,13 +1349,51 @@ async def prompt_change_group(
 ) -> None:
     """Prompt the user to choose a mailing group."""
 
-    await _safe_reply_text(update.message, 
+    await _safe_reply_text(update.message,
         "Выберите направление:",
         reply_markup=build_templates_kb(
             context,
             current_code=context.chat_data.get("current_template_code"),
         ),
     )
+
+
+async def fix_sent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force a re-detection of the IMAP "Sent" folder and display the result."""
+
+    try:
+        imap = context.bot_data.get("imap_client")
+    except Exception:
+        imap = None
+    created_session = False
+    text = ""
+    try:
+        if imap is None:
+            host = os.getenv("IMAP_HOST", "imap.mail.ru") or "imap.mail.ru"
+            port_raw = os.getenv("IMAP_PORT", "993") or "993"
+            try:
+                port = int(port_raw)
+            except Exception:
+                port = 993
+            user = os.getenv("EMAIL_ADDRESS", "") or ""
+            password = os.getenv("EMAIL_PASSWORD", "") or ""
+            imap = imaplib.IMAP4_SSL(host, port)
+            imap.login(user, password)
+            created_session = True
+        folder = mu.detect_sent_folder(imap)
+        text = f"Папка «Отправленные»: {folder}\nКэш обновлён."
+    except Exception as exc:
+        text = (
+            "Не удалось определить папку «Отправленные»: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    finally:
+        if created_session and imap is not None:
+            with suppress(Exception):
+                imap.logout()
+    message = update.effective_message
+    if message is not None:
+        await _safe_reply_text(message, text)
 
 
 async def imap_folders_command(
@@ -4169,6 +4207,7 @@ __all__ = [
     "handle_text",
     "page_url_command",
     "request_fix",
+    "fix_sent_command",
     "show_foreign_list",
     "apply_repairs",
     "show_repairs",
