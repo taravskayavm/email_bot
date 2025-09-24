@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import imaplib
+import inspect
 import logging
 import os
 import signal
@@ -545,7 +546,26 @@ def _run_bot() -> None:
         stop_event.set()
 
     async def _post_init(app_: Application) -> None:
-        await messaging.start_background_jobs(app_)
+        logger = logging.getLogger(__name__)
+        try:
+            try:
+                from emailbot import messaging_utils as _mutils  # type: ignore
+            except Exception:
+                _mutils = None
+
+            fn = getattr(_mutils, "start_background_jobs", None) if _mutils else None
+            if fn is None:
+                fn = getattr(messaging, "start_background_jobs", None)
+
+            if fn is not None:
+                result = fn(app_)
+                if inspect.isawaitable(result):
+                    await result
+                logger.info("Background jobs started")
+            else:
+                logger.info("No start_background_jobs() found; skipping background jobs")
+        except Exception:
+            logger.exception("Background jobs init failed")
 
     app.post_shutdown = _post_shutdown
     app.post_init = _post_init
