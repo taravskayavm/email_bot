@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -76,7 +77,31 @@ async def main() -> None:
     dispatcher.include_router(ingest_router)
     dispatcher.include_router(send_router)
     await _set_bot_commands(bot)
-    await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:  # pragma: no cover - specific to Windows/embedded loops
+            # Windows Py<3.8 и некоторые окружения
+            pass
+
+    async with bot:
+        polling = asyncio.create_task(
+            dispatcher.start_polling(
+                bot,
+                allowed_updates=dispatcher.resolve_used_update_types(),
+            )
+        )
+        polling.add_done_callback(lambda _: stop_event.set())
+        await stop_event.wait()
+        if not polling.done():
+            polling.cancel()
+        try:
+            await polling
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
