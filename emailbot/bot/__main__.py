@@ -18,9 +18,11 @@ from emailbot.bot.handlers.start import router as start_router
 
 
 def _load_dotenv() -> None:
-    env_file = Path(".env")
+    env_file = Path(__file__).resolve().parent.parent.parent / ".env"
     if env_file.exists():
-        load_dotenv(env_file)
+        load_dotenv(dotenv_path=env_file)
+    else:
+        load_dotenv()
 
 
 def _setup_logging() -> None:
@@ -43,7 +45,7 @@ def _resolve_token() -> str:
             return str(value)
     except Exception:
         pass
-    raise SystemExit("TELEGRAM_BOT_TOKEN is not set (check .env)")
+    raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Specify it in .env or environment.")
 
 
 async def _set_bot_commands(bot: Bot) -> None:
