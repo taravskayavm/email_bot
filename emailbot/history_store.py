@@ -407,11 +407,14 @@ def _legacy_stats_paths() -> Iterable[Path]:
 
 def _legacy_sent_log_paths() -> Iterable[Path]:
     seen: set[Path] = set()
-    env = os.getenv("LEGACY_SENT_LOG_PATH")
-    if env:
-        seen.add(_ensure_path(Path(env)))
-    defaults = [Path("/mnt/data/sent_log.csv"), Path("var/sent_log.csv")]
-    for path in list(seen) + defaults:
+    candidates: list[Path | str] = []
+    env_path = os.getenv("LEGACY_SENT_LOG_PATH")
+    if env_path:
+        candidates.append(env_path)
+    else:
+        candidates.append("var/sent_log.csv")
+        candidates.append("/mnt/data/sent_log.csv")
+    for path in candidates:
         resolved = _ensure_path(path)
         if resolved in seen or not resolved.exists():
             continue

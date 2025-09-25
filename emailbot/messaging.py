@@ -66,6 +66,7 @@ from .services.cooldown import (
 )
 from utils import rules
 from utils.send_stats import log_error, log_success
+from utils.paths import expand_path
 from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,8 @@ class SendOutcome(str, Enum):
 # directories located at the repository root.
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
+_SENT_LOG_ENV = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
+LOG_FILE = str(expand_path(_SENT_LOG_ENV))
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = int(os.getenv("DAILY_SEND_LIMIT", str(S.DAILY_SEND_LIMIT)))
 _ASCII_LOCAL_RX = re.compile(r"^[\x21-\x7E]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
