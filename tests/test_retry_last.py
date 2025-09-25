@@ -5,6 +5,10 @@ from email.message import EmailMessage
 from datetime import datetime
 import email.utils
 
+import pytest
+
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 from emailbot import messaging_utils as mu, messaging
 

@@ -25,7 +25,6 @@ __all__ = [
     "SmtpClient",
     "extraction",
     "messaging",
-    "bot_handlers",
     "unsubscribe",
     "reporting",
     "EmailEntry",
@@ -33,6 +32,6 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"bot_handlers", "messaging"}:
+    if name == "messaging":
         return importlib.import_module(f".{name}", __name__)
     raise AttributeError(name)

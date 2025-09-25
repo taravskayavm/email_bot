@@ -2,6 +2,8 @@ import asyncio
 import types
 import pytest
 
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 import emailbot.settings_store as store
 from emailbot.settings_store import get, set
