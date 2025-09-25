@@ -1,5 +1,5 @@
 python-telegram-bot>=20,<21
-aiogram>=3.4,<4
+aiogram>=3.6,<3.9
 aiohttp>=3.9
 pandas>=2.0
 openpyxl>=3.1
