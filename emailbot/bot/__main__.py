@@ -11,7 +11,13 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
-from dotenv import load_dotenv
+
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+
+    def load_dotenv(*args, **kwargs):
+        return False
 
 from emailbot.bot.handlers.ingest import router as ingest_router
 from emailbot.bot.handlers.send import router as send_router

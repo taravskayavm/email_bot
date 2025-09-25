@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+from utils.paths import ensure_parent, expand_path
 
 
 DEFAULTS = {
@@ -18,7 +21,8 @@ DEFAULTS = {
     "EXTERNAL_SOURCES": {},
 }
 
-SETTINGS_PATH = Path("/mnt/data/settings.json")
+_SETTINGS_ENV = os.getenv("SETTINGS_PATH", "var/settings.json")
+SETTINGS_PATH: Path = expand_path(_SETTINGS_ENV)
 _cache: dict[str, Any] | None = None
 _mtime: float = 0.0
 
@@ -45,7 +49,7 @@ def _ensure_defaults() -> dict[str, Any]:
             changed = True
     if changed:
         try:
-            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            ensure_parent(SETTINGS_PATH)
             SETTINGS_PATH.write_text(json.dumps(data), encoding="utf-8")
             stat = SETTINGS_PATH.stat()
             global _mtime, _cache
@@ -77,7 +81,7 @@ def set(name: str, value: Any) -> None:
     data = _load()
     data[name] = value
     try:
-        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent(SETTINGS_PATH)
         SETTINGS_PATH.write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass

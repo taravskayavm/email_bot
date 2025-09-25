@@ -15,6 +15,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
+from utils.paths import ensure_parent, expand_path
+
 from .extraction_common import normalize_email as _normalize_email
 from .history_key import normalize_history_key
 from .tld_registry import tld_of
@@ -41,11 +43,14 @@ def parse_imap_date_to_utc(date_str: str | None) -> datetime:
         dt = None
     return ensure_aware_utc(dt)
 
-SUPPRESS_PATH = Path(
-    "/mnt/data/suppress_list.csv"
-)  # e-mail, code, reason, first_seen, last_seen, hits
-BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")  # ts, email, code, msg, phase
-SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
+_SUPPRESS_ENV = os.getenv("SUPPRESS_LIST_PATH", "var/suppress_list.csv")
+_BOUNCE_ENV = os.getenv("BOUNCE_LOG_PATH", "var/bounce_log.csv")
+_SYNC_ENV = os.getenv("SYNC_SEEN_EVENTS_PATH", "var/sync_seen_events.csv")
+
+SUPPRESS_PATH = expand_path(_SUPPRESS_ENV)
+BOUNCE_LOG_PATH = expand_path(_BOUNCE_ENV)
+SYNC_SEEN_EVENTS_PATH = expand_path(_SYNC_ENV)
+SENT_CACHE_FILE = expand_path(os.getenv("SENT_MAILBOX_CACHE", "var/sent_mailbox.cache"))
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +155,6 @@ def build_email(
     set_list_unsubscribe_headers(msg, recipient=to_addr)
     return msg
 
-# A small cache file is used to remember the IMAP folder where
-# outgoing messages should be stored.
-SENT_CACHE_FILE = Path("var/sent_mailbox.cache")
-
 COMMON_SENT_NAMES = [
     "Sent",
     "Sent Items",
@@ -180,7 +181,7 @@ def _read_cached_sent_name() -> str | None:
 
 def _write_cached_sent_name(name: str) -> None:
     try:
-        SENT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent(SENT_CACHE_FILE)
         SENT_CACHE_FILE.write_text(name, encoding="utf-8")
     except Exception:
         pass
@@ -482,7 +483,7 @@ def ensure_sent_log_schema(path: str) -> List[str]:
     """Ensure ``sent_log.csv`` has the required schema and migrate legacy names."""
 
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     if not p.exists():
         with p.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(REQUIRED_FIELDS)
@@ -562,7 +563,7 @@ def upsert_sent_log(
     ts = ensure_aware_utc(ts)
 
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     fieldnames = ensure_sent_log_schema(str(p))
     key = canonical_for_history(email)
     inserted = False
@@ -696,7 +697,7 @@ def save_seen_events(path: Path, events: Iterable[tuple[str, str]]) -> None:
 
 def _ensure_headers(p: Path, headers: List[str]):
     new = not p.exists()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     f = p.open("a", newline="", encoding="utf-8")
     w = csv.DictWriter(f, fieldnames=headers)
     if new:
@@ -854,7 +855,7 @@ def suppress_add(email: str, code: int | None, reason: str) -> None:
             "hits": "1",
         }
     rows[key] = rec
-    SUPPRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(SUPPRESS_PATH)
     with SUPPRESS_PATH.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,

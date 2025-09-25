@@ -5,7 +5,8 @@ from typing import Any, Dict, Optional
 
 from utils.paths import ensure_parent, expand_path
 
-STATE_PATH: Path = expand_path(os.getenv("MASS_STATE_PATH", "var/mass_state.json"))
+_STATE_ENV = os.getenv("MASS_STATE_PATH", "var/mass_state.json")
+STATE_PATH: Path = expand_path(_STATE_ENV)
 
 # In-memory representation of the persisted state.  The file stores a mapping
 # of ``chat_id`` (as string) to an arbitrary dictionary.  This allows multiple
@@ -44,7 +45,7 @@ def _save_all(state: Dict[str, Dict[str, Any]]) -> None:
         data = _state_cache or {}
 
     ensure_parent(STATE_PATH)
-    tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+    tmp = STATE_PATH.with_name(f"{STATE_PATH.name}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_PATH)

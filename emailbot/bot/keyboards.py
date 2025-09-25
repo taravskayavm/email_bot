@@ -10,8 +10,11 @@ from pathlib import Path
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-_HERE = Path(__file__).resolve().parent
-ICONS_PATH = _HERE / "icons.json"
+_ICONS_ENV = os.getenv("DIRECTION_ICONS_PATH")
+if _ICONS_ENV:
+    ICONS_PATH = Path(os.path.expandvars(os.path.expanduser(_ICONS_ENV))).resolve()
+else:
+    ICONS_PATH = Path(__file__).resolve().parents[2] / "icons.json"
 _DEFAULT_ICON = "📄"
 
 
