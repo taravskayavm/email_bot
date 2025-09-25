@@ -101,3 +101,9 @@ def sync_bounces():
 
     imap.logout()
     return count
+
+
+def scan_bounces() -> int:
+    """Backward compatible wrapper around :func:`sync_bounces`."""
+
+    return sync_bounces()

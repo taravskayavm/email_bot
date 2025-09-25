@@ -1,4 +1,3 @@
-from pdfminer.high_level import extract_text
 import re
 
 
@@ -24,8 +23,46 @@ def separate_around_emails(text: str) -> str:
     return text
 
 
+def _extract_with_pypdf(path: str) -> str:
+    try:
+        import pypdf
+    except Exception:
+        return ""
+
+    try:
+        reader = pypdf.PdfReader(path)
+    except Exception:
+        return ""
+
+    chunks = []
+    for page in getattr(reader, "pages", []) or []:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def _extract_with_pdfminer(path: str) -> str:
+    try:
+        from pdfminer.high_level import extract_text as pdfminer_extract
+    except Exception:
+        return ""
+
+    try:
+        return pdfminer_extract(path) or ""
+    except Exception:
+        return ""
+
+
 def extract_text_from_pdf(path: str) -> str:
-    raw = extract_text(path)
+    raw = _extract_with_pypdf(path)
+    if not raw:
+        raw = _extract_with_pdfminer(path)
+    if not raw:
+        return ""
     raw = cleanup_text(raw)
     return separate_around_emails(raw)
 
