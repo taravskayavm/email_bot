@@ -1,4 +1,5 @@
 import json, os
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -176,4 +177,81 @@ def current_tz_label() -> str:
     if _TZ_NAME.lower() in ("europe/moscow", "moscow", "msk", "russia/moscow"):
         return "MSK"
     return _TZ_NAME
+
+
+def _ts_to_epoch(value) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except Exception:
+                return None
+            return dt.timestamp()
+    return None
+
+
+def print_summary_report(days: int = 180) -> None:
+    """Aggregate ``var/send_stats.jsonl`` into a concise console report."""
+
+    path = _stats_path()
+    if not path.exists():
+        print("No send stats found.")
+        return
+
+    cutoff = _now_utc() - timedelta(days=max(days, 0))
+    cutoff_ts = cutoff.timestamp()
+    by_domain: Counter[str] = Counter()
+    by_status: Counter[str] = Counter()
+    by_group: Counter[str] = Counter()
+    total = 0
+
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+
+            ts = _ts_to_epoch(record.get("ts"))
+            if ts is None or ts < cutoff_ts:
+                continue
+
+            email = (record.get("email") or "").strip().lower()
+            status = (record.get("status") or "unknown").strip().lower()
+            group = (record.get("group") or "n/a").strip().lower()
+            if "@" in email:
+                domain = email.rsplit("@", 1)[-1] or "n/a"
+            else:
+                domain = "n/a"
+
+            by_domain[domain] += 1
+            by_status[status] += 1
+            by_group[group] += 1
+            total += 1
+
+    print(f"Report for last {days} days: {total} record(s)\n")
+
+    print("=== Summary by status ===")
+    for key, value in by_status.most_common():
+        print(f"{key:12s} {value}")
+
+    print("\n=== Top domains ===")
+    for key, value in by_domain.most_common(20):
+        print(f"{key:30s} {value}")
+
+    print("\n=== Top groups ===")
+    for key, value in by_group.most_common(20):
+        print(f"{key:20s} {value}")
 

@@ -55,8 +55,23 @@ def main() -> None:
         action="store_true",
         help="verify that APPEND to detected Sent folder succeeds",
     )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print summary report for last N days (default 180)",
+    )
+    parser.add_argument(
+        "--report-days",
+        type=int,
+        default=int(os.getenv("REPORT_DAYS", "180")),
+        help="days back for the summary report",
+    )
     args = parser.parse_args()
-    if args.check_sent_append:
+    if args.report:
+        from utils.send_stats import print_summary_report
+
+        print_summary_report(days=args.report_days)
+    elif args.check_sent_append:
         _check_sent_append()
     else:
         _run_extractor()
