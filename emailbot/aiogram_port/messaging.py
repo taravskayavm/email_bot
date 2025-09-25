@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import uuid
 from typing import Dict, Optional, Tuple
 
@@ -19,6 +20,18 @@ def _get_sender() -> SmtpSender:
     if _SENDER is None:
         _SENDER = SmtpSender()
     return _SENDER
+
+
+def _close_sender() -> None:
+    global _SENDER
+    try:
+        if _SENDER is not None:
+            _SENDER.close()
+    finally:
+        _SENDER = None
+
+
+atexit.register(_close_sender)
 
 
 def _trace_id() -> str:
