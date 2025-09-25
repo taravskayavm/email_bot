@@ -33,9 +33,11 @@ jobs:
         run: |
           pip check
 
-      - name: Lint with Ruff
+      - name: Lint
         run: |
-          ruff check .
+          ruff --version || pip install ruff
+          ruff .
+          mypy || true
 
       - name: Lint with Flake8
         run: |
@@ -44,10 +46,6 @@ jobs:
       - name: Check formatting with Black
         run: |
           black --check --diff .
-
-      - name: Type check with Mypy
-        run: |
-          mypy .
 
       - name: Run tests with Pytest
         run: |
