@@ -1,8 +1,11 @@
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-STATE_PATH = "/mnt/data/mass_state.json"
+from utils.paths import ensure_parent, expand_path
+
+STATE_PATH: Path = expand_path(os.getenv("MASS_STATE_PATH", "var/mass_state.json"))
 
 # In-memory representation of the persisted state.  The file stores a mapping
 # of ``chat_id`` (as string) to an arbitrary dictionary.  This allows multiple
@@ -31,10 +34,19 @@ def _load_all() -> Dict[str, Dict[str, Any]]:
 
 
 def _save_all(state: Dict[str, Dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    global _state_cache
+
+    data: Dict[str, Dict[str, Any]]
+    if isinstance(state, dict) and all(isinstance(v, dict) for v in state.values()):
+        _state_cache = state
+        data = state
+    else:
+        data = _state_cache or {}
+
+    ensure_parent(STATE_PATH)
+    tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_PATH)
 
 
