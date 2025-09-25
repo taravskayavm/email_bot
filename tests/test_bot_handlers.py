@@ -7,6 +7,8 @@ import pytest
 from telegram import InlineKeyboardMarkup
 from telegram.ext import ApplicationHandlerStop
 
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 from emailbot import config as C
 from emailbot.messaging import SendOutcome

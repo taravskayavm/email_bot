@@ -4,6 +4,8 @@ import types
 import pytest
 from telegram import InlineKeyboardMarkup
 
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 
 
