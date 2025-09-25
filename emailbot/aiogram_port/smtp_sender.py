@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Optional
 
@@ -37,18 +38,32 @@ class SmtpSender:
     def __init__(self) -> None:
         self.host = str(_get_setting("SMTP_HOST", "smtp.mail.ru"))
         self.port = int(_get_setting("SMTP_PORT", 465))
-        self.starttls = _as_bool(_get_setting("SMTP_STARTTLS", False))
+        self.starttls = _as_bool(_get_setting("SMTP_STARTTLS", self.port != 465))
         self.email_address = _get_setting("EMAIL_ADDRESS")
         self.email_password = _get_setting("EMAIL_PASSWORD")
+        self.timeout = int(_get_setting("SMTP_TIMEOUT", 20))
+        self._ssl_context = ssl.create_default_context()
+        self._ssl_context.check_hostname = True
+        self._ssl_context.verify_mode = ssl.CERT_REQUIRED
         if not self.email_address or not self.email_password:
             raise RuntimeError("EMAIL_ADDRESS/EMAIL_PASSWORD must be configured")
 
     def _connect(self):
-        if self.starttls:
-            client = smtplib.SMTP(self.host, self.port, timeout=30)
-            client.starttls()
+        if not self.starttls and self.port == 465:
+            client = smtplib.SMTP_SSL(
+                self.host,
+                self.port,
+                timeout=self.timeout,
+                context=self._ssl_context,
+            )
         else:
-            client = smtplib.SMTP_SSL(self.host, self.port, timeout=30)
+            client = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
+            client.ehlo()
+            try:
+                client.starttls(context=self._ssl_context)
+                client.ehlo()
+            except smtplib.SMTPNotSupportedError:
+                pass
         client.login(str(self.email_address), str(self.email_password))
         return client
 

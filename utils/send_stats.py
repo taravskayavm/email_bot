@@ -3,7 +3,9 @@ from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from utils.paths import expand_path, ensure_parent
+from utils.paths import ensure_parent
+from emailbot.utils.paths import resolve_project_path
+from emailbot.utils.fs import append_jsonl_atomic
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
@@ -20,7 +22,9 @@ def _stats_path() -> Path:
     variable, which is important for tests monkeypatching it.
     """
 
-    path = expand_path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
+    raw = os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")
+    expanded = os.path.expandvars(os.path.expanduser(str(raw)))
+    path = resolve_project_path(expanded)
     ensure_parent(path)
     return path
 
@@ -75,8 +79,7 @@ def log_success(email: str, group: str, extra: dict | None = None) -> None:
     if extra:
         rec.update(extra)
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
@@ -91,8 +94,7 @@ def log_error(email: str, group: str, reason: str, extra: dict | None = None) ->
     if extra:
         rec.update(extra)
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
@@ -108,8 +110,7 @@ def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") ->
     if message_id:
         rec["message_id"] = message_id
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def _iter_today_week(scope: str):
