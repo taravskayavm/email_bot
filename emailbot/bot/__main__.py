@@ -18,6 +18,21 @@ from emailbot.bot.handlers.send import router as send_router
 from emailbot.bot.handlers.start import router as start_router
 
 
+def _make_bot(token: str) -> Bot:
+    """
+    Создаёт Bot корректно для aiogram <3.7 и >=3.7.
+    UI/логика не меняются (HTML по умолчанию).
+    """
+
+    try:
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.enums import ParseMode
+
+        return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    except Exception:
+        return Bot(token=token, parse_mode="HTML")
+
+
 def _load_dotenv() -> None:
     env_file = Path(__file__).resolve().parent.parent.parent / ".env"
     if env_file.exists():
@@ -67,12 +82,15 @@ async def main() -> None:
     _load_dotenv()
     _setup_logging()
     token = _resolve_token()
-    bot = Bot(token=token, parse_mode="HTML")
+    bot = _make_bot(token)
     dispatcher = Dispatcher()
-    from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
+    try:
+        from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
 
-    dispatcher.message.middleware(ErrorLoggingMiddleware())
-    dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
+        dispatcher.message.middleware(ErrorLoggingMiddleware())
+        dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
+    except Exception:
+        pass
     dispatcher.include_router(start_router)
     dispatcher.include_router(ingest_router)
     dispatcher.include_router(send_router)
