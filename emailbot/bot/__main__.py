@@ -68,6 +68,10 @@ async def main() -> None:
     token = _resolve_token()
     bot = Bot(token=token, parse_mode="HTML")
     dispatcher = Dispatcher()
+    from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
+
+    dispatcher.message.middleware(ErrorLoggingMiddleware())
+    dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
     dispatcher.include_router(start_router)
     dispatcher.include_router(ingest_router)
     dispatcher.include_router(send_router)
