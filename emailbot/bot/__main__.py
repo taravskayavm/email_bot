@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 
 from emailbot.bot.handlers.ingest import router as ingest_router
 from emailbot.bot.handlers.send import router as send_router
-from emailbot.bot.handlers.start import router as start_router
 
 
 def _make_bot(token: str) -> Bot:
@@ -91,7 +90,6 @@ async def main() -> None:
         dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
     except Exception:
         pass
-    dispatcher.include_router(start_router)
     dispatcher.include_router(ingest_router)
     dispatcher.include_router(send_router)
     await _set_bot_commands(bot)
