@@ -15,6 +15,7 @@ import imaplib
 import smtplib
 
 from . import history_service, messaging, settings as S
+from .services.cooldown import _env_int
 
 MASK = "****"
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -54,6 +55,14 @@ def _resolve_smtp_mode(raw_mode: str, ssl_flag: str) -> Tuple[str, bool, bool]:
     use_ssl = resolved == "ssl"
     use_starttls = resolved == "starttls"
     return resolved, use_ssl, use_starttls
+
+
+def print_env_diag() -> None:
+    """Print effective environment limits and cooldown settings."""
+
+    print("COOLDOWN_DAYS:", _env_int("COOLDOWN_DAYS", 180))
+    print("DOMAIN_RATE_LIMIT_SEC:", float(os.getenv("DOMAIN_RATE_LIMIT_SEC", "1.0")))
+    print("SENT_IDS_TTL_HOURS:", int(os.getenv("SENT_IDS_TTL_HOURS", "24")))
 
 
 def env_snapshot() -> Dict[str, str]:
@@ -278,6 +287,7 @@ def build_diag_text() -> str:
 __all__ = [
     "PingResult",
     "build_diag_text",
+    "print_env_diag",
     "env_snapshot",
     "history_db_info",
     "imap_ping",
