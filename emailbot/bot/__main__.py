@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
+import pkgutil
 import signal
 import sys
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import BotCommand
 
 try:  # pragma: no cover - optional dependency
@@ -18,10 +20,6 @@ except Exception:  # pragma: no cover - optional dependency
 
     def load_dotenv(*args, **kwargs):
         return False
-
-from emailbot.bot.handlers.ingest import router as ingest_router
-from emailbot.bot.handlers.send import router as send_router
-
 
 def _make_bot(token: str) -> Bot:
     """
@@ -81,6 +79,27 @@ async def _set_bot_commands(bot: Bot) -> None:
         logging.getLogger(__name__).debug("Unable to set bot commands", exc_info=True)
 
 
+def include_all_routers(dp: Dispatcher) -> None:
+    """Auto-import and include all routers from ``emailbot.bot.handlers``."""
+
+    from emailbot.bot import handlers as handlers_pkg
+
+    pkg_path = Path(handlers_pkg.__file__).parent
+    for module_info in pkgutil.iter_modules([str(pkg_path)]):
+        module_name = module_info.name
+        if module_name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{handlers_pkg.__name__}.{module_name}")
+        router = getattr(module, "router", None)
+        if not isinstance(router, Router):
+            for attr_name, value in vars(module).items():
+                if attr_name.endswith("_router") and isinstance(value, Router):
+                    router = value
+                    break
+        if isinstance(router, Router):
+            dp.include_router(router)
+
+
 async def main() -> None:
     """Run the bot dispatcher until cancelled."""
 
@@ -96,8 +115,7 @@ async def main() -> None:
         dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
     except Exception:
         pass
-    dispatcher.include_router(ingest_router)
-    dispatcher.include_router(send_router)
+    include_all_routers(dispatcher)
     await _set_bot_commands(bot)
 
     stop_event = asyncio.Event()
