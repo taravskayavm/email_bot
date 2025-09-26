@@ -1,5 +1,5 @@
-python-telegram-bot>=20,<21
-aiogram>=3.6,<3.9
+python-telegram-bot==20.8
+# aiogram удалён: используем стабильный PTB-рантайм (UI/логика без изменений)
 aiohttp>=3.9
 pandas>=2.0
 openpyxl>=3.1
