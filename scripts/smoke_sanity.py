@@ -22,16 +22,42 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-try:  # prefer lightweight helpers from the bot handlers module
-    from emailbot.bot_handlers import (  # type: ignore
-        async_extract_emails_from_url,
-        extract_from_uploaded_file,
-    )
-except Exception as exc:  # pragma: no cover - defensive
-    raise SystemExit(f"Не удалось импортировать модуль извлечения: {exc}")
+from emailbot import extraction as extraction_module
+from utils.tld_utils import is_foreign_domain
 
 MIXED_BAD_RE = re.compile(r"poccия|росс[i|l]ya|russia\d", re.I)
-_ALLOWED_TLDS = (".ru", ".com")
+
+
+def _normalize_email(value: object) -> str:
+    try:
+        text = str(value or "").strip()
+    except Exception:  # pragma: no cover - defensive
+        return ""
+    return text.lower()
+
+
+def extract_from_uploaded_file(path: str) -> tuple[set[str], set[str], dict]:
+    emails_raw, stats = extraction_module.extract_any(path)
+    normalized = {_normalize_email(email) for email in emails_raw if email}
+    normalized.discard("")
+    return normalized, set(normalized), stats
+
+
+async def async_extract_emails_from_url(
+    url: str,
+    _session,  # pragma: no cover - compatibility placeholder
+    _tag: str | None = None,
+):
+    """Asynchronously extract e-mails from ``url`` using the core extraction module."""
+
+    def _run() -> tuple[str, set[str], set[str], list, dict]:
+        hits, stats = extraction_module.extract_from_url(url)
+        allowed = {_normalize_email(getattr(hit, "email", "")) for hit in hits}
+        allowed.discard("")
+        foreign = {addr for addr in allowed if is_foreign_domain(addr.rsplit("@", 1)[-1])}
+        return url, allowed, foreign, [], stats
+
+    return await asyncio.to_thread(_run)
 
 
 def print_modules() -> None:
@@ -40,7 +66,7 @@ def print_modules() -> None:
         "utils.email_clean",
         "utils.email_deobfuscate",
         "services.cooldown",
-        "emailbot.bot_handlers",
+        "emailbot.bot.__main__",
     ]
     for name in modules:
         try:
@@ -114,7 +140,11 @@ def _classify_foreign(candidates: Iterable[str]) -> set[str]:
         if "@" not in email:
             continue
         domain = email.rsplit("@", 1)[1].lower()
-        if not domain.endswith(_ALLOWED_TLDS):
+        try:
+            foreign = is_foreign_domain(domain)
+        except Exception:  # pragma: no cover - defensive
+            foreign = True
+        if foreign:
             result.add(email)
     return result
 

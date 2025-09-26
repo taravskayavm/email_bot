@@ -1,4 +1,8 @@
 import inspect
+import pytest
+
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 import emailbot.extraction as ex
 

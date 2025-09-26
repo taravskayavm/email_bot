@@ -5,15 +5,20 @@ import types
 
 import pytest
 from telegram import InlineKeyboardMarkup
+from telegram.ext import ApplicationHandlerStop
+
+pytest.importorskip("emailbot.bot_handlers")
 
 import emailbot.bot_handlers as bh
 from emailbot import config as C
 from emailbot.messaging import SendOutcome
 from emailbot.bot_handlers import (
+    MANUAL_WAIT_INPUT,
     SESSION_KEY,
     SessionState,
     handle_document,
     handle_text,
+    manual_input_router,
     start,
 )
 
@@ -76,6 +81,7 @@ class DummyUpdate:
     ):
         self.message = DummyMessage(text=text, document=document, chat_id=chat_id)
         self.effective_chat = types.SimpleNamespace(id=chat_id)
+        self.effective_message = self.message
         if callback_data is not None:
 
             class DummyQuery:
@@ -91,6 +97,7 @@ class DummyUpdate:
                     return self.message
 
             self.callback_query = DummyQuery(callback_data, chat_id)
+            self.effective_message = self.callback_query.message
 
 
 class DummyContext:
@@ -276,6 +283,28 @@ def test_handle_text_manual_emails():
     assert "support@support.com — role-like" in drop_reply
 
 
+def test_manual_input_router_summary(monkeypatch):
+    update = DummyUpdate(text="User@example.com other@example.com")
+    ctx = DummyContext()
+    ctx.user_data["state"] = MANUAL_WAIT_INPUT
+    ctx.user_data["awaiting_manual_email"] = True
+
+    monkeypatch.setattr(bh, "should_skip_by_cooldown", lambda email, days=None: (False, ""))
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(manual_input_router(update, ctx))
+
+    assert ctx.user_data.get("state") is None
+    assert ctx.user_data.get("awaiting_manual_email") is False
+    assert update.message.replies
+    assert update.message.replies[0].startswith("✅ Ручная отправка — предпросмотр")
+    assert any("Адреса получены." in text for text in update.message.replies)
+    assert set(ctx.chat_data.get("manual_all_emails", [])) == {
+        "other@example.com",
+        "user@example.com",
+    }
+
+
 def test_prompt_manual_email_clears_previous_list():
     update = DummyUpdate(text="/manual")
     ctx = DummyContext()
@@ -286,6 +315,7 @@ def test_prompt_manual_email_clears_previous_list():
 
     assert "manual_all_emails" not in ctx.chat_data
     assert ctx.user_data["awaiting_manual_email"] is True
+    assert ctx.user_data["state"] == MANUAL_WAIT_INPUT
     assert ctx.user_data.get("awaiting_block_email") is False
 
 

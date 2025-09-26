@@ -1,8 +1,11 @@
 import json, os
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from utils.paths import expand_path, ensure_parent
+from utils.paths import ensure_parent
+from emailbot.utils.paths import resolve_project_path
+from emailbot.utils.fs import append_jsonl_atomic
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
@@ -19,7 +22,9 @@ def _stats_path() -> Path:
     variable, which is important for tests monkeypatching it.
     """
 
-    path = expand_path(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl"))
+    raw = os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")
+    expanded = os.path.expandvars(os.path.expanduser(str(raw)))
+    path = resolve_project_path(expanded)
     ensure_parent(path)
     return path
 
@@ -74,8 +79,7 @@ def log_success(email: str, group: str, extra: dict | None = None) -> None:
     if extra:
         rec.update(extra)
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
@@ -90,8 +94,7 @@ def log_error(email: str, group: str, reason: str, extra: dict | None = None) ->
     if extra:
         rec.update(extra)
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
@@ -107,8 +110,7 @@ def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") ->
     if message_id:
         rec["message_id"] = message_id
     path = _stats_path()
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, rec)
 
 
 def _iter_today_week(scope: str):
@@ -176,4 +178,81 @@ def current_tz_label() -> str:
     if _TZ_NAME.lower() in ("europe/moscow", "moscow", "msk", "russia/moscow"):
         return "MSK"
     return _TZ_NAME
+
+
+def _ts_to_epoch(value) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except Exception:
+                return None
+            return dt.timestamp()
+    return None
+
+
+def print_summary_report(days: int = 180) -> None:
+    """Aggregate ``var/send_stats.jsonl`` into a concise console report."""
+
+    path = _stats_path()
+    if not path.exists():
+        print("No send stats found.")
+        return
+
+    cutoff = _now_utc() - timedelta(days=max(days, 0))
+    cutoff_ts = cutoff.timestamp()
+    by_domain: Counter[str] = Counter()
+    by_status: Counter[str] = Counter()
+    by_group: Counter[str] = Counter()
+    total = 0
+
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+
+            ts = _ts_to_epoch(record.get("ts"))
+            if ts is None or ts < cutoff_ts:
+                continue
+
+            email = (record.get("email") or "").strip().lower()
+            status = (record.get("status") or "unknown").strip().lower()
+            group = (record.get("group") or "n/a").strip().lower()
+            if "@" in email:
+                domain = email.rsplit("@", 1)[-1] or "n/a"
+            else:
+                domain = "n/a"
+
+            by_domain[domain] += 1
+            by_status[status] += 1
+            by_group[group] += 1
+            total += 1
+
+    print(f"Report for last {days} days: {total} record(s)\n")
+
+    print("=== Summary by status ===")
+    for key, value in by_status.most_common():
+        print(f"{key:12s} {value}")
+
+    print("\n=== Top domains ===")
+    for key, value in by_domain.most_common(20):
+        print(f"{key:30s} {value}")
+
+    print("\n=== Top groups ===")
+    for key, value in by_group.most_common(20):
+        print(f"{key:20s} {value}")
 

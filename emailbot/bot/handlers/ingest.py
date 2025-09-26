@@ -3,23 +3,11 @@
 from __future__ import annotations
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import CallbackQuery
 
-from emailbot.bot import keyboards
-from emailbot.settings import list_available_directions, resolve_label
+from emailbot.settings import resolve_label
 
 router = Router()
-
-
-@router.message(F.text == "/start")
-async def start(message: Message) -> None:
-    """Send keyboard with available directions."""
-
-    directions = list_available_directions()
-    await message.answer(
-        "Выберите направление рассылки:",
-        reply_markup=keyboards.directions_keyboard(directions),
-    )
 
 
 @router.callback_query(F.data.startswith("set_group:"))

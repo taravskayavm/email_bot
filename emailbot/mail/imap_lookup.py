@@ -9,6 +9,27 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+try:  # pragma: no cover - optional dependency
+    from imapclient.imapclient import imap_utf7
+except Exception:  # pragma: no cover - fallback to internal helper
+    imap_utf7 = None
+
+from emailbot.messaging_utils import _imap_utf7_encode as _imap_utf7_encode
+from emailbot.messaging_utils import parse_imap_date_to_utc
+
+
+def _encode_mailbox(name: str) -> str:
+    if not name:
+        return name
+    if imap_utf7 is not None:
+        try:
+            return imap_utf7.encode(name)
+        except Exception:  # pragma: no cover - fallback
+            pass
+    try:
+        return _imap_utf7_encode(name)
+    except Exception:  # pragma: no cover - give up
+        return name
 from emailbot.services.cooldown import normalize_email_for_key
 
 
@@ -31,7 +52,7 @@ def find_last_sent_at(email_norm: str, mailbox: str, days: int) -> Optional[date
 
     with imaplib.IMAP4_SSL(host, port) as client:
         client.login(user, password)
-        status, _ = client.select(mailbox)
+        status, _ = client.select(_encode_mailbox(mailbox))
         if status != "OK":  # pragma: no cover - depends on server dialect
             status, _ = client.select(f'"{mailbox}"')
         if status != "OK":
@@ -63,17 +84,10 @@ def find_last_sent_at(email_norm: str, mailbox: str, days: int) -> Optional[date
             normalised = {normalize_email_for_key(addr) for addr in addresses if addr}
             if email_norm not in normalised:
                 continue
-            dt = header.get("Date")
-            if not dt:
+            dt_raw = header.get("Date")
+            if not dt_raw:
                 continue
-            try:
-                parsed = eut.parsedate_to_datetime(dt)
-            except Exception:
-                continue
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            else:
-                parsed = parsed.astimezone(timezone.utc)
+            parsed = parse_imap_date_to_utc(dt_raw)
             if last is None or parsed > last:
                 last = parsed
         return last

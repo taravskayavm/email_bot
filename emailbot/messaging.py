@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 from email import message_from_bytes, message_from_string, policy
 
 from emailbot import config as C
+from emailbot import settings as S
 
 from services.templates import get_template, get_template_by_path
 
@@ -41,11 +42,14 @@ from .messaging_utils import (
     append_to_sent,
     canonical_for_history,
     detect_sent_folder,
+    ensure_aware_utc,
     ensure_sent_log_schema,
+    SENT_CACHE_FILE,
     is_foreign,
     is_hard_bounce,
     is_soft_bounce,
     is_suppressed,
+    parse_imap_date_to_utc,
     load_seen_events,
     load_sent_log,
     save_seen_events,
@@ -62,6 +66,7 @@ from .services.cooldown import (
 )
 from utils import rules
 from utils.send_stats import log_error, log_success
+from utils.paths import expand_path
 from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
@@ -79,9 +84,10 @@ class SendOutcome(str, Enum):
 # directories located at the repository root.
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
+_SENT_LOG_ENV = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
+LOG_FILE = str(expand_path(_SENT_LOG_ENV))
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
-MAX_EMAILS_PER_DAY = 200
+MAX_EMAILS_PER_DAY = int(os.getenv("DAILY_SEND_LIMIT", str(S.DAILY_SEND_LIMIT)))
 _ASCII_LOCAL_RX = re.compile(r"^[\x21-\x7E]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 # Text of the signature without styling. The surrounding block and
@@ -102,8 +108,9 @@ EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 
-IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+IMAP_FOLDER_FILE = SENT_CACHE_FILE
 
+_smtp_mode = os.getenv("SMTP_MODE", "auto").strip().lower() or "auto"
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = C.DOMAIN_RATE_LIMIT_SEC
 _batch_idempotency: Set[str] = set()
@@ -116,6 +123,56 @@ SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
 _sent_idempotency: Set[str] = set()
 
 
+def _load_sent_idempotency() -> None:
+    """
+    Best-effort загрузка ранее сохранённых идентификаторов отправок
+    (для предотвращения дубликатов между перезапусками).
+    """
+
+    global _sent_idempotency
+    try:
+        if SENT_IDS_FILE.exists():
+            cutoff = time.time() - 86400
+            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = (line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    sid = str(obj.get("id") or "").strip()
+                    if not sid:
+                        continue
+                    try:
+                        ts = float(obj.get("ts", 0) or 0)
+                    except Exception:
+                        ts = 0.0
+                    if ts and ts < cutoff:
+                        continue
+                    _sent_idempotency.add(sid)
+    except Exception as exc:
+        logger.debug("idempotency load failed: %r", exc)
+
+
+def _append_sent_idempotency(sid: str) -> None:
+    """
+    Атомарная дозапись нового идентификатора в jsonl (без блокировок на NFS).
+    """
+
+    try:
+        SENT_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": sid, "ts": time.time()}) + "\n")
+    except Exception as exc:
+        logger.debug("idempotency append failed: %r", exc)
+
+
+# при импорте — подхватить прошлую историю
+_load_sent_idempotency()
+
+
 def _smtp_reason(exc: Exception) -> str:
     reason = getattr(exc, "smtp_error", None)
     if isinstance(reason, (bytes, bytearray)):
@@ -126,6 +183,16 @@ def _smtp_reason(exc: Exception) -> str:
     if reason:
         return str(reason)
     return str(exc)
+
+
+def _smtp_context_str() -> str:
+    port = os.getenv("SMTP_PORT", "")
+    ssl_flag = os.getenv("SMTP_SSL", "")
+    timeout = os.getenv("SMTP_TIMEOUT", "")
+    return (
+        f"host={SMTP_HOST} port={port or 'default'} ssl={ssl_flag or 'default'} "
+        f"mode={_smtp_mode} timeout={timeout or 'default'}"
+    )
 
 
 def _raw_to_text(raw_message: str | bytes) -> str:
@@ -150,9 +217,7 @@ def _normalize_key(email: str) -> str:
 def _coerce_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    return ensure_aware_utc(dt)
 
 
 
@@ -425,39 +490,18 @@ def _make_send_key(msg) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _load_sent_ids() -> Set[str]:
-    ids: Set[str] = set()
-    if SENT_IDS_FILE.exists():
-        try:
-            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        key = obj.get("key")
-                        ts = float(obj.get("ts", 0))
-                        if (
-                            datetime.now(timezone.utc).timestamp() - ts
-                        ) <= 86400 and key:
-                            ids.add(key)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-    return ids
+def mark_idempotent_and_persist(unique_key: str) -> None:
+    """
+    Сохраняем уникальный ключ отправки в оперативный и дисковый кэш,
+    чтобы предотвратить повтор в пределах 24 ч и между перезапусками.
+    """
 
-
-def _persist_sent_key(key: str) -> None:
-    try:
-        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
-            f.write(
-                json.dumps({"key": key, "ts": datetime.now(timezone.utc).timestamp()})
-                + "\n"
-            )
-    except Exception:
-        pass
+    key = (unique_key or "").strip()
+    if not key:
+        return
+    if key not in _sent_idempotency:
+        _sent_idempotency.add(key)
+        _append_sent_idempotency(key)
 
 
 def _primary_recipient(msg) -> str:
@@ -490,9 +534,6 @@ def was_sent_recently(msg) -> bool:
             return True
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("cooldown_sqlite was_sent_recently failed", exc_info=True)
-    global _sent_idempotency
-    if not _sent_idempotency:
-        _sent_idempotency = _load_sent_ids()
     key = _make_send_key(msg)
     return key in _sent_idempotency
 
@@ -516,8 +557,7 @@ def mark_sent(msg) -> None:
     except Exception:  # pragma: no cover - defensive fallback
         logger.debug("cooldown_sqlite mark_sent failed", exc_info=True)
     key = _make_send_key(msg)
-    _sent_idempotency.add(key)
-    _persist_sent_key(key)
+    mark_idempotent_and_persist(key)
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
@@ -627,6 +667,10 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                     rules.append_history(recipient)
                 except Exception:  # pragma: no cover - defensive fallback
                     logger.debug("rules.append_history failed", exc_info=True)
+                try:
+                    mark_idempotent_and_persist(_make_send_key(msg))
+                except Exception:  # pragma: no cover - defensive fallback
+                    logger.debug("mark_idempotent_and_persist failed", exc_info=True)
                 return  # success
             except smtplib.SMTPResponseException as e:
                 code = getattr(e, "smtp_code", None)
@@ -663,7 +707,12 @@ def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries
                 break
             except Exception as e:
                 last_exc = e
-                logger.warning("SMTP send failed to %s: %s", recipient, e)
+                logger.warning(
+                    "SMTP send failed to %s: %s | %s",
+                    recipient,
+                    e,
+                    _smtp_context_str(),
+                )
                 try:
                     log_error(
                         recipient,
@@ -891,17 +940,22 @@ def send_email(
                 recipient,
                 str(group_for_log or ""),
                 unsubscribe_token=token,
+                message_key=_make_send_key(msg),
             )
         except Exception as exc:
             logger.debug("log_sent_email failed for %s: %s", recipient, exc)
 
         return SendOutcome.SENT
     except smtplib.SMTPResponseException as exc:
-        log_internal_error(f"send_email SMTP error for {recipient}: {exc}")
+        log_internal_error(
+            f"send_email SMTP error for {recipient}: {exc} | {_smtp_context_str()}"
+        )
         _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
         return SendOutcome.ERROR
     except Exception as exc:  # pragma: no cover - best-effort safety
-        log_internal_error(f"send_email: {recipient}: {exc}")
+        log_internal_error(
+            f"send_email: {recipient}: {exc} | {_smtp_context_str()}"
+        )
         _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
         return SendOutcome.ERROR
 
@@ -1020,6 +1074,10 @@ def send_email_with_sessions(
             rules.append_history(recipient)
         except Exception:  # pragma: no cover - defensive fallback
             logger.debug("rules.append_history failed", exc_info=True)
+        try:
+            mark_idempotent_and_persist(_make_send_key(msg))
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug("mark_idempotent_and_persist failed", exc_info=True)
         return SendOutcome.SENT, token
     except smtplib.SMTPResponseException as e:
         code = getattr(e, "smtp_code", None)
@@ -1043,7 +1101,12 @@ def send_email_with_sessions(
             pass
         raise
     except Exception as e:
-        logger.warning("SMTP send failed to %s: %s", recipient, e)
+        logger.warning(
+            "SMTP send failed to %s: %s | %s",
+            recipient,
+            e,
+            _smtp_context_str(),
+        )
         try:
             extra = {
                 "uuid": eb_uuid,
@@ -1226,6 +1289,7 @@ def log_sent_email(
     unsubscribe_token="",
     unsubscribed="",
     unsubscribed_at="",
+    message_key: str | None = None,
 ):
     if status not in {"ok", "sent", "success"}:
         return
@@ -1245,6 +1309,8 @@ def log_sent_email(
         status=status,
         extra=extra,
     )
+    if message_key:
+        mark_idempotent_and_persist(message_key)
     global _log_cache
     _log_cache = None
 
@@ -1573,7 +1639,9 @@ def sync_log_with_imap() -> Dict[str, int]:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        date_180 = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%d-%b-%Y")
+        since_threshold = datetime.now(timezone.utc) - timedelta(days=180)
+        date_180 = since_threshold.strftime("%d-%b-%Y")
+        cutoff_dt = ensure_aware_utc(since_threshold)
         result, data = imap.search(None, f"SINCE {date_180}")
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
@@ -1592,17 +1660,13 @@ def sync_log_with_imap() -> Dict[str, int]:
                 if msgid and (msgid, key) in seen_events:
                     stats["skipped_events"] += 1
                     continue
-                try:
-                    dt = email.utils.parsedate_to_datetime(msg.get("Date"))
-                    dt = _coerce_utc(dt)
-                    if dt and dt < datetime.now(timezone.utc) - timedelta(days=180):
-                        continue
-                except Exception:
-                    dt = None
+                msg_dt = parse_imap_date_to_utc(msg.get("Date"))
+                if msg_dt < cutoff_dt:
+                    continue
                 inserted, updated = upsert_sent_log(
                     LOG_FILE,
                     _normalize_key(addr),
-                    dt or datetime.now(timezone.utc),
+                    msg_dt,
                     "imap_sync",
                     status="external",
                 )

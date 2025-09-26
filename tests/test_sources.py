@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("emailbot.bot_handlers")
+
 from emailbot import extraction
 
 

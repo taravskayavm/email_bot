@@ -8,6 +8,86 @@ from typing import Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+
+def build_parse_mode_kb(
+    token: str,
+    last_sections: list[str] | None = None,
+    domain: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Keyboard offering parse mode selection for a detected URL token."""
+
+    value = (token or "").strip()
+    rows = [
+        [
+            InlineKeyboardButton(
+                "📄 Только эта страница", callback_data=f"parse|single|{value}"
+            ),
+            InlineKeyboardButton(
+                "🕸️ Сканировать сайт", callback_data=f"parse|deep|{value}"
+            ),
+        ]
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🕸️ Выбрать разделы…", callback_data=f"parse|sections|{value}"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔎 Предложить разделы", callback_data=f"parse|suggest|{value}"
+            )
+        ]
+    )
+    if last_sections:
+        human = ", ".join(last_sections[:3])
+        if len(last_sections) > 3:
+            human += "…"
+        domain_label = (domain or "").strip()
+        if domain_label:
+            domain_label = domain_label.lower()
+            label = f"♻️ Разделы для {domain_label}: {human}"
+        else:
+            label = f"♻️ Разделы по умолчанию: {human}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"parse|use_last|{value}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def build_sections_suggest_kb(
+    token: str, candidates: list[str], selected: set[str] | None
+) -> InlineKeyboardMarkup:
+    """Build keyboard for interactive section selection."""
+
+    active = selected or set()
+    rows: list[list[InlineKeyboardButton]] = []
+    for prefix in candidates:
+        mark = "✅" if prefix in active else "⬜"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark} {prefix}",
+                    callback_data=f"sect|toggle|{token}|{prefix}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton("▶️ Старт", callback_data=f"sect|run|{token}"),
+            InlineKeyboardButton("✖️ Отмена", callback_data=f"sect|cancel|{token}"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 from services.templates import list_templates
 
 _ICONS: Dict[str, str] = {}

@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import os
 import unicodedata
+from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-ICONS_PATH = Path("icons.json")
+def _resolve_icons_path() -> Path:
+    override = os.getenv("DIRECTION_ICONS_PATH")
+    if override:
+        return Path(os.path.expandvars(os.path.expanduser(override))).resolve()
+
+    module_dir = Path(__file__).resolve().parent
+    module_local = module_dir / "icons.json"
+    if module_local.exists():
+        return module_local
+
+    return module_dir.parents[1] / "icons.json"
+
+
+ICONS_PATH = _resolve_icons_path()
 _DEFAULT_ICON = "📄"
 
 

@@ -16,6 +16,7 @@ MAX_ASSETS: int = 8
 MAX_SITEMAP_URLS: int = 200
 MAX_DOCS: int = 30
 PER_REQUEST_TIMEOUT: int = 15
+DAILY_SEND_LIMIT: int = 300
 EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
 
 TPL_DIR = Path("templates")
@@ -26,7 +27,8 @@ def load() -> None:
     """Load configuration from the persistent store."""
 
     global STRICT_OBFUSCATION, FOOTNOTE_RADIUS_PAGES, PDF_LAYOUT_AWARE, ENABLE_OCR
-    global MAX_ASSETS, MAX_SITEMAP_URLS, MAX_DOCS, PER_REQUEST_TIMEOUT, EXTERNAL_SOURCES
+    global MAX_ASSETS, MAX_SITEMAP_URLS, MAX_DOCS, PER_REQUEST_TIMEOUT
+    global EXTERNAL_SOURCES, DAILY_SEND_LIMIT
     STRICT_OBFUSCATION = bool(_store.get("STRICT_OBFUSCATION", STRICT_OBFUSCATION))
     FOOTNOTE_RADIUS_PAGES = int(_store.get("FOOTNOTE_RADIUS_PAGES", FOOTNOTE_RADIUS_PAGES))
     PDF_LAYOUT_AWARE = bool(_store.get("PDF_LAYOUT_AWARE", PDF_LAYOUT_AWARE))
@@ -35,6 +37,7 @@ def load() -> None:
     MAX_SITEMAP_URLS = int(_store.get("MAX_SITEMAP_URLS", MAX_SITEMAP_URLS))
     MAX_DOCS = int(_store.get("MAX_DOCS", MAX_DOCS))
     PER_REQUEST_TIMEOUT = int(_store.get("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT))
+    DAILY_SEND_LIMIT = int(_store.get("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT))
     EXTERNAL_SOURCES = _store.get("EXTERNAL_SOURCES", EXTERNAL_SOURCES) or {}
 
 
@@ -49,6 +52,7 @@ def save() -> None:
     _store.set("MAX_SITEMAP_URLS", MAX_SITEMAP_URLS)
     _store.set("MAX_DOCS", MAX_DOCS)
     _store.set("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT)
+    _store.set("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT)
     _store.set("EXTERNAL_SOURCES", EXTERNAL_SOURCES)
 
 
@@ -95,6 +99,7 @@ __all__ = [
     "MAX_SITEMAP_URLS",
     "MAX_DOCS",
     "PER_REQUEST_TIMEOUT",
+    "DAILY_SEND_LIMIT",
     "EXTERNAL_SOURCES",
     "load",
     "save",

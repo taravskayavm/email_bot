@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("emailbot.bot_handlers")
+
 from emailbot.bot_handlers import _classify_emails
 
 

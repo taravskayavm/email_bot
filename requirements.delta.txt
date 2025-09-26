@@ -1,0 +1,6 @@
+# Apply on top of the existing requirements when migrating to aiogram.
+
+remove: python-telegram-bot
+add:
+  - aiogram>=3.4,<4
+  - python-dotenv>=1.0

@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  mailhog:
+    image: mailhog/mailhog
+    ports: ["1025:1025","8025:8025"]
+  bot:
+    build: .
+    environment:
+      SMTP_HOST: mailhog
+      SMTP_PORT: 1025
+      EMAIL_ADDRESS: test@example.com
+      EMAIL_PASSWORD: dummy
+      APPEND_TO_SENT: "0"
+    depends_on: [mailhog]

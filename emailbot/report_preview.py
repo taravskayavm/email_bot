@@ -17,6 +17,7 @@ class PreviewData:
     suspicious: list[dict]       # {"email":..., "reason":...}
     blocked: list[dict]          # {"email":..., "source":...}
     duplicates: list[dict]       # {"email":..., "occurrences":..., "source_files":...}
+    planned_ready_count: int | None = None
 
 
 def _autosize(ws):
