@@ -2,31 +2,99 @@ from __future__ import annotations
 
 import base64
 import csv
-import email.utils
-import imaplib  # noqa: F401
+import imaplib
 import logging
 import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
+
+from utils.paths import ensure_parent, expand_path
 
 from .extraction_common import normalize_email as _normalize_email
 from .history_key import normalize_history_key
 from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
+from emailbot import edit_service
+from utils.email_norm import sanitize_for_send
 
-SUPPRESS_PATH = Path(
-    "/mnt/data/suppress_list.csv"
-)  # e-mail, code, reason, first_seen, last_seen, hits
-BOUNCE_LOG_PATH = Path("/mnt/data/bounce_log.csv")  # ts, email, code, msg, phase
-SYNC_SEEN_EVENTS_PATH = Path("/mnt/data/sync_seen_events.csv")
+
+# --- TZ helpers --------------------------------------------------------------
+def ensure_aware_utc(dt: datetime | None) -> datetime:
+    """Return a timezone-aware datetime in UTC."""
+
+    value = dt or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def parse_imap_date_to_utc(date_str: str | None) -> datetime:
+    """Best-effort parsing of IMAP date strings into aware UTC datetimes."""
+
+    try:
+        dt = parsedate_to_datetime(date_str) if date_str else None
+    except Exception:
+        dt = None
+    return ensure_aware_utc(dt)
+
+_SUPPRESS_ENV = os.getenv("SUPPRESS_LIST_PATH", "var/suppress_list.csv")
+_BOUNCE_ENV = os.getenv("BOUNCE_LOG_PATH", "var/bounce_log.csv")
+_SYNC_ENV = os.getenv("SYNC_SEEN_EVENTS_PATH", "var/sync_seen_events.csv")
+
+SUPPRESS_PATH = expand_path(_SUPPRESS_ENV)
+BOUNCE_LOG_PATH = expand_path(_BOUNCE_ENV)
+SYNC_SEEN_EVENTS_PATH = expand_path(_SYNC_ENV)
+SENT_CACHE_FILE = expand_path(os.getenv("SENT_MAILBOX_CACHE", "var/sent_mailbox.cache"))
 
 logger = logging.getLogger(__name__)
+
+
+def prepare_recipients_for_send(
+    recipients: Iterable[str],
+) -> Tuple[List[str], Set[str], Dict[str, str]]:
+    """Normalise raw recipient strings before attempting delivery."""
+
+    edits = edit_service.load_edits()
+    cleaned: List[str] = []
+    remap: Dict[str, str] = {}
+    origins: Dict[str, List[str]] = {}
+    dropped_originals: Set[str] = set()
+
+    for raw in recipients:
+        fixed = sanitize_for_send(raw)
+        if not fixed:
+            if raw:
+                dropped_originals.add(raw)
+            continue
+        if fixed != raw:
+            remap[raw] = fixed
+        cleaned.append(fixed)
+        origins.setdefault(fixed, []).append(raw)
+
+    good, dropped_sanitised, mapping = edit_service.apply_edits(edits, cleaned)
+
+    remap.update(mapping)
+    for source, target in mapping.items():
+        for original in origins.get(source, []):
+            remap[original] = target
+
+    dropped: Set[str] = set(dropped_originals)
+    for item in dropped_sanitised:
+        originals = origins.get(item)
+        if originals:
+            dropped.update(originals)
+        else:
+            dropped.add(item)
+
+    return good, dropped, remap
 
 
 def _format_unsubscribe_target(value: str | None, *, recipient: str | None = None) -> str | None:
@@ -129,13 +197,36 @@ def build_email(
     set_list_unsubscribe_headers(msg, recipient=to_addr)
     return msg
 
-# A small cache file is used to remember the IMAP folder where
-# outgoing messages should be stored.  The file lives alongside this
-# module so the path is deterministic and independent of the working
-# directory.
-SCRIPT_DIR = Path(__file__).resolve().parent
-# Name of the file storing the detected "Sent" folder name.
-SENT_CACHE_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+COMMON_SENT_NAMES = [
+    "Sent",
+    "Sent Items",
+    "Sent Mail",
+    "Sent Messages",
+    "[Gmail]/Sent Mail",
+    "[Google Mail]/Sent Mail",
+    "Отправленные",
+    "Отправленное",
+    "Отправленные письма",
+    "Исходящие",
+    "Отправленные элементы",
+]
+_LIST_RE = re.compile(r"\((?P<flags>[^)]*)\)\s+\"(?P<delim>[^\"]+)\"\s+(?P<name>.+)$")
+
+
+def _read_cached_sent_name() -> str | None:
+    try:
+        cached = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return cached or None
+
+
+def _write_cached_sent_name(name: str) -> None:
+    try:
+        ensure_parent(SENT_CACHE_FILE)
+        SENT_CACHE_FILE.write_text(name, encoding="utf-8")
+    except Exception:
+        pass
 
 
 class SecretFilter(logging.Filter):
@@ -164,44 +255,112 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _decode_modified_utf7(s: str) -> str:
+def _imap_utf7_encode(s: str) -> str:
+    """Unicode -> IMAP modified UTF-7."""
+
     res: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if not buf:
+            return
+        chunk = "".join(buf).encode("utf-16-be")
+        enc = base64.b64encode(chunk).decode("ascii").rstrip("=").replace("/", ",")
+        res.append("&" + enc + "-")
+        buf.clear()
+
+    for ch in s:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E and ch != "&":
+            flush()
+            res.append(ch)
+        elif ch == "&":
+            flush()
+            res.append("&-")
+        else:
+            buf.append(ch)
+    flush()
+    return "".join(res)
+
+
+def _imap_utf7_decode(s: str) -> str:
+    """IMAP modified UTF-7 -> Unicode."""
+
+    out: list[str] = []
     i = 0
-    while i < len(s):
-        c = s[i]
-        if c == "&":
-            j = i + 1
-            while j < len(s) and s[j] != "-":
-                j += 1
-            if j == i + 1:
-                res.append("&")
-            else:
-                chunk = s[i + 1 : j].replace(",", "/")
-                pad = "=" * (-len(chunk) % 4)
-                res.append(base64.b64decode(chunk + pad).decode("utf-16-be", "ignore"))
-            i = j + 1
-        else:
-            res.append(c)
+    n = len(s)
+    while i < n:
+        if s[i] != "&":
+            out.append(s[i])
             i += 1
-    return "".join(res)
-
-
-def _encode_modified_utf7(s: str) -> str:
-    res: list[str] = []
-    for part in re.split(r"([\u0080-\uFFFF]+)", s):
-        if not part:
             continue
-        if ord(part[0]) < 128:
-            res.append(part.replace("&", "&-"))
+        j = s.find("-", i)
+        if j == -1:
+            out.append(s[i:])
+            break
+        token = s[i + 1 : j]
+        if not token:
+            out.append("&")
         else:
-            b = (
-                base64.b64encode(part.encode("utf-16-be"))
-                .decode("ascii")
-                .replace("/", ",")
-                .rstrip("=")
-            )
-            res.append("&" + b + "-")
-    return "".join(res)
+            b64 = token.replace(",", "/")
+            pad = "=" * ((4 - len(b64) % 4) % 4)
+            data = base64.b64decode(b64 + pad)
+            out.append(data.decode("utf-16-be", errors="strict"))
+        i = j + 1
+    return "".join(out)
+
+
+def _normalize_list_line(row: bytes | str) -> str:
+    if isinstance(row, bytes):
+        return row.decode("utf-8", "ignore")
+    return str(row)
+
+
+def _parse_list_line(line: str) -> tuple[set[str], str, str]:
+    """Return (flags, raw_ascii_name, human_name)."""
+
+    match = _LIST_RE.match(line.strip())
+    flags: set[str] = set()
+    raw_name = ""
+    if match:
+        flags = set((match.group("flags") or "").split())
+        raw_name = (match.group("name") or "").strip()
+        if raw_name.startswith('"') and raw_name.endswith('"'):
+            raw_name = raw_name[1:-1]
+    else:
+        parts = line.strip().rsplit(" ", 1)
+        raw_name = parts[-1].strip('"') if parts else ""
+
+    decoded = _imap_utf7_decode(raw_name)
+    return flags, raw_name, decoded
+
+
+def _imap_enable_utf8_accept(imap: imaplib.IMAP4) -> None:
+    with suppress(Exception):
+        imap.enable("UTF8=ACCEPT")
+
+
+def _try_select_decoded(imap: imaplib.IMAP4, decoded_name: str) -> bool:
+    if not decoded_name:
+        return False
+    with suppress(Exception):
+        code, _ = imap.select(decoded_name, readonly=True)
+        if code == "OK":
+            return True
+    encoded = _imap_utf7_encode(decoded_name)
+    with suppress(Exception):
+        code, _ = imap.select(encoded, readonly=True)
+        return code == "OK"
+    return False
+
+
+def _try_select_raw_ascii(imap: imaplib.IMAP4, raw_ascii: str) -> bool:
+    if not raw_ascii:
+        return False
+    with suppress(Exception):
+        code, _ = imap.select(raw_ascii, readonly=True)
+        return code == "OK"
+    return False
 
 
 REQUIRED_FIELDS = ["key", "email", "last_sent_at", "source", "status"]
@@ -281,68 +440,53 @@ def last_sent_at(email: str) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
-def detect_sent_folder(imap) -> str:
-    r"""Determine the IMAP folder name for "Sent" messages.
+def detect_sent_folder(imap: imaplib.IMAP4) -> str:
+    """Locate the "Sent" folder, honouring overrides and caching the result."""
 
-    The function tries a cached value first.  If none is found it inspects
-    the output of ``imap.list()`` searching for a mailbox flagged with
-    ``\Sent``.  If still not found, a list of common folder names is checked.
-    The chosen value is stored in :data:`SENT_CACHE_FILE` for future calls.
-    """
+    cached = _read_cached_sent_name()
+    env_sent = (os.getenv("SENT_MAILBOX") or "").strip()
 
-    # 1) Cached value
-    try:
-        if SENT_CACHE_FILE.exists():
-            cached = SENT_CACHE_FILE.read_text(encoding="utf-8").strip()
-            if cached:
-                return cached
-    except Exception:
-        pass
+    _imap_enable_utf8_accept(imap)
 
-    candidates: List[str] = []
-    # 2) Ask the server
-    try:
+    if cached and _try_select_decoded(imap, cached):
+        return cached
+
+    if env_sent and _try_select_decoded(imap, env_sent):
+        if env_sent != cached:
+            _write_cached_sent_name(env_sent)
+        return env_sent
+
+    with suppress(Exception):
         status, data = imap.list()
         if status == "OK" and data:
-            for raw in data:
-                # В IMAP имена ящиков в modified UTF-7
-                try:
-                    line = raw.decode("imap4-utf-7", "ignore")
-                except LookupError:
-                    line = _decode_modified_utf7(raw.decode("ascii", "ignore"))
-                candidates.append(line)
-    except Exception:
-        candidates = []
+            candidates: list[tuple[set[str], str, str]] = []
+            for row in data:
+                line = _normalize_list_line(row)
+                flags, raw_ascii, human = _parse_list_line(line)
+                candidates.append((flags, raw_ascii, human))
 
-    # Prefer a folder explicitly flagged as Sent
-    for line in candidates:
-        if "\\Sent" in line:
-            # Формат: (<flags>) "<sep>" "<mailbox>"
-            name = line.rsplit('"', 2)[1] if '"' in line else line.split()[-1]
-            try:
-                SENT_CACHE_FILE.write_text(name, encoding="utf-8")
-            except Exception:
-                pass
-            return name
+            for flags, raw_ascii, human in candidates:
+                if any(flag.upper() == r"\SENT" for flag in flags):
+                    if _try_select_raw_ascii(imap, raw_ascii):
+                        to_cache = human or raw_ascii
+                        if to_cache != cached:
+                            _write_cached_sent_name(to_cache)
+                        return to_cache
 
-    # Common fallbacks (English and Russian variants)
-    COMMON = ["Sent", "Отправленные", "Отправленные письма"]
-    for line in candidates:
-        for name in COMMON:
-            if f'"{name}"' in line or line.endswith(name):
-                try:
-                    SENT_CACHE_FILE.write_text(name, encoding="utf-8")
-                except Exception:
-                    pass
-                return name
+            known = {name.lower() for name in COMMON_SENT_NAMES}
+            for _flags, _raw_ascii, human in candidates:
+                if human and human.lower() in known:
+                    if _try_select_decoded(imap, human):
+                        if human != cached:
+                            _write_cached_sent_name(human)
+                        return human
 
-    # Last resort
-    fallback = "Sent"
-    try:
-        SENT_CACHE_FILE.write_text(fallback, encoding="utf-8")
-    except Exception:
-        pass
-    return fallback
+    logger.warning(
+        "Sent mailbox not selectable, fell back to INBOX (env=%r, cached=%r)",
+        env_sent,
+        cached,
+    )
+    return "INBOX"
 
 
 def append_to_sent(imap, mailbox: str, msg_bytes: bytes) -> tuple[str, object]:
@@ -366,22 +510,22 @@ def _normalize_ts(value: str) -> str:
         dt = datetime.fromisoformat(value)
     except Exception:
         try:
-            dt = email.utils.parsedate_to_datetime(value)
-            if dt.tzinfo:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            dt = parsedate_to_datetime(value)
         except Exception:
             try:
                 dt = datetime.fromtimestamp(float(value))
             except Exception:
                 return value
-    return dt.isoformat()
+    if dt is None:
+        return value
+    return ensure_aware_utc(dt).isoformat()
 
 
 def ensure_sent_log_schema(path: str) -> List[str]:
     """Ensure ``sent_log.csv`` has the required schema and migrate legacy names."""
 
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     if not p.exists():
         with p.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(REQUIRED_FIELDS)
@@ -444,7 +588,7 @@ def load_sent_log(path: Path) -> Dict[str, datetime]:
                     dt = datetime.fromisoformat(row["last_sent_at"])
                 except Exception:
                     continue
-                data[row["key"]] = dt
+                data[row["key"]] = ensure_aware_utc(dt)
     return data
 
 
@@ -458,8 +602,10 @@ def upsert_sent_log(
 ) -> Tuple[bool, bool]:
     """Insert or update ``sent_log`` row."""
 
+    ts = ensure_aware_utc(ts)
+
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     fieldnames = ensure_sent_log_schema(str(p))
     key = canonical_for_history(email)
     inserted = False
@@ -476,8 +622,10 @@ def upsert_sent_log(
                     existing_dt = datetime.fromisoformat(existing_ts)
                 except Exception:
                     existing_dt = None
-                if existing_dt and ts <= existing_dt:
-                    return False, False
+                if existing_dt is not None:
+                    existing_dt = ensure_aware_utc(existing_dt)
+                    if ts <= existing_dt:
+                        return False, False
                 row.update(
                     {
                         "email": email.strip(),
@@ -532,13 +680,23 @@ def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     for r in rows:
         key = r.get("key") or canonical_for_history(r.get("email", ""))
         try:
-            ts = datetime.fromisoformat(r.get("last_sent_at", ""))
+            ts_parsed = datetime.fromisoformat(r.get("last_sent_at", ""))
         except Exception:
             continue
+        ts = ensure_aware_utc(ts_parsed)
         current = best.get(key)
-        if current is None or datetime.fromisoformat(current["last_sent_at"]) < ts:
+        current_dt = None
+        if current is not None:
+            try:
+                current_dt = datetime.fromisoformat(current["last_sent_at"])
+            except Exception:
+                current_dt = None
+            else:
+                current_dt = ensure_aware_utc(current_dt)
+        if current is None or current_dt is None or current_dt < ts:
             r = dict(r)
             r["key"] = key
+            r["last_sent_at"] = ts.isoformat()
             best[key] = r
     before = len(rows)
     after = len(best)
@@ -581,7 +739,7 @@ def save_seen_events(path: Path, events: Iterable[tuple[str, str]]) -> None:
 
 def _ensure_headers(p: Path, headers: List[str]):
     new = not p.exists()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(p)
     f = p.open("a", newline="", encoding="utf-8")
     w = csv.DictWriter(f, fieldnames=headers)
     if new:
@@ -739,7 +897,7 @@ def suppress_add(email: str, code: int | None, reason: str) -> None:
             "hits": "1",
         }
     rows[key] = rec
-    SUPPRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(SUPPRESS_PATH)
     with SUPPRESS_PATH.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
@@ -799,6 +957,7 @@ __all__ = [
     "SYNC_SEEN_EVENTS_PATH",
     "REQUIRED_FIELDS",
     "LEGACY_MAP",
+    "ensure_aware_utc",
     "ensure_sent_log_schema",
     "canonical_for_history",
     "last_sent_at",
@@ -809,6 +968,7 @@ __all__ = [
     "is_soft_bounce",
     "suppress_add",
     "is_suppressed",
+    "parse_imap_date_to_utc",
     "classify_tld",
     "DOMESTIC_CCTLD",
     "GENERIC_GTLD",

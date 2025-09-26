@@ -22,3 +22,27 @@ def test_edit_service_roundtrip(tmp_path):
 
     clear_edits(chat_id)
     assert list_edits(chat_id) == []
+
+
+def test_apply_edits_handles_canonicalization_and_drop(tmp_path):
+    db_path = tmp_path / "state.db"
+    history_store.init_db(db_path)
+    chat_id = 111
+    clear_edits(chat_id)
+
+    save_edit(chat_id, "User (at) Example.com", "Clean+tag@Example.COM")
+    save_edit(chat_id, "remove.me@example.com", "-", when=datetime(2024, 2, 2))
+
+    source = [
+        " user@example.com ",
+        "REMOVE.ME@example.com",
+        "Other@Example.com",
+        "USER@example.com",
+    ]
+
+    updated = apply_edits(source, chat_id)
+
+    assert updated == [
+        "Clean+tag@example.com",
+        "Other@example.com",
+    ]

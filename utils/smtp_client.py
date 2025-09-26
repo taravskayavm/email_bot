@@ -1,6 +1,7 @@
 import logging
 import os
 import smtplib
+import ssl
 import time
 from collections import deque
 from email.message import EmailMessage
@@ -78,13 +79,16 @@ class RobustSMTP:
             self.port = 465
         self.ssl = os.getenv("SMTP_SSL", "1") == "1"
         try:
-            self.timeout = int(os.getenv("SMTP_TIMEOUT", "45"))
+            self.timeout = int(os.getenv("SMTP_TIMEOUT", "20"))
         except Exception:
-            self.timeout = 45
+            self.timeout = 20
         self.user = os.getenv("EMAIL_ADDRESS")
         self.pwd = os.getenv("EMAIL_PASSWORD")
         self._smtp: Optional[smtplib.SMTP] = None
         self._logged_config = False
+        self._ssl_ctx = ssl.create_default_context()
+        self._ssl_ctx.check_hostname = True
+        self._ssl_ctx.verify_mode = ssl.CERT_REQUIRED
 
     def _log_config(self) -> None:
         if not self._logged_config:
@@ -101,13 +105,20 @@ class RobustSMTP:
         self._log_config()
         if self.ssl:
             smtp: smtplib.SMTP = smtplib.SMTP_SSL(
-                self.host, self.port, timeout=self.timeout
+                self.host,
+                self.port,
+                timeout=self.timeout,
+                context=self._ssl_ctx,
             )
             smtp.ehlo()
         else:
             smtp = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
             smtp.ehlo()
-            smtp.starttls()
+            try:
+                smtp.starttls(context=self._ssl_ctx)
+            except smtplib.SMTPNotSupportedError:
+                # сервер не поддерживает TLS — продолжаем без падения
+                pass
             smtp.ehlo()
         smtp.login(self.user, self.pwd)
         self._smtp = smtp

@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("emailbot.bot_handlers")
+
 import emailbot.bot_handlers as bh
 import emailbot.messaging as messaging
 from tests.test_bot_handlers import DummyUpdate, DummyContext

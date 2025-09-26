@@ -40,6 +40,7 @@ from .extraction_pdf import (
 from .extraction_zip import extract_emails_from_zip
 from .settings_store import get
 from utils.tld_utils import is_allowed_domain
+from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -247,6 +248,49 @@ _COMMON_TLDS = {
 
 _TLD_TRIM_BLACKLIST = {"message", "promocode"}
 
+_RIGHT_TAIL_WORDS = {
+    "центр",
+    "институт",
+    "кафедра",
+    "каф.",
+    "факультет",
+    "университет",
+    "лаборатория",
+    "лабораторія",
+    "департамент",
+    "отдел",
+    "филиал",
+    "кафедры",
+    "факультета",
+    "института",
+    "университета",
+    "преподаватель",
+    "доцент",
+    "профессор",
+    "email",
+    "почта",
+    "e-mail",
+    "электронной",
+    "электронная",
+    "сайт",
+    "телефон",
+}
+
+
+def _trim_known_tail(label: str) -> str | None:
+    lower = label.lower()
+    for tail in _RIGHT_TAIL_WORDS:
+        if not tail:
+            continue
+        if lower.endswith(tail):
+            base = lower[: -len(tail)].rstrip("-_ " + " ")
+            if not base:
+                continue
+            pref = _longest_known_tld_prefix(base)
+            if pref:
+                return pref
+    return None
+
 def _longest_known_tld_prefix(s: str) -> str | None:
     s = s.lower()
     best = None
@@ -287,7 +331,9 @@ def _trim_appended_word(domain: str) -> str:
             return ".".join(parts)
 
     # Максимальный известный префикс (onlinebiz -> online, rurussia -> ru)
-    pref = _longest_known_tld_prefix(t)
+    pref = _trim_known_tail(t)
+    if not pref:
+        pref = _longest_known_tld_prefix(t)
     if pref:
         parts[-1] = pref
         return ".".join(parts)
@@ -432,10 +478,15 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
         i = at + 1
 
     # Дедуп с сохранением порядка
-    out, seen = [], set()
+    out: list[str] = []
+    seen: Set[str] = set()
     for e in emails:
-        if e not in seen:
-            out.append(e); seen.add(e)
+        cleaned = sanitize_for_send(e)
+        if not cleaned:
+            continue
+        if cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
     return out
 
 

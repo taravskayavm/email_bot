@@ -8,9 +8,14 @@ from pathlib import Path
 def expand_path(p: str | os.PathLike) -> Path:
     """Expand environment variables and ``~``, return absolute :class:`Path`."""
 
+    from emailbot.utils.paths import resolve_project_path
+
     s = os.fspath(p)
     s = os.path.expandvars(os.path.expanduser(s))
-    return Path(s).resolve()
+    path = Path(s)
+    if not path.is_absolute():
+        path = resolve_project_path(path)
+    return path.resolve()
 
 
 def ensure_parent(path: Path) -> None:
