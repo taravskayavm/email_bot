@@ -11,6 +11,7 @@ from aiogram.filters import CommandObject
 from email_validator import EmailNotValidError, validate_email
 
 from emailbot.aiogram_port.messaging import send_one_email
+from emailbot.messaging_utils import prepare_recipients_for_send
 
 router = Router()
 
@@ -50,6 +51,11 @@ async def send(message: Message, command: CommandObject) -> None:
         return
 
     normalized = result.normalized
+    good, dropped, _ = prepare_recipients_for_send([normalized])
+    if dropped or not good:
+        await message.answer("Адрес отклонён после проверки. Письмо не отправлено.")
+        return
+    normalized = good[0]
     await message.bot.send_chat_action(message.chat.id, "typing")
     ok, info = await send_one_email(normalized, subject, body, source="telegram_manual")
     trace_id = info.get("trace_id", "—")

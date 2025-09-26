@@ -5,7 +5,7 @@ import sqlite3
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from utils.dedup import canonical as _canon
 from utils.email_clean import preclean_obfuscations
@@ -66,6 +66,81 @@ def _db_path() -> Path:
     return history_store._DB_PATH
 
 
+def load_edits(chat_id: Optional[int] = None) -> Dict[str, Any]:
+    """Load stored edits and return mapping/drop structures.
+
+    When ``chat_id`` is ``None`` all edits are returned.  Otherwise edits are
+    limited to the specified chat.
+    """
+
+    path = _db_path()
+    query = "SELECT old_email, new_email FROM edits"
+    params: Sequence[Union[int, str]] = ()
+    if chat_id is not None:
+        query += " WHERE chat_id=?"
+        params = (chat_id,)
+
+    with sqlite3.connect(path) as con:
+        cur = con.execute(query, params)
+        raw_pairs: List[Tuple[str, str]] = [(row[0], row[1]) for row in cur.fetchall()]
+
+    mapping, drops = _build_edit_maps(raw_pairs)
+    return {"MAP": mapping, "DROP": drops}
+
+
+def _normalise_edit_struct(edits: Dict[str, Any]) -> Tuple[Dict[str, str], Set[str]]:
+    raw_map = edits.get("MAP") or {}
+    raw_drop = edits.get("DROP") or set()
+
+    mapping: Dict[str, str] = {}
+    for old_raw, new_raw in dict(raw_map).items():
+        old_key = _norm_key(old_raw)
+        sanitized_new = _norm_email_safe(new_raw)
+        if old_key and sanitized_new:
+            mapping[old_key] = sanitized_new
+
+    drops: Set[str] = set()
+    for value in raw_drop:
+        key = _norm_key(value)
+        if key:
+            drops.add(key)
+
+    return mapping, drops
+
+
+def _apply_edits_struct(
+    edits: Dict[str, Any], emails: Iterable[str]
+) -> Tuple[List[str], Set[str], Dict[str, str]]:
+    mapping, drops = _normalise_edit_struct(edits)
+
+    seen: Set[str] = set()
+    good: List[str] = []
+    dropped: Set[str] = set()
+    remap: Dict[str, str] = {}
+
+    for item in emails:
+        raw = (item or "").strip()
+        if not raw:
+            continue
+        canon = _norm_key(raw)
+        if canon in drops:
+            dropped.add(raw)
+            continue
+        replacement = mapping.get(canon)
+        target = replacement if replacement is not None else raw
+        final = _norm_email_safe(target)
+        if replacement and final and final != raw:
+            remap[raw] = final
+        if not final:
+            dropped.add(raw)
+            continue
+        if final not in seen:
+            seen.add(final)
+            good.append(final)
+
+    return good, dropped, remap
+
+
 def save_edit(
     chat_id: int, old_email: str, new_email: str, when: datetime | None = None
 ) -> None:
@@ -95,26 +170,21 @@ def clear_edits(chat_id: int) -> None:
         con.commit()
 
 
-def apply_edits(emails: Iterable[str], chat_id: int) -> list[str]:
-    path = _db_path()
-    with sqlite3.connect(path) as con:
-        cur = con.execute(
-            "SELECT old_email, new_email FROM edits WHERE chat_id=?", (chat_id,)
-        )
-        raw_pairs: List[Tuple[str, str]] = [(row[0], row[1]) for row in cur.fetchall()]
+def apply_edits(
+    edits_or_emails: Union[Dict[str, Any], Iterable[str]],
+    maybe_emails_or_chat_id: Union[Iterable[str], int, None] = None,
+):
+    """Apply stored edits or transform addresses with a supplied structure."""
 
-    map_canon, drops = _build_edit_maps(raw_pairs)
-    seen: Set[str] = set()
-    result: List[str] = []
-    for item in emails:
-        raw = (item or "").strip()
-        canon = _norm_key(raw)
-        if canon in drops:
-            continue
-        replacement = map_canon.get(canon)
-        target = replacement if replacement is not None else raw
-        final = _norm_email_safe(target)
-        if final and final not in seen:
-            seen.add(final)
-            result.append(final)
-    return result
+    if isinstance(edits_or_emails, dict):
+        emails_iter = maybe_emails_or_chat_id or []
+        return _apply_edits_struct(edits_or_emails, emails_iter)  # type: ignore[arg-type]
+
+    emails = list(edits_or_emails)
+    chat_id = maybe_emails_or_chat_id
+    if not isinstance(chat_id, int):
+        raise ValueError("chat_id is required when applying stored edits")
+
+    edits = load_edits(chat_id)
+    good, _, _ = _apply_edits_struct(edits, emails)
+    return good
