@@ -1,5 +1,4 @@
-python-telegram-bot==20.8
-# aiogram удалён: используем стабильный PTB-рантайм (UI/логика без изменений)
+python-telegram-bot==20.8  # фиксируем стабильную версию PTB
 aiohttp>=3.9
 pandas>=2.0
 openpyxl>=3.1
