@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 
 from utils.paths import ensure_parent, expand_path
 
@@ -22,6 +22,8 @@ from .history_key import normalize_history_key
 from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
+from emailbot import edit_service
+from utils.email_norm import sanitize_for_send
 
 
 # --- TZ helpers --------------------------------------------------------------
@@ -53,6 +55,46 @@ SYNC_SEEN_EVENTS_PATH = expand_path(_SYNC_ENV)
 SENT_CACHE_FILE = expand_path(os.getenv("SENT_MAILBOX_CACHE", "var/sent_mailbox.cache"))
 
 logger = logging.getLogger(__name__)
+
+
+def prepare_recipients_for_send(
+    recipients: Iterable[str],
+) -> Tuple[List[str], Set[str], Dict[str, str]]:
+    """Normalise raw recipient strings before attempting delivery."""
+
+    edits = edit_service.load_edits()
+    cleaned: List[str] = []
+    remap: Dict[str, str] = {}
+    origins: Dict[str, List[str]] = {}
+    dropped_originals: Set[str] = set()
+
+    for raw in recipients:
+        fixed = sanitize_for_send(raw)
+        if not fixed:
+            if raw:
+                dropped_originals.add(raw)
+            continue
+        if fixed != raw:
+            remap[raw] = fixed
+        cleaned.append(fixed)
+        origins.setdefault(fixed, []).append(raw)
+
+    good, dropped_sanitised, mapping = edit_service.apply_edits(edits, cleaned)
+
+    remap.update(mapping)
+    for source, target in mapping.items():
+        for original in origins.get(source, []):
+            remap[original] = target
+
+    dropped: Set[str] = set(dropped_originals)
+    for item in dropped_sanitised:
+        originals = origins.get(item)
+        if originals:
+            dropped.update(originals)
+        else:
+            dropped.add(item)
+
+    return good, dropped, remap
 
 
 def _format_unsubscribe_target(value: str | None, *, recipient: str | None = None) -> str | None:

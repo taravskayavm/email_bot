@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 import uuid
 from typing import Dict, Optional, Tuple
 
 from emailbot.aiogram_port import cooldown
 from emailbot.aiogram_port.logs import mask_email
 from emailbot.aiogram_port.smtp_sender import SmtpSender
+from emailbot.messaging_utils import prepare_recipients_for_send
 from utils import send_stats
 
 _SENDER: Optional[SmtpSender] = None
+
+logger = logging.getLogger(__name__)
 
 
 def _get_sender() -> SmtpSender:
@@ -54,6 +58,30 @@ async def send_one_email(
     """Send an e-mail after enforcing cooldown and logging outcomes."""
 
     trace_id = _trace_id()
+
+    good, dropped, remap = prepare_recipients_for_send([to_addr])
+    if not good:
+        logger.info(
+            "Recipient dropped after preprocess", extra={
+                "raw": to_addr,
+                "dropped": sorted(dropped),
+                "remap": remap,
+                "trace_id": trace_id,
+            }
+        )
+        reason = "recipient rejected after sanitisation"
+        if dropped:
+            reason = f"recipient rejected after sanitisation: {', '.join(sorted(dropped))}"
+        return False, {
+            "trace_id": trace_id,
+            "masked_to": mask_email(to_addr),
+            "reason": reason,
+        }
+
+    if remap and to_addr != good[0]:
+        logger.debug("Recipient remapped before send: %s -> %s", to_addr, good[0])
+    to_addr = good[0]
+
     masked = mask_email(to_addr)
     allowed, reason = cooldown.enforce_cooldown(to_addr)
     if not allowed:

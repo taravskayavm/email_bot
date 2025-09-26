@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 
 # Strict e-mail matcher with named groups for local and domain parts
-_RX = re.compile(r"(?i)\b(?P<local>[a-z0-9._%+-]+)@(?P<domain>[a-z0-9.-]+\.[a-z]{2,})\b")
+_RX = re.compile(
+    r"(?i)\b(?P<local>[-a-z0-9!#$%&'*+/=?^_`{|}~./]+)@(?P<domain>[a-z0-9.-]+\.[a-z]{2,})\b"
+)
 
 
 def sanitize_for_send(addr: str) -> str:
