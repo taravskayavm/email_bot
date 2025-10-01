@@ -788,6 +788,23 @@ def build_message(
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
+    # --- Unsubscribe caption injection (HTML) ---
+    # Добавляем в конец HTML-письма подпись-пояснение к кнопке «Отписаться».
+    # Управляется переменными окружения:
+    #   UNSUBSCRIBE_CAPTION_ENABLE=1|0
+    #   UNSUBSCRIBE_CAPTION_TEXT="..."
+    #   UNSUBSCRIBE_CAPTION_WITH_LINK=0|1 (если 1 — слово «Отписаться» будет ссылкой)
+    #
+    # Текст по умолчанию соответствует задаче: «Если вы получили это письмо по ошибке
+    # или не хотите получать рассылку — нажмите «Отписаться».»
+    unsub_caption_enabled = os.getenv("UNSUBSCRIBE_CAPTION_ENABLE", "1") == "1"
+    unsub_caption_text = (
+        os.getenv(
+            "UNSUBSCRIBE_CAPTION_TEXT",
+            "Если вы получили это письмо по ошибке или не хотите получать рассылку — нажмите «Отписаться».",
+        ).strip()
+    )
+    unsub_caption_with_link = os.getenv("UNSUBSCRIBE_CAPTION_WITH_LINK", "1") == "1"
     sig_size = max(base_size - 1, 1)
     template_info = get_template_by_path(html_path)
     info_code = ""
@@ -823,7 +840,21 @@ def build_message(
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
     html_body = _inject_signature(html_body, signature_html)
-    html_body = html_body.replace("</body>", f"{unsub_html}</body>")
+    caption_html = ""
+    if unsub_caption_enabled and unsub_caption_text:
+        if unsub_caption_with_link:
+            caption_text = unsub_caption_text.replace(
+                "«Отписаться»",
+                f'«<a href="{link}">Отписаться</a>»',
+            )
+        else:
+            caption_text = unsub_caption_text
+        caption_html = (
+            f"\n"
+            f'<div style="margin-top:16px;font-size:0.9em;color:#666;line-height:1.4;">{caption_text}</div>\n'
+        )
+
+    html_body = html_body.replace("</body>", f"{unsub_html}{caption_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
     msg["To"] = to_addr
