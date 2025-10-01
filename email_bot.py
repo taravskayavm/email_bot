@@ -1,3 +1,5 @@
+"""Synchronous entrypoint resolver for the email bot project."""
+
 from importlib import import_module
 
 # Порядок важен: сначала старые точки входа, затем новые.
@@ -26,6 +28,8 @@ def resolve_entrypoint():
 
 
 def main():
+    """Invoke the first available entrypoint synchronously."""
+
     return resolve_entrypoint()()
 
 
