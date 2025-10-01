@@ -1,4 +1,4 @@
-"""Async entrypoint for the aiogram-based Telegram bot."""
+"""Synchronous entrypoint for the aiogram-based Telegram bot (async under the hood)."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def include_all_routers(dp: Dispatcher) -> None:
             dp.include_router(router)
 
 
-async def main() -> None:
+async def _amain() -> None:
     """Run the bot dispatcher until cancelled."""
 
     _load_dotenv()
@@ -144,10 +144,17 @@ async def main() -> None:
             pass
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Synchronous entrypoint that wraps the async bot startup."""
+
     if sys.platform.startswith("win"):
         try:  # pragma: no cover - specific to Windows event loop
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
         except Exception:
             pass
-    asyncio.run(main())
+
+    asyncio.run(_amain())
+
+
+if __name__ == "__main__":
+    main()
