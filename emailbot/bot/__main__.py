@@ -1,265 +1,153 @@
-"""PTB-вход: короткий старт, категории и нижняя панель в стиле «золотого» UI."""
+"""Async entrypoint for the aiogram-based Telegram bot."""
+
 from __future__ import annotations
+
+import asyncio
+import importlib
+import logging
 import os
+import pkgutil
+import signal
+import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
-)
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from aiogram import Bot, Dispatcher, Router
+from aiogram.types import BotCommand
 
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
 
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    env = root / ".env"
-    load_dotenv(dotenv_path=env if env.exists() else None)
+    def load_dotenv(*args, **kwargs):
+        return False
 
+def _make_bot(token: str) -> Bot:
+    """
+    Создаёт Bot корректно для aiogram <3.7 и >=3.7.
+    UI/логика не меняются (HTML по умолчанию).
+    """
 
-def _read_file(path: str) -> str | None:
-    if not path:
-        return None
-    file_path = Path(path)
-    if not file_path.exists():
-        return None
     try:
-        return file_path.read_text(encoding="utf-8")
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.enums import ParseMode
+
+        return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     except Exception:
-        return None
+        return Bot(token=token, parse_mode="HTML")
 
 
-def _load_start_text() -> str:
-    # Короткое сообщение для /start, без зависимостей от .env
-    return "<b>Можно загрузить данные</b>"
+def _load_dotenv() -> None:
+    env_file = Path(__file__).resolve().parent.parent.parent / ".env"
+    if env_file.exists():
+        load_dotenv(dotenv_path=env_file)
+    else:
+        load_dotenv()
 
 
-def _load_bulk_text() -> str:
-    # подробная инструкция после клика «Массовая»
-    text = _read_file((os.getenv("BULK_MESSAGE_HTML_PATH") or "").strip())
-    if text:
-        return text
-    env_value = (os.getenv("BULK_MESSAGE_TEXT") or "").strip()
-    if env_value:
-        return env_value
-    return (
-        "Загрузите данные со e-mail-адресами для рассылки.\n\n"
-        "Поддерживаемые форматы: PDF, Excel (xlsx), Word (docx), CSV, "
-        "ZIP (с этими файлами внутри), а также ссылки на сайты.\n\n"
-        "<i>Примечание:</i>\n"
-        "Мы удаляем возможные сноски/обфускации и проверяем адреса (MX/дубликаты).\n"
-        "Правило: один адрес — не чаще раза в 180 дней."
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
 
-_ALLOWED_TAGS = "b|strong|i|em|u|ins|s|strike|del|a|code|pre|tg-spoiler"
+def _resolve_token() -> str:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if token:
+        return token
+    try:
+        import emailbot.settings as settings_module  # type: ignore
+
+        value = getattr(settings_module, "TELEGRAM_BOT_TOKEN", None)
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Specify it in .env or environment.")
 
 
-def _normalize_html(text: str) -> str:
-    import re
-
-    if not text:
-        return text
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(
-        rf"</?(?!{_ALLOWED_TAGS})([a-z0-9:-]+)(?:\s[^>]*)?>",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text
-
-
-def _categories_inline_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("🧬 Биоинформатика", callback_data="cat:bio")],
-        [InlineKeyboardButton("🗺️ География", callback_data="cat:geo")],
-        [InlineKeyboardButton("🧠 Психология", callback_data="cat:psy")],
-        [InlineKeyboardButton("🏃 Спорт", callback_data="cat:sport")],
-        [InlineKeyboardButton("🧳 Туризм", callback_data="cat:tour")],
+async def _set_bot_commands(bot: Bot) -> None:
+    commands = [
+        BotCommand(command="start", description="Запуск меню"),
+        BotCommand(command="help", description="Краткая инструкция"),
+        BotCommand(command="send", description="Ручная отправка письма"),
     ]
-    return InlineKeyboardMarkup(rows)
+    try:
+        await bot.set_my_commands(commands)
+    except Exception:
+        logging.getLogger(__name__).debug("Unable to set bot commands", exc_info=True)
 
 
-def _bottom_reply_keyboard() -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton("📦 Массовая"), KeyboardButton("✉️ Ручная")],
-        [KeyboardButton("🧹 Очистить список"), KeyboardButton("📄 Показать исключения")],
-        [KeyboardButton("ℹ️ О боте"), KeyboardButton("📊 Отчёты")],
-        [KeyboardButton("⛔ Стоп")],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def include_all_routers(dp: Dispatcher) -> None:
+    """Auto-import and include all routers from ``emailbot.bot.handlers``."""
+
+    from emailbot.bot import handlers as handlers_pkg
+
+    pkg_path = Path(handlers_pkg.__file__).parent
+    for module_info in pkgutil.iter_modules([str(pkg_path)]):
+        module_name = module_info.name
+        if module_name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{handlers_pkg.__name__}.{module_name}")
+        router = getattr(module, "router", None)
+        if not isinstance(router, Router):
+            for attr_name, value in vars(module).items():
+                if attr_name.endswith("_router") and isinstance(value, Router):
+                    router = value
+                    break
+        if isinstance(router, Router):
+            dp.include_router(router)
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Старт: короткий текст, категории и постоянная нижняя панель."""
+async def main() -> None:
+    """Run the bot dispatcher until cancelled."""
 
-    message = update.message
-    if message is None:
-        return
+    _load_dotenv()
+    _setup_logging()
+    token = _resolve_token()
+    bot = _make_bot(token)
+    dispatcher = Dispatcher()
+    try:
+        from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
 
-    await message.reply_text("Меню", reply_markup=_bottom_reply_keyboard())
-    await message.reply_text(
-        _normalize_html(_load_start_text()),
-        reply_markup=_categories_inline_keyboard(),
-        parse_mode=ParseMode.HTML,
-    )
+        dispatcher.message.middleware(ErrorLoggingMiddleware())
+        dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
+    except Exception:
+        pass
+    include_all_routers(dispatcher)
+    await _set_bot_commands(bot)
 
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:  # pragma: no cover - specific to Windows/embedded loops
+            # Windows Py<3.8 и некоторые окружения
+            pass
 
-async def on_bulk_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer()
-    await query.message.reply_text(
-        _normalize_html(_load_bulk_text()),
-        reply_markup=_bottom_reply_keyboard(),
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message and message.document:
-        await message.reply_text("Файл получен. Обработка запустится отдельно.")
-
-
-async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer()
-
-
-async def on_bulk_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        _normalize_html(_load_bulk_text()),
-        reply_markup=_bottom_reply_keyboard(),
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def on_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "Остановлено. Клавиатура скрыта.", reply_markup=ReplyKeyboardRemove()
-    )
-
-
-async def on_show_exclusions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "Исключения пока пусты.", reply_markup=_bottom_reply_keyboard()
-    )
-
-
-async def on_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "Ручной режим скоро вернём (заглушка).",
-        reply_markup=_bottom_reply_keyboard(),
-    )
-
-
-async def on_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "Список очищен (заглушка).", reply_markup=_bottom_reply_keyboard()
-    )
-
-
-async def on_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "О боте: PTB-версия без aiogram.", reply_markup=_bottom_reply_keyboard()
-    )
-
-
-async def on_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if message is None:
-        return
-    await message.reply_text(
-        "Отчёты будут здесь (заглушка).",
-        reply_markup=_bottom_reply_keyboard(),
-    )
-
-
-def main_sync() -> None:
-    """
-    Корректный запуск PTB v20+: без прямой работы с Updater.
-    Просто регистрируем хэндлеры и вызываем run_polling().
-    """
-
-    _load_env()
-    token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
-    if not token:
-        raise SystemExit("TELEGRAM_BOT_TOKEN не задан в .env")
-
-    app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler(["start", "help"], cmd_start))
-
-    app.add_handler(CallbackQueryHandler(on_bulk_inline, pattern=r"^bulk:start$"))
-    app.add_handler(CallbackQueryHandler(on_category, pattern=r"^cat:(bio|geo|psy|sport|tour)$"))
-
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^📦 Массовая$"), on_bulk_reply)
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^⛔ Стоп$"), on_stop)
-    )
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(r"^📄 Показать исключения$"),
-            on_show_exclusions,
+    async with bot:
+        polling = asyncio.create_task(
+            dispatcher.start_polling(
+                bot,
+                allowed_updates=dispatcher.resolve_used_update_types(),
+            )
         )
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^✉️ Ручная$"), on_manual)
-    )
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(r"^🧹 Очистить список$"), on_clear
-        )
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^ℹ️ О боте$"), on_about)
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^📊 Отчёты$"), on_reports)
-    )
-
-    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-
-    # run_polling — синхронный, сам управляет инициализацией/остановкой
-    # close_loop=False — чтобы не ломать чужой event loop на Windows
-    app.run_polling(close_loop=False)
+        polling.add_done_callback(lambda _: stop_event.set())
+        await stop_event.wait()
+        if not polling.done():
+            polling.cancel()
+        try:
+            await polling
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
-    main_sync()
+    if sys.platform.startswith("win"):
+        try:  # pragma: no cover - specific to Windows event loop
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    asyncio.run(main())
