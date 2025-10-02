@@ -1,155 +1,159 @@
-"""Async entrypoint for the aiogram-based Telegram bot."""
-
+"""
+PTB-вход: /start -> короткое «Можно загрузить данные» + одна inline «Массовая».
+Клик «Массовая» -> отдельное сообщение с подробной инструкцией.
+Никакого aiogram.
+"""
 from __future__ import annotations
 
 import asyncio
-import importlib
-import logging
 import os
-import pkgutil
-import signal
-import sys
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, Router
-from aiogram.types import BotCommand
+from dotenv import load_dotenv
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-try:  # pragma: no cover - optional dependency
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover - optional dependency
 
-    def load_dotenv(*args, **kwargs):
-        return False
+def _load_env() -> None:
+    root = Path(__file__).resolve().parents[2]
+    env = root / ".env"
+    load_dotenv(dotenv_path=env if env.exists() else None)
 
-def _make_bot(token: str) -> Bot:
-    """
-    Создаёт Bot корректно для aiogram <3.7 и >=3.7.
-    UI/логика не меняются (HTML по умолчанию).
-    """
 
+def _read_file(path: str) -> str | None:
+    if not path:
+        return None
+    file_path = Path(path)
+    if not file_path.exists():
+        return None
     try:
-        from aiogram.client.default import DefaultBotProperties
-        from aiogram.enums import ParseMode
-
-        return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        return file_path.read_text(encoding="utf-8")
     except Exception:
-        return Bot(token=token, parse_mode="HTML")
+        return None
 
 
-def _load_dotenv() -> None:
-    env_file = Path(__file__).resolve().parent.parent.parent / ".env"
-    if env_file.exists():
-        load_dotenv(dotenv_path=env_file)
-    else:
-        load_dotenv()
+def _load_start_text() -> str:
+    # фиксируем короткий старт, без зависимостей от .env
+    return "<b>Можно загрузить данные</b>"
 
 
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+def _load_bulk_text() -> str:
+    # подробная инструкция после клика «Массовая»
+    text = _read_file((os.getenv("BULK_MESSAGE_HTML_PATH") or "").strip())
+    if text:
+        return text
+    env_value = (os.getenv("BULK_MESSAGE_TEXT") or "").strip()
+    if env_value:
+        return env_value
+    return (
+        "Загрузите данные со e-mail-адресами для рассылки.\n\n"
+        "Поддерживаемые форматы: PDF, Excel (xlsx), Word (docx), CSV, "
+        "ZIP (с этими файлами внутри), а также ссылки на сайты.\n\n"
+        "<i>Примечание:</i>\n"
+        "Мы удаляем возможные сноски/обфускации и проверяем адреса (MX/дубликаты).\n"
+        "Правило: один адрес — не чаще раза в 180 дней."
     )
 
 
-def _resolve_token() -> str:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if token:
-        return token
-    try:
-        import emailbot.settings as settings_module  # type: ignore
+_ALLOWED_TAGS = "b|strong|i|em|u|ins|s|strike|del|a|code|pre|tg-spoiler"
 
-        value = getattr(settings_module, "TELEGRAM_BOT_TOKEN", None)
-        if value:
-            return str(value)
+
+def _normalize_html(text: str) -> str:
+    import re
+
+    if not text:
+        return text
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(
+        rf"</?(?!{_ALLOWED_TAGS})([a-z0-9:-]+)(?:\s[^>]*)?>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("Массовая", callback_data="bulk:start")
+    )
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # убираем любую висящую reply-клавиатуру и показываем короткий старт
+    message = update.message
+    if message is None:
+        return
+    try:
+        await message.reply_text(" ", reply_markup=ReplyKeyboardRemove())
     except Exception:
         pass
-    raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Specify it in .env or environment.")
+    await message.reply_text(
+        _normalize_html(_load_start_text()),
+        reply_markup=_start_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
-async def _set_bot_commands(bot: Bot) -> None:
-    commands = [
-        BotCommand(command="start", description="Запуск меню"),
-        BotCommand(command="help", description="Краткая инструкция"),
-        BotCommand(command="send", description="Ручная отправка письма"),
-    ]
-    try:
-        await bot.set_my_commands(commands)
-    except Exception:
-        logging.getLogger(__name__).debug("Unable to set bot commands", exc_info=True)
+async def on_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    await query.message.reply_text(
+        _normalize_html(_load_bulk_text()),
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
-def include_all_routers(dp: Dispatcher) -> None:
-    """Auto-import and include all routers from ``emailbot.bot.handlers``."""
-
-    from emailbot.bot import handlers as handlers_pkg
-
-    pkg_path = Path(handlers_pkg.__file__).parent
-    for module_info in pkgutil.iter_modules([str(pkg_path)]):
-        module_name = module_info.name
-        if module_name.startswith("_"):
-            continue
-        module = importlib.import_module(f"{handlers_pkg.__name__}.{module_name}")
-        router = getattr(module, "router", None)
-        if not isinstance(router, Router):
-            for attr_name, value in vars(module).items():
-                if attr_name.endswith("_router") and isinstance(value, Router):
-                    router = value
-                    break
-        if isinstance(router, Router):
-            dp.include_router(router)
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message and message.document:
+        await message.reply_text("Файл получен. Обработка запустится отдельно.")
 
 
 async def main() -> None:
-    """Run the bot dispatcher until cancelled."""
+    _load_env()
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    if not token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN не задан в .env")
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler(["start", "help"], cmd_start))
+    app.add_handler(CallbackQueryHandler(on_bulk, pattern=r"^bulk:start$"))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
-    _load_dotenv()
-    _setup_logging()
-    token = _resolve_token()
-    bot = _make_bot(token)
-    dispatcher = Dispatcher()
+    await app.initialize()
+    await app.start()
     try:
-        from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
-
-        dispatcher.message.middleware(ErrorLoggingMiddleware())
-        dispatcher.callback_query.middleware(ErrorLoggingMiddleware())
-    except Exception:
-        pass
-    include_all_routers(dispatcher)
-    await _set_bot_commands(bot)
-
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:  # pragma: no cover - specific to Windows/embedded loops
-            # Windows Py<3.8 и некоторые окружения
-            pass
-
-    async with bot:
-        polling = asyncio.create_task(
-            dispatcher.start_polling(
-                bot,
-                allowed_updates=dispatcher.resolve_used_update_types(),
-            )
-        )
-        polling.add_done_callback(lambda _: stop_event.set())
-        await stop_event.wait()
-        if not polling.done():
-            polling.cancel()
-        try:
-            await polling
-        except asyncio.CancelledError:
-            pass
+        await app.updater.start_polling()
+        await app.updater.idle()
+    finally:
+        await app.stop()
+        await app.shutdown()
 
 
 def main_sync() -> None:
-    """Synchronous wrapper around :func:`main`."""
+    """Синхронная обёртка для email_bot.py."""
 
     try:
+        import sys
+
         if sys.platform.startswith("win"):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception:
         pass
     asyncio.run(main())
