@@ -144,10 +144,16 @@ async def main() -> None:
             pass
 
 
-if __name__ == "__main__":
-    if sys.platform.startswith("win"):
-        try:  # pragma: no cover - specific to Windows event loop
+def main_sync() -> None:
+    """Synchronous wrapper around :func:`main`."""
+
+    try:
+        if sys.platform.startswith("win"):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
-        except Exception:
-            pass
+    except Exception:
+        pass
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    main_sync()
