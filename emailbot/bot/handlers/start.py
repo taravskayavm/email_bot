@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from aiogram import Router
@@ -19,6 +20,23 @@ DEFAULT_START_MESSAGE = (
     "• Выберите направление из списка ниже, чтобы работать с шаблонами.\n\n"
     "Правило: один адрес — не чаще раза в 180 дней."
 )
+
+_ALLOWED_TELEGRAM_HTML_TAGS = (
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "a",
+    "code",
+    "pre",
+    "tg-spoiler",
+)
+_ALLOWED_TELEGRAM_TAGS_PATTERN = "|".join(_ALLOWED_TELEGRAM_HTML_TAGS)
 
 
 def _load_start_message_text() -> str:
@@ -45,12 +63,29 @@ def _load_start_message_text() -> str:
     return DEFAULT_START_MESSAGE
 
 
+def _normalize_telegram_html(text: str) -> str:
+    """Нормализует произвольный текст/HTML к допустимому Telegram HTML."""
+
+    if not text:
+        return text
+
+    normalized = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    normalized = re.sub(
+        rf"</?(?!{_ALLOWED_TELEGRAM_TAGS_PATTERN})([a-z0-9:-]+)(?:\s[^>]*)?>",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return normalized
+
+
 @router.message(CommandStart())
 @router.message(Command("help"))
 async def start(message: Message) -> None:
     """Reply with configurable instructions and optional directions keyboard."""
 
-    text = _load_start_message_text()
+    raw_text = _load_start_message_text()
+    text = _normalize_telegram_html(raw_text)
     show_directions = os.getenv("START_MESSAGE_SHOW_DIRECTIONS", "1") == "1"
     keyboard = None
     if show_directions:
