@@ -1,8 +1,4 @@
-"""
-PTB-вход: /start -> короткое «Можно загрузить данные» + одна inline «Массовая».
-Клик «Массовая» -> отдельное сообщение с подробной инструкцией.
-Никакого aiogram.
-"""
+"""PTB-вход: короткий старт, категории и нижняя панель в стиле «золотого» UI."""
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -11,6 +7,8 @@ from dotenv import load_dotenv
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
@@ -44,7 +42,7 @@ def _read_file(path: str) -> str | None:
 
 
 def _load_start_text() -> str:
-    # фиксируем короткий старт, без зависимостей от .env
+    # Короткое сообщение для /start, без зависимостей от .env
     return "<b>Можно загрузить данные</b>"
 
 
@@ -84,36 +82,50 @@ def _normalize_html(text: str) -> str:
     return text
 
 
-def _start_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup.from_button(
-        InlineKeyboardButton("Массовая", callback_data="bulk:start")
-    )
+def _categories_inline_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🧬 Биоинформатика", callback_data="cat:bio")],
+        [InlineKeyboardButton("🗺️ География", callback_data="cat:geo")],
+        [InlineKeyboardButton("🧠 Психология", callback_data="cat:psy")],
+        [InlineKeyboardButton("🏃 Спорт", callback_data="cat:sport")],
+        [InlineKeyboardButton("🧳 Туризм", callback_data="cat:tour")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _bottom_reply_keyboard() -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton("📦 Массовая"), KeyboardButton("✉️ Ручная")],
+        [KeyboardButton("🧹 Очистить список"), KeyboardButton("📄 Показать исключения")],
+        [KeyboardButton("ℹ️ О боте"), KeyboardButton("📊 Отчёты")],
+        [KeyboardButton("⛔ Стоп")],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # убираем любую висящую reply-клавиатуру и показываем короткий старт
+    """Старт: короткий текст, категории и постоянная нижняя панель."""
+
     message = update.message
     if message is None:
         return
-    try:
-        await message.reply_text(" ", reply_markup=ReplyKeyboardRemove())
-    except Exception:
-        pass
+
+    await message.reply_text("Меню", reply_markup=_bottom_reply_keyboard())
     await message.reply_text(
         _normalize_html(_load_start_text()),
-        reply_markup=_start_keyboard(),
+        reply_markup=_categories_inline_keyboard(),
         parse_mode=ParseMode.HTML,
     )
 
 
-async def on_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_bulk_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
     await query.answer()
     await query.message.reply_text(
         _normalize_html(_load_bulk_text()),
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=_bottom_reply_keyboard(),
         parse_mode=ParseMode.HTML,
     )
 
@@ -122,6 +134,80 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     message = update.message
     if message and message.document:
         await message.reply_text("Файл получен. Обработка запустится отдельно.")
+
+
+async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+
+async def on_bulk_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        _normalize_html(_load_bulk_text()),
+        reply_markup=_bottom_reply_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def on_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Остановлено. Клавиатура скрыта.", reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def on_show_exclusions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Исключения пока пусты.", reply_markup=_bottom_reply_keyboard()
+    )
+
+
+async def on_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Ручной режим скоро вернём (заглушка).",
+        reply_markup=_bottom_reply_keyboard(),
+    )
+
+
+async def on_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Список очищен (заглушка).", reply_markup=_bottom_reply_keyboard()
+    )
+
+
+async def on_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "О боте: PTB-версия без aiogram.", reply_markup=_bottom_reply_keyboard()
+    )
+
+
+async def on_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+    await message.reply_text(
+        "Отчёты будут здесь (заглушка).",
+        reply_markup=_bottom_reply_keyboard(),
+    )
 
 
 def main_sync() -> None:
@@ -137,7 +223,37 @@ def main_sync() -> None:
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
-    app.add_handler(CallbackQueryHandler(on_bulk, pattern=r"^bulk:start$"))
+
+    app.add_handler(CallbackQueryHandler(on_bulk_inline, pattern=r"^bulk:start$"))
+    app.add_handler(CallbackQueryHandler(on_category, pattern=r"^cat:(bio|geo|psy|sport|tour)$"))
+
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^📦 Массовая$"), on_bulk_reply)
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^⛔ Стоп$"), on_stop)
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(r"^📄 Показать исключения$"),
+            on_show_exclusions,
+        )
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^✉️ Ручная$"), on_manual)
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(r"^🧹 Очистить список$"), on_clear
+        )
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^ℹ️ О боте$"), on_about)
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(r"^📊 Отчёты$"), on_reports)
+    )
+
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
     # run_polling — синхронный, сам управляет инициализацией/остановкой
