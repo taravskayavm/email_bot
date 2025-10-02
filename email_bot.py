@@ -1,10 +1,10 @@
-"""Entry point: always start Telegram bot."""
+"""Entrypoint: запускает Telegram-бота (на python-telegram-bot, без aiogram)."""
 from emailbot.bot.__main__ import main as bot_main
 
 
 def main() -> int:
-    """Запуск синхронной обёртки Telegram-бота."""
-    return bot_main() or 0
+    bot_main()
+    return 0
 
 
 if __name__ == "__main__":
