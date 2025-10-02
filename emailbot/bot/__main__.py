@@ -4,8 +4,6 @@ PTB-вход: /start -> короткое «Можно загрузить дан�
 Никакого aiogram.
 """
 from __future__ import annotations
-
-import asyncio
 import os
 from pathlib import Path
 
@@ -126,37 +124,25 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text("Файл получен. Обработка запустится отдельно.")
 
 
-async def main() -> None:
+def main_sync() -> None:
+    """
+    Корректный запуск PTB v20+: без прямой работы с Updater.
+    Просто регистрируем хэндлеры и вызываем run_polling().
+    """
+
     _load_env()
     token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN не задан в .env")
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CallbackQueryHandler(on_bulk, pattern=r"^bulk:start$"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
-    await app.initialize()
-    await app.start()
-    try:
-        await app.updater.start_polling()
-        await app.updater.idle()
-    finally:
-        await app.stop()
-        await app.shutdown()
-
-
-def main_sync() -> None:
-    """Синхронная обёртка для email_bot.py."""
-
-    try:
-        import sys
-
-        if sys.platform.startswith("win"):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
-    asyncio.run(main())
+    # run_polling — синхронный, сам управляет инициализацией/остановкой
+    # close_loop=False — чтобы не ломать чужой event loop на Windows
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
