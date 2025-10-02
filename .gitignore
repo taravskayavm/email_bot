@@ -4,6 +4,7 @@
 
 # Ignore real email templates (keep only examples)
 templates/*.html
+!templates/start_legacy.html
 !templates/examples/*.html
 blocked_emails.txt
 imap_sent_folder.txt
