@@ -1,4 +1,4 @@
-"""Start/help handlers for the aiogram-based bot."""
+"""Start/help handlers for the aiogram-based bot (configurable /start message)."""
 
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ DEFAULT_START_MESSAGE = (
 
 def _load_start_message_text() -> str:
     """
-    Возвращает текст приветствия:
-      1) если задан START_MESSAGE_HTML_PATH и файл существует — читаем из него;
-      2) иначе, если задан START_MESSAGE_TEXT — используем его (можно с HTML);
-      3) иначе — дефолтный текст (текущий).
+    Порядок приоритета:
+      1) START_MESSAGE_HTML_PATH указывает на существующий файл — читаем его;
+      2) иначе START_MESSAGE_TEXT из .env (строка; можно HTML);
+      3) иначе дефолтный текст (как сейчас).
     """
 
     path_value = (os.getenv("START_MESSAGE_HTML_PATH") or "").strip()
@@ -48,7 +48,7 @@ def _load_start_message_text() -> str:
 @router.message(CommandStart())
 @router.message(Command("help"))
 async def start(message: Message) -> None:
-    """Reply with instructions and optional inline keyboard of directions."""
+    """Reply with configurable instructions and optional directions keyboard."""
 
     text = _load_start_message_text()
     show_directions = os.getenv("START_MESSAGE_SHOW_DIRECTIONS", "1") == "1"
@@ -58,5 +58,5 @@ async def start(message: Message) -> None:
         if directions:
             keyboard = keyboards.directions_keyboard(directions)
 
-    # В aiogram parse_mode уже HTML (ставится в __main__), поэтому можно присылать HTML.
+    # parse_mode=HTML задаётся в __main__, так что можно присылать HTML
     await message.answer(text, reply_markup=keyboard)
