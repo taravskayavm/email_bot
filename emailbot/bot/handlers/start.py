@@ -12,7 +12,10 @@ from emailbot.settings import list_available_directions
 router = Router()
 
 
-def _start_message() -> str:
+START_MESSAGE = "<b>Можно загрузить данные</b>"
+
+
+def _help_message() -> str:
     return (
         "Привет! Я помогу с рассылкой.\n\n"
         "• /send email@domain.tld | Тема | Текст — отправка письма вручную.\n"
@@ -21,13 +24,22 @@ def _start_message() -> str:
     )
 
 
-@router.message(CommandStart())
-@router.message(Command("help"))
-async def start(message: Message) -> None:
-    """Reply with instructions and inline keyboard of directions."""
-
+def _build_keyboard():
     directions = list_available_directions()
-    keyboard = None
     if directions:
-        keyboard = keyboards.directions_keyboard(directions)
-    await message.answer(_start_message(), reply_markup=keyboard)
+        return keyboards.directions_keyboard(directions)
+    return None
+
+
+@router.message(CommandStart())
+async def start(message: Message) -> None:
+    """Reply with a short start message and optional directions keyboard."""
+
+    await message.answer(START_MESSAGE, reply_markup=_build_keyboard())
+
+
+@router.message(Command("help"))
+async def help_command(message: Message) -> None:
+    """Reply with detailed help instructions and optional keyboard."""
+
+    await message.answer(_help_message(), reply_markup=_build_keyboard())
