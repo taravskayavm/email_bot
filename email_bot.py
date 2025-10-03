@@ -1,96 +1,164 @@
-import importlib
+# -*- coding: utf-8 -*-
+"""Entry point for the email bot application."""
+
+from __future__ import annotations
+
+import json
+import logging
 import os
-import sys
+import threading
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
-def _load_dotenv_safe():
-    """
-    Ленивая подгрузка .env, чтобы поведение оставалось как раньше:
-    при наличии .env в корне — загрузить и написать, откуда загрузили.
-    Не добавляем зависимостей; если python-dotenv не установлен — просто пропускаем.
-    """
-    env_path = Path(__file__).parent / ".env"
-    if env_path.exists():
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(env_path)
-            print(f"[ebot] .env loaded from: {env_path}")
-        except Exception:
-            # Безопасно замалчиваем — старое поведение было «мягким»
-            print(f"[ebot] .env present but python-dotenv not available (skipped): {env_path}")
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
-def _try_call(func):
-    if callable(func):
-        return func()
-    return None
+from emailbot import bot_handlers, messaging
+from emailbot.messaging_utils import SecretFilter
+from emailbot.utils import load_env
 
-def _resolve_and_run():
-    """
-    Универсальный «старый» запуск:
-    пытаемся найти в известных модулях одну из функций: main / run / start / cli
-    и вызвать её без аргументов.
-    Можно переопределить через CLI:
-      python email_bot.py --module emailbot.messaging --func main
-    """
-    # Быстрый ручной оверрайд через флаги
-    mod_override = None
-    func_override = None
-    if "--module" in sys.argv:
-        i = sys.argv.index("--module")
-        if i + 1 < len(sys.argv):
-            mod_override = sys.argv[i+1]
-    if "--func" in sys.argv:
-        i = sys.argv.index("--func")
-        if i + 1 < len(sys.argv):
-            func_override = sys.argv[i+1]
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-    # Набор вероятных модулей из проекта (упорядочены по приоритету)
-    candidates_modules = [
-        "emailbot.app",
-        "emailbot.bot",
-        "emailbot.messaging",
-        "emailbot.runner",
-        "emailbot.main",
-        "emailbot.core",
-        "emailbot.cli",
+
+class JsonFormatter(logging.Formatter):
+    """Format logs as JSON objects."""
+
+    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        data = {
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            data["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(data, ensure_ascii=False)
+
+
+class SecretFilter(logging.Filter):
+    """Mask sensitive values in logs."""
+
+    def __init__(self, secrets: list[str]) -> None:
+        super().__init__()
+        self.secrets = [s for s in secrets if s]
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        msg = record.getMessage()
+        for s in self.secrets:
+            if s and s in msg:
+                record.msg = msg.replace(s, "****")
+        return True
+
+
+def configure_logging() -> None:
+    """Set up console + rotating file logging with JSON formatter."""
+    log_dir = SCRIPT_DIR / "var"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "email_bot.log"
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    stream = logging.StreamHandler()
+    stream.setFormatter(JsonFormatter())
+
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", backupCount=7, encoding="utf-8"
+    )
+    file_handler.setFormatter(JsonFormatter())
+
+    # Mask secrets we know from env
+    secrets = [
+        os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        os.getenv("EMAIL_ADDRESS", ""),
+        os.getenv("EMAIL_PASSWORD", ""),
     ]
-    # Наиболее типовые имена точек входа
-    candidate_funcs = ["main", "run", "start", "cli"]
+    root.addFilter(SecretFilter(secrets))
+    root.addHandler(stream)
+    root.addHandler(file_handler)
 
-    if mod_override:
-        modules = [mod_override]
-    else:
-        modules = candidates_modules
 
-    if func_override:
-        funcs = [func_override]
-    else:
-        funcs = candidate_funcs
+def main() -> None:
+    load_env(SCRIPT_DIR)
+    configure_logging()
 
-    last_err = None
-    for m in modules:
-        try:
-            mod = importlib.import_module(m)
-        except Exception as e:
-            last_err = e
-            continue
-        for f in funcs:
-            fn = getattr(mod, f, None)
-            if callable(fn):
-                return _try_call(fn)
-    # Если ничего не нашли — даем понятное сообщение (как раньше, но без CANDIDATES)
-    raise RuntimeError(
-        "Не найдена точка входа. "
-        "Проверьте, что в одном из модулей пакета emailbot есть функция main/run/start/cli.\n"
-        "Можно указать явно: python email_bot.py --module emailbot.X --func main"
-        + (f"\nПоследняя ошибка импорта: {last_err}" if last_err else "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    messaging.EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+    messaging.EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+    messaging.check_env_vars()
+    messaging.dedupe_blocked_file()
+
+    app = ApplicationBuilder().token(token).build()
+
+    # Commands
+    app.add_handler(CommandHandler("start", bot_handlers.start))
+    app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
+    app.add_handler(CommandHandler("diag", bot_handlers.diag))
+    app.add_handler(CommandHandler("features", bot_handlers.features))
+
+    # Text buttons
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📧"), bot_handlers.prompt_email_settings
+        )
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^⚙️"), bot_handlers.prompt_settings)
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^🧹"), bot_handlers.clean_state)
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command)
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
     )
 
-def main():
-    _load_dotenv_safe()
-    # На всякий случай гасим влияние новой переменной, если она осталась в окружении
-    os.environ.pop("CANDIDATES", None)
-    return _resolve_and_run()
+    # Documents / any text
+    app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text)
+    )
+
+    # Inline callbacks
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.include_numeric_emails, pattern="^confirm_include_numeric$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.cancel_include_numeric, pattern="^cancel_include_numeric$"
+        )
+    )
+
+    # Background periodic tasks (unsubscribe checks, etc.)
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
+    )
+    t.start()
+    try:
+        app.run_polling()
+    finally:
+        stop_event.set()
+        t.join()
+
 
 if __name__ == "__main__":
-    sys.exit(main() or 0)
+    main()
