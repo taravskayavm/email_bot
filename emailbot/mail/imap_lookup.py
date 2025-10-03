@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import email
 import email.utils as eut
-import imaplib
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from contextlib import closing
 
 try:  # pragma: no cover - optional dependency
     from imapclient.imapclient import imap_utf7
@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - fallback to internal helper
 
 from emailbot.messaging_utils import _imap_utf7_encode as _imap_utf7_encode
 from emailbot.messaging_utils import parse_imap_date_to_utc
+from emailbot.net_imap import get_imap_timeout, imap_connect_ssl
 
 
 def _encode_mailbox(name: str) -> str:
@@ -50,7 +51,8 @@ def find_last_sent_at(email_norm: str, mailbox: str, days: int) -> Optional[date
 
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
 
-    with imaplib.IMAP4_SSL(host, port) as client:
+    timeout = get_imap_timeout(15.0)
+    with closing(imap_connect_ssl(host, port, timeout=timeout)) as client:
         client.login(user, password)
         status, _ = client.select(_encode_mailbox(mailbox))
         if status != "OK":  # pragma: no cover - depends on server dialect

@@ -410,7 +410,7 @@ def test_process_unsubscribe_requests_skips_without_imap_config(monkeypatch):
         called["imap"] = True
         return object()
 
-    monkeypatch.setattr(messaging.imaplib, "IMAP4_SSL", fake_imap)
+    monkeypatch.setattr(messaging, "imap_connect_ssl", fake_imap)
     messaging.process_unsubscribe_requests()
     assert called["imap"] is False
 
@@ -429,10 +429,8 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     calls: dict[str, object] = {}
 
     class DummyIMAP:
-        def __init__(self, host, port=993, **kwargs):
-            calls["host"] = host
-            calls["port"] = port
-            calls["timeout"] = kwargs.get("timeout")
+        def __init__(self):
+            pass
 
         def login(self, user, password):
             calls["user"] = user
@@ -457,7 +455,13 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
         def logout(self):
             calls["logout"] = True
 
-    monkeypatch.setattr(messaging.imaplib, "IMAP4_SSL", DummyIMAP)
+    def fake_connect(host, port, timeout=None):
+        calls["host"] = host
+        calls["port"] = port
+        calls["timeout"] = timeout
+        return DummyIMAP()
+
+    monkeypatch.setattr(messaging, "imap_connect_ssl", fake_connect)
     messaging.process_unsubscribe_requests()
 
     assert unsubscribed == ["unsubscribe@example.com"]
