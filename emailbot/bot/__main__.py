@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import logging
 import os
 import pkgutil
@@ -144,10 +145,22 @@ async def main() -> None:
             pass
 
 
-if __name__ == "__main__":
+def main_sync() -> None:
+    """Provide a synchronous entry point that reuses :func:`main`."""
+
+    m = globals().get("main")
+    if m is None:
+        raise RuntimeError("emailbot.bot.__main__: main is not defined")
     if sys.platform.startswith("win"):
         try:  # pragma: no cover - specific to Windows event loop
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
         except Exception:
             pass
-    asyncio.run(main())
+    if inspect.iscoroutinefunction(m):
+        asyncio.run(m())
+    else:
+        m()
+
+
+if __name__ == "__main__":
+    main_sync()
