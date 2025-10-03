@@ -5,91 +5,56 @@ from __future__ import annotations
 import asyncio
 import csv
 import email
-import uuid
-import email.utils as eut
-import hashlib
 import imaplib
-import json
 import logging
 import os
 import re
+import time
 import secrets
 import smtplib
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
-from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
-from email import message_from_bytes, message_from_string, policy
-
-from emailbot import config as C
-from emailbot import settings as S
-from emailbot.net_imap import get_imap_timeout, imap_connect_ssl
-
-from services.templates import get_template, get_template_by_path
-
-from . import history_service
-from .audit import write_audit_drop
-from .edit_service import apply_edits as apply_saved_edits
-
 from .extraction import normalize_email, strip_html
-from .history_key import normalize_history_key
+from .smtp_client import SmtpClient
+from .utils import log_error
 from .messaging_utils import (
-    SYNC_SEEN_EVENTS_PATH,
     add_bounce,
-    append_to_sent,
     canonical_for_history,
-    detect_sent_folder,
-    ensure_aware_utc,
     ensure_sent_log_schema,
-    SENT_CACHE_FILE,
-    is_foreign,
-    is_hard_bounce,
     is_soft_bounce,
+    is_hard_bounce,
+    is_foreign,
     is_suppressed,
-    parse_imap_date_to_utc,
-    load_seen_events,
-    load_sent_log,
-    save_seen_events,
-    set_list_unsubscribe_headers,
     suppress_add,
     upsert_sent_log,
+    load_sent_log,
+    load_seen_events,
+    save_seen_events,
+    was_sent_within,
+    SYNC_SEEN_EVENTS_PATH,
 )
-from .utils import log_error as log_internal_error
-from .services.cooldown import (
-    COOLDOWN_DAYS,
-    mark_sent as cooldown_mark_sent,
-    should_skip_by_cooldown,
-    was_sent_recently as cooldown_was_sent_recently,
-)
-from utils import rules
-from utils.send_stats import log_error, log_success
-from utils.paths import expand_path
-from utils.smtp_client import RobustSMTP, send_with_retry
 
 logger = logging.getLogger(__name__)
-
-
-class SendOutcome(str, Enum):
-    """Outcome of an e-mail sending attempt."""
-
-    SENT = "sent"
-    COOLDOWN = "cooldown"
-    BLOCKED = "blocked"
-    ERROR = "error"
 
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-_SENT_LOG_ENV = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
-LOG_FILE = str(expand_path(_SENT_LOG_ENV))
+LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
-MAX_EMAILS_PER_DAY = int(os.getenv("DAILY_SEND_LIMIT", str(S.DAILY_SEND_LIMIT)))
-_ASCII_LOCAL_RX = re.compile(r"^[\x21-\x7E]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+MAX_EMAILS_PER_DAY = 200
+
+# HTML templates are stored at the root-level ``templates`` directory.
+TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
+TEMPLATE_MAP = {
+    "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
+    "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
+    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
+}
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -107,220 +72,13 @@ SIGNATURE_TEXT = (
 )
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.mail.ru")
 
-IMAP_FOLDER_FILE = SENT_CACHE_FILE
+IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 
-_smtp_mode = os.getenv("SMTP_MODE", "auto").strip().lower() or "auto"
 _last_domain_send: Dict[str, float] = {}
-_DOMAIN_RATE_LIMIT = C.DOMAIN_RATE_LIMIT_SEC
-_batch_idempotency: Set[str] = set()
-
-APPEND_TO_SENT = C.APPEND_TO_SENT
-
-# Persistent idempotency storage (24h)
-MODULE_DIR = Path(__file__).resolve().parent
-SENT_IDS_FILE = MODULE_DIR / "sent_ids.jsonl"
+_DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
 _sent_idempotency: Set[str] = set()
 
-
-def _load_sent_idempotency() -> None:
-    """
-    Best-effort загрузка ранее сохранённых идентификаторов отправок
-    (для предотвращения дубликатов между перезапусками).
-    """
-
-    global _sent_idempotency
-    try:
-        if SENT_IDS_FILE.exists():
-            cutoff = time.time() - 86400
-            with SENT_IDS_FILE.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = (line or "").strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
-                    sid = str(obj.get("id") or "").strip()
-                    if not sid:
-                        continue
-                    try:
-                        ts = float(obj.get("ts", 0) or 0)
-                    except Exception:
-                        ts = 0.0
-                    if ts and ts < cutoff:
-                        continue
-                    _sent_idempotency.add(sid)
-    except Exception as exc:
-        logger.debug("idempotency load failed: %r", exc)
-
-
-def _append_sent_idempotency(sid: str) -> None:
-    """
-    Атомарная дозапись нового идентификатора в jsonl (без блокировок на NFS).
-    """
-
-    try:
-        SENT_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with SENT_IDS_FILE.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"id": sid, "ts": time.time()}) + "\n")
-    except Exception as exc:
-        logger.debug("idempotency append failed: %r", exc)
-
-
-# при импорте — подхватить прошлую историю
-_load_sent_idempotency()
-
-
-def _smtp_reason(exc: Exception) -> str:
-    reason = getattr(exc, "smtp_error", None)
-    if isinstance(reason, (bytes, bytearray)):
-        try:
-            return reason.decode()
-        except Exception:
-            return repr(reason)
-    if reason:
-        return str(reason)
-    return str(exc)
-
-
-def _smtp_context_str() -> str:
-    port = os.getenv("SMTP_PORT", "")
-    ssl_flag = os.getenv("SMTP_SSL", "")
-    timeout = os.getenv("SMTP_TIMEOUT", "")
-    return (
-        f"host={SMTP_HOST} port={port or 'default'} ssl={ssl_flag or 'default'} "
-        f"mode={_smtp_mode} timeout={timeout or 'default'}"
-    )
-
-
-def _raw_to_text(raw_message: str | bytes) -> str:
-    if isinstance(raw_message, (bytes, bytearray)):
-        try:
-            return raw_message.decode()
-        except Exception:
-            return raw_message.decode("utf-8", errors="ignore")
-    return str(raw_message)
-
-
-def _normalize_key(email: str) -> str:
-    """Canonical normalisation for history lookups and deduplication."""
-
-    # Единая нормализация адреса для всех проверок/записи истории.
-    # - обрезаем пробелы, приводим к lower
-    # - нормализуем юникод (NFKC)
-    # - домен → IDNA (punycode), локальная часть остаётся как есть
-    return normalize_history_key(email)
-
-
-def _coerce_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    return ensure_aware_utc(dt)
-
-
-
-def _normalize_template_code(code: str) -> str:
-    return (code or "").strip().lower()
-
-
-def _new_signature_codes() -> set[str]:
-    raw = os.getenv(
-        "TEMPLATES_NEW_SIGNATURE",
-        "bioinformatics,geography,psychology",
-    )
-    return {
-        part.strip().lower()
-        for part in raw.split(",")
-        if part.strip()
-    }
-
-
-def _resolve_signature_mode(code: str) -> str:
-    info = get_template(code)
-    if info:
-        mode = info.get("signature")
-        if isinstance(mode, str):
-            mode_norm = mode.strip().lower()
-            if mode_norm in {"new", "old"}:
-                return mode_norm
-    return "new" if _normalize_template_code(code) in _new_signature_codes() else "old"
-
-
-def _choose_from_header(group: str) -> str:
-    """
-    Имя отправителя в заголовке From — зависит от направления.
-    Старые: 'Редакция литературы по медицине, спорту и туризму'
-    Новые:  'Редакция литературы'
-    """
-    mode = _resolve_signature_mode(group)
-    if mode == "new":
-        return "Редакция литературы"
-    return "Редакция литературы по медицине, спорту и туризму"
-
-
-def _apply_from(msg: EmailMessage, group: str) -> None:
-    """Гарантированно проставить корректный From по группе (без точки на конце)."""
-    from_addr = os.getenv("EMAIL_ADDRESS", "")
-    from_name = _choose_from_header(group).strip()
-    # убрать точку/пробелы на конце, если вдруг есть
-    while from_name.endswith((".", " ", " ")):  # пробел и NBSP
-        from_name = from_name[:-1]
-    if "From" in msg:
-        try:
-            del msg["From"]
-        except Exception:
-            pass
-    msg["From"] = formataddr((from_name, from_addr))
-
-_SIGNATURE_OLD = """--
-С уважением,
-Таравская Владлена Михайловна
-Заведующая редакцией литературы по медицине, спорту и туризму
-ООО Издательство «ЛАНЬ»
-
-8 (812) 336-90-92, доб. 208
-
-196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А
-
-Рабочие часы: 10.00-18.00
-
-med@lanbook.ru
-www.lanbook.com"""
-
-_SIGNATURE_NEW = """--
-С уважением,
-Таравская Владлена Михайловна
-Заведующая редакцией литературы 
-ООО Издательство «ЛАНЬ»
-
-8 (812) 336-90-92, доб. 208
-
-196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А
-
-Рабочие часы: 10.00-18.00
-
-med@lanbook.ru
-www.lanbook.com"""
-
-def _choose_signature(group: str) -> str:
-    text = _SIGNATURE_NEW if _resolve_signature_mode(group) == "new" else _SIGNATURE_OLD
-    return text.replace("\n", "<br>")
-
-
-def _inject_signature(html_body: str, signature_html: str) -> str:
-    """Вставляет подпись в письмо, заменяя {{SIGNATURE}} или добавляя перед </body>."""
-    if not html_body:
-        return signature_html
-    if "{{SIGNATURE}}" in html_body:
-        return html_body.replace("{{SIGNATURE}}", signature_html)
-    lower = html_body.lower()
-    closing = lower.rfind("</body>")
-    if closing != -1:
-        return html_body[:closing] + "\n" + signature_html + "\n" + html_body[closing:]
-    return html_body + "\n" + signature_html + "\n"
 
 def _read_template_file(path: str) -> str:
     if not os.path.exists(path):
@@ -329,35 +87,6 @@ def _read_template_file(path: str) -> str:
             path = alt
     with open(path, encoding="utf-8") as f:
         return f.read()
-
-
-def _render_template_for_group(group: str, context: Dict[str, str]) -> str:
-    """Загрузить HTML шаблон для указанного кода и дополнить подписью."""
-
-    info = get_template(group)
-    path = info.get("path") if info else ""
-    if path and os.path.exists(path):
-        html = _read_template_file(path)
-    else:
-        html = "<html><body>{{SIGNATURE}}</body></html>"
-    signature_html = _choose_signature(group)
-    return _inject_signature(html, signature_html)
-
-
-def log_domain_rate_limit(domain: str, sleep_s: float) -> None:
-    """Log diagnostic message for per-domain rate limiting.
-
-    The real sending code sleeps for ``sleep_s`` seconds; in tests we pass
-    ``0`` to avoid delays and simply verify that the log entry is emitted.
-    """
-
-    try:
-        sleep_s = float(sleep_s)
-    except Exception:
-        sleep_s = 0.0
-    logging.getLogger(__name__).info(
-        "rate-limit: sleeping %.3fs for domain %s", sleep_s, domain
-    )
 
 
 def _extract_fonts(html: str) -> tuple[str, int]:
@@ -385,44 +114,6 @@ def _extract_fonts(html: str) -> tuple[str, int]:
     return font_family, font_size
 
 
-def build_messages_for_group(
-    group: str, recipients: List[str], base_context: Dict[str, str]
-) -> List[EmailMessage]:
-    """
-    Собирает письма для указанного направления на основе шаблона.
-    """
-    body_html = _render_template_for_group(group, base_context)
-    out: List[EmailMessage] = []
-    inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
-    logo_path = os.getenv("LOGO_PATH", "")
-    logo_cid = os.getenv("LOGO_CID", "logo")
-    for rcpt in recipients:
-        msg = EmailMessage()
-        msg["To"] = rcpt
-        text = strip_html(body_html)
-        msg.set_content(text)
-        msg.add_alternative(body_html, subtype="html")
-        if inline_logo and logo_path and os.path.exists(logo_path):
-            try:
-                with open(logo_path, "rb") as img:
-                    img_bytes = img.read()
-                msg.get_payload()[-1].add_related(
-                    img_bytes,
-                    maintype="image",
-                    subtype="png",
-                    cid=f"<{logo_cid}>",
-                )
-            except Exception:
-                pass
-        if group:
-            msg["X-EBOT-Group"] = group
-            msg["X-EBOT-Group-Key"] = group
-        # В самом конце — зафиксировать корректный From по группе
-        _apply_from(msg, group)
-        out.append(msg)
-    return out
-
-
 def _rate_limit_domain(recipient: str) -> None:
     """Simple per-domain rate limiter."""
 
@@ -432,9 +123,7 @@ def _rate_limit_domain(recipient: str) -> None:
     if last is not None:
         elapsed = now - last
         if elapsed < _DOMAIN_RATE_LIMIT:
-            pause = _DOMAIN_RATE_LIMIT - elapsed
-            log_domain_rate_limit(domain, pause)
-            time.sleep(pause)
+            time.sleep(_DOMAIN_RATE_LIMIT - elapsed)
             now = last + _DOMAIN_RATE_LIMIT
     _last_domain_send[domain] = now
 
@@ -444,121 +133,11 @@ def _register_send(recipient: str, batch_id: str | None) -> bool:
 
     if not batch_id:
         return True
-    key = f"{_normalize_key(recipient)}|{batch_id}"
-    if key in _batch_idempotency:
+    key = f"{normalize_email(recipient)}|{batch_id}"
+    if key in _sent_idempotency:
         return False
-    _batch_idempotency.add(key)
+    _sent_idempotency.add(key)
     return True
-
-
-# === Blocklist helper ===
-_DEFAULT_BLOCK_PARTS = [
-    "no-reply",
-    "noreply",
-    "do-not-reply",
-    "mailer-daemon",
-    "postmaster",
-    "webmaster",
-    "admin@",
-]
-
-
-def _is_blocklisted(email: str) -> bool:
-    e = (email or "").lower()
-    parts = set(_DEFAULT_BLOCK_PARTS)
-    if os.getenv("FILTER_SUPPORT", "0") == "1":
-        parts.add("support@")
-    extra = os.getenv("FILTER_BLOCKLIST", "")
-    if extra:
-        for token in extra.split(","):
-            token = token.strip().lower()
-            if token:
-                parts.add(token)
-    return any(p in e for p in parts)
-
-
-# === Idempotency (24h persist) ===
-
-
-def _make_send_key(msg) -> str:
-    """Return stable key for a message for the current day."""
-
-    from_ = (msg.get("From") or "").strip().lower()
-    to_ = (msg.get("To") or "").strip().lower()
-    subj = (msg.get("Subject") or "").strip().lower()
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw = f"{from_}|{to_}|{subj}|{day}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def mark_idempotent_and_persist(unique_key: str) -> None:
-    """
-    Сохраняем уникальный ключ отправки в оперативный и дисковый кэш,
-    чтобы предотвратить повтор в пределах 24 ч и между перезапусками.
-    """
-
-    key = (unique_key or "").strip()
-    if not key:
-        return
-    if key not in _sent_idempotency:
-        _sent_idempotency.add(key)
-        _append_sent_idempotency(key)
-
-
-def _primary_recipient(msg) -> str:
-    values = msg.get_all("To", []) if hasattr(msg, "get_all") else []
-    addresses = eut.getaddresses(values)
-    for _, addr in addresses:
-        if addr:
-            return addr
-    return (msg.get("To") or "").strip()
-
-
-def _message_group_key(msg) -> str:
-    """Extract a stable group identifier from message headers."""
-
-    if msg is None or not hasattr(msg, "get"):
-        return ""
-    key = msg.get("X-EBOT-Group-Key", "") or msg.get("X-EBOT-Group", "") or ""
-    return str(key).strip()
-
-
-def was_sent_recently(msg) -> bool:
-    recipient = _primary_recipient(msg)
-    group = _message_group_key(msg)
-    try:
-        return history_service.was_sent_within_days(recipient, group, 1)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("history_service was_sent_recently failed", exc_info=True)
-    try:
-        if cooldown_was_sent_recently(recipient, days=1):
-            return True
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("cooldown_sqlite was_sent_recently failed", exc_info=True)
-    key = _make_send_key(msg)
-    return key in _sent_idempotency
-
-
-def mark_sent(msg) -> None:
-    recipient = _primary_recipient(msg)
-    group = _message_group_key(msg)
-    msg_id = (msg.get("Message-ID") or "").strip() or None
-    try:
-        history_service.mark_sent(
-            recipient,
-            group,
-            msg_id,
-            datetime.now(timezone.utc),
-        )
-        return
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("history_service mark_sent failed", exc_info=True)
-    try:
-        cooldown_mark_sent(recipient)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("cooldown_sqlite mark_sent failed", exc_info=True)
-    key = _make_send_key(msg)
-    mark_idempotent_and_persist(key)
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
@@ -567,168 +146,52 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     if IMAP_FOLDER_FILE.exists():
         name = IMAP_FOLDER_FILE.read_text(encoding="utf-8").strip()
         if name:
-            status, _ = imap.select(name)
+            status, _ = imap.select(f'"{name}"')
             if status == "OK":
                 return name
             logger.warning("Stored sent folder %s not selectable, falling back", name)
     detected = detect_sent_folder(imap)
-    status, _ = imap.select(detected)
+    status, _ = imap.select(f'"{detected}"')
     if status == "OK":
         return detected
     logger.warning("Detected sent folder %s not selectable, using Sent", detected)
     return "Sent"
 
 
-def send_raw_smtp_with_retry(raw_message: str | bytes, recipient: str, max_tries=3):
-    candidate = (recipient or "").strip()
-    if not candidate or not _ASCII_LOCAL_RX.match(candidate):
-        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
-        if candidate:
-            suppress_add(candidate, None, "invalid-local")
-        return
-
+def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
     last_exc: Exception | None = None
-    grp = ""
-    eb_uuid = ""
-    mid = ""
-    if isinstance(raw_message, EmailMessage):
-        msg = raw_message
-        grp = _message_group_key(msg)
-        eb_uuid = msg.get("X-EBOT-UUID", "") or ""
-        mid = msg.get("Message-ID", "") or ""
-    else:
+    for attempt in range(max_tries):
+        _rate_limit_domain(recipient)
         try:
-            parsed = (
-                message_from_bytes(raw_message, policy=policy.default)
-                if isinstance(raw_message, (bytes, bytearray))
-                else message_from_string(str(raw_message), policy=policy.default)
-            )
-            if isinstance(parsed, EmailMessage):
-                msg = parsed
-            else:
-                msg = EmailMessage()
-                msg.set_content(_raw_to_text(raw_message))
-            grp = _message_group_key(msg)
-            eb_uuid = msg.get("X-EBOT-UUID", "") or ""
-            mid = msg.get("Message-ID", "") or ""
-        except Exception:
-            msg = EmailMessage()
-            msg.set_content(_raw_to_text(raw_message))
-    if not msg.get("To"):
-        msg["To"] = recipient
-    if not msg.get("From") and EMAIL_ADDRESS:
-        msg["From"] = EMAIL_ADDRESS
-
-    override_flag = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
-    allow_send = override_flag in {"1", "true", "yes", "on"}
-    if not allow_send:
-        skip, skip_reason = should_skip_by_cooldown(recipient)
-        if skip:
-            reason_code = (
-                skip_reason.split(";", 1)[0]
-                if skip_reason
-                else f"cooldown<{COOLDOWN_DAYS}d"
-            )
-            try:
-                write_audit_drop(recipient, reason_code, skip_reason)
-            except Exception:  # pragma: no cover - defensive logging
-                logger.debug("write_audit_drop failed", exc_info=True)
-            logger.info(
-                "Skipping SMTP send to %s due to cooldown: %s",
-                recipient,
-                skip_reason,
-            )
+            with SmtpClient(
+                "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
+            ) as client:
+                client.send(EMAIL_ADDRESS, recipient, raw_message)
+            logger.info("Email sent", extra={"event": "send", "email": recipient})
             return
-
-    smtp = RobustSMTP()
-    try:
-        for attempt in range(max_tries):
-            _rate_limit_domain(recipient)
-            try:
-                send_with_retry(smtp, msg)
-                logger.info("Email sent", extra={"event": "send", "email": recipient})
-                try:
-                    log_success(
-                        recipient,
-                        grp,
-                        extra={"uuid": eb_uuid, "message_id": mid},
-                    )
-                except Exception:
-                    pass
-                try:
-                    history_service.mark_sent(
-                        recipient,
-                        grp,
-                        mid,
-                        datetime.now(timezone.utc),
-                    )
-                except Exception:  # pragma: no cover - defensive fallback
-                    logger.debug("history_service mark_sent failed", exc_info=True)
-                try:
-                    rules.append_history(recipient)
-                except Exception:  # pragma: no cover - defensive fallback
-                    logger.debug("rules.append_history failed", exc_info=True)
-                try:
-                    mark_idempotent_and_persist(_make_send_key(msg))
-                except Exception:  # pragma: no cover - defensive fallback
-                    logger.debug("mark_idempotent_and_persist failed", exc_info=True)
-                return  # success
-            except smtplib.SMTPResponseException as e:
-                code = getattr(e, "smtp_code", None)
-                msg_bytes = getattr(e, "smtp_error", b"")
-                add_bounce(recipient, code, msg_bytes, "send")
-                if is_soft_bounce(code, msg_bytes) and attempt < max_tries - 1:
-                    delay = 2**attempt
-                    logger.info(
-                        "Soft bounce for %s (%s), retrying in %s s",
-                        recipient,
-                        code,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    last_exc = e
-                    continue
-                if is_hard_bounce(code, msg_bytes):
-                    suppress_add(recipient, code, "hard bounce")
-                last_exc = e
-                try:
-                    err = (
-                        msg_bytes.decode()
-                        if isinstance(msg_bytes, (bytes, bytearray))
-                        else msg_bytes
-                    )
-                    log_error(
-                        recipient,
-                        grp,
-                        f"{code} {err}",
-                        extra={"uuid": eb_uuid, "message_id": mid},
-                    )
-                except Exception:
-                    pass
-                break
-            except Exception as e:
-                last_exc = e
-                logger.warning(
-                    "SMTP send failed to %s: %s | %s",
-                    recipient,
-                    e,
-                    _smtp_context_str(),
+        except smtplib.SMTPResponseException as e:
+            code = getattr(e, "smtp_code", None)
+            msg = getattr(e, "smtp_error", b"")
+            add_bounce(recipient, code, msg, "send")
+            if is_soft_bounce(code, msg) and attempt < max_tries - 1:
+                delay = 2**attempt
+                logger.info(
+                    "Soft bounce for %s (%s), retrying in %s s", recipient, code, delay
                 )
-                try:
-                    log_error(
-                        recipient,
-                        grp,
-                        _smtp_reason(e),
-                        extra={"uuid": eb_uuid, "message_id": mid},
-                    )
-                except Exception:
-                    pass
-                if attempt < max_tries - 1:
-                    time.sleep(2**attempt)
-        if last_exc:
-            raise last_exc
-    finally:
-        smtp.close()
+                time.sleep(delay)
+                last_exc = e
+                continue
+            if is_hard_bounce(code, msg):
+                suppress_add(recipient, code, "hard bounce")
+            last_exc = e
+            break
+        except Exception as e:
+            last_exc = e
+            logger.warning("SMTP send failed to %s: %s", recipient, e)
+            if attempt < max_tries - 1:
+                time.sleep(2**attempt)
+    if last_exc:
+        raise last_exc
 
 
 def save_to_sent_folder(
@@ -736,118 +199,78 @@ def save_to_sent_folder(
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
 ):
-    """Унифицированное сохранение в «Отправленные»:
-    - Берём IMAP_HOST/IMAP_PORT/EMAIL_* из .env,
-    - Определяем папку через detect_sent_folder(imap),
-    - Выполняем append_to_sent(imap, folder, msg_bytes).
-    """
     try:
         close = False
+        if imap is None:
+            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            close = True
+        if folder is None:
+            folder = get_preferred_sent_folder(imap)
+        status, _ = imap.select(folder)
+        if status != "OK":
+            logger.warning("select %s failed (%s), using Sent", folder, status)
+            folder = "Sent"
+            imap.select(folder)
+
         if isinstance(raw_message, EmailMessage):
             msg_bytes = raw_message.as_bytes()
         elif isinstance(raw_message, bytes):
             msg_bytes = raw_message
         else:
-            msg_bytes = (raw_message or "").encode("utf-8")
+            msg_bytes = raw_message.encode("utf-8")
 
-        if imap is None:
-            imap_host = os.getenv("IMAP_HOST", "")
-            imap_port = int(os.getenv("IMAP_PORT", "993"))
-            user = os.getenv("EMAIL_ADDRESS", "")
-            pwd = os.getenv("EMAIL_PASSWORD", "")
-            if not (imap_host and user and pwd):
-                logger.warning("IMAP creds are incomplete; skip APPEND")
-                return
-            timeout = get_imap_timeout()
-            imap = imap_connect_ssl(imap_host, imap_port, timeout=timeout)
-            imap.login(user, pwd)
-            close = True
-
-        if folder is None:
-            folder = detect_sent_folder(imap)
-
-        status, _ = append_to_sent(imap, folder, msg_bytes)
-        logger.info("IMAP APPEND to %s: %s", folder, status)
+        res = imap.append(
+            folder,
+            "\\Seen",
+            imaplib.Time2Internaldate(time.time()),
+            msg_bytes,
+        )
+        logger.info("imap.append to %s: %s", folder, res)
     except Exception as e:
-        log_internal_error(f"save_to_sent_folder: {e}")
+        log_error(f"save_to_sent_folder: {e}")
     finally:
         if close and imap is not None:
             try:
                 imap.logout()
-            except Exception:
-                pass
+            except Exception as e:
+                log_error(f"save_to_sent_folder logout: {e}")
 
 
-def build_message(
-    to_addr: str,
-    html_path: str,
-    subject: str,
-    *,
-    group_title: str | None = None,
-    group_key: str | None = None,
-    override_180d: bool = False,
-) -> tuple[EmailMessage, str, str]:
+def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
-    template_info = get_template_by_path(html_path)
-    info_code = ""
-    info_label = ""
-    if template_info:
-        raw_code = template_info.get("code")
-        if raw_code:
-            info_code = str(raw_code).strip()
-        raw_label = template_info.get("label")
-        if raw_label:
-            info_label = str(raw_label).strip()
-    fallback_code = _normalize_template_code(Path(html_path).stem)
-    resolved_key = str(group_key or info_code or fallback_code or "").strip()
-    if not resolved_key:
-        resolved_key = fallback_code
-    resolved_title = str(group_title or info_label or resolved_key or "").strip()
-    if not resolved_title:
-        resolved_title = resolved_key
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
-        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{_choose_signature(resolved_key)}</div>'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{SIGNATURE_TEXT}</div>'
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
-        html_body = re.sub(
-            r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE
-        )
+        html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
     token = secrets.token_urlsafe(16)
     link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
     unsub_html = (
         f'<div style="margin-top:8px"><a href="{link}" '
-        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;'
+        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
-    html_body = _inject_signature(html_body, signature_html)
-    html_body = html_body.replace("</body>", f"{unsub_html}</body>")
+    html_body = html_body.replace("</body>", f"{signature_html}{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
+    msg["From"] = formataddr(
+        ("Редакция литературы по медицине, спорту и туризму", EMAIL_ADDRESS)
+    )
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    default_mailto = (
-        f"mailto:{EMAIL_ADDRESS}?subject=unsubscribe" if EMAIL_ADDRESS else None
+    msg["List-Unsubscribe"] = (
+        f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
     )
-    set_list_unsubscribe_headers(
-        msg,
-        recipient=to_addr,
-        default_mailto=default_mailto,
-        default_http=link,
-        default_one_click=True,
-    )
+    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
-    _apply_from(msg, resolved_key)
-    if resolved_title:
-        msg["X-EBOT-Template-Label"] = resolved_title
-    if override_180d:
-        msg["X-EBOT-Override-180d"] = "1"
     logo_path = SCRIPT_DIR / "Logo.png"
     if inline_logo and logo_path.exists():
         try:
@@ -857,21 +280,8 @@ def build_message(
                 img_bytes, maintype="image", subtype="png", cid="<logo>"
             )
         except Exception as e:
-            log_internal_error(f"attach_logo: {e}")
-
-    if not msg.get("Message-ID"):
-        msg["Message-ID"] = eut.make_msgid()
-
-    eb_uuid = str(uuid.uuid4())
-    msg["X-EBOT-UUID"] = eb_uuid
-    msg["X-EBOT-Recipient"] = to_addr
-    if resolved_title:
-        msg["X-EBOT-Group"] = resolved_title
-    if resolved_key:
-        msg["X-EBOT-Group-Key"] = resolved_key
-    elif resolved_title:
-        msg["X-EBOT-Group-Key"] = resolved_title
-    return msg, token, eb_uuid
+            log_error(f"attach_logo: {e}")
+    return msg, token
 
 
 def send_email(
@@ -880,96 +290,31 @@ def send_email(
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     notify_func=None,
     batch_id: str | None = None,
-) -> SendOutcome:
-    recipient_clean = (recipient or "").strip()
-    if not recipient_clean or not _ASCII_LOCAL_RX.match(recipient_clean):
-        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
-        if recipient_clean:
-            try:
-                suppress_add(recipient_clean, None, "invalid-local")
-            except Exception:
-                logger.debug("suppress_add failed for %s", recipient_clean, exc_info=True)
-        return SendOutcome.BLOCKED
-
-    recipient = recipient_clean
-
-    def _notify_failure(message: str) -> None:
-        if not notify_func:
-            return
-        try:
-            notify_func(message)
-        except Exception:  # pragma: no cover - defensive fallback
-            logger.debug("notify_func failed", exc_info=True)
-
+):
     try:
         if not _register_send(recipient, batch_id):
-            logger.info(
-                "Skipping duplicate send to %s for batch %s", recipient, batch_id
-            )
-            return SendOutcome.COOLDOWN
-
-        msg, token, _ = build_message(recipient, html_path, subject)
-        skip, skip_reason = _should_skip_by_history(recipient)
-        if skip:
-            logger.info(
-                "send_skip",
-                extra={
-                    "email": recipient,
-                    "why": "cooldown",
-                    "detail": skip_reason or "",
-                },
-            )
-            return SendOutcome.COOLDOWN
-
-        send_raw_smtp_with_retry(msg, recipient, max_tries=3)
-
-        if APPEND_TO_SENT:
-            try:
-                save_to_sent_folder(msg)
-            except Exception as exc:
-                logger.warning(
-                    "append_sent_failed",
-                    extra={"email": recipient, "error": str(exc)},
-                )
-
-        group_for_log = (
-            msg.get("X-EBOT-Group-Key")
-            or msg.get("X-EBOT-Group")
-            or Path(html_path).stem
-        )
-        try:
-            log_sent_email(
-                recipient,
-                str(group_for_log or ""),
-                unsubscribe_token=token,
-                message_key=_make_send_key(msg),
-            )
-        except Exception as exc:
-            logger.debug("log_sent_email failed for %s: %s", recipient, exc)
-
-        return SendOutcome.SENT
-    except smtplib.SMTPResponseException as exc:
-        log_internal_error(
-            f"send_email SMTP error for {recipient}: {exc} | {_smtp_context_str()}"
-        )
-        _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
-        return SendOutcome.ERROR
-    except Exception as exc:  # pragma: no cover - best-effort safety
-        log_internal_error(
-            f"send_email: {recipient}: {exc} | {_smtp_context_str()}"
-        )
-        _notify_failure(f"❌ Ошибка при отправке на {recipient}: {exc}")
-        return SendOutcome.ERROR
+            logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+            return ""
+        msg, token = build_message(recipient, html_path, subject)
+        raw = msg.as_string()
+        send_raw_smtp_with_retry(raw, recipient, max_tries=3)
+        save_to_sent_folder(raw)
+        return token
+    except Exception as e:
+        log_error(f"send_email: {recipient}: {e}")
+        if notify_func:
+            notify_func(f"❌ Ошибка при отправке на {recipient}: {e}")
+        raise
 
 
-async def async_send_email(recipient: str, html_path: str) -> SendOutcome:
+async def async_send_email(recipient: str, html_path: str) -> str:
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, send_email, recipient, html_path)
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        logger.exception(exc)
-        log_internal_error(f"async_send_email: {exc}")
-        return SendOutcome.ERROR
+    except Exception as e:
+        logger.exception(e)
+        log_error(e)
+        raise
 
 
 def create_task_with_logging(
@@ -981,211 +326,53 @@ def create_task_with_logging(
             await coro
         except Exception as e:
             logger.exception(e)
-            log_internal_error(e)
+            log_error(e)
             if notify_func:
                 try:
                     await notify_func(f"❌ Ошибка: {e}")
                 except Exception as inner:
                     logger.exception(inner)
-                    log_internal_error(inner)
+                    log_error(inner)
 
     return asyncio.create_task(runner())
 
 
 def send_email_with_sessions(
-    smtp: RobustSMTP,
+    client: SmtpClient,
     imap: imaplib.IMAP4_SSL,
     sent_folder: str,
     recipient: str,
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     batch_id: str | None = None,
-    fixed_from: str | None = None,
-    *,
-    group_title: str | None = None,
-    group_key: str | None = None,
-    override_180d: bool = False,
-) -> tuple[SendOutcome, str]:
-    recipient_clean = (recipient or "").strip()
-    if not recipient_clean or not _ASCII_LOCAL_RX.match(recipient_clean):
-        logger.info("Skip SMTP: recipient looks non-ASCII/broken: %s", recipient)
-        if recipient_clean:
-            suppress_add(recipient_clean, None, "invalid-local")
-        return SendOutcome.BLOCKED, ""
-
-    recipient = recipient_clean
-
+):
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return SendOutcome.COOLDOWN, ""
-    msg, token, eb_uuid = build_message(
-        recipient,
-        html_path,
-        subject,
-        group_title=group_title,
-        group_key=group_key,
-        override_180d=override_180d,
-    )
-    header_override = str(msg.get("X-EBOT-Override-180d", "") or "").strip().lower()
-    if not (override_180d or header_override in {"1", "true", "yes", "on"}):
-        skip, skip_reason = should_skip_by_cooldown(recipient)
-        if skip:
-            reason_code = (
-                skip_reason.split(";", 1)[0]
-                if skip_reason
-                else f"cooldown<{COOLDOWN_DAYS}d"
-            )
-            try:
-                write_audit_drop(recipient, reason_code, skip_reason)
-            except Exception:  # pragma: no cover - defensive logging
-                logger.debug("write_audit_drop failed", exc_info=True)
-            logger.info(
-                "send_skip",
-                extra={
-                    "email": recipient,
-                    "why": "cooldown",
-                    "detail": skip_reason or "",
-                },
-            )
-            return SendOutcome.COOLDOWN, ""
-    group_code = _message_group_key(msg)
-    try:
-        send_with_retry(smtp, msg)
-        if APPEND_TO_SENT:
-            save_to_sent_folder(msg, imap=imap, folder=sent_folder)
-        try:
-            extra = {
-                "uuid": eb_uuid,
-                "message_id": msg.get("Message-ID", ""),
-            }
-            if fixed_from:
-                extra["fixed_from"] = fixed_from
-            log_success(recipient, group_code, extra=extra)
-        except Exception:
-            pass
-        try:
-            history_service.mark_sent(
-                recipient,
-                group_code,
-                msg.get("Message-ID", ""),
-                datetime.now(timezone.utc),
-            )
-        except Exception:  # pragma: no cover - defensive fallback
-            logger.debug("history_service mark_sent failed", exc_info=True)
-        try:
-            rules.append_history(recipient)
-        except Exception:  # pragma: no cover - defensive fallback
-            logger.debug("rules.append_history failed", exc_info=True)
-        try:
-            mark_idempotent_and_persist(_make_send_key(msg))
-        except Exception:  # pragma: no cover - defensive fallback
-            logger.debug("mark_idempotent_and_persist failed", exc_info=True)
-        return SendOutcome.SENT, token
-    except smtplib.SMTPResponseException as e:
-        code = getattr(e, "smtp_code", None)
-        msg_bytes = getattr(e, "smtp_error", b"")
-        add_bounce(recipient, code, msg_bytes, "send")
-        try:
-            err = msg_bytes.decode() if isinstance(msg_bytes, (bytes, bytearray)) else msg_bytes
-            extra = {
-                "uuid": eb_uuid,
-                "message_id": msg.get("Message-ID", ""),
-            }
-            if fixed_from:
-                extra["fixed_from"] = fixed_from
-            log_error(
-                recipient,
-                group_code,
-                f"{code} {err}",
-                extra=extra,
-            )
-        except Exception:
-            pass
-        raise
-    except Exception as e:
-        logger.warning(
-            "SMTP send failed to %s: %s | %s",
-            recipient,
-            e,
-            _smtp_context_str(),
-        )
-        try:
-            extra = {
-                "uuid": eb_uuid,
-                "message_id": msg.get("Message-ID", ""),
-            }
-            if fixed_from:
-                extra["fixed_from"] = fixed_from
-            log_error(
-                recipient,
-                group_code,
-                _smtp_reason(e),
-                extra=extra,
-            )
-        except Exception:
-            pass
-        raise
+        return ""
+    msg, token = build_message(recipient, html_path, subject)
+    raw = msg.as_string()
+    client.send(EMAIL_ADDRESS, recipient, raw)
+    save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+    return token
 
 
 def process_unsubscribe_requests():
-    imap = None
     try:
-        host = (os.getenv("IMAP_HOST", "imap.mail.ru") or "").strip()
-        user = (os.getenv("EMAIL_ADDRESS") or EMAIL_ADDRESS or "").strip()
-        password = (os.getenv("EMAIL_PASSWORD") or EMAIL_PASSWORD or "").strip()
-        if not host:
-            logger.debug("IMAP_HOST is empty; skip unsubscribe processing")
-            return
-        if not user or not password:
-            logger.debug("IMAP credentials are missing; skip unsubscribe processing")
-            return
-        try:
-            port = int(os.getenv("IMAP_PORT", "993") or "993")
-        except ValueError:
-            port = 993
-        timeout = get_imap_timeout(15.0)
-        imap = imap_connect_ssl(host, port, timeout=timeout)
-        imap.login(user, password)
-
-        status, _ = imap.select("INBOX")
-        if status != "OK":
-            logger.warning("IMAP select INBOX failed: %s", status)
-            return
-
-        status, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
-        if status != "OK":
-            logger.warning("IMAP search failed: %s", status)
-            return
-
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        imap.select("INBOX")
+        result, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
         for num in data[0].split() if data and data[0] else []:
-            status, msg_data = imap.fetch(num, "(RFC822)")
-            if status != "OK" or not msg_data:
-                continue
-            raw_email = None
-            for part in msg_data:
-                if (
-                    isinstance(part, tuple)
-                    and len(part) > 1
-                    and isinstance(part[1], (bytes, bytearray, memoryview))
-                    and part[1]
-                ):
-                    raw_email = bytes(part[1])
-                    break
-            if not raw_email:
-                continue
+            _, msg_data = imap.fetch(num, "(RFC822)")
+            raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
             sender = email.utils.parseaddr(msg.get("From"))[1]
             if sender:
                 mark_unsubscribed(sender)
             imap.store(num, "+FLAGS", "\\Seen")
+        imap.logout()
     except Exception as e:
-        log_internal_error(f"process_unsubscribe_requests: {e}")
-    finally:
-        if imap is not None:
-            try:
-                imap.logout()
-            except Exception as e:
-                log_internal_error(f"process_unsubscribe_requests logout: {e}")
+        log_error(f"process_unsubscribe_requests: {e}")
 
 
 def _canonical_blocked(email_str: str) -> str:
@@ -1226,7 +413,7 @@ def dedupe_blocked_file():
 def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
     if not os.path.exists(LOG_FILE):
         return False
-    email_norm = _normalize_key(email_addr)
+    email_norm = normalize_email(email_addr)
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -1236,7 +423,7 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
 
 
 def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
-    email_norm = _normalize_key(email_addr)
+    email_norm = normalize_email(email_addr)
     p = Path(LOG_FILE)
     rows: list[dict] = []
     changed = False
@@ -1245,30 +432,24 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
             reader = csv.DictReader(f)
             rows = list(reader)
         for row in rows:
-            if row.get("email") == email_norm and (
-                token is None or row.get("unsubscribe_token") == token
-            ):
+            if row.get("email") == email_norm and (token is None or row.get("unsubscribe_token") == token):
                 row["unsubscribed"] = "1"
-                row["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
+                row["unsubscribed_at"] = datetime.utcnow().isoformat()
                 changed = True
     if changed:
-        headers = (
-            rows[0].keys()
-            if rows
-            else [
-                "key",
-                "email",
-                "last_sent_at",
-                "source",
-                "status",
-                "user_id",
-                "filename",
-                "error_msg",
-                "unsubscribe_token",
-                "unsubscribed",
-                "unsubscribed_at",
-            ]
-        )
+        headers = rows[0].keys() if rows else [
+            "key",
+            "email",
+            "last_sent_at",
+            "source",
+            "status",
+            "user_id",
+            "filename",
+            "error_msg",
+            "unsubscribe_token",
+            "unsubscribed",
+            "unsubscribed_at",
+        ]
         with p.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
@@ -1287,7 +468,6 @@ def log_sent_email(
     unsubscribe_token="",
     unsubscribed="",
     unsubscribed_at="",
-    message_key: str | None = None,
 ):
     if status not in {"ok", "sent", "success"}:
         return
@@ -1301,16 +481,38 @@ def log_sent_email(
     }
     upsert_sent_log(
         LOG_FILE,
-        _normalize_key(email_addr),
-        datetime.now(timezone.utc),
+        normalize_email(email_addr),
+        datetime.utcnow(),
         group,
         status=status,
         extra=extra,
     )
-    if message_key:
-        mark_idempotent_and_persist(message_key)
     global _log_cache
     _log_cache = None
+
+
+def _parse_list_line(line: bytes):
+    s = line.decode(errors="ignore")
+    m = re.match(r'^\((?P<flags>[^)]*)\)\s+"(?P<delim>[^"]*)"\s+"?(?P<name>.+?)"?$', s)
+    if not m:
+        return None, ""
+    return m.group("name"), m.group("flags")
+
+
+def detect_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
+    status, data = imap.list()
+    if status != "OK" or not data:
+        return "Sent"
+    candidates = []
+    for line in data:
+        name, flags = _parse_list_line(line)
+        if not name:
+            continue
+        if "\\Sent" in flags or "\\sent" in flags:
+            candidates.append(name)
+    if candidates:
+        return candidates[0]
+    return "Sent"
 
 
 _log_cache: dict[str, List[datetime]] | None = None
@@ -1328,14 +530,10 @@ def _load_sent_log() -> Dict[str, datetime]:
 
 def was_sent_within(email: str, days: int = 180) -> bool:
     """Return True if ``email`` was sent to within ``days`` days."""
-    try:
-        return history_service.was_sent_within_days(email, "", days)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("history_service was_sent_within failed", exc_info=True)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.utcnow() - timedelta(days=days)
     cache = _load_sent_log()
     key = canonical_for_history(email)
-    dt = _coerce_utc(cache.get(key))
+    dt = cache.get(key)
     if dt and dt >= cutoff:
         return True
     recent = get_recently_contacted_emails_cached()
@@ -1348,17 +546,16 @@ def was_emailed_recently(
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
 ) -> bool:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    cutoff = datetime.utcnow() - timedelta(days=since_days)
     cache = _load_sent_log()
     key = canonical_for_history(email_addr)
-    dt = _coerce_utc(cache.get(key))
+    dt = cache.get(key)
     if dt and dt >= cutoff:
         return True
     try:
         close = False
         if imap is None:
-            timeout = get_imap_timeout()
-            imap = imap_connect_ssl("imap.mail.ru", 993, timeout=timeout)
+            imap = imaplib.IMAP4_SSL("imap.mail.ru")
             imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             close = True
         if folder is None:
@@ -1368,34 +565,32 @@ def was_emailed_recently(
             logger.warning("select %s failed (%s), using Sent", folder, status)
             folder = "Sent"
             imap.select(f'"{folder}"')
-        date_str = (
-            datetime.now(timezone.utc) - timedelta(days=since_days)
-        ).strftime("%d-%b-%Y")
+        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
         status, data = imap.search(None, f'(SINCE {date_str} HEADER To "{email_addr}")')
         return status == "OK" and bool(data and data[0])
     except Exception as e:
-        log_internal_error(f"was_emailed_recently: {e}")
+        log_error(f"was_emailed_recently: {e}")
         return False
     finally:
         if close and imap is not None:
             try:
                 imap.logout()
             except Exception as e:
-                log_internal_error(f"was_emailed_recently logout: {e}")
+                log_error(f"was_emailed_recently logout: {e}")
 
 
 def get_recent_6m_union() -> Set[str]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=180)
+    cutoff = datetime.utcnow() - timedelta(days=180)
     result: Set[str] = set()
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    dt = _coerce_utc(datetime.fromisoformat(row["last_sent_at"]))
+                    dt = datetime.fromisoformat(row["last_sent_at"])
                 except Exception:
                     continue
-                if dt and dt >= cutoff:
+                if dt >= cutoff:
                     result.add(row["key"])
     return result
 
@@ -1417,54 +612,10 @@ def clear_recent_sent_cache():
     _recent_cache["set"] = set()
 
 
-def _should_skip_by_history(email: str) -> tuple[bool, str]:
-    """Return ``True`` if the address is blocked by history or suppress lists."""
-
-    norm = _normalize_key(email)
-    if not norm:
-        return False, ""
-
-    try:
-        if mu.is_suppressed(email):
-            return True, "suppress"
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("is_suppressed failed", exc_info=True)
-
-    try:
-        last = mu.last_sent_at(email)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("last_sent_at lookup failed", exc_info=True)
-        last = None
-
-    if not last:
-        return False, ""
-
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    else:
-        last = last.astimezone(timezone.utc)
-
-    cooldown_days = COOLDOWN_DAYS
-    cooldown_seconds = max(0, int(cooldown_days * 86400))
-    if cooldown_seconds <= 0:
-        return False, ""
-
-    delta = time.time() - last.timestamp()
-    if delta < cooldown_seconds:
-        remain = int(cooldown_seconds - delta)
-        remain_days = remain // 86400
-        reason = (
-            f"cooldown<{cooldown_days}d; last={last.isoformat()}; remain≈{remain_days}d"
-        )
-        return True, reason
-
-    return False, ""
-
-
 def get_sent_today() -> Set[str]:
     if not os.path.exists(LOG_FILE):
         return set()
-    today = datetime.now(timezone.utc).date()
+    today = datetime.utcnow().date()
     sent = set()
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1473,13 +624,11 @@ def get_sent_today() -> Set[str]:
             if status not in {"ok", "sent", "success"}:
                 continue
             try:
-                dt = _coerce_utc(datetime.fromisoformat(row["last_sent_at"]))
+                dt = datetime.fromisoformat(row["last_sent_at"])
             except Exception:
                 continue
-            if dt and dt.date() == today:
-                norm = _normalize_key(row.get("email", ""))
-                if norm:
-                    sent.add(norm)
+            if dt.date() == today:
+                sent.add(row["email"].lower())
     return sent
 
 
@@ -1487,29 +636,7 @@ def count_sent_today() -> int:
     return len(get_sent_today())
 
 
-def start_manual_mass_send(group: str, emails: List[str], *args, **kwargs) -> None:
-    logger.info("Manual mass send: group=%s count=%d", group, len(emails))
-    # Guard от пустых рассылок
-    if not emails:
-        logger.info("Manual mass send skipped: empty recipient list")
-        notify_user("Отправка не запущена: нет адресов для отправки.")
-        return
-    notify_user("Запущено — выполняю в фоне...")
-    notify_user(f"✉️ Рассылка начата. Отправляем {len(emails)} писем...")
-
-    messages = kwargs.get("messages", [])
-    sent = _send_batch(
-        messages,
-        host=SMTP_HOST,
-        user=EMAIL_ADDRESS,
-        password=EMAIL_PASSWORD,
-    )
-    notify_user(f"✅ Отправлено писем: {sent}")
-
-
-def prepare_mass_mailing(
-    emails: list[str], group: str = "", chat_id: int | None = None
-):
+def prepare_mass_mailing(emails: list[str]):
     """Apply all mass-mailing filters and return ready e-mails.
 
     Returns a tuple ``(ready, blocked_foreign, blocked_invalid, skipped_recent, digest)``
@@ -1519,42 +646,17 @@ def prepare_mass_mailing(
     history. ``digest`` contains counters for logging.
     """
 
-    source = list(emails)
-    if chat_id is not None:
-        try:
-            source = apply_saved_edits(source, chat_id)
-        except Exception:  # pragma: no cover - defensive fallback
-            source = list(emails)
-
     blocked = get_blocked_emails()
     sent_today = get_sent_today()
-    lookup_days = history_service.get_days_rule_default()
+    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
 
     blocked_foreign: list[str] = []
     blocked_invalid: list[str] = []
     skipped_recent: list[str] = []
 
-    blocklist_rules = {
-        normalize_email(item)
-        for item in rules.load_blocklist()
-        if isinstance(item, str) and item
-    }
-    skipped_blocklist_rules = 0
-
     queue: list[str] = []
-    for e in source:
-        norm = normalize_email(e)
-        hist_norm = _normalize_key(e)
-        if norm and norm in blocklist_rules:
-            blocked_invalid.append(e)
-            skipped_blocklist_rules += 1
-            continue
-        if (
-            e in blocked
-            or norm in blocked
-            or hist_norm in blocked
-            or hist_norm in sent_today
-        ):
+    for e in emails:
+        if e in blocked or e in sent_today:
             continue
         if is_foreign(e):
             blocked_foreign.append(e)
@@ -1568,34 +670,18 @@ def prepare_mass_mailing(
         else:
             queue2.append(e)
 
-    try:
-        queue3, skipped_recent = history_service.filter_by_days(queue2, group, lookup_days)
-    except Exception:  # pragma: no cover - defensive fallback
-        logger.debug("history_service filter_by_days failed", exc_info=True)
-        queue3 = list(queue2)
-        skipped_recent = []
-
-    queue_after_rules: list[str] = []
-    skipped_local_recent: list[str] = []
-    for e in queue3:
-        if rules.seen_within_window(e):
-            skipped_local_recent.append(e)
+    queue3: list[str] = []
+    for e in queue2:
+        if was_sent_within(e, days=lookup_days):
+            skipped_recent.append(e)
         else:
-            queue_after_rules.append(e)
-
-    queue3 = queue_after_rules
-    if skipped_recent:
-        skipped_recent = list(skipped_recent)
-    else:
-        skipped_recent = []
-    if skipped_local_recent:
-        skipped_recent.extend(skipped_local_recent)
+            queue3.append(e)
 
     deduped: list[str] = []
     seen: set[str] = set()
     dup_skipped = 0
     for e in queue3:
-        norm = _normalize_key(e)
+        norm = normalize_email(e)
         if norm in seen:
             dup_skipped += 1
         else:
@@ -1603,7 +689,7 @@ def prepare_mass_mailing(
             deduped.append(e)
 
     digest = {
-        "input_total": len(source),
+        "input_total": len(emails),
         "after_suppress": len(queue2),
         "foreign_blocked": len(blocked_foreign),
         "after_180d": len(queue3),
@@ -1613,8 +699,6 @@ def prepare_mass_mailing(
         "skipped_suppress": len(blocked_invalid),
         "skipped_180d": len(skipped_recent),
         "skipped_foreign": len(blocked_foreign),
-        "skipped_blocklist_file": skipped_blocklist_rules,
-        "skipped_local_history": len(skipped_local_recent),
     }
 
     return deduped, blocked_foreign, blocked_invalid, skipped_recent, digest
@@ -1630,8 +714,7 @@ def sync_log_with_imap() -> Dict[str, int]:
     }
     ensure_sent_log_schema(LOG_FILE)
     try:
-        timeout = get_imap_timeout()
-        imap = imap_connect_ssl("imap.mail.ru", 993, timeout=timeout)
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         status, _ = imap.select(f'"{sent_folder}"')
@@ -1639,9 +722,7 @@ def sync_log_with_imap() -> Dict[str, int]:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        since_threshold = datetime.now(timezone.utc) - timedelta(days=180)
-        date_180 = since_threshold.strftime("%d-%b-%Y")
-        cutoff_dt = ensure_aware_utc(since_threshold)
+        date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
         result, data = imap.search(None, f"SINCE {date_180}")
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
@@ -1660,13 +741,18 @@ def sync_log_with_imap() -> Dict[str, int]:
                 if msgid and (msgid, key) in seen_events:
                     stats["skipped_events"] += 1
                     continue
-                msg_dt = parse_imap_date_to_utc(msg.get("Date"))
-                if msg_dt < cutoff_dt:
-                    continue
+                try:
+                    dt = email.utils.parsedate_to_datetime(msg.get("Date"))
+                    if dt and dt.tzinfo:
+                        dt = dt.replace(tzinfo=None)
+                    if dt and dt < datetime.utcnow() - timedelta(days=180):
+                        continue
+                except Exception:
+                    dt = None
                 inserted, updated = upsert_sent_log(
                     LOG_FILE,
-                    _normalize_key(addr),
-                    msg_dt,
+                    normalize_email(addr),
+                    dt or datetime.utcnow(),
                     "imap_sync",
                     status="external",
                 )
@@ -1682,14 +768,14 @@ def sync_log_with_imap() -> Dict[str, int]:
         stats["total_rows_after"] = len(load_sent_log(Path(LOG_FILE)))
         return stats
     except Exception as e:
-        log_internal_error(f"sync_log_with_imap: {e}")
+        log_error(f"sync_log_with_imap: {e}")
         raise
     finally:
         if imap is not None:
             try:
                 imap.logout()
             except Exception as e:
-                log_internal_error(f"sync_log_with_imap logout: {e}")
+                log_error(f"sync_log_with_imap logout: {e}")
 
 
 def periodic_unsubscribe_check(stop_event):
@@ -1697,7 +783,7 @@ def periodic_unsubscribe_check(stop_event):
         try:
             process_unsubscribe_requests()
         except Exception as e:
-            log_internal_error(f"periodic_unsubscribe_check: {e}")
+            log_error(f"periodic_unsubscribe_check: {e}")
         time.sleep(300)
 
 
@@ -1712,7 +798,8 @@ __all__ = [
     "LOG_FILE",
     "BLOCKED_FILE",
     "MAX_EMAILS_PER_DAY",
-    "SIGNATURE_TEXT",
+    "TEMPLATE_MAP",
+    "SIGNATURE_HTML",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",
     "IMAP_FOLDER_FILE",
@@ -1720,7 +807,6 @@ __all__ = [
     "save_to_sent_folder",
     "get_preferred_sent_folder",
     "build_message",
-    "SendOutcome",
     "send_email",
     "async_send_email",
     "create_task_with_logging",
