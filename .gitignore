@@ -222,3 +222,7 @@ Thumbs.db
 .vscode/
 *.log
 >>>>>>> 51d698b (Initial commit)
+
+# Telegram bot logs
+bot.log*
+logs/
