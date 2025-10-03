@@ -31,106 +31,160 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
         data = {
-            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "time": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),
         }
-        if record.exc_info:
-            data["exc_info"] = self.formatException(record.exc_info)
+        for key in ("event", "email", "source", "code", "phase", "count"):
+            if key in record.__dict__:
+                data[key] = record.__dict__[key]
         return json.dumps(data, ensure_ascii=False)
 
 
-class SecretFilter(logging.Filter):
-    """Mask sensitive values in logs."""
+class SizedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Rotate logs daily and when exceeding a size threshold."""
 
-    def __init__(self, secrets: list[str]) -> None:
-        super().__init__()
-        self.secrets = [s for s in secrets if s]
+    def __init__(self, filename: Path, maxBytes: int = 1_000_000, **kwargs):
+        super().__init__(filename, **kwargs)
+        self.maxBytes = maxBytes
 
-    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
-        msg = record.getMessage()
-        for s in self.secrets:
-            if s and s in msg:
-                record.msg = msg.replace(s, "****")
-        return True
+    def shouldRollover(self, record: logging.LogRecord) -> int:  # type: ignore[override]
+        if super().shouldRollover(record):
+            return 1
+        if self.maxBytes > 0:
+            self.stream = self.stream or self._open()
+            self.stream.seek(0, os.SEEK_END)
+            if self.stream.tell() >= self.maxBytes:
+                return 1
+        return 0
 
 
-def configure_logging() -> None:
-    """Set up console + rotating file logging with JSON formatter."""
-    log_dir = SCRIPT_DIR / "var"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "email_bot.log"
-
+def configure_logging(log_file: Path, secrets: list[str]) -> None:
+    formatter = JsonFormatter()
     root = logging.getLogger()
     root.setLevel(logging.INFO)
+    root.handlers.clear()
 
     stream = logging.StreamHandler()
-    stream.setFormatter(JsonFormatter())
+    stream.setFormatter(formatter)
 
-    file_handler = TimedRotatingFileHandler(
+    file_handler = SizedTimedRotatingFileHandler(
         log_file, when="midnight", backupCount=7, encoding="utf-8"
     )
-    file_handler.setFormatter(JsonFormatter())
+    file_handler.setFormatter(formatter)
 
-    # Mask secrets we know from env
-    secrets = [
-        os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        os.getenv("EMAIL_ADDRESS", ""),
-        os.getenv("EMAIL_PASSWORD", ""),
-    ]
-    root.addFilter(SecretFilter(secrets))
     root.addHandler(stream)
     root.addHandler(file_handler)
+    root.addFilter(SecretFilter(secrets))
 
 
 def main() -> None:
     load_env(SCRIPT_DIR)
-    configure_logging()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     messaging.EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
     messaging.EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
     messaging.check_env_vars()
+
+    configure_logging(
+        SCRIPT_DIR / "bot.log",
+        [token, messaging.EMAIL_PASSWORD, messaging.EMAIL_ADDRESS],
+    )
+
+    os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
     messaging.dedupe_blocked_file()
 
     app = ApplicationBuilder().token(token).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
     app.add_handler(CommandHandler("features", bot_handlers.features))
 
-    # Text buttons
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
     )
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.Regex("^📧"), bot_handlers.prompt_email_settings
+            filters.TEXT & filters.Regex("^🧹"), bot_handlers.reset_email_list
         )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^⚙️"), bot_handlers.prompt_settings)
+        MessageHandler(filters.TEXT & filters.Regex("^🧾"), bot_handlers.about_bot)
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🧹"), bot_handlers.clean_state)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🚫"), bot_handlers.add_block_prompt
+        )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command)
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^✉️"), bot_handlers.prompt_manual_email
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🧭"), bot_handlers.prompt_change_group
+        )
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex("^📈"), bot_handlers.report_command)
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📁"), bot_handlers.imap_folders_command
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🔄"), bot_handlers.sync_imap_command
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^🚀"), bot_handlers.force_send_command
+        )
     )
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
     )
 
-    # Documents / any text
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text)
     )
 
-    # Inline callbacks
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_group_")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")
+    )
+    app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.send_all, pattern="^start_sending")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.show_foreign_list, pattern="^show_foreign$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.features_callback, pattern="^feature_")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
+    )
     app.add_handler(
         CallbackQueryHandler(
             bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"
@@ -146,8 +200,20 @@ def main() -> None:
             bot_handlers.cancel_include_numeric, pattern="^cancel_include_numeric$"
         )
     )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.apply_repairs, pattern="^apply_repairs$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.show_repairs, pattern="^show_repairs$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.imap_page_callback, pattern="^imap_page:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:")
+    )
 
-    # Background periodic tasks (unsubscribe checks, etc.)
+    print("Бот запущен.")
     stop_event = threading.Event()
     t = threading.Thread(
         target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
