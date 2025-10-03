@@ -134,7 +134,7 @@ def test_sync_uses_upsert_and_no_duplicates(monkeypatch, tmp_path):
         def logout(self):
             pass
 
-    monkeypatch.setattr(messaging, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()))
+    monkeypatch.setattr(messaging, "imap_connect_ssl", lambda *a, **k: DummyImap())
 
     stats1 = messaging.sync_log_with_imap()
     stats2 = messaging.sync_log_with_imap()

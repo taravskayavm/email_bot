@@ -1,5 +1,4 @@
 import asyncio
-import imaplib
 import logging
 import types
 
@@ -457,7 +456,10 @@ def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):
 
     monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(
-        bh, "imaplib", types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap())
+        bh,
+        "imap_connect_ssl",
+        lambda *a, **k: DummyImap(),
+        raising=False,
     )
     monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
@@ -525,7 +527,7 @@ async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
         def logout(self):
             return
 
-    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *a, **k: DummyImap())
+    monkeypatch.setattr(bh.messaging, "imap_connect_ssl", lambda *a, **k: DummyImap())
 
     monkeypatch.setattr(
         bh.messaging,
@@ -588,8 +590,9 @@ async def test_manual_send_override_sets_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(
         bh,
-        "imaplib",
-        types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()),
+        "imap_connect_ssl",
+        lambda *a, **k: DummyImap(),
+        raising=False,
     )
     monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
@@ -730,8 +733,9 @@ async def test_manual_send_selective_override(monkeypatch, tmp_path):
     monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
     monkeypatch.setattr(
         bh,
-        "imaplib",
-        types.SimpleNamespace(IMAP4_SSL=lambda *a, **k: DummyImap()),
+        "imap_connect_ssl",
+        lambda *a, **k: DummyImap(),
+        raising=False,
     )
     monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())

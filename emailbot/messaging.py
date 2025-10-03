@@ -27,6 +27,7 @@ from email import message_from_bytes, message_from_string, policy
 
 from emailbot import config as C
 from emailbot import settings as S
+from emailbot.net_imap import get_imap_timeout, imap_connect_ssl
 
 from services.templates import get_template, get_template_by_path
 
@@ -757,7 +758,8 @@ def save_to_sent_folder(
             if not (imap_host and user and pwd):
                 logger.warning("IMAP creds are incomplete; skip APPEND")
                 return
-            imap = imaplib.IMAP4_SSL(imap_host, imap_port)
+            timeout = get_imap_timeout()
+            imap = imap_connect_ssl(imap_host, imap_port, timeout=timeout)
             imap.login(user, pwd)
             close = True
 
@@ -1141,12 +1143,8 @@ def process_unsubscribe_requests():
             port = int(os.getenv("IMAP_PORT", "993") or "993")
         except ValueError:
             port = 993
-        try:
-            timeout = float(os.getenv("IMAP_TIMEOUT", "15") or "15")
-        except ValueError:
-            timeout = 15.0
-
-        imap = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+        timeout = get_imap_timeout(15.0)
+        imap = imap_connect_ssl(host, port, timeout=timeout)
         imap.login(user, password)
 
         status, _ = imap.select("INBOX")
@@ -1359,7 +1357,8 @@ def was_emailed_recently(
     try:
         close = False
         if imap is None:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            timeout = get_imap_timeout()
+            imap = imap_connect_ssl("imap.mail.ru", 993, timeout=timeout)
             imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             close = True
         if folder is None:
@@ -1631,7 +1630,8 @@ def sync_log_with_imap() -> Dict[str, int]:
     }
     ensure_sent_log_schema(LOG_FILE)
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        timeout = get_imap_timeout()
+        imap = imap_connect_ssl("imap.mail.ru", 993, timeout=timeout)
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         status, _ = imap.select(f'"{sent_folder}"')
