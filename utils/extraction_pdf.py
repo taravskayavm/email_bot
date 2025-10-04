@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 
 INVISIBLES = ["\xad", "\u200b", "\u200c", "\u200d", "\ufeff"]
@@ -23,18 +24,48 @@ def separate_around_emails(text: str) -> str:
     return text
 
 
-def _extract_with_pypdf(path: str) -> str:
+def _fitz_extract(path: Path) -> str:
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return ""
+
+    doc = None
+    try:
+        doc = fitz.open(str(path))
+    except Exception:
+        return ""
+
+    chunks: list[str] = []
+    try:
+        for page in doc:
+            try:
+                text = page.get_text() or ""
+            except Exception:
+                text = ""
+            if text:
+                chunks.append(text)
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+    return "\n".join(chunks)
+
+
+def _extract_with_pypdf(path: Path) -> str:
     try:
         import pypdf
     except Exception:
         return ""
 
     try:
-        reader = pypdf.PdfReader(path)
+        reader = pypdf.PdfReader(str(path))
     except Exception:
         return ""
 
-    chunks = []
+    chunks: list[str] = []
     for page in getattr(reader, "pages", []) or []:
         try:
             text = page.extract_text() or ""
@@ -45,24 +76,29 @@ def _extract_with_pypdf(path: str) -> str:
     return "\n".join(chunks)
 
 
-def _extract_with_pdfminer(path: str) -> str:
+def _pdfminer_extract(path: Path) -> str:
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
         return ""
 
     try:
-        return pdfminer_extract(path) or ""
+        return pdfminer_extract(str(path)) or ""
     except Exception:
         return ""
 
 
-def extract_text_from_pdf(path: str) -> str:
-    raw = _extract_with_pypdf(path)
-    if not raw:
-        raw = _extract_with_pdfminer(path)
-    if not raw:
+def extract_text_from_pdf(path: str | Path) -> str:
+    pdf_path = Path(path)
+
+    text = _fitz_extract(pdf_path)
+    if not text or not text.strip():
+        fallback = _extract_with_pypdf(pdf_path)
+        text = fallback if fallback.strip() else ""
+    if not text:
+        text = _pdfminer_extract(pdf_path)
+    if not text:
         return ""
-    raw = cleanup_text(raw)
-    return separate_around_emails(raw)
+    text = cleanup_text(text)
+    return separate_around_emails(text)
 

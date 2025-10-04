@@ -15,6 +15,13 @@ except Exception:  # pragma: no cover - fallback for older Python
 _TZ_NAME = (os.getenv("REPORT_TZ", "Europe/Moscow") or "Europe/Moscow").strip()
 
 
+def _normalize_group_value(group: object) -> str:
+    if isinstance(group, str):
+        normalized = group.strip().lower()
+        return normalized or "unknown"
+    return "unknown"
+
+
 def _stats_path() -> Path:
     """Resolve stats file path from ``SEND_STATS_PATH`` each call.
 
@@ -70,10 +77,11 @@ def _normalize_for_stats(email: str) -> str:
 
 def log_success(email: str, group: str, extra: dict | None = None) -> None:
     email_value = _normalize_for_stats(email) or (email or "").strip()
+    group_value = _normalize_group_value(group)
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": email_value,
-        "group": (group or "").strip().lower(),
+        "group": group_value,
         "status": "success",
     }
     if extra:
@@ -84,10 +92,11 @@ def log_success(email: str, group: str, extra: dict | None = None) -> None:
 
 def log_error(email: str, group: str, reason: str, extra: dict | None = None) -> None:
     email_value = _normalize_for_stats(email) or (email or "").strip()
+    group_value = _normalize_group_value(group)
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
         "email": email_value,
-        "group": (group or "").strip().lower(),
+        "group": group_value,
         "status": "error",
         "reason": reason[:300],
     }

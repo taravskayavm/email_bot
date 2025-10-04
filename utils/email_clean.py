@@ -1326,6 +1326,7 @@ def sanitize_email(
         value: str,
         reason_value: str | None,
         suspects: list[str] | None = None,
+        meta_extra: dict[str, object] | None = None,
     ):
         if not return_meta:
             return value, reason_value
@@ -1337,7 +1338,13 @@ def sanitize_email(
                 local_part = ""
             if local_part and _is_suspect_local(local_part):
                 suspects_list.append(value)
-        return ([value] if value else [], {"reason": reason_value, "suspects": suspects_list})
+        meta: dict[str, object] = {"reason": reason_value, "suspects": suspects_list}
+        if meta_extra:
+            for key, val in meta_extra.items():
+                if key == "suspects":
+                    continue
+                meta[key] = val
+        return ([value] if value else [], meta)
 
     trimmed = _trim_after_tld(email)
     if trimmed != email:
@@ -1347,7 +1354,11 @@ def sanitize_email(
     email = _strip_footnotes_before_email(email)
 
     if strip_footnote and "@" in email:
-        local0, domain0 = email.split("@", 1)
+        try:
+            local0, domain0 = email.split("@", 1)
+        except ValueError:
+            reason_no_at = _merge_reason(reason, "no_at") if reason else "no_at"
+            return _finalize("", reason_no_at)
         email = f"{_strip_footnotes(local0)}@{domain0}"
 
     normalized_text = _normalize_text(email)
@@ -1366,9 +1377,11 @@ def sanitize_email(
     compact_original = compact_tail
 
     if "@" not in s:
-        return _finalize("", reason)
+        reason_no_at = _merge_reason(reason, "no_at") if reason else "no_at"
+        return _finalize("", reason_no_at)
 
     local, domain = s.split("@", 1)
+    domain_original = domain
     original_local = ""
     if "@" in compact_original:
         original_local = compact_original.split("@", 1)[0]
@@ -1418,7 +1431,12 @@ def sanitize_email(
 
     domain_ascii, domain_reason = normalize_domain(domain)
     if not domain_ascii:
-        return _finalize("", domain_reason or reason)
+        final_reason = reason
+        if domain_reason:
+            final_reason = (
+                _merge_reason(reason, domain_reason) if reason else domain_reason
+            )
+        return _finalize("", final_reason, meta_extra={"domain": domain_original})
 
     tail_repaired = False
     if REPAIR_TLD_TAIL and not is_allowed_domain(domain_ascii):
