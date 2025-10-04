@@ -13,7 +13,7 @@ import urllib.parse
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import List, Optional, Set
+from typing import Iterable, List, Optional, Set
 
 import aiohttp
 from telegram import (
@@ -23,7 +23,10 @@ from telegram import (
     ReplyKeyboardMarkup,
     Update,
 )
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
+
+from bot.keyboards import build_bulk_edit_kb, groups_map
 
 from . import messaging
 from . import messaging_utils as mu
@@ -34,6 +37,8 @@ from .reporting import build_mass_report_text, log_mass_filter_digest
 from . import settings
 from . import mass_state
 from .settings_store import DEFAULTS
+
+from utils.email_clean import sanitize_email
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -160,6 +165,9 @@ TECH_PATTERNS = [
 ]
 
 
+BULK_EDIT_PAGE_SIZE = 10
+
+
 @dataclass
 class SessionState:
     all_emails: Set[str] = field(default_factory=set)
@@ -198,6 +206,102 @@ def enable_force_send(chat_id: int) -> None:
     FORCE_SEND_CHAT_IDS.add(chat_id)
 
 
+def _unique_preserve_order(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        normalized = item.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+    return result
+
+
+def _build_group_markup(prefix: str = "group_") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"{prefix}{code}")]
+        for code, label in groups_map.items()
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _clamp_bulk_edit_page(context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw_page = context.user_data.get("bulk_edit_page", 0)
+    try:
+        page = int(raw_page)
+    except (TypeError, ValueError):
+        page = 0
+    working = list(context.user_data.get("bulk_edit_working", []))
+    if not working:
+        page = 0
+    else:
+        max_page = max((len(working) - 1) // BULK_EDIT_PAGE_SIZE, 0)
+        page = max(0, min(page, max_page))
+    context.user_data["bulk_edit_page"] = page
+    return page
+
+
+def _bulk_edit_status_text(
+    context: ContextTypes.DEFAULT_TYPE, extra: str | None = None
+) -> str:
+    page = _clamp_bulk_edit_page(context)
+    working = list(context.user_data.get("bulk_edit_working", []))
+    total = len(working)
+    lines: list[str] = []
+    if extra:
+        lines.append(extra)
+    lines.append("Режим редактирования списка адресов.")
+    lines.append(f"Всего адресов: {total}.")
+    if total:
+        start = page * BULK_EDIT_PAGE_SIZE + 1
+        end = min(start + BULK_EDIT_PAGE_SIZE - 1, total)
+        lines.append(f"Показаны {start}–{end}.")
+    lines.append("Выберите действие на клавиатуре ниже.")
+    return "\n".join(lines)
+
+
+async def _update_bulk_edit_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    extra: str | None = None,
+    disable_markup: bool = False,
+) -> None:
+    ref = context.user_data.get("bulk_edit_message")
+    if not ref:
+        return
+    chat_id, message_id = ref
+    page = _clamp_bulk_edit_page(context)
+    working = list(context.user_data.get("bulk_edit_working", []))
+    markup = (
+        None
+        if disable_markup
+        else build_bulk_edit_kb(working, page=page, page_size=BULK_EDIT_PAGE_SIZE)
+    )
+    text = _bulk_edit_status_text(context, extra)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=markup,
+        )
+    except BadRequest as exc:
+        lowered = str(exc).lower()
+        if not disable_markup and "message is not modified" in lowered:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=markup,
+            )
+            return
+        if "message to edit not found" in lowered:
+            return
+        raise
 def disable_force_send(chat_id: int) -> None:
     """Disable the force-send mode for the chat."""
 
@@ -570,14 +674,14 @@ async def prompt_change_group(
 ) -> None:
     """Prompt the user to choose a mailing group."""
 
-    keyboard = [
-        [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
-        [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
-        [InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина")],
-    ]
-    await update.message.reply_text(
+    message = update.message
+    if message is None and update.callback_query:
+        message = update.callback_query.message
+    if not message:
+        return
+    await message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_build_group_markup(),
     )
 
 
@@ -803,6 +907,21 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     init_state(context)
     context.user_data.pop("manual_emails", None)
+    edit_message = context.user_data.pop("bulk_edit_message", None)
+    if edit_message:
+        try:
+            await context.bot.delete_message(
+                chat_id=edit_message[0], message_id=edit_message[1]
+            )
+        except Exception:
+            pass
+    for key in (
+        "bulk_edit_working",
+        "bulk_edit_mode",
+        "bulk_edit_page",
+        "bulk_edit_replace_old",
+    ):
+        context.user_data.pop(key, None)
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
@@ -964,6 +1083,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     extra_buttons.append(
         [
             InlineKeyboardButton(
+                "✏️ Исправить адреса", callback_data="bulk:edit:start"
+            )
+        ]
+    )
+    extra_buttons.append(
+        [
+            InlineKeyboardButton(
                 "▶️ Перейти к выбору направления", callback_data="proceed_group"
             )
         ]
@@ -1009,14 +1135,134 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     query = update.callback_query
     await query.answer()
-    keyboard = [
-        [InlineKeyboardButton("⚽ Спорт", callback_data="group_спорт")],
-        [InlineKeyboardButton("🏕 Туризм", callback_data="group_туризм")],
-        [InlineKeyboardButton("🩺 Медицина", callback_data="group_медицина")],
-    ]
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_build_group_markup(),
+    )
+
+
+async def bulk_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enter the bulk e-mail editing flow."""
+
+    query = update.callback_query
+    await query.answer()
+
+    previous = context.user_data.get("bulk_edit_message")
+    if previous:
+        try:
+            await context.bot.delete_message(
+                chat_id=previous[0], message_id=previous[1]
+            )
+        except Exception:
+            pass
+
+    state = get_state(context)
+    working = _unique_preserve_order(state.to_send)
+    context.user_data["bulk_edit_working"] = working
+    context.user_data["bulk_edit_mode"] = None
+    context.user_data["bulk_edit_page"] = 0
+    context.user_data.pop("bulk_edit_replace_old", None)
+
+    text = _bulk_edit_status_text(context)
+    markup = build_bulk_edit_kb(
+        working, page=0, page_size=BULK_EDIT_PAGE_SIZE
+    )
+    message = await query.message.reply_text(text, reply_markup=markup)
+    context.user_data["bulk_edit_message"] = (message.chat_id, message.message_id)
+
+
+async def bulk_edit_add_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Ask the user to provide additional e-mail addresses."""
+
+    query = update.callback_query
+    await query.answer()
+    context.user_data["bulk_edit_mode"] = "add"
+    context.user_data.pop("bulk_edit_replace_old", None)
+    await query.message.reply_text("Отправьте адрес(а) через запятую.")
+
+
+async def bulk_edit_replace_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Ask for the address that should be replaced."""
+
+    query = update.callback_query
+    await query.answer()
+    context.user_data["bulk_edit_mode"] = "replace_wait_old"
+    context.user_data.pop("bulk_edit_replace_old", None)
+    await query.message.reply_text("Укажите адрес, который нужно заменить.")
+
+
+async def bulk_edit_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a single e-mail from the working list."""
+
+    query = update.callback_query
+    await query.answer("Удалено")
+    target = query.data.split("bulk:edit:del:", 1)[-1]
+    working = [
+        item for item in context.user_data.get("bulk_edit_working", []) if item != target
+    ]
+    context.user_data["bulk_edit_working"] = working
+    current_page = context.user_data.get("bulk_edit_page", 0)
+    if working:
+        max_page = max((len(working) - 1) // BULK_EDIT_PAGE_SIZE, 0)
+        context.user_data["bulk_edit_page"] = min(int(current_page), max_page)
+    else:
+        context.user_data["bulk_edit_page"] = 0
+    await _update_bulk_edit_message(context, "Адрес удалён.")
+
+
+async def bulk_edit_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch between pages in the bulk edit keyboard."""
+
+    query = update.callback_query
+    await query.answer()
+    raw_page = query.data.rsplit(":", 1)[-1]
+    try:
+        page = int(raw_page)
+    except ValueError:
+        return
+    context.user_data["bulk_edit_page"] = page
+    await _update_bulk_edit_message(context)
+
+
+async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Finalize the edited list and return to group selection."""
+
+    query = update.callback_query
+    await query.answer()
+
+    working = list(context.user_data.get("bulk_edit_working", []))
+    filtered = [email for email in working if is_allowed_tld(email)]
+    unique = _unique_preserve_order(filtered)
+
+    state = get_state(context)
+    state.to_send = unique
+    state.preview_allowed_all = list(unique)
+    state.suspect_numeric = sorted(
+        {email for email in unique if is_numeric_localpart(email)}
+    )
+    state.foreign = []
+
+    context.user_data["bulk_edit_working"] = unique
+    context.user_data["bulk_edit_page"] = 0
+    await _update_bulk_edit_message(
+        context,
+        "Редактирование завершено.",
+        disable_markup=True,
+    )
+
+    context.user_data.pop("bulk_edit_message", None)
+    context.user_data.pop("bulk_edit_mode", None)
+    context.user_data.pop("bulk_edit_replace_old", None)
+    context.user_data.pop("bulk_edit_working", None)
+    context.user_data.pop("bulk_edit_page", None)
+
+    await query.message.reply_text(
+        "⬇️ Выберите направление рассылки:",
+        reply_markup=_build_group_markup(),
     )
 
 
@@ -1025,7 +1271,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     await query.answer()
-    group_code = query.data.split("_")[1]
+    group_code = query.data.removeprefix("group_")
     template_path = TEMPLATE_MAP[group_code]
     state = get_state(context)
     emails = state.to_send
@@ -1089,11 +1335,112 @@ async def prompt_manual_email(
     context.user_data["awaiting_manual_email"] = True
 
 
+async def _handle_bulk_edit_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> bool:
+    """Process user replies for the bulk edit workflow."""
+
+    mode = context.user_data.get("bulk_edit_mode")
+    if not mode:
+        return False
+
+    if mode == "add":
+        parts = [p.strip() for p in re.split(r"[,\s]+", text) if p.strip()]
+        if not parts:
+            await update.message.reply_text(
+                "Не найдено адресов. Отправьте e-mail через запятую."
+            )
+            return True
+        working = list(context.user_data.get("bulk_edit_working", []))
+        valid: list[str] = []
+        for item in parts:
+            cleaned, _ = sanitize_email(item)
+            if cleaned:
+                valid.append(cleaned)
+        if not valid:
+            await update.message.reply_text(
+                "Не удалось распознать корректные адреса, попробуйте ещё раз."
+            )
+            return True
+        merged = _unique_preserve_order(working + valid)
+        context.user_data["bulk_edit_working"] = merged
+        context.user_data["bulk_edit_mode"] = None
+        context.user_data["bulk_edit_page"] = max(
+            0, (len(merged) - 1) // BULK_EDIT_PAGE_SIZE
+        )
+        skipped = len(parts) - len(valid)
+        summary = [f"Добавлено: {len(valid)}"]
+        if skipped:
+            summary.append(f"Пропущено: {skipped}")
+        summary.append(f"Текущий размер списка: {len(merged)}")
+        message = ". ".join(summary)
+        await update.message.reply_text(message)
+        await _update_bulk_edit_message(context, message)
+        return True
+
+    if mode == "replace_wait_old":
+        candidate = text.strip()
+        working = list(context.user_data.get("bulk_edit_working", []))
+        if not working:
+            context.user_data["bulk_edit_mode"] = None
+            await update.message.reply_text("Список пуст.")
+            return True
+        cleaned, _ = sanitize_email(candidate)
+        if candidate in working:
+            target = candidate
+        elif cleaned and cleaned in working:
+            target = cleaned
+        else:
+            await update.message.reply_text(
+                "Адрес не найден в текущем списке. Укажите один адрес из списка."
+            )
+            return True
+        context.user_data["bulk_edit_replace_old"] = target
+        context.user_data["bulk_edit_mode"] = "replace_wait_new"
+        await update.message.reply_text("Укажите новый адрес.")
+        return True
+
+    if mode == "replace_wait_new":
+        old = context.user_data.get("bulk_edit_replace_old")
+        if not old:
+            context.user_data["bulk_edit_mode"] = None
+            await update.message.reply_text(
+                "Не выбран адрес для замены. Нажмите «🔁 Заменить» ещё раз."
+            )
+            return True
+        cleaned, _ = sanitize_email(text)
+        if not cleaned:
+            await update.message.reply_text("Неверный e-mail, попробуйте ещё раз.")
+            return True
+        working = list(context.user_data.get("bulk_edit_working", []))
+        try:
+            idx = working.index(old)
+        except ValueError:
+            idx = None
+        if idx is not None:
+            working[idx] = cleaned
+        else:
+            working.append(cleaned)
+            idx = len(working) - 1
+        working = _unique_preserve_order(working)
+        context.user_data["bulk_edit_working"] = working
+        context.user_data["bulk_edit_mode"] = None
+        context.user_data.pop("bulk_edit_replace_old", None)
+        context.user_data["bulk_edit_page"] = max(0, idx // BULK_EDIT_PAGE_SIZE)
+        await update.message.reply_text("Адрес заменён.")
+        await _update_bulk_edit_message(context, "Адрес обновлён.")
+        return True
+
+    return False
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process text messages for uploads, blocking or manual lists."""
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
+    if await _handle_bulk_edit_text(update, context, text):
+        return
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
         emails = {normalize_email(x) for x in extract_emails_loose(clean) if "@" in x}
@@ -1115,21 +1462,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if filtered:
             context.user_data["manual_emails"] = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
-            keyboard = [
-                [InlineKeyboardButton("⚽ Спорт", callback_data="manual_group_спорт")],
-                [InlineKeyboardButton("🏕 Туризм", callback_data="manual_group_туризм")],
-                [
-                    InlineKeyboardButton(
-                        "🩺 Медицина", callback_data="manual_group_медицина"
-                    )
-                ],
-            ]
             await update.message.reply_text(
                 (
                     f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
                     "⬇️ Выберите направление письма:"
                 ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=_build_group_markup(prefix="manual_group_"),
             )
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")
@@ -1230,6 +1568,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                 ]
             )
+        extra_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адреса", callback_data="bulk:edit:start"
+                )
+            ]
+        )
         extra_buttons.append(
             [
                 InlineKeyboardButton(
@@ -1406,7 +1751,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
-        group_code = query.data.split("_")[2]
+        group_code = query.data.removeprefix("manual_group_")
         template_path = TEMPLATE_MAP[group_code]
 
         # manual отправка не учитывает супресс-лист

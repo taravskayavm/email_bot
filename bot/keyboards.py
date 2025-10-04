@@ -3,10 +3,21 @@ from __future__ import annotations
 import json
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+
+
+groups_map = {
+    "sport": "⚽ Спорт",
+    "tourism": "🧭 Туризм",
+    "medicine": "🩺 Медицина",
+    "bioinformatics": "🧬 Биоинформатика",
+    "geography": "🗺️ География",
+    "psychology": "🧠 Психология",
+    "beauty": "💄 Индустрия красоты",
+}
 
 
 def build_parse_mode_kb(
@@ -200,3 +211,49 @@ def send_flow_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def build_bulk_edit_kb(
+    emails: Sequence[str], page: int = 0, page_size: int = 10
+) -> InlineKeyboardMarkup:
+    """Keyboard for bulk address editing actions."""
+
+    total = len(emails)
+    if page_size <= 0:
+        page_size = 10
+    max_page = max((total - 1) // page_size, 0) if total else 0
+    page = max(0, min(page, max_page))
+    start = page * page_size
+    end = start + page_size
+    visible = emails[start:end]
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("➕ Добавить", callback_data="bulk:edit:add"),
+            InlineKeyboardButton("🔁 Заменить", callback_data="bulk:edit:replace"),
+        ]
+    ]
+
+    for email in visible:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🗑 {email}", callback_data=f"bulk:edit:del:{email}"
+                )
+            ]
+        )
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton("⬅️", callback_data=f"bulk:edit:page:{page - 1}")
+        )
+    if end < total:
+        nav.append(
+            InlineKeyboardButton("➡️", callback_data=f"bulk:edit:page:{page + 1}")
+        )
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("✅ Готово", callback_data="bulk:edit:done")])
+    return InlineKeyboardMarkup(rows)
