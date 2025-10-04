@@ -51,9 +51,13 @@ MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
-    "спорт": os.path.join(TEMPLATES_DIR, "sport.htm"),
-    "туризм": os.path.join(TEMPLATES_DIR, "tourism.htm"),
-    "медицина": os.path.join(TEMPLATES_DIR, "medicine.htm"),
+    "sport": os.path.join(TEMPLATES_DIR, "sport.html"),
+    "tourism": os.path.join(TEMPLATES_DIR, "tourism.html"),
+    "medicine": os.path.join(TEMPLATES_DIR, "medicine.html"),
+    "bioinformatics": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),
+    "geography": os.path.join(TEMPLATES_DIR, "geography.html"),
+    "psychology": os.path.join(TEMPLATES_DIR, "psychology.html"),
+    "beauty": os.path.join(TEMPLATES_DIR, "beauty.html"),
 }
 
 # Text of the signature without styling. The surrounding block and

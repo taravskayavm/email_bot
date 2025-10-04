@@ -197,6 +197,26 @@ def main() -> None:
         )
     )
     app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_edit_start, pattern="^bulk:edit:start$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_edit_add_prompt, pattern="^bulk:edit:add$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.bulk_edit_replace_prompt, pattern="^bulk:edit:replace$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_edit_delete, pattern=r"^bulk:edit:del:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_edit_page, pattern=r"^bulk:edit:page:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_edit_done, pattern="^bulk:edit:done$")
+    )
+    app.add_handler(
         CallbackQueryHandler(
             bot_handlers.include_numeric_emails, pattern="^confirm_include_numeric$"
         )
