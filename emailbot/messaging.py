@@ -46,7 +46,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
-MAX_EMAILS_PER_DAY = 200
+MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
