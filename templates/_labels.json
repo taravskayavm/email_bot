@@ -4,5 +4,6 @@
   "medicine": {"label": "Медицина", "signature": "old"},
   "psychology": {"label": "Психология", "signature": "new"},
   "sport": {"label": "Спорт", "signature": "old"},
-  "tourism": {"label": "Туризм", "signature": "old"}
+  "tourism": {"label": "Туризм", "signature": "old"},
+  "beauty": {"label": "Индустрия красоты", "signature": "new"}
 }

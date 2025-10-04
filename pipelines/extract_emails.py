@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -433,20 +434,40 @@ def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
     """Fetch a single URL synchronously and decode using charset-normalizer."""
 
     headers = {"User-Agent": C.CRAWL_USER_AGENT}
+    timeout_conf = httpx.Timeout(connect=10.0, read=timeout, write=timeout, pool=10.0)
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     with httpx.Client(
         follow_redirects=True,
-        timeout=timeout,
+        timeout=timeout_conf,
         headers=headers,
-        http2=True,
+        http2=C.CRAWL_HTTP2,
+        limits=limits,
     ) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        content_type = str(response.headers.get("content-type", "")).lower()
-        if content_type and not any(
-            hint in content_type for hint in ("text", "html", "xml", "json")
-        ):
-            return ""
-        return best_effort_decode(response.content)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = client.get(url)
+                response.raise_for_status()
+                content_type = str(response.headers.get("content-type", "")).lower()
+                if content_type and not any(
+                    hint in content_type for hint in ("text", "html", "xml", "json")
+                ):
+                    return ""
+                return best_effort_decode(response.content)
+            except httpx.ReadTimeout as exc:
+                last_exc = exc
+            except Exception as exc:
+                last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                    # HTTP errors should propagate after retries.
+                    pass
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            break
+        if last_exc:
+            raise last_exc
+        return ""
 
 
 async def extract_from_url_async(

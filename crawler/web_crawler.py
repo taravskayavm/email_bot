@@ -58,11 +58,14 @@ class Crawler:
         self.start_canonical = canonicalize(start_url, start_url) or start_url
         self.max_pages = max_pages or C.CRAWL_MAX_PAGES
         self.max_depth = max_depth or C.CRAWL_MAX_DEPTH
+        timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0)
+        limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
         self.client = httpx.AsyncClient(
-            http2=True,
-            timeout=20,
+            http2=C.CRAWL_HTTP2,
+            timeout=timeout,
             headers={"User-Agent": C.CRAWL_USER_AGENT},
             follow_redirects=True,
+            limits=limits,
         )
         self.robots = robotparser.RobotFileParser()
         self.pages_scanned = 0
@@ -121,21 +124,40 @@ class Crawler:
     async def fetch_html(self, url: str) -> tuple[str | None, str | None]:
         """Fetch ``url`` and return ``(final_url, html)`` if it looks like HTML."""
 
-        try:
-            response = await self.client.get(url)
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if content_type and "html" not in content_type and "text" not in content_type:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self.client.get(url)
+                content_type = str(response.headers.get("content-type", "")).lower()
+                if (
+                    content_type
+                    and "html" not in content_type
+                    and "text" not in content_type
+                ):
+                    self.last_error = None
+                    return str(response.url), None
+                text = best_effort_decode(response.content)
+                if not text:
+                    response.encoding = response.encoding or "utf-8"
+                    text = response.text
                 self.last_error = None
-                return str(response.url), None
-            text = best_effort_decode(response.content)
-            if not text:
-                response.encoding = response.encoding or "utf-8"
-                text = response.text
-            self.last_error = None
-            return str(response.url), text
-        except Exception as exc:
-            self.last_error = exc
-            return None, None
+                return str(response.url), text
+            except httpx.ReadTimeout as exc:
+                last_error = exc
+                self.last_error = exc
+            except Exception as exc:  # pragma: no cover - defensive network errors
+                last_error = exc
+                self.last_error = exc
+            if attempt < 2:
+                try:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                except Exception:
+                    pass
+                continue
+            break
+        if last_error is not None:
+            self.last_error = last_error
+        return None, None
 
     def extract_links(self, base: str, html: str) -> list[str]:
         """Extract and canonicalize links from ``html``."""

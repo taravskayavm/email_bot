@@ -87,8 +87,14 @@ def main() -> None:
     messaging.EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
     messaging.check_env_vars()
 
+    log_path = SCRIPT_DIR / "bot.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
     configure_logging(
-        SCRIPT_DIR / "bot.log",
+        log_path,
         [token, messaging.EMAIL_PASSWORD, messaging.EMAIL_ADDRESS],
     )
 
