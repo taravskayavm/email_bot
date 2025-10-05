@@ -73,6 +73,22 @@ def build_parse_mode_kb(
     return InlineKeyboardMarkup(rows)
 
 
+def build_post_parse_extra_actions_kb() -> InlineKeyboardMarkup:
+    """
+    Дополнительные действия после завершения парсинга.
+
+    Используется в паре с основным выводом результатов, отправляется отдельным
+    сообщением и не ломает текущую клавиатуру.
+    """
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
+            [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
+        ]
+    )
+
+
 def build_sections_suggest_kb(
     token: str, candidates: list[str], selected: set[str] | None
 ) -> InlineKeyboardMarkup:

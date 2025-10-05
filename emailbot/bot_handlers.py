@@ -8,14 +8,16 @@ import imaplib
 import logging
 import os
 import re
+import secrets
 import time
 import urllib.parse
-import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
 import aiohttp
+import pandas as pd
 from telegram import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -26,7 +28,11 @@ from telegram import (
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from bot.keyboards import build_bulk_edit_kb, groups_map
+from bot.keyboards import (
+    build_bulk_edit_kb,
+    build_post_parse_extra_actions_kb,
+    groups_map,
+)
 
 from . import messaging
 from . import messaging_utils as mu
@@ -317,7 +323,11 @@ def is_force_send(chat_id: int) -> bool:
 def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reset all awaiting flags stored in ``user_data``."""
 
-    for key in ["awaiting_block_email", "awaiting_manual_email"]:
+    for key in [
+        "awaiting_block_email",
+        "awaiting_manual_email",
+        "awaiting_corrections_text",
+    ]:
         context.user_data[key] = False
 
 
@@ -1037,6 +1047,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     current = set(state.to_send)
     current.update(filtered)
     state.to_send = sorted(current)
+    context.user_data["last_parsed_emails"] = list(state.to_send)
     state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
@@ -1094,10 +1105,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         ]
     )
-    report += "\n\nДополнительные действия:"
+    report += "\n\nДальнейшие действия:"
     await update.message.reply_text(
         report,
         reply_markup=InlineKeyboardMarkup(extra_buttons),
+    )
+    await update.message.reply_text(
+        "Дополнительные действия:",
+        reply_markup=build_post_parse_extra_actions_kb(),
     )
 
 
@@ -1246,6 +1261,8 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     state.foreign = []
 
+    context.user_data["last_parsed_emails"] = list(unique)
+
     context.user_data["bulk_edit_working"] = unique
     context.user_data["bulk_edit_page"] = 0
     await _update_bulk_edit_message(
@@ -1265,6 +1282,257 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=_build_group_markup(),
     )
 
+
+async def prompt_mass_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Compatibility wrapper for the bulk send start callback."""
+
+    await send_all(update, context)
+
+
+async def bulk_xls_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Экспортировать текущий список адресов в Excel и запросить правки."""
+
+    query = update.callback_query
+    await query.answer()
+
+    emails = context.user_data.get("last_parsed_emails") or []
+    if not emails:
+        state = get_state(context)
+        emails = list(state.to_send or [])
+        if emails:
+            context.user_data["last_parsed_emails"] = emails
+
+    if not emails:
+        await query.edit_message_text("Список пуст — сначала выполните парсинг.")
+        return
+
+    run_id = context.user_data.get("run_id") or secrets.token_hex(6)
+    context.user_data["run_id"] = run_id
+
+    out_dir = Path("var/exports") / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"emails_{run_id}.xlsx"
+
+    df = pd.DataFrame({"email": list(emails)})
+    df["comment"] = ""
+    df.to_excel(path, index=False)
+
+    with path.open("rb") as fh:
+        await query.message.reply_document(
+            document=fh,
+            filename=path.name,
+            caption=(
+                "Отредактируйте список локально. Затем пришлите одним сообщением пары "
+                "правок в формате «старый -> новый» (можно много строк)."
+            ),
+        )
+
+    context.user_data["awaiting_corrections_text"] = True
+    await query.message.reply_text(
+        "Готово. Отправьте правки одним сообщением. Пример строк:\n"
+        "bad1(at)mail.ru -> good1@mail.ru\n"
+        "wrong@yandex.ru => correct@gmail.com\n"
+        "typo@examp1e.com → typo@example.com\n"
+        "old@old.com: new@new.com\n"
+        "bad2@mail.ru, good2@mail.ru"
+    )
+
+
+def _audit_append_correction(
+    user_id: int,
+    old_raw: str,
+    old_norm: str,
+    new_raw: str,
+    new_norm: str,
+    note: str = "",
+) -> None:
+    """Append correction info to audit CSV."""
+
+    path = Path("var/audit_corrections.csv")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if not exists:
+            writer.writerow(
+                ["ts", "user_id", "old_raw", "old_norm", "new_raw", "new_norm", "note"]
+            )
+        writer.writerow(
+            [
+                datetime.utcnow().isoformat(),
+                user_id,
+                old_raw,
+                old_norm,
+                new_raw,
+                new_norm,
+                note,
+            ]
+        )
+
+
+def _parse_corrections(text: str) -> list[tuple[str, str]]:
+    """Parse pairs of corrections from free-form text."""
+
+    if not text:
+        return []
+
+    cleaned = text.replace("→", "->").replace("=>", "->")
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    pairs: list[tuple[str, str]] = []
+
+    for line in lines:
+        if "->" in line:
+            parts = [part.strip() for part in line.split("->") if part.strip()]
+            if len(parts) >= 2:
+                old = parts[0]
+                new = "->".join(parts[1:]).strip()
+                if old and new:
+                    pairs.append((old, new))
+                continue
+
+        if ":" in line and "," not in line:
+            left, right = [part.strip() for part in line.split(":", 1)]
+            if left and right:
+                pairs.append((left, right))
+                continue
+
+        if "," in line:
+            parts = [part.strip() for part in line.split(",") if part.strip()]
+            if len(parts) == 2:
+                pairs.append((parts[0], parts[1]))
+                continue
+            for idx in range(0, len(parts) - 1, 2):
+                first = parts[idx]
+                second = parts[idx + 1]
+                if first and second:
+                    pairs.append((first, second))
+            continue
+
+        tokens = line.split()
+        if len(tokens) >= 2:
+            old = tokens[0].strip()
+            new = " ".join(tokens[1:]).strip()
+            if old and new:
+                pairs.append((old, new))
+
+    return pairs
+
+
+async def bulk_txt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Включить режим ожидания текстовых правок адресов."""
+
+    query = update.callback_query
+    await query.answer()
+
+    emails = context.user_data.get("last_parsed_emails") or []
+    if not emails:
+        state = get_state(context)
+        emails = list(state.to_send or [])
+        if emails:
+            context.user_data["last_parsed_emails"] = emails
+
+    if not emails:
+        await query.message.reply_text("Список пуст — сначала выполните парсинг.")
+        return
+
+    context.user_data["awaiting_corrections_text"] = True
+    await query.message.reply_text(
+        "Режим правок включён. Пришлите одним сообщением пары «старый -> новый». "
+        "Несколько пар можно прислать в одном сообщении, по одной паре на строку."
+    )
+
+
+async def corrections_text_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Принять текстовые правки адресов от пользователя."""
+
+    if not context.user_data.get("awaiting_corrections_text"):
+        return
+
+    message = update.message
+    if not message:
+        return
+
+    text = (message.text or "").strip()
+    pairs = _parse_corrections(text)
+    if not pairs:
+        await message.reply_text("Не распознаны пары. Используйте формат: old -> new")
+        return
+
+    raw_last = context.user_data.get("last_parsed_emails") or []
+    if not raw_last:
+        state = get_state(context)
+        raw_last = list(state.to_send or [])
+    last_parsed = list(raw_last)
+    last_set = set(last_parsed)
+
+    accepted_new: list[str] = []
+    removed = 0
+    invalid_rows: list[tuple[str, str]] = []
+
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    for old_raw, new_raw in pairs:
+        old_clean, _ = sanitize_email(old_raw)
+        new_clean, _ = sanitize_email(new_raw)
+        if not new_clean:
+            invalid_rows.append((old_raw, new_raw))
+            _audit_append_correction(
+                user_id, old_raw, old_clean, new_raw, new_clean, "new_invalid"
+            )
+            continue
+
+        accepted_new.append(new_clean)
+        if old_clean and old_clean in last_set:
+            try:
+                last_parsed.remove(old_clean)
+                last_set.remove(old_clean)
+                removed += 1
+            except ValueError:
+                pass
+
+        _audit_append_correction(
+            user_id,
+            old_raw,
+            old_clean,
+            new_raw,
+            new_clean,
+            "mapped" if old_clean else "added",
+        )
+
+    final = sorted(set(last_parsed) | set(accepted_new))
+
+    context.user_data["last_parsed_emails"] = final
+    context.user_data["awaiting_corrections_text"] = False
+
+    state = get_state(context)
+    state.to_send = final
+    state.preview_allowed_all = list(final)
+    state.suspect_numeric = sorted(
+        {email for email in final if is_numeric_localpart(email)}
+    )
+    state.foreign = []
+
+    summary_lines = [
+        f"Обработано пар: {len(pairs)}",
+        f"Добавлено новых адресов: {len(set(accepted_new))}",
+        f"Удалено старых адресов: {removed}",
+        f"Итоговый размер списка: {len(final)}",
+    ]
+
+    if invalid_rows:
+        sample = ", ".join(f"{old}->{new}" for old, new in invalid_rows[:6])
+        summary_lines.append(
+            f"Невалидных пар: {len(invalid_rows)}. Примеры: {sample}"
+        )
+
+    await message.reply_text("\n".join(summary_lines))
+
+    try:
+        await prompt_change_group(update, context)
+    except Exception:
+        await message.reply_text("Готово. Теперь выберите направление рассылки.")
 
 async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle group selection and prepare messages for sending."""
