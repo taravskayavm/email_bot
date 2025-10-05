@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 
@@ -201,26 +202,31 @@ def main() -> None:
             bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"
         )
     )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_edit_start, pattern="^bulk:edit:start$")
-    )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_edit_add_prompt, pattern="^bulk:edit:add$")
-    )
-    app.add_handler(
-        CallbackQueryHandler(
-            bot_handlers.bulk_edit_replace_prompt, pattern="^bulk:edit:replace$"
+    if ENABLE_INLINE_EMAIL_EDITOR:
+        app.add_handler(
+            CallbackQueryHandler(bot_handlers.bulk_edit_start, pattern="^bulk:edit:start$")
         )
-    )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_edit_delete, pattern=r"^bulk:edit:del:")
-    )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_edit_page, pattern=r"^bulk:edit:page:")
-    )
-    app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_edit_done, pattern="^bulk:edit:done$")
-    )
+        app.add_handler(
+            CallbackQueryHandler(bot_handlers.bulk_edit_add_prompt, pattern="^bulk:edit:add$")
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                bot_handlers.bulk_edit_replace_prompt, pattern="^bulk:edit:replace$"
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                bot_handlers.bulk_edit_delete, pattern=r"^bulk:edit:del:"
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                bot_handlers.bulk_edit_page, pattern=r"^bulk:edit:page:"
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(bot_handlers.bulk_edit_done, pattern="^bulk:edit:done$")
+        )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.prompt_mass_send, pattern="^bulk:send:start$")
     )

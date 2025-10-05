@@ -34,6 +34,8 @@ from bot.keyboards import (
     groups_map,
 )
 
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
+
 from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
@@ -1091,13 +1093,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             ]
         )
-    extra_buttons.append(
-        [
-            InlineKeyboardButton(
-                "✏️ Исправить адреса", callback_data="bulk:edit:start"
-            )
-        ]
-    )
+    if ENABLE_INLINE_EMAIL_EDITOR:
+        extra_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адреса", callback_data="bulk:edit:start"
+                )
+            ]
+        )
     extra_buttons.append(
         [
             InlineKeyboardButton(
@@ -1161,6 +1164,13 @@ async def bulk_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     query = update.callback_query
     await query.answer()
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.message.reply_text(
+            "Редактор в чате отключён. Используйте:\n"
+            "• 📥 Экспорт адресов в Excel\n"
+            "• ✏️ Отправить правки текстом (в одном сообщении: «старый -> новый» на строку)\n"
+        )
+        return
 
     previous = context.user_data.get("bulk_edit_message")
     if previous:
@@ -1192,6 +1202,9 @@ async def bulk_edit_add_prompt(
     """Ask the user to provide additional e-mail addresses."""
 
     query = update.callback_query
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.answer()
+        return
     await query.answer()
     context.user_data["bulk_edit_mode"] = "add"
     context.user_data.pop("bulk_edit_replace_old", None)
@@ -1204,6 +1217,9 @@ async def bulk_edit_replace_prompt(
     """Ask for the address that should be replaced."""
 
     query = update.callback_query
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.answer()
+        return
     await query.answer()
     context.user_data["bulk_edit_mode"] = "replace_wait_old"
     context.user_data.pop("bulk_edit_replace_old", None)
@@ -1214,6 +1230,9 @@ async def bulk_edit_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Remove a single e-mail from the working list."""
 
     query = update.callback_query
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.answer()
+        return
     await query.answer("Удалено")
     target = query.data.split("bulk:edit:del:", 1)[-1]
     working = [
@@ -1233,6 +1252,9 @@ async def bulk_edit_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Switch between pages in the bulk edit keyboard."""
 
     query = update.callback_query
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.answer()
+        return
     await query.answer()
     raw_page = query.data.rsplit(":", 1)[-1]
     try:
@@ -1247,6 +1269,9 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Finalize the edited list and return to group selection."""
 
     query = update.callback_query
+    if not ENABLE_INLINE_EMAIL_EDITOR:
+        await query.answer()
+        return
     await query.answer()
 
     working = list(context.user_data.get("bulk_edit_working", []))
@@ -1322,8 +1347,10 @@ async def bulk_xls_export(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             document=fh,
             filename=path.name,
             caption=(
-                "Отредактируйте список локально. Затем пришлите одним сообщением пары "
-                "правок в формате «старый -> новый» (можно много строк)."
+                "Отредактируйте список локально (Excel).\n"
+                "⚠️ Файл загружать обратно НЕ нужно.\n\n"
+                "Пришлите одним сообщением пары правок в формате «старый -> новый» "
+                "(несколько строк в одном сообщении допустимы)."
             ),
         )
 
@@ -1836,13 +1863,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                 ]
             )
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    "✏️ Исправить адреса", callback_data="bulk:edit:start"
-                )
-            ]
-        )
+        if ENABLE_INLINE_EMAIL_EDITOR:
+            extra_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "✏️ Исправить адреса", callback_data="bulk:edit:start"
+                    )
+                ]
+            )
         extra_buttons.append(
             [
                 InlineKeyboardButton(
