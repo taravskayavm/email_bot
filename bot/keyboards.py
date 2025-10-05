@@ -8,7 +8,7 @@ from typing import Dict, Sequence
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR, EXPORT_XLS_ADMIN_ONLY
 
 
 groups_map = {
@@ -75,13 +75,20 @@ def build_parse_mode_kb(
     return InlineKeyboardMarkup(rows)
 
 
-def build_post_parse_extra_actions_kb() -> InlineKeyboardMarkup:
+def build_post_parse_extra_actions_kb(*, is_admin: bool = True) -> InlineKeyboardMarkup:
     """Дополнительные действия после завершения парсинга."""
 
-    rows = [
-        [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
-        [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
-    ]
+    rows = [[InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")]]
+    if not EXPORT_XLS_ADMIN_ONLY or is_admin:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    "📥 Скачать Excel с адресами (для ручной проверки)",
+                    callback_data="bulk:xls:export",
+                )
+            ],
+        )
     if ENABLE_INLINE_EMAIL_EDITOR:
         rows.append(
             [
@@ -95,6 +102,8 @@ def build_post_parse_extra_actions_kb() -> InlineKeyboardMarkup:
 
 def build_after_parse_combined_kb(
     extra_rows: Sequence[Sequence[InlineKeyboardButton]] | None = None,
+    *,
+    is_admin: bool = True,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура, объединяющая действия после парсинга под единым сообщением
@@ -105,8 +114,16 @@ def build_after_parse_combined_kb(
         [InlineKeyboardButton("👀 Показать ещё примеры", callback_data="refresh_preview")],
         [InlineKeyboardButton("🧭 Перейти к выбору направления", callback_data="proceed_group")],
         [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
-        [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
     ]
+    if not EXPORT_XLS_ADMIN_ONLY or is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📥 Скачать Excel с адресами (для ручной проверки)",
+                    callback_data="bulk:xls:export",
+                )
+            ]
+        )
     if ENABLE_INLINE_EMAIL_EDITOR:
         rows.append(
             [

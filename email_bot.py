@@ -13,6 +13,7 @@ from pathlib import Path
 
 from telegram.ext import (
     ApplicationBuilder,
+    ContextTypes,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
@@ -80,6 +81,20 @@ def configure_logging(log_file: Path, secrets: list[str]) -> None:
     root.addFilter(SecretFilter(secrets))
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log exceptions raised by PTB handlers with contextual details."""
+
+    logger = logging.getLogger(__name__)
+    try:
+        logger.error("Exception while handling update", exc_info=context.error)
+        chat_id = None
+        if hasattr(update, "effective_chat") and update.effective_chat:
+            chat_id = getattr(update.effective_chat, "id", None)
+        logger.info({"event": "error", "chat_id": chat_id, "update_type": type(update).__name__})
+    except Exception:
+        pass
+
+
 def main() -> None:
     load_env(SCRIPT_DIR)
 
@@ -103,6 +118,7 @@ def main() -> None:
     messaging.dedupe_blocked_file()
 
     app = ApplicationBuilder().token(token).build()
+    app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))

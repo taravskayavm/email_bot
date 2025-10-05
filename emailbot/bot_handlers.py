@@ -1040,7 +1040,9 @@ async def _send_combined_parse_response(
     context.user_data["run_id"] = run_id
     xlsx_path = _export_emails_xlsx(emails, run_id)
 
-    markup = build_after_parse_combined_kb(extra_rows=extra_rows)
+    user = message.from_user
+    is_admin = bool(user and user.id in ADMIN_IDS)
+    markup = build_after_parse_combined_kb(extra_rows=extra_rows, is_admin=is_admin)
     with xlsx_path.open("rb") as fh:
         await message.reply_document(
             document=fh,
@@ -1574,7 +1576,17 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     group_code = query.data.removeprefix("group_")
     template_path = TEMPLATE_MAP[group_code]
     state = get_state(context)
-    emails = state.to_send
+    emails = state.to_send or []
+    if not emails:
+        fallback = context.user_data.get("last_parsed_emails")
+        if isinstance(fallback, list):
+            emails = [str(item).strip() for item in fallback if str(item).strip()]
+            state.to_send = emails
+    if not emails:
+        await query.edit_message_text(
+            "Список адресов пуст. Сначала выполните парсинг или внесите правки, затем повторите выбор направления."
+        )
+        return
     state.group = group_code
     state.template = template_path
     chat_id = query.message.chat.id
