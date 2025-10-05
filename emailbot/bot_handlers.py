@@ -1032,7 +1032,7 @@ async def _send_combined_parse_response(
         "Дальнейшие действия:\n"
         "• Выберите направление рассылки\n"
         "• Или отправьте правки одним сообщением в формате «старый -> новый»\n"
-        "• При необходимости можно пересоздать Excel\n"
+        "• Excel-файл прикреплён к сообщению автоматически\n"
     )
 
     emails = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
@@ -1180,7 +1180,6 @@ async def bulk_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not ENABLE_INLINE_EMAIL_EDITOR:
         await query.message.reply_text(
             "Редактор в чате отключён. Используйте:\n"
-            "• 📥 Экспорт адресов в Excel\n"
             "• ✏️ Отправить правки текстом (в одном сообщении: «старый -> новый» на строку)\n"
         )
         return
@@ -1325,51 +1324,6 @@ async def prompt_mass_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Compatibility wrapper for the bulk send start callback."""
 
     await send_all(update, context)
-
-
-async def bulk_xls_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Экспортировать текущий список адресов в Excel и запросить правки."""
-
-    query = update.callback_query
-    await query.answer()
-
-    emails = context.user_data.get("last_parsed_emails") or []
-    if not emails:
-        state = get_state(context)
-        emails = list(state.to_send or [])
-        if emails:
-            context.user_data["last_parsed_emails"] = emails
-
-    if not emails:
-        await query.edit_message_text("Список пуст — сначала выполните парсинг.")
-        return
-
-    run_id = context.user_data.get("run_id") or secrets.token_hex(6)
-    context.user_data["run_id"] = run_id
-
-    path = _export_emails_xlsx(list(emails), run_id)
-
-    with path.open("rb") as fh:
-        await query.message.reply_document(
-            document=fh,
-            filename=path.name,
-            caption=(
-                "Отредактируйте список локально (Excel).\n"
-                "⚠️ Файл загружать обратно НЕ нужно.\n\n"
-                "Пришлите одним сообщением пары правок в формате «старый -> новый» "
-                "(несколько строк в одном сообщении допустимы)."
-            ),
-        )
-
-    context.user_data["awaiting_corrections_text"] = True
-    await query.message.reply_text(
-        "Готово. Отправьте правки одним сообщением. Пример строк:\n"
-        "bad1(at)mail.ru -> good1@mail.ru\n"
-        "wrong@yandex.ru => correct@gmail.com\n"
-        "typo@examp1e.com → typo@example.com\n"
-        "old@old.com: new@new.com\n"
-        "bad2@mail.ru, good2@mail.ru"
-    )
 
 
 def _audit_append_correction(

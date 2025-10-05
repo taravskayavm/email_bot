@@ -247,9 +247,6 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.prompt_mass_send, pattern="^bulk:send:start$")
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.bulk_xls_export, pattern="^bulk:xls:export$")
-    )
-    app.add_handler(
         CallbackQueryHandler(bot_handlers.bulk_txt_start, pattern="^bulk:txt:start$")
     )
     app.add_handler(
