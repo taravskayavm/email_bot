@@ -163,6 +163,11 @@ def main() -> None:
 
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
     app.add_handler(
+        MessageHandler(
+            filters.TEXT & (~filters.COMMAND), bot_handlers.corrections_text_handler
+        )
+    )
+    app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text)
     )
 
@@ -215,6 +220,15 @@ def main() -> None:
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.bulk_edit_done, pattern="^bulk:edit:done$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.prompt_mass_send, pattern="^bulk:send:start$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_xls_export, pattern="^bulk:xls:export$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.bulk_txt_start, pattern="^bulk:txt:start$")
     )
     app.add_handler(
         CallbackQueryHandler(
