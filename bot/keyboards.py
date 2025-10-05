@@ -8,7 +8,7 @@ from typing import Dict, Sequence
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR, EXPORT_XLS_ADMIN_ONLY
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 
 
 groups_map = {
@@ -79,16 +79,6 @@ def build_post_parse_extra_actions_kb(*, is_admin: bool = True) -> InlineKeyboar
     """Дополнительные действия после завершения парсинга."""
 
     rows = [[InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")]]
-    if not EXPORT_XLS_ADMIN_ONLY or is_admin:
-        rows.insert(
-            0,
-            [
-                InlineKeyboardButton(
-                    "📥 Скачать Excel с адресами (для ручной проверки)",
-                    callback_data="bulk:xls:export",
-                )
-            ],
-        )
     if ENABLE_INLINE_EMAIL_EDITOR:
         rows.append(
             [
@@ -115,15 +105,6 @@ def build_after_parse_combined_kb(
         [InlineKeyboardButton("🧭 Перейти к выбору направления", callback_data="proceed_group")],
         [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
     ]
-    if not EXPORT_XLS_ADMIN_ONLY or is_admin:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📥 Скачать Excel с адресами (для ручной проверки)",
-                    callback_data="bulk:xls:export",
-                )
-            ]
-        )
     if ENABLE_INLINE_EMAIL_EDITOR:
         rows.append(
             [
