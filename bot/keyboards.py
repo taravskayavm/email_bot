@@ -93,6 +93,33 @@ def build_post_parse_extra_actions_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def build_after_parse_combined_kb(
+    extra_rows: Sequence[Sequence[InlineKeyboardButton]] | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура, объединяющая действия после парсинга под единым сообщением
+    со сводкой и прикреплённым Excel-файлом.
+    """
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("👀 Показать ещё примеры", callback_data="refresh_preview")],
+        [InlineKeyboardButton("🧭 Перейти к выбору направления", callback_data="proceed_group")],
+        [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
+        [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
+    ]
+    if ENABLE_INLINE_EMAIL_EDITOR:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адреса (встроенно)", callback_data="bulk:edit:start"
+                )
+            ]
+        )
+    if extra_rows:
+        rows.extend(extra_rows)
+    return InlineKeyboardMarkup(rows)
+
+
 def build_sections_suggest_kb(
     token: str, candidates: list[str], selected: set[str] | None
 ) -> InlineKeyboardMarkup:

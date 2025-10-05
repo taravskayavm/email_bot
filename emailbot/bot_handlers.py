@@ -22,6 +22,7 @@ from telegram import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
     ReplyKeyboardMarkup,
     Update,
 )
@@ -29,8 +30,8 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from bot.keyboards import (
+    build_after_parse_combined_kb,
     build_bulk_edit_kb,
-    build_post_parse_extra_actions_kb,
     groups_map,
 )
 
@@ -989,6 +990,66 @@ async def _compose_report_and_save(
     return report
 
 
+def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
+    out_dir = Path("var/exports") / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"emails_{run_id}.xlsx"
+    df = pd.DataFrame({"email": list(emails)})
+    if "comment" not in df.columns:
+        df["comment"] = ""
+    df.to_excel(path, index=False)
+    return path
+
+
+async def _send_combined_parse_response(
+    message: Message, context: ContextTypes.DEFAULT_TYPE, report: str, state: SessionState
+) -> None:
+    if state.repairs_sample:
+        report += "\n\n🧩 Возможные исправления (проверьте вручную):"
+        for sample in state.repairs_sample:
+            report += f"\n{sample}"
+
+    extra_rows: list[list[InlineKeyboardButton]] = []
+    if state.repairs:
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🧩 Применить исправления ({len(state.repairs)})",
+                    callback_data="apply_repairs",
+                )
+            ]
+        )
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    "🧩 Показать все исправления", callback_data="show_repairs"
+                )
+            ]
+        )
+
+    caption = (
+        f"{report}\n\n"
+        "Дальнейшие действия:\n"
+        "• Выберите направление рассылки\n"
+        "• Или отправьте правки одним сообщением в формате «старый -> новый»\n"
+        "• При необходимости можно пересоздать Excel\n"
+    )
+
+    emails = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
+    run_id = context.user_data.get("run_id") or secrets.token_hex(6)
+    context.user_data["run_id"] = run_id
+    xlsx_path = _export_emails_xlsx(emails, run_id)
+
+    markup = build_after_parse_combined_kb(extra_rows=extra_rows)
+    with xlsx_path.open("rb") as fh:
+        await message.reply_document(
+            document=fh,
+            filename=xlsx_path.name,
+            caption=caption,
+            reply_markup=markup,
+        )
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an uploaded document with potential e-mail addresses."""
 
@@ -1065,58 +1126,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
     )
-    if state.repairs_sample:
-        report += "\n\n🧩 Возможные исправления (проверьте вручную):"
-        for s in state.repairs_sample:
-            report += f"\n{s}"
-    extra_buttons = [
-        [
-            InlineKeyboardButton(
-                "🔁 Показать ещё примеры", callback_data="refresh_preview"
-            )
-        ]
-    ]
-    # No extra buttons for numeric or foreign preview
-    if state.repairs:
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    f"🧩 Применить исправления ({len(state.repairs)})",
-                    callback_data="apply_repairs",
-                )
-            ]
-        )
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🧩 Показать все исправления", callback_data="show_repairs"
-                )
-            ]
-        )
-    if ENABLE_INLINE_EMAIL_EDITOR:
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    "✏️ Исправить адреса", callback_data="bulk:edit:start"
-                )
-            ]
-        )
-    extra_buttons.append(
-        [
-            InlineKeyboardButton(
-                "▶️ Перейти к выбору направления", callback_data="proceed_group"
-            )
-        ]
-    )
-    report += "\n\nДальнейшие действия:"
-    await update.message.reply_text(
-        report,
-        reply_markup=InlineKeyboardMarkup(extra_buttons),
-    )
-    await update.message.reply_text(
-        "Дополнительные действия:",
-        reply_markup=build_post_parse_extra_actions_kb(),
-    )
+
+    await _send_combined_parse_response(update.message, context, report, state)
 
 
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1334,13 +1345,7 @@ async def bulk_xls_export(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     run_id = context.user_data.get("run_id") or secrets.token_hex(6)
     context.user_data["run_id"] = run_id
 
-    out_dir = Path("var/exports") / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"emails_{run_id}.xlsx"
-
-    df = pd.DataFrame({"email": list(emails)})
-    df["comment"] = ""
-    df.to_excel(path, index=False)
+    path = _export_emails_xlsx(list(emails), run_id)
 
     with path.open("rb") as fh:
         await query.message.reply_document(
@@ -1835,54 +1840,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sorted(foreign_total),
             total_footnote,
         )
-        if state.repairs_sample:
-            report += "\n\n🧩 Возможные исправления (проверьте вручную):"
-            for s in state.repairs_sample:
-                report += f"\n{s}"
-        extra_buttons = [
-            [
-                InlineKeyboardButton(
-                    "🔁 Показать ещё примеры", callback_data="refresh_preview"
-                )
-            ]
-        ]
-        # No extra buttons for numeric or foreign preview
-        if state.repairs:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"🧩 Применить исправления ({len(state.repairs)})",
-                        callback_data="apply_repairs",
-                    )
-                ]
-            )
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🧩 Показать все исправления", callback_data="show_repairs"
-                    )
-                ]
-            )
-        if ENABLE_INLINE_EMAIL_EDITOR:
-            extra_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "✏️ Исправить адреса", callback_data="bulk:edit:start"
-                    )
-                ]
-            )
-        extra_buttons.append(
-            [
-                InlineKeyboardButton(
-                    "▶️ Перейти к выбору направления", callback_data="proceed_group"
-                )
-            ]
-        )
-        report += "\n\nДополнительные действия:"
-        await update.message.reply_text(
-            report,
-            reply_markup=InlineKeyboardMarkup(extra_buttons),
-        )
+        await _send_combined_parse_response(update.message, context, report, state)
         return
 
 
