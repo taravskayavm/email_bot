@@ -8,6 +8,8 @@ from typing import Dict, Sequence
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
+
 
 groups_map = {
     "sport": "⚽ Спорт",
@@ -74,19 +76,21 @@ def build_parse_mode_kb(
 
 
 def build_post_parse_extra_actions_kb() -> InlineKeyboardMarkup:
-    """
-    Дополнительные действия после завершения парсинга.
+    """Дополнительные действия после завершения парсинга."""
 
-    Используется в паре с основным выводом результатов, отправляется отдельным
-    сообщением и не ломает текущую клавиатуру.
-    """
-
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
-            [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
-        ]
-    )
+    rows = [
+        [InlineKeyboardButton("📥 Экспорт адресов в Excel", callback_data="bulk:xls:export")],
+        [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
+    ]
+    if ENABLE_INLINE_EMAIL_EDITOR:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адреса (встроенно)", callback_data="bulk:edit:start"
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 def build_sections_suggest_kb(

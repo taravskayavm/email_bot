@@ -15,3 +15,6 @@ CRAWL_HTTP2 = os.getenv("CRAWL_HTTP2", "1") == "1"
 
 # UX: разрешать редактирование сразу после предпросмотра?
 ALLOW_EDIT_AT_PREVIEW = os.getenv("ALLOW_EDIT_AT_PREVIEW", "0") == "1"
+
+# Отключение встроенного (инлайн) редактора e-mail в боте
+ENABLE_INLINE_EMAIL_EDITOR = os.getenv("ENABLE_INLINE_EMAIL_EDITOR", "0") == "1"
