@@ -110,6 +110,18 @@ def normalize_text(s: str) -> str:
 
 _B64_ALLOWED = re.compile(r"^[A-Za-z0-9+/=\n\r\s]+$")
 _GLUE_JOIN_RE = re.compile(r"[а-яА-Яa-zA-Z0-9]\s*@\s*[а-яА-Яa-zA-Z0-9]")
+EMAIL_LIKE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _canonicalize_address(address: str) -> str:
+    """Return ``address`` with normalised domain and Gmail rules applied."""
+
+    local, domain = address.rsplit("@", 1)
+    domain = normalize_domain(domain)
+    if domain in {"gmail.com", "googlemail.com"}:
+        domain = "gmail.com"
+        local = local.split("+", 1)[0].replace(".", "")
+    return f"{local.lower()}@{domain}"
 
 
 def maybe_decode_base64(s: str) -> str | None:
@@ -227,18 +239,23 @@ def normalize_email(s: str) -> str:
     """
 
     s = (normalize_text(s or "").strip().strip("'\""))
+    match = EMAIL_LIKE.fullmatch(s)
+    if match:
+        return _canonicalize_address(match.group(0))
+
+    s = re.sub(
+        r"(?i)(?:(?<=^)|(?<=\s))[abc]\)\s*(?=[A-Za-z0-9._%+-]+@)",
+        "",
+        s,
+    )
+    match = EMAIL_LIKE.search(s)
+    if match:
+        return _canonicalize_address(match.group(0))
+
     if "@" not in s:
         return s.lower()
-    local, domain = s.rsplit("@", 1)
 
-    domain = normalize_domain(domain)
-
-    # Gmail canonicalisation: ignore dots and "+tag" in the local part.
-    if domain in {"gmail.com", "googlemail.com"}:
-        domain = "gmail.com"
-        local = local.split("+", 1)[0].replace(".", "")
-
-    return f"{local.lower()}@{domain}"
+    return _canonicalize_address(s)
 
 
 def is_valid_domain(domain: str) -> bool:
