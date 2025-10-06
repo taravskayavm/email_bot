@@ -278,11 +278,15 @@ def _unique_preserve_order(items: Iterable[str]) -> list[str]:
     return result
 
 
-def _build_group_markup(prefix: str = "group_") -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(label, callback_data=f"{prefix}{code}")]
-        for code, label in groups_map.items()
-    ]
+def _build_group_markup(
+    prefix: str = "group_", *, selected: str | None = None
+) -> InlineKeyboardMarkup:
+    rows = []
+    for code, label in groups_map.items():
+        prefix_mark = "✅ " if code == selected else ""
+        rows.append(
+            [InlineKeyboardButton(f"{prefix_mark}{label}", callback_data=f"{prefix}{code}")]
+        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -744,9 +748,11 @@ async def prompt_change_group(
         message = update.callback_query.message
     if not message:
         return
+    state = context.chat_data.get(SESSION_KEY)
+    selected = getattr(state, "group", None) if state else None
     await message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(),
+        reply_markup=_build_group_markup(selected=selected),
     )
 
 
@@ -1236,9 +1242,11 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     query = update.callback_query
     await query.answer()
+    state = context.chat_data.get(SESSION_KEY)
+    selected = getattr(state, "group", None) if state else None
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(),
+        reply_markup=_build_group_markup(selected=selected),
     )
 
 
@@ -1405,9 +1413,11 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("bulk_edit_working", None)
     context.user_data.pop("bulk_edit_page", None)
 
+    state = context.chat_data.get(SESSION_KEY)
+    selected = getattr(state, "group", None) if state else None
     await query.message.reply_text(
         "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(),
+        reply_markup=_build_group_markup(selected=selected),
     )
 
 
@@ -1626,6 +1636,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             show_alert=True,
         )
         return
+    label = groups_map.get(group_code, group_code)
     template_info = get_template(group_code)
     template_path = None
     if template_info:
@@ -1669,9 +1680,16 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             show_alert=True,
         )
         return
-    await query.answer()
     state.group = group_code
     state.template = template_path_str
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_build_group_markup(selected=group_code)
+        )
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await query.answer(f"Выбрано: {label}")
     chat_id = query.message.chat.id
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
         messaging.prepare_mass_mailing(emails)
