@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -30,6 +31,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", _env_int("SEND_COOLDOWN_DAYS", 180))
+REPORT_TZ = os.getenv("REPORT_TZ", "Europe/Moscow")
 _DEFAULT_SEND_STATS_PATH = expand_path("var/send_stats.jsonl")
 SEND_STATS_PATH = os.getenv("SEND_STATS_PATH", str(_DEFAULT_SEND_STATS_PATH))
 APPEND_TO_SENT = os.getenv("APPEND_TO_SENT", "1") == "1"
@@ -161,6 +163,18 @@ def _cooldown_days(days: Optional[int]) -> int:
         except Exception:
             pass
     return _env_int("SEND_COOLDOWN_DAYS", COOLDOWN_DAYS)
+
+
+def _same_local_day(ts_utc: datetime) -> bool:
+    """Return True if ``ts_utc`` falls on the same calendar day in ``REPORT_TZ``."""
+
+    try:
+        tz = ZoneInfo(REPORT_TZ)
+    except Exception:
+        tz = timezone.utc
+    now_local = datetime.now(tz)
+    ts_local = ts_utc.astimezone(tz)
+    return now_local.date() == ts_local.date()
 
 
 def _append_to_sent_enabled() -> bool:
@@ -363,6 +377,9 @@ def should_skip_by_cooldown(
         last = last.replace(tzinfo=timezone.utc)
     else:
         last = last.astimezone(timezone.utc)
+
+    if _same_local_day(last):
+        return True, "cooldown<same_day"
 
     delta = now - last
     threshold = timedelta(days=window)
