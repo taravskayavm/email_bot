@@ -1639,7 +1639,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     data = (query.data or "").strip()
-    group_code = data.removeprefix("group_").strip()
+    group_code = (data[len("group_"):] if data.startswith("group_") else data).strip()
     if not group_code:
         await query.answer(
             cache_time=0,
