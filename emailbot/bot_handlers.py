@@ -1937,22 +1937,23 @@ async def _send_batch_with_sessions(
                         )
                         sent_count += 1
                         await asyncio.sleep(1.5)
-                    except ValueError as err:
-                        if "Unresolved placeholders" in str(err):
-                            await context.bot.send_message(
-                                chat_id=query.message.chat.id,
-                                text=(
-                                    "⚠️ Шаблон содержит неподставленные плейсхолдеры "
-                                    "(например, {{BODY}} или {BODY}). "
-                                    "Исправьте шаблон и повторите отправку."
-                                ),
-                            )
-                            try:
-                                imap.logout()
-                            except Exception:
-                                pass
-                            return
-                        errors.append(f"{email_addr} — {err}")
+                    except messaging.TemplateRenderError as err:
+                        missing = ", ".join(sorted(err.missing)) if err.missing else "—"
+                        await context.bot.send_message(
+                            chat_id=query.message.chat.id,
+                            text=(
+                                "⚠️ Шаблон не готов к отправке.\n"
+                                f"Файл: {err.path}\n"
+                                f"Не заполнены: {missing}\n\n"
+                                "Если нужен плейсхолдер BODY и нет динамики, создай рядом файл:\n"
+                                "• <имя_шаблона>.body.txt — текст письма, который подставится в {BODY}/{{BODY}}."
+                            ),
+                        )
+                        try:
+                            imap.logout()
+                        except Exception:
+                            pass
+                        return
                     except Exception as err:
                         errors.append(f"{email_addr} — {err}")
                         code, msg = None, None
@@ -2563,22 +2564,23 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             )
                             sent_count += 1
                             await asyncio.sleep(1.5)
-                        except ValueError as e:
-                            if "Unresolved placeholders" in str(e):
-                                await context.bot.send_message(
-                                    chat_id=query.message.chat.id,
-                                    text=(
-                                        "⚠️ Шаблон содержит неподставленные плейсхолдеры "
-                                        "(например, {{BODY}} или {BODY}). "
-                                        "Исправьте шаблон и повторите отправку."
-                                    ),
-                                )
-                                try:
-                                    imap.logout()
-                                except Exception:
-                                    pass
-                                return
-                            errors.append(f"{email_addr} — {e}")
+                        except messaging.TemplateRenderError as err:
+                            missing = ", ".join(sorted(err.missing)) if err.missing else "—"
+                            await context.bot.send_message(
+                                chat_id=query.message.chat.id,
+                                text=(
+                                    "⚠️ Шаблон не готов к отправке.\n"
+                                    f"Файл: {err.path}\n"
+                                    f"Не заполнены: {missing}\n\n"
+                                    "Если нужен плейсхолдер BODY и нет динамики, создай рядом файл:\n"
+                                    "• <имя_шаблона>.body.txt — текст письма, который подставится в {BODY}/{{BODY}}."
+                                ),
+                            )
+                            try:
+                                imap.logout()
+                            except Exception:
+                                pass
+                            return
                         except Exception as e:
                             errors.append(f"{email_addr} — {e}")
                             code, msg = None, None
@@ -2802,22 +2804,23 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     sent_ok.append(email_addr)
                     await asyncio.sleep(1.5)
-                except ValueError as e:
-                    if "Unresolved placeholders" in str(e):
-                        await context.bot.send_message(
-                            chat_id=query.message.chat.id,
-                            text=(
-                                "⚠️ Шаблон содержит неподставленные плейсхолдеры "
-                                "(например, {{BODY}} или {BODY}). "
-                                "Исправьте шаблон и повторите отправку."
-                            ),
-                        )
-                        try:
-                            imap.logout()
-                        except Exception:
-                            pass
-                        return
-                    errors.append(f"{email_addr} — {e}")
+                except messaging.TemplateRenderError as err:
+                    missing = ", ".join(sorted(err.missing)) if err.missing else "—"
+                    await context.bot.send_message(
+                        chat_id=query.message.chat.id,
+                        text=(
+                            "⚠️ Шаблон не готов к отправке.\n"
+                            f"Файл: {err.path}\n"
+                            f"Не заполнены: {missing}\n\n"
+                            "Если нужен плейсхолдер BODY и нет динамики, создай рядом файл:\n"
+                            "• <имя_шаблона>.body.txt — текст письма, который подставится в {BODY}/{{BODY}}."
+                        ),
+                    )
+                    try:
+                        imap.logout()
+                    except Exception:
+                        pass
+                    return
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
                     code, msg = None, None
