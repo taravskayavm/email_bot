@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import email
+import html
 import imaplib
 import logging
 import os
@@ -76,6 +77,7 @@ SIGNATURE_TEXT = (
     "med@lanbook.ru<br>"
     '<a href="https://www.lanbook.com">www.lanbook.com</a>'
 )
+SIGNATURE_HTML = SIGNATURE_TEXT
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
@@ -84,6 +86,74 @@ IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
 _sent_idempotency: Set[str] = set()
+
+_RE_JINJA = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
+_RE_FMT = re.compile(r"\{([A-Z0-9_]+)\}")
+
+
+def _render_placeholders(text: str, ctx: dict[str, object]) -> str:
+    """Safely substitute ``{{KEY}}`` and ``{KEY}`` placeholders from ``ctx``."""
+
+    def _sub_jinja(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return str(ctx.get(key, match.group(0)))
+
+    def _sub_fmt(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return str(ctx.get(key, match.group(0)))
+
+    text = _RE_JINJA.sub(_sub_jinja, text)
+    text = _RE_FMT.sub(_sub_fmt, text)
+    return text
+
+
+def _has_unresolved_placeholders(text: str) -> bool:
+    """Return ``True`` if ``text`` still contains unresolved placeholders."""
+
+    return bool(_RE_JINJA.search(text) or _RE_FMT.search(text))
+
+
+def _has_placeholder(text: str, key: str) -> bool:
+    key_upper = key.upper()
+    for match in _RE_JINJA.finditer(text):
+        if match.group(1) == key_upper:
+            return True
+    for match in _RE_FMT.finditer(text):
+        if match.group(1) == key_upper:
+            return True
+    return False
+
+
+def text_to_html(text: str) -> str:
+    """Convert plain text body to a simple HTML representation."""
+
+    if not text:
+        return ""
+    lines = html.escape(text).splitlines()
+    return "<br>".join(lines)
+
+
+def build_signature_text() -> str:
+    """Return the plain-text representation of the default signature."""
+
+    return strip_html(SIGNATURE_HTML).strip()
+
+
+def build_email_body(template_path: str, variables: Optional[dict[str, object]]) -> tuple[str, str]:
+    """Return rendered text and HTML bodies for a template file."""
+
+    tpl = Path(template_path).read_text(encoding="utf-8")
+
+    ctx: dict[str, object] = dict(variables or {})
+    if "SIGNATURE" not in ctx:
+        ctx["SIGNATURE"] = build_signature_text()
+
+    text_body = _render_placeholders(tpl, ctx)
+    if _has_unresolved_placeholders(text_body):
+        raise ValueError("Unresolved placeholders in template")
+
+    html_body = text_to_html(text_body)
+    return text_body, html_body
 
 
 def _read_template_file(path: str) -> str:
@@ -263,6 +333,10 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
         html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
+    signature_placeholder_present = _has_placeholder(html_body, "SIGNATURE")
+    html_body = _render_placeholders(html_body, {"SIGNATURE": signature_html})
+    if _has_unresolved_placeholders(html_body):
+        raise ValueError("Unresolved placeholders in template")
     token = secrets.token_urlsafe(16)
     link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
     unsub_html = (
@@ -270,7 +344,9 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
         'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
         'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
     )
-    html_body = html_body.replace("</body>", f"{signature_html}{unsub_html}</body>")
+    if not signature_placeholder_present:
+        html_body = html_body.replace("</body>", f"{signature_html}</body>")
+    html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
     msg["From"] = formataddr(
@@ -814,6 +890,8 @@ __all__ = [
     "MAX_EMAILS_PER_DAY",
     "TEMPLATE_MAP",
     "SIGNATURE_HTML",
+    "build_email_body",
+    "build_signature_text",
     "EMAIL_ADDRESS",
     "EMAIL_PASSWORD",
     "IMAP_FOLDER_FILE",

@@ -2252,6 +2252,22 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             )
                             sent_count += 1
                             await asyncio.sleep(1.5)
+                        except ValueError as e:
+                            if "Unresolved placeholders" in str(e):
+                                await context.bot.send_message(
+                                    chat_id=query.message.chat.id,
+                                    text=(
+                                        "⚠️ Шаблон содержит неподставленные плейсхолдеры "
+                                        "(например, {{BODY}} или {BODY}). "
+                                        "Исправьте шаблон и повторите отправку."
+                                    ),
+                                )
+                                try:
+                                    imap.logout()
+                                except Exception:
+                                    pass
+                                return
+                            errors.append(f"{email_addr} — {e}")
                         except Exception as e:
                             errors.append(f"{email_addr} — {e}")
                             code, msg = None, None
@@ -2475,6 +2491,22 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     sent_ok.append(email_addr)
                     await asyncio.sleep(1.5)
+                except ValueError as e:
+                    if "Unresolved placeholders" in str(e):
+                        await context.bot.send_message(
+                            chat_id=query.message.chat.id,
+                            text=(
+                                "⚠️ Шаблон содержит неподставленные плейсхолдеры "
+                                "(например, {{BODY}} или {BODY}). "
+                                "Исправьте шаблон и повторите отправку."
+                            ),
+                        )
+                        try:
+                            imap.logout()
+                        except Exception:
+                            pass
+                        return
+                    errors.append(f"{email_addr} — {e}")
                 except Exception as e:
                     errors.append(f"{email_addr} — {e}")
                     code, msg = None, None
