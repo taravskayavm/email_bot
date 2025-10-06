@@ -1639,7 +1639,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     data = (query.data or "").strip()
-    # безопасно для Python < 3.9
+    # Безопасно извлекаем код группы (поддержка <3.9 и дефенсив от шумных callback'ов)
     group_code = (data[len("group_"):] if data.startswith("group_") else data).strip()
     if not group_code:
         await query.answer(
@@ -1680,8 +1680,12 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not emails:
         fallback = context.user_data.get("last_parsed_emails")
         if isinstance(fallback, list):
-            emails = [str(item).strip() for item in fallback if str(item).strip()]
-            state.to_send = emails
+            emails = fallback
+            state.to_send = fallback
+    if not isinstance(emails, list):
+        emails = list(emails)
+    emails = [str(item).strip() for item in emails if str(item).strip()]
+    state.to_send = emails
     if not emails:
         await query.answer(
             cache_time=0,
@@ -1694,18 +1698,43 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     state.group = group_code
     state.template = template_path_str
+    markup = _build_group_markup(selected=group_code)
+    # Обновляем клавиатуру устойчиво: при любых проблемах — тихий фоллбэк в новый месседж
     try:
-        await query.edit_message_reply_markup(
-            reply_markup=_build_group_markup(selected=group_code)
-        )
+        await query.edit_message_reply_markup(reply_markup=markup)
     except BadRequest as exc:
         if "message is not modified" not in str(exc).lower():
-            raise
+            try:
+                await query.message.reply_text(
+                    "⬇️ Выберите направление рассылки:", reply_markup=markup
+                )
+            except Exception:
+                pass
+    except Exception:
+        try:
+            await query.message.reply_text(
+                "⬇️ Выберите направление рассылки:", reply_markup=markup
+            )
+        except Exception:
+            pass
     await query.answer(f"Выбрано: {label}")
     chat_id = query.message.chat.id
-    ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(emails)
-    )
+    # Гарантированно не роняемся на неожиданных проблемах подготовки очереди
+    try:
+        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+            messaging.prepare_mass_mailing(emails)
+        )
+    except Exception as exc:
+        logger.exception(
+            "prepare_mass_mailing failed",
+            extra={"event": "select_group", "code": group_code, "phase": "prepare"},
+        )
+        await query.message.reply_text(
+            "⚠️ Не удалось подготовить список к рассылке. "
+            "Обновите меню или повторите выбор направления.",
+            reply_markup=markup,
+        )
+        return
     log_mass_filter_digest(
         {
             **digest,
@@ -2132,7 +2161,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
-        # безопасно для Python < 3.9
+        # Безопасно извлекаем код группы (поддержка <3.9 и без падений на шумных коллбэках)
         group_code = (
             query.data[len("manual_group_") :]
             if (query.data or "").startswith("manual_group_")
