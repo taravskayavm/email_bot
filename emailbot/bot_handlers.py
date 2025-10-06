@@ -2215,45 +2215,74 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         sent_count = 0
         errors: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
-        with SmtpClient(
-            "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
-        ) as client:
-            for email_addr in to_send:
-                if cancel_event and cancel_event.is_set():
-                    break
-                try:
-                    token = send_email_with_sessions(
-                        client, imap, sent_folder, email_addr, template_path
-                    )
-                    log_sent_email(
-                        email_addr,
-                        group_code,
-                        "ok",
-                        chat_id,
-                        template_path,
-                        unsubscribe_token=token,
-                    )
-                    sent_count += 1
-                    await asyncio.sleep(1.5)
-                except Exception as e:
-                    errors.append(f"{email_addr} — {e}")
-                    code, msg = None, None
-                    if (
-                        hasattr(e, "recipients")
-                        and isinstance(e.recipients, dict)
-                        and email_addr in e.recipients
-                    ):
-                        code, msg = (
-                            e.recipients[email_addr][0],
-                            e.recipients[email_addr][1],
-                        )
-                    elif hasattr(e, "smtp_code"):
-                        code = getattr(e, "smtp_code", None)
-                        msg = getattr(e, "smtp_error", None)
-                    add_bounce(email_addr, code, str(msg or e), phase="send")
-                    log_sent_email(
-                        email_addr, group_code, "error", chat_id, template_path, str(e)
-                    )
+        host = os.getenv("SMTP_HOST", "smtp.mail.ru")
+        port = int(os.getenv("SMTP_PORT", "465"))
+        ssl_env = os.getenv("SMTP_SSL")
+        use_ssl = None if not ssl_env else (ssl_env == "1")
+        retries = int(os.getenv("SMTP_CONNECT_RETRIES", "3"))
+        backoff = float(os.getenv("SMTP_CONNECT_BACKOFF", "1.0"))
+
+        import smtplib  # наверху можно не поднимать, локальный импорт ок
+
+        attempt = 0
+        while True:
+            try:
+                with SmtpClient(
+                    host,
+                    port,
+                    messaging.EMAIL_ADDRESS,
+                    messaging.EMAIL_PASSWORD,
+                    use_ssl=use_ssl,
+                ) as client:
+                    while to_send:
+                        if cancel_event and cancel_event.is_set():
+                            break
+                        email_addr = to_send.pop(0)
+                        try:
+                            token = send_email_with_sessions(
+                                client, imap, sent_folder, email_addr, template_path
+                            )
+                            log_sent_email(
+                                email_addr,
+                                group_code,
+                                "ok",
+                                chat_id,
+                                template_path,
+                                unsubscribe_token=token,
+                            )
+                            sent_count += 1
+                            await asyncio.sleep(1.5)
+                        except Exception as e:
+                            errors.append(f"{email_addr} — {e}")
+                            code, msg = None, None
+                            if (
+                                hasattr(e, "recipients")
+                                and isinstance(e.recipients, dict)
+                                and email_addr in e.recipients
+                            ):
+                                code, msg = (
+                                    e.recipients[email_addr][0],
+                                    e.recipients[email_addr][1],
+                                )
+                            elif hasattr(e, "smtp_code"):
+                                code = getattr(e, "smtp_code", None)
+                                msg = getattr(e, "smtp_error", None)
+                            add_bounce(email_addr, code, str(msg or e), phase="send")
+                            log_sent_email(
+                                email_addr,
+                                group_code,
+                                "error",
+                                chat_id,
+                                template_path,
+                                str(e),
+                            )
+                break  # успешно отработали без коннект-ошибок
+            except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as e:
+                attempt += 1
+                if attempt >= retries:
+                    raise
+                await asyncio.sleep(backoff)
+                backoff *= 2
         imap.logout()
         if cancel_event and cancel_event.is_set():
             await query.message.reply_text(

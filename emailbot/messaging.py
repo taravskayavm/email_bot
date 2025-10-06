@@ -169,8 +169,16 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
     for attempt in range(max_tries):
         _rate_limit_domain(recipient)
         try:
+            host = os.getenv("SMTP_HOST", "smtp.mail.ru")
+            port = int(os.getenv("SMTP_PORT", "465"))
+            ssl_env = os.getenv("SMTP_SSL")  # None/"" -> авто по порту
+            use_ssl = None if not ssl_env else (ssl_env == "1")
             with SmtpClient(
-                "smtp.mail.ru", 465, EMAIL_ADDRESS, EMAIL_PASSWORD
+                host,
+                port,
+                EMAIL_ADDRESS,
+                EMAIL_PASSWORD,
+                use_ssl=use_ssl,
             ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
