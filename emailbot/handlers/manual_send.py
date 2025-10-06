@@ -501,6 +501,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         fixed_from=fixed_map.get(email_addr),
                         group_title=template_label,
                         group_key=group_code,
+                        override_180d=(context.chat_data.get("manual_send_mode") == "all"),
                     )
                     if outcome == SendOutcome.SENT:
                         log_sent_email(

@@ -12,7 +12,7 @@ from email.utils import getaddresses
 from smtplib import SMTPResponseException
 
 from emailbot.audit import write_audit_drop
-from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown
+from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown, mark_sent as cooldown_mark_sent
 from emailbot.history_service import (
     cancel_send_attempt,
     mark_sent,
@@ -219,6 +219,10 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                         run_id=run_id,
                         smtp_result="ok",
                     )
+                    try:
+                        cooldown_mark_sent(addr_norm)
+                    except Exception:
+                        logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
             except Exception:
                 logger.warning("history_registry_record_failed", exc_info=True)
 

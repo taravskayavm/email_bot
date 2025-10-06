@@ -29,7 +29,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", 180)
+COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", _env_int("SEND_COOLDOWN_DAYS", 180))
 _DEFAULT_SEND_STATS_PATH = expand_path("var/send_stats.jsonl")
 SEND_STATS_PATH = os.getenv("SEND_STATS_PATH", str(_DEFAULT_SEND_STATS_PATH))
 APPEND_TO_SENT = os.getenv("APPEND_TO_SENT", "1") == "1"
@@ -153,7 +153,14 @@ def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
 def _cooldown_days(days: Optional[int]) -> int:
     if days is not None:
         return days
-    return _env_int("COOLDOWN_DAYS", COOLDOWN_DAYS)
+    # приоритет COOLDOWN_DAYS, но поддерживаем SEND_COOLDOWN_DAYS для совместимости
+    val = os.getenv("COOLDOWN_DAYS")
+    if val is not None and str(val).strip():
+        try:
+            return int(str(val).strip())
+        except Exception:
+            pass
+    return _env_int("SEND_COOLDOWN_DAYS", COOLDOWN_DAYS)
 
 
 def _append_to_sent_enabled() -> bool:

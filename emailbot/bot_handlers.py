@@ -1924,19 +1924,32 @@ async def _send_batch_with_sessions(
                         break
                     email_addr = to_send.pop(0)
                     try:
-                        token = send_email_with_sessions(
+                        outcome, token = send_email_with_sessions(
                             client, imap, sent_folder, email_addr, template_path
                         )
-                        log_sent_email(
-                            email_addr,
-                            group_code,
-                            "ok",
-                            chat_id,
-                            template_path,
-                            unsubscribe_token=token,
-                        )
-                        sent_count += 1
-                        await asyncio.sleep(1.5)
+                        if outcome == messaging.SendOutcome.SENT:
+                            log_sent_email(
+                                email_addr,
+                                group_code,
+                                "ok",
+                                chat_id,
+                                template_path,
+                                unsubscribe_token=token,
+                            )
+                            sent_count += 1
+                            await asyncio.sleep(1.5)
+                        elif outcome == messaging.SendOutcome.COOLDOWN:
+                            errors.append(
+                                f"{email_addr} — пропущено (кулдаун 180 дней)"
+                            )
+                        elif outcome == messaging.SendOutcome.BLOCKED:
+                            errors.append(
+                                f"{email_addr} — пропущено (блок-лист)"
+                            )
+                        else:
+                            errors.append(
+                                f"{email_addr} — не отправлено (ошибка отправки)"
+                            )
                     except messaging.TemplateRenderError as err:
                         missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                         await context.bot.send_message(
@@ -2551,19 +2564,32 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             break
                         email_addr = to_send.pop(0)
                         try:
-                            token = send_email_with_sessions(
+                            outcome, token = send_email_with_sessions(
                                 client, imap, sent_folder, email_addr, template_path
                             )
-                            log_sent_email(
-                                email_addr,
-                                group_code,
-                                "ok",
-                                chat_id,
-                                template_path,
-                                unsubscribe_token=token,
-                            )
-                            sent_count += 1
-                            await asyncio.sleep(1.5)
+                            if outcome == messaging.SendOutcome.SENT:
+                                log_sent_email(
+                                    email_addr,
+                                    group_code,
+                                    "ok",
+                                    chat_id,
+                                    template_path,
+                                    unsubscribe_token=token,
+                                )
+                                sent_count += 1
+                                await asyncio.sleep(1.5)
+                            elif outcome == messaging.SendOutcome.COOLDOWN:
+                                errors.append(
+                                    f"{email_addr} — пропущено (кулдаун 180 дней)"
+                                )
+                            elif outcome == messaging.SendOutcome.BLOCKED:
+                                errors.append(
+                                    f"{email_addr} — пропущено (блок-лист)"
+                                )
+                            else:
+                                errors.append(
+                                    f"{email_addr} — не отправлено (ошибка отправки)"
+                                )
                         except messaging.TemplateRenderError as err:
                             missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                             await context.bot.send_message(
@@ -2791,19 +2817,30 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    token = send_email_with_sessions(
+                    outcome, token = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
-                    log_sent_email(
-                        email_addr,
-                        group_code,
-                        "ok",
-                        chat_id,
-                        template_path,
-                        unsubscribe_token=token,
-                    )
-                    sent_ok.append(email_addr)
-                    await asyncio.sleep(1.5)
+                    if outcome == messaging.SendOutcome.SENT:
+                        log_sent_email(
+                            email_addr,
+                            group_code,
+                            "ok",
+                            chat_id,
+                            template_path,
+                            unsubscribe_token=token,
+                        )
+                        sent_ok.append(email_addr)
+                        await asyncio.sleep(1.5)
+                    elif outcome == messaging.SendOutcome.COOLDOWN:
+                        errors.append(f"{email_addr} — пропущено (кулдаун 180 дней)")
+                        if email_addr not in skipped_recent:
+                            skipped_recent.append(email_addr)
+                    elif outcome == messaging.SendOutcome.BLOCKED:
+                        errors.append(f"{email_addr} — пропущено (блок-лист)")
+                        if email_addr not in blocked_invalid:
+                            blocked_invalid.append(email_addr)
+                    else:
+                        errors.append(f"{email_addr} — не отправлено (ошибка отправки)")
                 except messaging.TemplateRenderError as err:
                     missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                     await context.bot.send_message(
