@@ -14,6 +14,7 @@ import time
 import secrets
 import smtplib
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
@@ -114,6 +115,22 @@ _sent_idempotency: Set[str] = set()
 
 _RE_JINJA = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
 _RE_FMT = re.compile(r"\{([A-Z0-9_]+)\}")
+
+
+@dataclass
+class TemplateRenderError(Exception):
+    path: str
+    missing: set[str]
+    found: set[str]
+
+    def __str__(self) -> str:
+        return f"Unresolved placeholders: {sorted(self.missing)} in {self.path}"
+
+
+def _find_placeholders(text: str) -> set[str]:
+    keys = {match.group(1) for match in _RE_JINJA.finditer(text)}
+    keys |= {match.group(1) for match in _RE_FMT.finditer(text)}
+    return keys
 
 
 def _ensure_sent_log_schema(path: str) -> None:
@@ -236,15 +253,34 @@ def build_signature_text() -> str:
 def build_email_body(template_path: str, variables: Optional[dict[str, object]]) -> tuple[str, str]:
     """Return rendered text and HTML bodies for a template file."""
 
-    tpl = Path(template_path).read_text(encoding="utf-8")
+    path = Path(template_path)
+    tpl = path.read_text(encoding="utf-8")
 
     ctx: dict[str, object] = dict(variables or {})
     if "SIGNATURE" not in ctx:
         ctx["SIGNATURE"] = build_signature_text()
 
+    found_keys = _find_placeholders(tpl)
+    if "BODY" in found_keys and "BODY" not in ctx:
+        body_candidates = [
+            path.with_name(path.stem + ".body" + path.suffix),
+            path.with_suffix(".body.txt"),
+            path.parent / "body" / path.name,
+        ]
+        for body_path in body_candidates:
+            if body_path.exists():
+                try:
+                    ctx["BODY"] = body_path.read_text(encoding="utf-8").strip()
+                    logger.info("Loaded BODY from %s", body_path)
+                    break
+                except Exception as exc:
+                    logger.warning("Can't read BODY file %s: %s", body_path, exc)
+
     text_body = _render_placeholders(tpl, ctx)
     if _has_unresolved_placeholders(text_body):
-        raise ValueError("Unresolved placeholders in template")
+        unresolved = _find_placeholders(text_body)
+        missing = {key for key in unresolved if key not in ctx}
+        raise TemplateRenderError(str(path), missing=missing, found=found_keys)
 
     html_body = text_to_html(text_body)
     return text_body, html_body
@@ -1040,6 +1076,7 @@ __all__ = [
     "MAX_EMAILS_PER_DAY",
     "TEMPLATE_MAP",
     "SIGNATURE_HTML",
+    "TemplateRenderError",
     "build_email_body",
     "build_signature_text",
     "EMAIL_ADDRESS",
