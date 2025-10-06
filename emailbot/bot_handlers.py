@@ -48,6 +48,7 @@ from . import mass_state
 from .settings_store import DEFAULTS
 
 from utils.email_clean import sanitize_email
+from services.templates import get_template, get_template_label
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -159,6 +160,51 @@ ADMIN_IDS = {
 PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
 PREVIEW_FOREIGN = 6
+
+
+def _split_cb(data: str) -> tuple[str, str]:
+    """Safely split callback data into action and payload parts."""
+
+    if not isinstance(data, str):
+        return "", ""
+    parts = data.split(":", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return parts[0], ""
+
+
+async def _safe_edit_message(target, *, text: str | None = None, reply_markup=None, **kwargs):
+    """Edit Telegram messages while ignoring harmless BadRequest errors."""
+
+    try:
+        if text is not None:
+            params = dict(kwargs)
+            params["text"] = text
+            if reply_markup is not None:
+                params["reply_markup"] = reply_markup
+            if hasattr(target, "edit_message_text"):
+                return await target.edit_message_text(**params)
+            if hasattr(target, "edit_text"):
+                return await target.edit_text(**params)
+        elif reply_markup is not None:
+            params = dict(kwargs)
+            params["reply_markup"] = reply_markup
+            if hasattr(target, "edit_message_reply_markup"):
+                return await target.edit_message_reply_markup(**params)
+            if hasattr(target, "edit_reply_markup"):
+                return await target.edit_reply_markup(**params)
+        else:
+            if hasattr(target, "edit_message_text"):
+                return await target.edit_message_text(**kwargs)
+            if hasattr(target, "edit_text"):
+                return await target.edit_text(**kwargs)
+    except BadRequest as exc:  # pragma: no cover - defensive branch
+        lowered = str(exc).lower()
+        if "message is not modified" in lowered or "message to edit not found" in lowered:
+            return None
+        raise
+    return None
+
 
 TECH_PATTERNS = [
     "noreply",
@@ -421,10 +467,14 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     settings.load()
 
-    data = query.data or ""
+    raw = (query.data or "").strip()
+    action, payload = _split_cb(raw)
     hint = ""
     try:
-        if data == "feat:strict:toggle":
+        if action != "feat":
+            raise ValueError
+        section, argument = _split_cb(payload)
+        if section == "strict" and argument == "toggle":
             settings.STRICT_OBFUSCATION = not settings.STRICT_OBFUSCATION
             hint = (
                 "🛡️ Строгий режим включён. Парсер принимает обфускации только с явными “at/dot”. "
@@ -432,29 +482,31 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if settings.STRICT_OBFUSCATION
                 else "⚠️ Строгий режим выключен. Парсер будет пытаться восстановить адреса из менее явных обфускаций. Возможен рост ложных совпадений на «число + домен»."
             )
-        elif data.startswith("feat:radius:"):
-            n = int(data.rsplit(":", 1)[-1])
+        elif section == "radius":
+            if not argument:
+                raise ValueError
+            n = int(argument)
             if n not in {0, 1, 2}:
                 raise ValueError
             settings.FOOTNOTE_RADIUS_PAGES = n
             hint = (
                 f"📝 Радиус сносок: {n}. Дубликаты «урезанных» адресов будут склеиваться в пределах той же страницы и ±{n} стр. того же файла."
             )
-        elif data == "feat:layout:toggle":
+        elif section == "layout" and argument == "toggle":
             settings.PDF_LAYOUT_AWARE = not settings.PDF_LAYOUT_AWARE
             hint = (
                 "📄 Учёт макета PDF включён. Надстрочные (сноски) обрабатываются точнее. Может работать медленнее на больших PDF."
                 if settings.PDF_LAYOUT_AWARE
                 else "📄 Учёт макета PDF выключен. Используется стандартное извлечение текста."
             )
-        elif data == "feat:ocr:toggle":
+        elif section == "ocr" and argument == "toggle":
             settings.ENABLE_OCR = not settings.ENABLE_OCR
             hint = (
                 "🔍 OCR включён. Будем распознавать e-mail в скан-PDF. Анализ станет медленнее. Ограничения: до 10 страниц, таймаут 30 сек."
                 if settings.ENABLE_OCR
                 else "🔍 OCR выключен. Скан-PDF без текста пропускаются без распознавания."
             )
-        elif data == "feat:reset:defaults":
+        elif section == "reset" and argument == "defaults":
             settings.STRICT_OBFUSCATION = DEFAULTS["STRICT_OBFUSCATION"]
             settings.FOOTNOTE_RADIUS_PAGES = DEFAULTS["FOOTNOTE_RADIUS_PAGES"]
             settings.PDF_LAYOUT_AWARE = DEFAULTS["PDF_LAYOUT_AWARE"]
@@ -528,8 +580,8 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     await query.answer()
-    await query.edit_message_text(
-        f"{_status()}\n\n{hint}\n\n{_doc()}", reply_markup=_keyboard()
+    await _safe_edit_message(
+        query, text=f"{_status()}\n\n{hint}\n\n{_doc()}", reply_markup=_keyboard()
     )
 
 
@@ -747,15 +799,26 @@ async def _show_imap_page(update_or_query, context, page: int) -> None:
     if isinstance(update_or_query, Update):
         await update_or_query.message.reply_text(text, reply_markup=markup)
     else:
-        await update_or_query.message.edit_text(text, reply_markup=markup)
+        await _safe_edit_message(
+            update_or_query.message, text=text, reply_markup=markup
+        )
 
 
 async def imap_page_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     query = update.callback_query
+    data = (query.data or "").strip()
+    action, payload = _split_cb(data)
+    if action != "imap_page" or not payload:
+        await query.answer()
+        return
+    try:
+        page = int(payload)
+    except ValueError:
+        await query.answer(cache_time=0, text="Некорректная страница.", show_alert=True)
+        return
     await query.answer()
-    page = int(query.data.split(":")[1])
     await _show_imap_page(query, context, page)
 
 
@@ -763,8 +826,13 @@ async def choose_imap_folder(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     query = update.callback_query
+    data = (query.data or "").strip()
+    action, payload = _split_cb(data)
+    if action != "imap_choose" or not payload:
+        await query.answer(cache_time=0, text="Некорректный выбор папки.", show_alert=True)
+        return
     await query.answer()
-    encoded = query.data.split(":", 1)[1]
+    encoded = payload
     folder = urllib.parse.unquote(encoded)
     with open(messaging.IMAP_FOLDER_FILE, "w", encoding="utf-8") as f:
         f.write(folder)
@@ -850,7 +918,9 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "year": "Отчёт за год",
     }
     text = get_report(period)
-    await query.edit_message_text(f"📊 {mapping.get(period, period)}:\n{text}")
+    await _safe_edit_message(
+        query, text=f"📊 {mapping.get(period, period)}:\n{text}"
+    )
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1245,8 +1315,20 @@ async def bulk_edit_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not ENABLE_INLINE_EMAIL_EDITOR:
         await query.answer()
         return
+    data = (query.data or "").strip()
+    action, payload = _split_cb(data)
+    if action != "bulk":
+        await query.answer()
+        return
+    section, rest = _split_cb(payload)
+    if section != "edit":
+        await query.answer()
+        return
+    op, target = _split_cb(rest)
+    if op != "del" or not target:
+        await query.answer(cache_time=0, text="Некорректная команда.")
+        return
     await query.answer("Удалено")
-    target = query.data.split("bulk:edit:del:", 1)[-1]
     working = [
         item for item in context.user_data.get("bulk_edit_working", []) if item != target
     ]
@@ -1268,7 +1350,16 @@ async def bulk_edit_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         return
     await query.answer()
-    raw_page = query.data.rsplit(":", 1)[-1]
+    data = (query.data or "").strip()
+    action, payload = _split_cb(data)
+    if action != "bulk":
+        return
+    section, rest = _split_cb(payload)
+    if section != "edit":
+        return
+    op, raw_page = _split_cb(rest)
+    if op != "page" or not raw_page:
+        return
     try:
         page = int(raw_page)
     except ValueError:
@@ -1526,15 +1617,40 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle group selection and prepare messages for sending."""
 
     query = update.callback_query
-    await query.answer()
-    data = (query.data or "")
-    group_code = data.removeprefix("group_")
-    template_path = TEMPLATE_MAP.get(group_code)
-    if not template_path:
-        await query.edit_message_text(
-            "Неизвестное направление. Обновите меню и попробуйте снова."
+    data = (query.data or "").strip()
+    group_code = data.removeprefix("group_").strip()
+    if not group_code:
+        await query.answer(
+            cache_time=0,
+            text="Некорректное направление. Обновите меню и попробуйте снова.",
+            show_alert=True,
         )
         return
+    template_info = get_template(group_code)
+    template_path = None
+    if template_info:
+        raw_path = template_info.get("path")
+        if isinstance(raw_path, str) and raw_path.strip():
+            template_path = raw_path.strip()
+    if not template_path:
+        template_path = TEMPLATE_MAP.get(group_code)
+    if not template_path:
+        await query.answer(
+            cache_time=0,
+            text="Шаблон не найден. Обновите меню и попробуйте снова.",
+            show_alert=True,
+        )
+        return
+    path_obj = Path(template_path)
+    if not path_obj.exists():
+        await query.answer(
+            cache_time=0,
+            text="Файл шаблона не найден. Обновите меню и попробуйте снова.",
+            show_alert=True,
+        )
+        return
+    template_label = get_template_label(group_code) or group_code
+    template_path_str = str(path_obj)
     state = get_state(context)
     # Нормализуем источник адресов после возможных правок/предпросмотра:
     emails = state.to_send or []
@@ -1544,13 +1660,18 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             emails = [str(item).strip() for item in fallback if str(item).strip()]
             state.to_send = emails
     if not emails:
-        await query.edit_message_text(
-            "Список адресов пуст. Сначала выполните парсинг или внесите правки, "
-            "затем повторите выбор направления."
+        await query.answer(
+            cache_time=0,
+            text=(
+                "Список адресов пуст. Сначала выполните парсинг или внесите правки, "
+                "затем повторите выбор направления."
+            ),
+            show_alert=True,
         )
         return
+    await query.answer()
     state.group = group_code
-    state.template = template_path
+    state.template = template_path_str
     chat_id = query.message.chat.id
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
         messaging.prepare_mass_mailing(emails)
@@ -1561,6 +1682,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "batch_id": context.chat_data.get("batch_id"),
             "chat_id": chat_id,
             "entry_url": context.chat_data.get("entry_url"),
+            "template_label": template_label,
         }
     )
     state.to_send = ready
@@ -1568,7 +1690,8 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         chat_id,
         {
             "group": group_code,
-            "template": template_path,
+            "template": template_path_str,
+            "template_label": template_label,
             "pending": ready,
             "blocked_foreign": blocked_foreign,
             "blocked_invalid": blocked_invalid,
