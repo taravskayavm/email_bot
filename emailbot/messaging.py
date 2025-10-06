@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional, Set
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
@@ -114,6 +114,75 @@ _sent_idempotency: Set[str] = set()
 
 _RE_JINJA = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
 _RE_FMT = re.compile(r"\{([A-Z0-9_]+)\}")
+
+
+def _ensure_sent_log_schema(path: str) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists() or p.stat().st_size == 0:
+        with p.open("w", encoding="utf-8", newline="") as f:
+            f.write("ts,email,subject,message_id\n")
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        cleaned = value.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned)
+    except Exception:
+        return None
+
+
+def _load_recent_sent(days: int) -> set[str]:
+    if days <= 0:
+        return set()
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    recent: set[str] = set()
+    try:
+        _ensure_sent_log_schema(LOG_FILE)
+        with open(LOG_FILE, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                email_raw = (row.get("email") or row.get("key") or "").strip().lower()
+                ts = _parse_ts(
+                    row.get("ts")
+                    or row.get("time")
+                    or row.get("sent_at")
+                    or row.get("last_sent_at")
+                )
+                if not email_raw or not ts or ts < cutoff:
+                    continue
+                try:
+                    email_norm = normalize_email(email_raw)
+                except Exception:
+                    email_norm = email_raw
+                recent.add(email_norm)
+    except FileNotFoundError:
+        return set()
+    except Exception as exc:
+        logger.warning("recent-sent load failed: %s", exc)
+    return recent
+
+
+def _validate_email_basic(email_value: str) -> bool:
+    return bool(EMAIL_RE.fullmatch(email_value))
+
+
+def _sanitize_batch(emails: Iterable[str]) -> tuple[list[str], int]:
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    dup_skipped = 0
+    for raw in emails or []:
+        em = (str(raw) or "").strip().strip(",;").lower()
+        if not em:
+            continue
+        if em in seen:
+            dup_skipped += 1
+            continue
+        seen.add(em)
+        sanitized.append(em)
+    return sanitized, dup_skipped
 
 
 def _render_placeholders(text: str, ctx: dict[str, object]) -> str:
@@ -751,72 +820,128 @@ def count_sent_today() -> int:
     return len(get_sent_today())
 
 
-def prepare_mass_mailing(emails: list[str]):
-    """Apply all mass-mailing filters and return ready e-mails.
+def prepare_mass_mailing(
+    emails: list[str],
+    group: str | None = None,
+    chat_id: int | None = None,
+) -> tuple[list[str], list[str], list[str], list[str], dict[str, object]]:
+    """Filter ``emails`` for manual/preview sends.
 
-    Returns a tuple ``(ready, blocked_foreign, blocked_invalid, skipped_recent, digest)``
-    where ``ready`` is the list of addresses allowed to send, ``blocked_foreign`` are
-    addresses filtered due to foreign TLDs, ``blocked_invalid`` – suppressed or
-    blocked addresses, and ``skipped_recent`` – addresses found in the 180 day
-    history. ``digest`` contains counters for logging.
+    The function never raises exceptions to the caller. Instead it returns empty
+    results along with a digest containing an ``"error"`` key when something goes
+    wrong. The caller is expected to present a friendly message to the user.
     """
 
-    blocked = get_blocked_emails()
-    sent_today = get_sent_today()
-    lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+    try:
+        normalized, dup_skipped = _sanitize_batch(emails)
+        if not normalized:
+            return [], [], [], [], {"total": 0, "input_total": 0}
 
-    blocked_foreign: list[str] = []
-    blocked_invalid: list[str] = []
-    skipped_recent: list[str] = []
+        blocked_invalid: list[str] = []
+        blocked_foreign: list[str] = []
+        skipped_recent: list[str] = []
 
-    queue: list[str] = []
-    for e in emails:
-        if e in blocked or e in sent_today:
-            continue
-        if is_foreign(e):
-            blocked_foreign.append(e)
-        else:
-            queue.append(e)
+        invalid_basic = [addr for addr in normalized if not _validate_email_basic(addr)]
+        candidates = [addr for addr in normalized if addr not in invalid_basic]
 
-    queue2: list[str] = []
-    for e in queue:
-        if is_suppressed(e):
-            blocked_invalid.append(e)
-        else:
-            queue2.append(e)
+        blocked_set: set[str] = set()
+        try:
+            blocked_set = {normalize_email(e) for e in get_blocked_emails()}
+        except Exception as exc:
+            logger.warning("blocked list load failed: %s", exc)
 
-    queue3: list[str] = []
-    for e in queue2:
-        if was_sent_within(e, days=lookup_days):
-            skipped_recent.append(e)
-        else:
-            queue3.append(e)
+        queue_after_block: list[str] = []
+        for addr in candidates:
+            norm = normalize_email(addr)
+            if blocked_set and norm in blocked_set:
+                blocked_invalid.append(addr)
+                continue
+            try:
+                if is_suppressed(addr):
+                    blocked_invalid.append(addr)
+                    continue
+            except Exception as exc:
+                logger.warning("suppression check failed for %s: %s", addr, exc)
+            queue_after_block.append(addr)
 
-    deduped: list[str] = []
-    seen: set[str] = set()
-    dup_skipped = 0
-    for e in queue3:
-        norm = normalize_email(e)
-        if norm in seen:
-            dup_skipped += 1
-        else:
-            seen.add(norm)
-            deduped.append(e)
+        queue_after_foreign: list[str] = []
+        block_foreign_enabled = os.getenv("FOREIGN_BLOCK", "1") == "1"
+        for addr in queue_after_block:
+            try:
+                if block_foreign_enabled and is_foreign(addr):
+                    blocked_foreign.append(addr)
+                    continue
+            except Exception as exc:
+                logger.warning("foreign check failed for %s: %s", addr, exc)
+            queue_after_foreign.append(addr)
 
-    digest = {
-        "input_total": len(emails),
-        "after_suppress": len(queue2),
-        "foreign_blocked": len(blocked_foreign),
-        "after_180d": len(queue3),
-        "sent_planned": len(deduped),
-        "skipped_by_dup_in_batch": dup_skipped,
-        "unique_ready_to_send": len(deduped),
-        "skipped_suppress": len(blocked_invalid),
-        "skipped_180d": len(skipped_recent),
-        "skipped_foreign": len(blocked_foreign),
-    }
+        raw_lookback = os.getenv("HALF_YEAR_DAYS", os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+        try:
+            lookback_days = int(raw_lookback)
+        except (TypeError, ValueError):
+            lookback_days = 180
+        if lookback_days < 0:
+            lookback_days = 0
+        recent = _load_recent_sent(lookback_days)
 
-    return deduped, blocked_foreign, blocked_invalid, skipped_recent, digest
+        ready: list[str] = []
+        for addr in queue_after_foreign:
+            blocked_recent = False
+            try:
+                if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
+                    skipped_recent.append(addr)
+                    blocked_recent = True
+            except Exception as exc:
+                logger.warning("history lookup failed for %s: %s", addr, exc)
+            if blocked_recent:
+                continue
+            if lookback_days > 0:
+                try:
+                    canon = normalize_email(addr)
+                except Exception:
+                    canon = addr
+            else:
+                canon = addr
+            if lookback_days > 0 and canon in recent:
+                skipped_recent.append(addr)
+                continue
+            ready.append(addr)
+
+        combined_invalid: list[str] = []
+        seen_invalid: set[str] = set()
+        for addr in blocked_invalid + invalid_basic:
+            if addr in seen_invalid:
+                continue
+            seen_invalid.add(addr)
+            combined_invalid.append(addr)
+        blocked_invalid = combined_invalid
+
+        digest = {
+            "total": len(normalized),
+            "ready": len(ready),
+            "invalid": len(invalid_basic),
+            "blocked_foreign": len(blocked_foreign),
+            "blocked_invalid": len(blocked_invalid),
+            "skipped_recent": len(skipped_recent),
+            "input_total": len(normalized),
+            "after_suppress": len(queue_after_block),
+            "foreign_blocked": len(blocked_foreign),
+            "after_180d": len(queue_after_foreign),
+            "sent_planned": len(ready),
+            "skipped_by_dup_in_batch": dup_skipped,
+            "unique_ready_to_send": len(ready),
+            "skipped_suppress": len(blocked_invalid),
+            "skipped_180d": len(skipped_recent),
+            "skipped_foreign": len(blocked_foreign),
+        }
+        return ready, blocked_foreign, blocked_invalid, skipped_recent, digest
+    except Exception as exc:
+        logger.exception("prepare_mass_mailing hard-fail: %s", exc)
+        return [], [], [], [], {
+            "total": 0,
+            "input_total": 0,
+            "error": str(exc),
+        }
 
 
 def sync_log_with_imap() -> Dict[str, int]:
