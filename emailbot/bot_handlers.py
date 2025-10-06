@@ -1814,6 +1814,13 @@ async def route_text_message(
         return
 
     text = (message.text or "").strip()
+    if (
+        not text
+        or text in {"✉️ Ручная", "Ручная"}
+        or text.startswith("✉️")
+    ):
+        raise ApplicationHandlerStop
+
     emails = messaging.parse_emails_from_text(text)
     if not emails:
         await message.reply_text(
@@ -2024,17 +2031,18 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.chat_data["manual_group"] = group_code
 
-    try:
-        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-            messaging.prepare_mass_mailing(list(emails))
-        )
-    except Exception:
-        logger.exception(
-            "prepare_mass_mailing failed",
+    ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+        messaging.prepare_mass_mailing(list(emails))
+    )
+    if digest.get("error"):
+        logger.error(
+            "prepare_mass_mailing failed (manual): %s",
+            digest["error"],
             extra={"event": "manual", "code": group_code},
         )
         await query.message.reply_text(
-            "⚠️ Не удалось подготовить список к ручной рассылке. Попробуйте ещё раз."
+            "⚠️ Не удалось подготовить список к ручной рассылке (проблема с журналом/данными). "
+            "Попробуйте ещё раз или выберите другое направление."
         )
         return
 
