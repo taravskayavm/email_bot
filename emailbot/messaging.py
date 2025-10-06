@@ -42,9 +42,11 @@ logger = logging.getLogger(__name__)
 
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
+from utils.paths import expand_path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-LOG_FILE = str(Path("/mnt/data") / "sent_log.csv")
+# Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
+LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 
