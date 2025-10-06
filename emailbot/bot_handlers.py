@@ -1527,9 +1527,16 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     await query.answer()
-    group_code = query.data.removeprefix("group_")
-    template_path = TEMPLATE_MAP[group_code]
+    data = (query.data or "")
+    group_code = data.removeprefix("group_")
+    template_path = TEMPLATE_MAP.get(group_code)
+    if not template_path:
+        await query.edit_message_text(
+            "Неизвестное направление. Обновите меню и попробуйте снова."
+        )
+        return
     state = get_state(context)
+    # Нормализуем источник адресов после возможных правок/предпросмотра:
     emails = state.to_send or []
     if not emails:
         fallback = context.user_data.get("last_parsed_emails")
@@ -1538,7 +1545,8 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             state.to_send = emails
     if not emails:
         await query.edit_message_text(
-            "Список адресов пуст. Сначала выполните парсинг или внесите правки, затем повторите выбор направления."
+            "Список адресов пуст. Сначала выполните парсинг или внесите правки, "
+            "затем повторите выбор направления."
         )
         return
     state.group = group_code
