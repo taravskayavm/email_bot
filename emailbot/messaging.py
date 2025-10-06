@@ -15,6 +15,7 @@ import secrets
 import smtplib
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+from enum import Enum
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
@@ -70,6 +71,7 @@ def parse_emails_from_text(text: str) -> list[str]:
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
 from utils.paths import expand_path
+from emailbot.services.cooldown import should_skip_by_cooldown, mark_sent as cooldown_mark_sent
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 # Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
@@ -88,6 +90,13 @@ TEMPLATE_MAP = {
     "psychology": os.path.join(TEMPLATES_DIR, "psychology.html"),
     "beauty": os.path.join(TEMPLATES_DIR, "beauty.html"),
 }
+
+
+class SendOutcome(Enum):
+    SENT = "sent"
+    COOLDOWN = "cooldown"
+    BLOCKED = "blocked"
+    ERROR = "error"
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -451,7 +460,13 @@ def save_to_sent_folder(
                 log_error(f"save_to_sent_folder logout: {e}")
 
 
-def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMessage, str]:
+def build_message(
+    to_addr: str,
+    html_path: str,
+    subject: str,
+    *,
+    override_180d: bool = False,
+) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
@@ -491,6 +506,9 @@ def build_message(to_addr: str, html_path: str, subject: str) -> tuple[EmailMess
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    if override_180d:
+        # Явный, осознанный обход кулдауна (для ручного режима "всем")
+        msg["X-EBOT-Override-180d"] = "1"
     logo_path = SCRIPT_DIR / "Logo.png"
     if inline_logo and logo_path.exists():
         try:
@@ -510,16 +528,36 @@ def send_email(
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     notify_func=None,
     batch_id: str | None = None,
-):
+    *,
+    override_180d: bool = False,
+) -> SendOutcome:
     try:
+        if not override_180d:
+            try:
+                skip, reason = should_skip_by_cooldown(recipient)
+                if skip:
+                    logger.info("Cooldown skip for %s: %s", recipient, reason)
+                    return SendOutcome.COOLDOWN
+            except Exception:
+                logger.exception("cooldown check failed")
+                return SendOutcome.ERROR
         if not _register_send(recipient, batch_id):
             logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-            return ""
-        msg, token = build_message(recipient, html_path, subject)
+            return SendOutcome.COOLDOWN
+        msg, _token = build_message(
+            recipient,
+            html_path,
+            subject,
+            override_180d=override_180d,
+        )
         raw = msg.as_string()
         send_raw_smtp_with_retry(raw, recipient, max_tries=3)
         save_to_sent_folder(raw)
-        return token
+        try:
+            cooldown_mark_sent(recipient)
+        except Exception:
+            logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+        return SendOutcome.SENT
     except Exception as e:
         log_error(f"send_email: {recipient}: {e}")
         if notify_func:
@@ -527,7 +565,8 @@ def send_email(
         raise
 
 
-async def async_send_email(recipient: str, html_path: str) -> str:
+
+async def async_send_email(recipient: str, html_path: str) -> SendOutcome:
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, send_email, recipient, html_path)
@@ -565,15 +604,60 @@ def send_email_with_sessions(
     html_path: str,
     subject: str = "Издательство Лань приглашает к сотрудничеству",
     batch_id: str | None = None,
-):
+    *,
+    # параметры, которые уже пробрасывает manual_send.py — принимаем их,
+    # чтобы не падать и в нужный момент использовать при логе
+    fixed_from: str | None = None,
+    group_title: str | None = None,
+    group_key: str | None = None,
+    override_180d: bool = False,
+) -> tuple[SendOutcome, str]:
+    # 0) Проверка кулдауна (если не запросили явный override)
+    if not override_180d:
+        try:
+            skip, reason = should_skip_by_cooldown(recipient)
+            if skip:
+                logger.info("Cooldown skip for %s: %s", recipient, reason)
+                return SendOutcome.COOLDOWN, ""
+        except Exception:
+            # Не роняем поток из-за побочного сервиса — fail-open запрещён,
+            # поэтому при ошибке проверку считаем «нет допуска»
+            logger.exception("cooldown check failed")
+            return SendOutcome.ERROR, ""
+
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return ""
-    msg, token = build_message(recipient, html_path, subject)
-    raw = msg.as_string()
-    client.send(EMAIL_ADDRESS, recipient, raw)
-    save_to_sent_folder(raw, imap=imap, folder=sent_folder)
-    return token
+        return SendOutcome.COOLDOWN, ""
+
+    # 1) Формируем письмо
+    msg, token = build_message(
+        recipient,
+        html_path,
+        subject,
+        override_180d=override_180d,
+    )
+    if fixed_from:
+        try:
+            msg.replace_header("From", fixed_from)
+        except KeyError:
+            msg["From"] = fixed_from
+
+    # 2) Отправка
+    try:
+        raw = msg.as_string()
+        client.send(EMAIL_ADDRESS, recipient, raw)
+        save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+    except Exception:
+        logger.exception("SMTP send failed for %s", recipient)
+        return SendOutcome.ERROR, ""
+
+    # 3) Зафиксировать отправку для кулдауна
+    try:
+        cooldown_mark_sent(recipient)
+    except Exception:
+        logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+
+    return SendOutcome.SENT, token
 
 
 def process_unsubscribe_requests():
@@ -1070,6 +1154,7 @@ def check_env_vars():
 
 
 __all__ = [
+    "SendOutcome",
     "DOWNLOAD_DIR",
     "LOG_FILE",
     "BLOCKED_FILE",
