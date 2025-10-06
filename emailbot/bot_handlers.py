@@ -281,12 +281,23 @@ def _unique_preserve_order(items: Iterable[str]) -> list[str]:
 def _build_group_markup(
     prefix: str = "group_", *, selected: str | None = None
 ) -> InlineKeyboardMarkup:
+    icons = {
+        "bioinformatics": "🧬",
+        "geography": "🗺️",
+        "psychology": "🧠",
+        "beauty": "💅",
+        "medicine": "💊",
+        "sport": "🏃",
+        "tourism": "🌍",
+    }
+
     rows = []
     for code, label in groups_map.items():
-        prefix_mark = "✅ " if code == selected else ""
-        rows.append(
-            [InlineKeyboardButton(f"{prefix_mark}{label}", callback_data=f"{prefix}{code}")]
-        )
+        icon = icons.get(code, "").strip()
+        text = f"{icon} {label}".strip()
+        if code == selected:
+            text = f"{text} ✅"
+        rows.append([InlineKeyboardButton(text, callback_data=f"{prefix}{code}")])
     return InlineKeyboardMarkup(rows)
 
 
