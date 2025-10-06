@@ -20,8 +20,13 @@ class SmtpClient:
         self.port = port
         self.username = username
         self.password = password
+        # Если SMTP_SSL не задана, автоматически включаем SSL на 465 порту.
         if use_ssl is None:
-            use_ssl = os.getenv("SMTP_SSL", "0") == "1"
+            env = os.getenv("SMTP_SSL")
+            if env is None or env == "":
+                use_ssl = self.port == 465
+            else:
+                use_ssl = env == "1"
         self.use_ssl = use_ssl
         if timeout is None:
             try:
