@@ -24,6 +24,7 @@ from emailbot.edit_service import (
 from emailbot.report_preview import PreviewData, build_preview_workbook
 from emailbot.utils_preview_export import build_preview_excel
 from bot.keyboards import send_flow_keyboard
+from emailbot.ui.messages import format_dispatch_preview
 from utils.email_clean import (
     dedupe_keep_original,
     drop_leading_char_twins,
@@ -295,18 +296,21 @@ def _build_preview_data(
     )
 
 
-def _compose_caption(data: PreviewData, rule_days: int) -> str:
-    lines = [f"✉️ Готово к отправке: {len(data.valid)} адресов."]
-    if data.rejected_180d:
-        lines.append(f"⏳ Отложено по правилу {rule_days} дн.: {len(data.rejected_180d)}")
-    if data.blocked:
-        lines.append(f"🚫 В исключениях/блок-листах: {len(data.blocked)}")
-    if data.suspicious:
-        lines.append(f"⚠️ Требует проверки: {len(data.suspicious)}")
+def _compose_caption(data: PreviewData, rule_days: int, filename: str) -> str:
+    base = format_dispatch_preview(
+        {
+            "ready_to_send": len(data.valid),
+            "deferred_180d": len(data.rejected_180d),
+            "in_blacklists": len(data.blocked),
+            "need_review": len(data.suspicious),
+        },
+        xlsx_name=filename,
+    )
+    if rule_days != 180 and data.rejected_180d:
+        base = base.replace("180 дн.", f"{rule_days} дн.")
     if data.duplicates:
-        lines.append(f"🔁 Возможные дубликаты: {len(data.duplicates)}")
-    lines.append("Файл-предпросмотр: подробности внутри.")
-    return "\n".join(lines)
+        base += f"\n🔁 Возможные дубликаты: {len(data.duplicates)}"
+    return base
 
 
 def _preview_keyboard() -> InlineKeyboardMarkup:
@@ -349,7 +353,7 @@ async def send_preview_report(
             (row.get("email", "") for row in data.suspicious),
         )
         file_path = Path(fallback_path)
-    caption = _compose_caption(data, rule_days)
+    caption = _compose_caption(data, rule_days, file_path.name)
     keyboard = _preview_keyboard()
     with file_path.open("rb") as fh:
         await update.callback_query.message.reply_document(
