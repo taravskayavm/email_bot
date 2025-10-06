@@ -40,7 +40,8 @@ from emailbot.messaging_utils import (
     is_suppressed,
     suppress_add,
 )
-from emailbot.reporting import build_mass_report_text, log_mass_filter_digest
+from emailbot.reporting import log_mass_filter_digest
+from emailbot.ui.messages import format_dispatch_result
 from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
 
@@ -594,24 +595,28 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        report_text = build_mass_report_text(
-            sent_ok,
-            skipped_recent,
-            blocked_foreign,
-            blocked_invalid,
+        total_sent = len(sent_ok)
+        total_skipped = len(skipped_recent)
+        total_blocked = len(blocked_foreign) + len(blocked_invalid)
+        total = total_sent + total_skipped + total_blocked
+        report_text = format_dispatch_result(
+            total,
+            total_sent,
+            total_skipped,
+            total_blocked,
         )
-        if not skipped_recent:
-            report_text = report_text.replace(
-                "\n⏳ Пропущены (<180 дней/идемпотентность): 0", ""
-            )
-            if report_text.startswith("⏳ Пропущены (<180 дней/идемпотентность): 0\n"):
-                report_text = report_text.split("\n", 1)[-1]
-        if "🚫 В блок-листе/недоступны: 0" in report_text:
-            report_text = report_text.replace(
-                "\n🚫 В блок-листе/недоступны: 0", ""
-            )
-            if report_text.startswith("🚫 В блок-листе/недоступны: 0\n"):
-                report_text = report_text.split("\n", 1)[-1]
+        filtered_lines = []
+        for line in report_text.splitlines():
+            if line.startswith("⏳") and total_skipped == 0:
+                continue
+            if line.startswith("🚫") and total_blocked == 0:
+                continue
+            filtered_lines.append(line)
+        report_text = "\n".join(filtered_lines)
+        if blocked_foreign:
+            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
+        if blocked_invalid:
+            report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
         if error_addresses:
             report_text = (
                 f"{report_text}\n❌ Ошибок при отправке: {len(error_addresses)}"

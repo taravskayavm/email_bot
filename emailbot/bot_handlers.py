@@ -34,6 +34,8 @@ from bot.keyboards import (
     build_bulk_edit_kb,
     groups_map,
 )
+from emailbot.ui.keyboards import directions_keyboard
+from emailbot.ui.messages import format_dispatch_result, format_parse_summary
 
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 
@@ -42,7 +44,7 @@ from . import messaging_utils as mu
 from . import extraction as _extraction
 from . import extraction_url as _extraction_url
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
-from .reporting import build_mass_report_text, log_mass_filter_digest
+from .reporting import log_mass_filter_digest
 from . import settings
 from . import mass_state
 from .settings_store import DEFAULTS
@@ -281,24 +283,11 @@ def _unique_preserve_order(items: Iterable[str]) -> list[str]:
 def _build_group_markup(
     prefix: str = "group_", *, selected: str | None = None
 ) -> InlineKeyboardMarkup:
-    icons = {
-        "bioinformatics": "🧬",
-        "geography": "🗺️",
-        "psychology": "🧠",
-        "beauty": "💅",
-        "medicine": "💊",
-        "sport": "🏃",
-        "tourism": "🌍",
-    }
-
-    rows = []
-    for code, label in groups_map.items():
-        icon = icons.get(code, "").strip()
-        text = f"{icon} {label}".strip()
-        if code == selected:
-            text = f"{text} ✅"
-        rows.append([InlineKeyboardButton(text, callback_data=f"{prefix}{code}")])
-    return InlineKeyboardMarkup(rows)
+    return directions_keyboard(
+        groups_map,
+        selected_code=selected,
+        prefix=prefix,
+    )
 
 
 def _group_keyboard(
@@ -1063,27 +1052,27 @@ async def _compose_report_and_save(
     )
     sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
 
-    report_lines = [
-        "✅ Анализ завершён.",
-        f"Найдено адресов: {len(allowed_all)}",
-        f"Уникальных (после очистки): {len(filtered)}",
-    ]
-    if suspicious_numeric:
-        report_lines.append(
-            f"Подозрительные (логин только из цифр): {len(suspicious_numeric)}"
-        )
-    if foreign:
-        report_lines.append(f"Иностранные домены: {len(foreign)}")
-    report = "\n".join(report_lines)
-    if footnote_dupes:
-        report += f"\nВозможные сносочные дубликаты удалены: {footnote_dupes}"
-    if sample_allowed:
-        report += "\n\n🧪 Примеры:\n" + "\n".join(sample_allowed)
+    summary = format_parse_summary(
+        {
+            "total_found": len(allowed_all),
+            "to_send": len(filtered),
+            "suspicious": len(suspicious_numeric),
+            "cooldown_180d": 0,
+            "foreign_domain": len(foreign),
+            "pages_skipped": 0,
+            "footnote_dupes_removed": footnote_dupes,
+        },
+        examples=sample_allowed,
+    )
+
+    extra_sections: list[str] = []
     if sample_numeric:
-        report += "\n\n🔢 Примеры цифровых:\n" + "\n".join(sample_numeric)
+        extra_sections.append("🔢 Примеры цифровых:\n" + "\n".join(sample_numeric))
     if sample_foreign:
-        report += "\n\n🌍 Примеры иностранных:\n" + "\n".join(sample_foreign)
-    return report
+        extra_sections.append("🌍 Примеры иностранных:\n" + "\n".join(sample_foreign))
+    if extra_sections:
+        return "\n\n".join([summary, *extra_sections])
+    return summary
 
 
 def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
@@ -2895,12 +2884,20 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        report_text = build_mass_report_text(
-            sent_ok,
-            skipped_recent,
-            blocked_foreign,
-            blocked_invalid,
+        total_sent = len(sent_ok)
+        total_skipped = len(skipped_recent)
+        total_blocked = len(blocked_foreign) + len(blocked_invalid)
+        total = total_sent + total_skipped + total_blocked
+        report_text = format_dispatch_result(
+            total,
+            total_sent,
+            total_skipped,
+            total_blocked,
         )
+        if blocked_foreign:
+            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
+        if blocked_invalid:
+            report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
 
         await query.message.reply_text(report_text)
         if errors:
