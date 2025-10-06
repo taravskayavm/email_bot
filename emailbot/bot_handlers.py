@@ -27,7 +27,7 @@ from telegram import (
     Update,
 )
 from telegram.error import BadRequest
-from telegram.ext import ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 from bot.keyboards import (
     build_after_parse_combined_kb,
@@ -301,6 +301,14 @@ def _build_group_markup(
     return InlineKeyboardMarkup(rows)
 
 
+def _group_keyboard(
+    prefix: str = "group_", selected: str | None = None
+) -> InlineKeyboardMarkup:
+    """Return a simple inline keyboard for selecting a mailing group."""
+
+    return _build_group_markup(prefix=prefix, selected=selected)
+
+
 def _clamp_bulk_edit_page(context: ContextTypes.DEFAULT_TYPE) -> int:
     raw_page = context.user_data.get("bulk_edit_page", 0)
     try:
@@ -393,6 +401,7 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
         "awaiting_corrections_text",
     ]:
         context.user_data[key] = False
+    context.chat_data["awaiting_manual_emails"] = False
 
 
 async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1775,6 +1784,297 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the inline "Ручная" button press."""
+
+    query = update.callback_query
+    await query.answer()
+    context.chat_data["awaiting_manual_emails"] = True
+    context.chat_data["manual_emails"] = []
+    context.chat_data["manual_group"] = None
+    context.user_data["awaiting_manual_email"] = True
+    context.user_data.pop("manual_emails", None)
+    await query.message.reply_text(
+        "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
+    )
+
+
+async def route_text_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Universal router for plain text updates."""
+
+    message = update.message
+    if message is None:
+        return
+    awaiting = context.chat_data.get("awaiting_manual_emails") or context.user_data.get(
+        "awaiting_manual_email"
+    )
+    if not awaiting:
+        return
+
+    text = (message.text or "").strip()
+    emails = messaging.parse_emails_from_text(text)
+    if not emails:
+        await message.reply_text(
+            "Не нашла корректных адресов. Пришлите ещё раз (допустимы запятая/пробел/новая строка)."
+        )
+        raise ApplicationHandlerStop
+
+    context.chat_data["manual_emails"] = emails
+    context.chat_data["manual_group"] = None
+    context.chat_data["awaiting_manual_emails"] = False
+    context.user_data["manual_emails"] = emails
+    context.user_data["awaiting_manual_email"] = False
+
+    await message.reply_text(
+        f"Принято адресов: {len(emails)}\nТеперь выберите направление:",
+        reply_markup=_group_keyboard(prefix="manual_group_"),
+    )
+
+    raise ApplicationHandlerStop
+
+
+async def _send_batch_with_sessions(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    recipients: list[str],
+    template_path: str,
+    group_code: str,
+) -> None:
+    """Send e-mails using the resilient session-aware pipeline."""
+
+    chat_id = query.message.chat.id
+    to_send = list(dict.fromkeys(recipients))
+    if not to_send:
+        await query.message.reply_text(
+            "Никого не осталось для отправки по правилам (фильтры/полугодовой лимит)."
+        )
+        return
+
+    sent_today = get_sent_today()
+    available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
+    if available <= 0 and not is_force_send(chat_id):
+        logger.info(
+            "Daily limit reached: %s emails sent today (source=sent_log)",
+            len(sent_today),
+        )
+        await query.message.reply_text(
+            (
+                f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
+                "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
+            )
+        )
+        return
+
+    if not is_force_send(chat_id) and len(to_send) > available:
+        to_send = to_send[:available]
+        await query.message.reply_text(
+            (
+                f"⚠️ Учитываю дневной лимит: будет отправлено "
+                f"{available} адресов из списка."
+            )
+        )
+
+    await query.message.reply_text(
+        f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+    )
+
+    try:
+        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
+        sent_folder = get_preferred_sent_folder(imap)
+        imap.select(f'"{sent_folder}"')
+    except Exception as exc:
+        log_error(f"imap connect: {exc}")
+        await query.message.reply_text(f"❌ IMAP ошибка: {exc}")
+        return
+
+    errors: list[str] = []
+    cancel_event = context.chat_data.get("cancel_event")
+    host = os.getenv("SMTP_HOST", "smtp.mail.ru")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    ssl_env = os.getenv("SMTP_SSL")
+    use_ssl = None if not ssl_env else ssl_env == "1"
+    retries = int(os.getenv("SMTP_CONNECT_RETRIES", "3"))
+    backoff = float(os.getenv("SMTP_CONNECT_BACKOFF", "1.0"))
+
+    import smtplib
+
+    sent_count = 0
+    attempt = 0
+    while True:
+        try:
+            with SmtpClient(
+                host,
+                port,
+                messaging.EMAIL_ADDRESS,
+                messaging.EMAIL_PASSWORD,
+                use_ssl=use_ssl,
+            ) as client:
+                while to_send:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    email_addr = to_send.pop(0)
+                    try:
+                        token = send_email_with_sessions(
+                            client, imap, sent_folder, email_addr, template_path
+                        )
+                        log_sent_email(
+                            email_addr,
+                            group_code,
+                            "ok",
+                            chat_id,
+                            template_path,
+                            unsubscribe_token=token,
+                        )
+                        sent_count += 1
+                        await asyncio.sleep(1.5)
+                    except ValueError as err:
+                        if "Unresolved placeholders" in str(err):
+                            await context.bot.send_message(
+                                chat_id=query.message.chat.id,
+                                text=(
+                                    "⚠️ Шаблон содержит неподставленные плейсхолдеры "
+                                    "(например, {{BODY}} или {BODY}). "
+                                    "Исправьте шаблон и повторите отправку."
+                                ),
+                            )
+                            try:
+                                imap.logout()
+                            except Exception:
+                                pass
+                            return
+                        errors.append(f"{email_addr} — {err}")
+                    except Exception as err:
+                        errors.append(f"{email_addr} — {err}")
+                        code, msg = None, None
+                        if (
+                            hasattr(err, "recipients")
+                            and isinstance(err.recipients, dict)
+                            and email_addr in err.recipients
+                        ):
+                            code, msg = err.recipients[email_addr][:2]
+                        elif hasattr(err, "smtp_code"):
+                            code = getattr(err, "smtp_code", None)
+                            msg = getattr(err, "smtp_error", None)
+                        add_bounce(email_addr, code, str(msg or err), phase="manual_send")
+                        if is_hard_bounce(code, msg):
+                            suppress_add(email_addr, code, "hard bounce on send")
+                        log_sent_email(
+                            email_addr,
+                            group_code,
+                            "error",
+                            chat_id,
+                            template_path,
+                            str(err),
+                        )
+            break
+        except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
+            attempt += 1
+            if attempt >= retries:
+                logger.exception("SMTP connection retries exhausted", exc_info=exc)
+                await query.message.reply_text(f"❌ SMTP ошибка: {exc}")
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+                return
+            await asyncio.sleep(backoff)
+            backoff *= 2
+
+    try:
+        imap.logout()
+    except Exception:
+        pass
+
+    if cancel_event and cancel_event.is_set():
+        await query.message.reply_text(
+            f"Остановлено. Отправлено писем: {sent_count}"
+        )
+    else:
+        await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+    if errors:
+        await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+
+    clear_recent_sent_cache()
+    disable_force_send(chat_id)
+
+
+async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Select a manual mailing group and start sending."""
+
+    query = update.callback_query
+    data = (query.data or "").strip()
+    group_code = (
+        data[len("manual_group_") :]
+        if data.startswith("manual_group_")
+        else data
+    ).strip()
+    await query.answer()
+
+    emails = (
+        context.chat_data.get("manual_emails")
+        or context.user_data.get("manual_emails")
+        or []
+    )
+    if not emails:
+        await query.message.reply_text("Сначала пришлите адреса текстом.")
+        return
+
+    context.chat_data["manual_group"] = group_code
+
+    try:
+        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+            messaging.prepare_mass_mailing(list(emails))
+        )
+    except Exception:
+        logger.exception(
+            "prepare_mass_mailing failed",
+            extra={"event": "manual", "code": group_code},
+        )
+        await query.message.reply_text(
+            "⚠️ Не удалось подготовить список к ручной рассылке. Попробуйте ещё раз."
+        )
+        return
+
+    logger.info(
+        "manual prepare digest",
+        extra={"event": "manual_prepare", "code": group_code, **digest},
+    )
+
+    summary_lines = [f"Будет отправлено: {len(ready)}"]
+    if blocked_foreign:
+        summary_lines.append(f"🌍 Исключено иностранных доменов: {len(blocked_foreign)}")
+    if blocked_invalid:
+        summary_lines.append(f"🚫 Исключено заблокированных адресов: {len(blocked_invalid)}")
+    if skipped_recent:
+        summary_lines.append(f"🕓 Пропущено по лимиту 180 дней: {len(skipped_recent)}")
+    if len(summary_lines) > 1:
+        await query.message.reply_text("\n".join(summary_lines))
+
+    if not ready:
+        await query.message.reply_text(
+            "Никого не осталось для отправки по правилам (фильтры/полугодовой лимит)."
+        )
+        return
+
+    template_path = messaging.TEMPLATE_MAP.get(group_code)
+    if not template_path or not Path(template_path).exists():
+        await query.message.reply_text(
+            "⚠️ Не найден шаблон письма для выбранного направления."
+        )
+        return
+
+    await _send_batch_with_sessions(query, context, ready, template_path, group_code)
+
+    context.chat_data["awaiting_manual_emails"] = False
+    context.chat_data["manual_emails"] = []
+    context.chat_data["manual_group"] = None
+    context.user_data.pop("manual_emails", None)
+    context.user_data["awaiting_manual_email"] = False
+
+
 async def prompt_manual_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1782,6 +2082,9 @@ async def prompt_manual_email(
 
     clear_all_awaiting(context)
     context.user_data.pop("manual_emails", None)
+    context.chat_data["manual_emails"] = []
+    context.chat_data["manual_group"] = None
+    context.chat_data["awaiting_manual_emails"] = True
     await update.message.reply_text(
         (
             "Введите email или список email-адресов "
@@ -2601,6 +2904,9 @@ __all__ = [
     "proceed_to_group",
     "select_group",
     "prompt_manual_email",
+    "manual_start",
+    "manual_select_group",
+    "route_text_message",
     "handle_text",
     "ask_include_numeric",
     "include_numeric_emails",
