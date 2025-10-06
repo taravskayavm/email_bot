@@ -1639,6 +1639,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     data = (query.data or "").strip()
+    # безопасно для Python < 3.9
     group_code = (data[len("group_"):] if data.startswith("group_") else data).strip()
     if not group_code:
         await query.answer(
@@ -2131,7 +2132,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
-        group_code = query.data.removeprefix("manual_group_")
+        # безопасно для Python < 3.9
+        group_code = (
+            query.data[len("manual_group_") :]
+            if (query.data or "").startswith("manual_group_")
+            else (query.data or "")
+        )
         template_path = TEMPLATE_MAP[group_code]
 
         # manual отправка не учитывает супресс-лист
