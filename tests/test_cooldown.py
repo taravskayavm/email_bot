@@ -13,6 +13,7 @@ def cooldown_module(monkeypatch, tmp_path):
     monkeypatch.setenv("SEND_STATS_PATH", str(stats_path))
     monkeypatch.setenv("APPEND_TO_SENT", "0")
     monkeypatch.setenv("SEND_HISTORY_SQLITE_PATH", str(sqlite_path))
+    monkeypatch.setenv("REPORT_TZ", "UTC")
     module = importlib.import_module("emailbot.services.cooldown")
     return importlib.reload(module), stats_path
 
@@ -49,6 +50,25 @@ def test_should_skip_by_cooldown_recent(cooldown_module):
     skip, reason = cooldown.should_skip_by_cooldown("testuser@gmail.com", now=now, days=180)
     assert skip is True
     assert re.search(r"remain≈\d+d \d+h \d+m", reason)
+
+
+def test_should_skip_when_same_day(cooldown_module):
+    cooldown, stats_path = cooldown_module
+    now = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
+    earlier_same_day = now - timedelta(hours=3)
+    stats_path.write_text(
+        json.dumps(
+            {
+                "email": "today@example.com",
+                "ts": earlier_same_day.isoformat().replace("+00:00", "Z"),
+            }
+        )
+        + "\n"
+    )
+
+    skip, reason = cooldown.should_skip_by_cooldown("today@example.com", now=now, days=180)
+    assert skip is True
+    assert reason == "cooldown<same_day"
 
 
 def test_should_allow_after_window(cooldown_module):
