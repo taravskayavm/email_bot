@@ -7,10 +7,13 @@ import json
 import logging
 import os
 import threading
+import traceback
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -85,12 +88,42 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Log exceptions raised by PTB handlers with contextual details."""
 
     logger = logging.getLogger(__name__)
+    err = context.error
     try:
-        logger.error("Exception while handling update", exc_info=context.error)
+        tb = ""
+        if err is not None:
+            tb = "".join(
+                traceback.format_exception(type(err), err, err.__traceback__)
+            )
         chat_id = None
-        if hasattr(update, "effective_chat") and update.effective_chat:
-            chat_id = getattr(update.effective_chat, "id", None)
-        logger.info({"event": "error", "chat_id": chat_id, "update_type": type(update).__name__})
+        effective_chat = None
+        try:
+            if isinstance(update, Update):
+                effective_chat = update.effective_chat
+            elif hasattr(update, "effective_chat"):
+                effective_chat = getattr(update, "effective_chat")
+            if effective_chat:
+                chat_id = getattr(effective_chat, "id", None)
+        except Exception:
+            chat_id = None
+        logger.error(
+            "Unhandled exception",
+            extra={
+                "chat_id": chat_id,
+                "update_type": type(update).__name__ if update else None,
+                "traceback": tb,
+            },
+        )
+        if chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Произошла ошибка. Попробуйте ещё раз.",
+                )
+            except TelegramError:
+                pass
+            except Exception:
+                pass
     except Exception:
         pass
 
