@@ -214,6 +214,13 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
     app.add_handler(
         MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            bot_handlers.route_text_message,
+        ),
+        group=5,
+    )
+    app.add_handler(
+        MessageHandler(
             filters.TEXT & (~filters.COMMAND), bot_handlers.corrections_text_handler
         )
     )
@@ -222,7 +229,13 @@ def main() -> None:
     )
 
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.send_manual_email, pattern="^manual_group_")
+        CallbackQueryHandler(bot_handlers.manual_start, pattern="^manual$"), group=0
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.manual_select_group, pattern="^manual_group_"
+        ),
+        group=0,
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")

@@ -41,6 +41,31 @@ from .messaging_utils import (
 
 logger = logging.getLogger(__name__)
 
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def parse_emails_from_text(text: str) -> list[str]:
+    """Extract e-mail addresses from arbitrary text.
+
+    The parser accepts comma, semicolon, whitespace and newline separators, trims
+    surrounding punctuation, normalizes case and removes duplicates while
+    preserving order of first appearance.
+    """
+
+    if not text:
+        return []
+
+    found = EMAIL_RE.findall(text)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in found:
+        normalized = raw.strip().strip(",;").lower()
+        if not normalized or normalized in seen:
+            continue
+        cleaned.append(normalized)
+        seen.add(normalized)
+    return cleaned
+
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
 from utils.paths import expand_path
@@ -916,6 +941,7 @@ __all__ = [
     "clear_recent_sent_cache",
     "get_sent_today",
     "count_sent_today",
+    "parse_emails_from_text",
     "prepare_mass_mailing",
     "sync_log_with_imap",
     "periodic_unsubscribe_check",
