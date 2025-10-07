@@ -144,6 +144,41 @@ def build_sections_suggest_kb(
     return InlineKeyboardMarkup(rows)
 
 
+def build_skipped_preview_kb() -> InlineKeyboardMarkup:
+    """Keyboard with quick access to preview skipped e-mail categories."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: 180 дней", callback_data="skipped:180d"
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: сегодня", callback_data="skipped:today"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: кулдаун", callback_data="skipped:cooldown"
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: роль/служебные",
+                    callback_data="skipped:blocked_role",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: загр. домены",
+                    callback_data="skipped:blocked_foreign",
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: невалидные", callback_data="skipped:invalid"
+                ),
+            ],
+        ]
+    )
+
+
 from services.templates import list_templates
 
 _ICONS: Dict[str, str] = {}

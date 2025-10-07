@@ -32,6 +32,7 @@ from telegram.ext import ApplicationHandlerStop, ContextTypes
 from bot.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
+    build_skipped_preview_kb,
     groups_map,
 )
 from emailbot.ui.keyboards import directions_keyboard
@@ -47,6 +48,8 @@ from .extraction import normalize_email, smart_extract_emails, extract_emails_ma
 from .reporting import log_mass_filter_digest
 from . import settings
 from . import mass_state
+from .session_store import load_last_summary, save_last_summary
+from .settings import SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
 
 from utils.email_clean import sanitize_email
@@ -163,6 +166,24 @@ PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
 PREVIEW_FOREIGN = 6
 
+_SKIPPED_REASON_ORDER = [
+    "180d",
+    "today",
+    "cooldown",
+    "blocked_role",
+    "blocked_foreign",
+    "invalid",
+]
+
+_SKIPPED_REASON_LABELS = {
+    "180d": "За 180 дней",
+    "today": "Отправляли сегодня",
+    "cooldown": "Кулдаун",
+    "blocked_role": "Роль/служебные",
+    "blocked_foreign": "Иностранные домены",
+    "invalid": "Невалидные",
+}
+
 
 def _split_cb(data: str) -> tuple[str, str]:
     """Safely split callback data into action and payload parts."""
@@ -278,6 +299,109 @@ def _unique_preserve_order(items: Iterable[str]) -> list[str]:
         seen.add(key)
         result.append(normalized)
     return result
+
+
+def _build_mass_summary(
+    *,
+    group: str | None,
+    ready: Iterable[str],
+    blocked_foreign: Iterable[str],
+    blocked_invalid: Iterable[str],
+    skipped_recent: Iterable[str],
+    digest: dict[str, object] | None = None,
+    total_incoming: int | None = None,
+) -> dict[str, object]:
+    allowed = _unique_preserve_order(ready)
+    summary_skipped: dict[str, list[str]] = {
+        "180d": _unique_preserve_order(skipped_recent),
+        "today": [],
+        "cooldown": [],
+        "blocked_role": [],
+        "blocked_foreign": _unique_preserve_order(blocked_foreign),
+        "invalid": _unique_preserve_order(blocked_invalid),
+    }
+
+    total = total_incoming
+    if digest:
+        for key in ("input_total", "total"):
+            value = digest.get(key)
+            if value is None:
+                continue
+            if isinstance(value, int):
+                total = value
+                break
+            try:
+                total = int(value)
+                break
+            except (TypeError, ValueError):
+                continue
+    if total is None:
+        total = len(allowed) + sum(len(items) for items in summary_skipped.values())
+
+    return {
+        "allowed": allowed,
+        "skipped": summary_skipped,
+        "meta": {
+            "group": group,
+            "total_incoming": total,
+            "generated_at": datetime.utcnow().isoformat(),
+        },
+    }
+
+
+def _store_mass_summary(
+    chat_id: int,
+    *,
+    group: str | None,
+    ready: Iterable[str],
+    blocked_foreign: Iterable[str],
+    blocked_invalid: Iterable[str],
+    skipped_recent: Iterable[str],
+    digest: dict[str, object] | None = None,
+    total_incoming: int | None = None,
+) -> dict[str, object]:
+    payload = _build_mass_summary(
+        group=group,
+        ready=ready,
+        blocked_foreign=blocked_foreign,
+        blocked_invalid=blocked_invalid,
+        skipped_recent=skipped_recent,
+        digest=digest,
+        total_incoming=total_incoming,
+    )
+    save_last_summary(chat_id, payload)
+    return payload
+
+
+async def _maybe_send_skipped_summary(
+    query: CallbackQuery, summary: dict[str, object]
+) -> None:
+    skipped_raw = summary.get("skipped") if isinstance(summary, dict) else None
+    if not isinstance(skipped_raw, dict):
+        return
+
+    counts: list[tuple[str, int]] = []
+    for reason in _SKIPPED_REASON_ORDER:
+        entries = skipped_raw.get(reason) or []
+        if not isinstance(entries, list):
+            continue
+        unique = _unique_preserve_order(str(item) for item in entries)
+        if not unique:
+            continue
+        counts.append((reason, len(unique)))
+        skipped_raw[reason] = unique
+
+    if not counts:
+        return
+
+    lines = ["👀 Отфильтрованные адреса:"]
+    for reason, count in counts:
+        label = _SKIPPED_REASON_LABELS.get(reason, reason)
+        lines.append(f"• {label}: {count}")
+
+    await query.message.reply_text(
+        "\n".join(lines), reply_markup=build_skipped_preview_kb()
+    )
 
 
 def _build_group_markup(
@@ -1759,6 +1883,17 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "batch_id": context.chat_data.get("batch_id"),
         },
     )
+    summary_payload = _store_mass_summary(
+        chat_id,
+        group=group_code,
+        ready=ready,
+        blocked_foreign=blocked_foreign,
+        blocked_invalid=blocked_invalid,
+        skipped_recent=skipped_recent,
+        digest=digest,
+        total_incoming=len(emails),
+    )
+    await _maybe_send_skipped_summary(query, summary_payload)
     if not ready:
         await query.message.reply_text(
             "Все адреса уже в истории за 180 дней или в блок-листах.",
@@ -2025,6 +2160,7 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         else data
     ).strip()
     await query.answer()
+    chat_id = query.message.chat.id
 
     emails = (
         context.chat_data.get("manual_emails")
@@ -2051,6 +2187,18 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
             "Попробуйте ещё раз или выберите другое направление."
         )
         return
+
+    summary_payload = _store_mass_summary(
+        chat_id,
+        group=group_code,
+        ready=ready,
+        blocked_foreign=blocked_foreign,
+        blocked_invalid=blocked_invalid,
+        skipped_recent=skipped_recent,
+        digest=digest,
+        total_incoming=len(emails),
+    )
+    await _maybe_send_skipped_summary(query, summary_payload)
 
     logger.info(
         "manual prepare digest",
@@ -2912,6 +3060,47 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messaging.create_task_with_logging(long_job(), query.message.reply_text)
 
 
+async def show_skipped_examples(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Display sample e-mail addresses filtered out for a specific reason."""
+
+    query = update.callback_query
+    data = query.data or ""
+    reason = data.split(":", 1)[1] if ":" in data else ""
+    message = query.message
+    chat_id = message.chat.id if message else None
+
+    if message is None or chat_id is None or not reason:
+        await query.answer("Некорректный запрос", show_alert=True)
+        return
+
+    summary = load_last_summary(chat_id)
+    if not summary:
+        await query.answer("Нет сохранённой сводки для этого чата.", show_alert=True)
+        return
+
+    skipped_raw = summary.get("skipped") if isinstance(summary, dict) else None
+    entries = []
+    if isinstance(skipped_raw, dict):
+        raw = skipped_raw.get(reason) or []
+        if isinstance(raw, list):
+            entries = _unique_preserve_order(str(item) for item in raw)
+
+    if not entries:
+        await query.answer("Нет адресов по этой причине.", show_alert=True)
+        return
+
+    total = len(entries)
+    sample = entries[:SKIPPED_PREVIEW_LIMIT]
+    label = _SKIPPED_REASON_LABELS.get(reason, reason)
+    lines = [f"Причина: {label}"]
+    lines.append(f"Показано {len(sample)} из {total}:")
+    lines.extend(sample)
+    await message.reply_text("\n".join(lines))
+    await query.answer()
+
+
 async def autosync_imap_with_message(query: CallbackQuery) -> None:
     """Synchronize IMAP logs and notify the user via message."""
     await query.answer()
@@ -2966,4 +3155,5 @@ __all__ = [
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",
+    "show_skipped_examples",
 ]

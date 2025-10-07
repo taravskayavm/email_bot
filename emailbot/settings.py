@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 
 from . import settings_store as _store
 
@@ -18,6 +19,9 @@ MAX_DOCS: int = 30
 PER_REQUEST_TIMEOUT: int = 15
 DAILY_SEND_LIMIT: int = 300
 EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
+# UI helpers
+SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
+LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
 
 TPL_DIR = Path("templates")
 LABELS_FILE = TPL_DIR / "_labels.json"
@@ -28,7 +32,7 @@ def load() -> None:
 
     global STRICT_OBFUSCATION, FOOTNOTE_RADIUS_PAGES, PDF_LAYOUT_AWARE, ENABLE_OCR
     global MAX_ASSETS, MAX_SITEMAP_URLS, MAX_DOCS, PER_REQUEST_TIMEOUT
-    global EXTERNAL_SOURCES, DAILY_SEND_LIMIT
+    global EXTERNAL_SOURCES, DAILY_SEND_LIMIT, SKIPPED_PREVIEW_LIMIT, LAST_SUMMARY_DIR
     STRICT_OBFUSCATION = bool(_store.get("STRICT_OBFUSCATION", STRICT_OBFUSCATION))
     FOOTNOTE_RADIUS_PAGES = int(_store.get("FOOTNOTE_RADIUS_PAGES", FOOTNOTE_RADIUS_PAGES))
     PDF_LAYOUT_AWARE = bool(_store.get("PDF_LAYOUT_AWARE", PDF_LAYOUT_AWARE))
@@ -39,6 +43,10 @@ def load() -> None:
     PER_REQUEST_TIMEOUT = int(_store.get("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT))
     DAILY_SEND_LIMIT = int(_store.get("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT))
     EXTERNAL_SOURCES = _store.get("EXTERNAL_SOURCES", EXTERNAL_SOURCES) or {}
+    SKIPPED_PREVIEW_LIMIT = int(
+        _store.get("SKIPPED_PREVIEW_LIMIT", SKIPPED_PREVIEW_LIMIT)
+    )
+    LAST_SUMMARY_DIR = str(_store.get("LAST_SUMMARY_DIR", LAST_SUMMARY_DIR))
 
 
 def save() -> None:
@@ -54,6 +62,8 @@ def save() -> None:
     _store.set("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT)
     _store.set("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT)
     _store.set("EXTERNAL_SOURCES", EXTERNAL_SOURCES)
+    _store.set("SKIPPED_PREVIEW_LIMIT", SKIPPED_PREVIEW_LIMIT)
+    _store.set("LAST_SUMMARY_DIR", LAST_SUMMARY_DIR)
 
 
 def _load_labels() -> dict[str, dict[str, str]]:
@@ -101,6 +111,8 @@ __all__ = [
     "PER_REQUEST_TIMEOUT",
     "DAILY_SEND_LIMIT",
     "EXTERNAL_SOURCES",
+    "SKIPPED_PREVIEW_LIMIT",
+    "LAST_SUMMARY_DIR",
     "load",
     "save",
     "list_available_directions",
