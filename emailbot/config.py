@@ -12,6 +12,10 @@ CRAWL_USER_AGENT = os.getenv(
     "CRAWL_USER_AGENT", "EmailBotCrawler/1.0 (+contact@example.com)"
 )
 CRAWL_HTTP2 = os.getenv("CRAWL_HTTP2", "1") == "1"
+CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
+CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
+ROBOTS_CACHE_PATH = os.getenv("ROBOTS_CACHE_PATH", "var/robots_cache.json")
+ROBOTS_CACHE_TTL_SECONDS = int(os.getenv("ROBOTS_CACHE_TTL_SECONDS", "86400"))
 
 # UX: разрешать редактирование сразу после предпросмотра?
 ALLOW_EDIT_AT_PREVIEW = os.getenv("ALLOW_EDIT_AT_PREVIEW", "0") == "1"
