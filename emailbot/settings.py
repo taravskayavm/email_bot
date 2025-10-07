@@ -25,30 +25,6 @@ LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
 # Отчётная временная зона (используется в логах/отчётах)
 REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
-# ---- Crawler content filters ----
-HEAD_TIMEOUT: float = float(os.getenv("HEAD_TIMEOUT", "8.0"))
-GET_TIMEOUT: float = float(os.getenv("GET_TIMEOUT", "20.0"))
-MAX_CONTENT_LENGTH: int = int(
-    os.getenv("MAX_CONTENT_LENGTH", str(8 * 1024 * 1024))
-)
-_allowed_types_raw = os.getenv(
-    "ALLOWED_CONTENT_TYPES",
-    (
-        "text/html,text/plain,application/pdf,application/msword,"
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ),
-)
-ALLOWED_CONTENT_TYPES: list[str] = [
-    item.strip().lower()
-    for item in _allowed_types_raw.split(",")
-    if item.strip()
-]
-ENABLE_SITEMAP: bool = os.getenv("ENABLE_SITEMAP", "1") == "1"
-SITEMAP_MAX_URLS: int = int(os.getenv("SITEMAP_MAX_URLS", "500"))
-
-# ---- Parallel file parsing ----
-PARSE_MAX_WORKERS: int = int(os.getenv("PARSE_MAX_WORKERS", "4"))
-PARSE_FILE_TIMEOUT: float = float(os.getenv("PARSE_FILE_TIMEOUT", "25.0"))
 
 # ---- Reconcile (IMAP vs CSV) ----
 RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
@@ -150,14 +126,6 @@ __all__ = [
     "SKIPPED_PREVIEW_LIMIT",
     "LAST_SUMMARY_DIR",
     "REPORT_TZ",
-    "HEAD_TIMEOUT",
-    "GET_TIMEOUT",
-    "MAX_CONTENT_LENGTH",
-    "ALLOWED_CONTENT_TYPES",
-    "ENABLE_SITEMAP",
-    "SITEMAP_MAX_URLS",
-    "PARSE_MAX_WORKERS",
-    "PARSE_FILE_TIMEOUT",
     "RECONCILE_SINCE_DAYS",
     "CRAWL_MAX_PAGES_PER_DOMAIN",
     "CRAWL_TIME_BUDGET_SECONDS",

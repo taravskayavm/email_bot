@@ -3,9 +3,17 @@ import os
 import smtplib
 import ssl
 import time
-from collections import deque
+from collections import defaultdict, deque
 from email.message import EmailMessage
-from typing import Deque, List, Optional
+from email.utils import getaddresses
+from typing import Deque, Iterable, List, Optional, Set
+
+from emailbot.settings import (
+    BACKOFF_DECAY_SUCCESS,
+    BACKOFF_MAX_SECONDS,
+    BACKOFF_STEP_SECONDS,
+    BASE_DOMAIN_DELAY,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +31,46 @@ MAX_PER_MIN = _parse_limit("SMTP_MAX_PER_MIN", 20)
 MAX_PER_HOUR = _parse_limit("SMTP_MAX_PER_HOUR", 200)
 _TS_MIN: Deque[float] = deque()
 _TS_HOUR: Deque[float] = deque()
+_DOMAIN_DELAYS: defaultdict[str, float] = defaultdict(lambda: BASE_DOMAIN_DELAY)
+
+
+def _extract_domains(msg: EmailMessage) -> Set[str]:
+    headers: list[str] = []
+    for name in ("To", "Cc", "Bcc"):
+        headers.extend(msg.get_all(name, []))
+    domains: Set[str] = set()
+    for _, addr in getaddresses(headers):
+        if not addr or "@" not in addr:
+            continue
+        domain = addr.split("@", 1)[1].strip().lower()
+        if domain:
+            domains.add(domain)
+    return domains
+
+
+def _sleep_for_domains(domains: Iterable[str]) -> None:
+    delays = [max(0.0, _DOMAIN_DELAYS[d]) for d in set(domains) if d]
+    if not delays:
+        return
+    wait_for = max(delays)
+    if wait_for > 0:
+        time.sleep(wait_for)
+
+
+def _backoff_fail(domains: Iterable[str]) -> None:
+    for domain in set(domains):
+        if not domain:
+            continue
+        current = _DOMAIN_DELAYS[domain]
+        _DOMAIN_DELAYS[domain] = min(BACKOFF_MAX_SECONDS, current + BACKOFF_STEP_SECONDS)
+
+
+def _backoff_success(domains: Iterable[str]) -> None:
+    for domain in set(domains):
+        if not domain:
+            continue
+        current = _DOMAIN_DELAYS[domain]
+        _DOMAIN_DELAYS[domain] = max(BASE_DOMAIN_DELAY, current - BACKOFF_DECAY_SUCCESS)
 
 
 def _throttle_block() -> None:
@@ -152,13 +200,18 @@ class RobustSMTP:
 def send_with_retry(
     smtp: RobustSMTP, msg: EmailMessage, retries: int = 3, backoff: float = 1.0
 ):
+    domains = _extract_domains(msg)
     for attempt in range(1, retries + 1):
         try:
+            _sleep_for_domains(domains)
             _throttle_block()
-            return smtp.send(msg)
+            result = smtp.send(msg)
+            _backoff_success(domains)
+            return result
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", 0)
             if 400 <= code < 500:
+                _backoff_fail(domains)
                 if attempt == retries:
                     raise
                 time.sleep(backoff * attempt)
@@ -171,6 +224,7 @@ def send_with_retry(
             smtplib.SMTPConnectError,
             TimeoutError,
         ):
+            _backoff_fail(domains)
             if attempt == retries:
                 raise
             time.sleep(backoff)

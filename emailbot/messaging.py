@@ -882,18 +882,31 @@ def was_emailed_recently(email: str, days: int = 180) -> bool:  # pragma: no cov
 
 
 def get_recent_6m_union() -> Set[str]:
-    cutoff = datetime.utcnow() - timedelta(days=180)
+    tz = ZoneInfo(REPORT_TZ)
+    cutoff = datetime.now(tz) - timedelta(days=180)
     result: Set[str] = set()
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                ts_raw = (row.get("last_sent_at") or "").strip()
+                if not ts_raw:
+                    continue
                 try:
-                    dt = datetime.fromisoformat(row["last_sent_at"])
+                    dt = datetime.fromisoformat(ts_raw)
                 except Exception:
                     continue
-                if dt >= cutoff:
-                    result.add(row["key"])
+                if dt.tzinfo is None:
+                    dt_local = dt.replace(tzinfo=tz)
+                else:
+                    dt_local = dt.astimezone(tz)
+                if dt_local < cutoff:
+                    continue
+                key = (row.get("key") or "").strip()
+                if not key:
+                    key = canonical_for_history(row.get("email", ""))
+                if key:
+                    result.add(key)
     return result
 
 
@@ -917,20 +930,35 @@ def clear_recent_sent_cache():
 def get_sent_today() -> Set[str]:
     if not os.path.exists(LOG_FILE):
         return set()
-    today = datetime.utcnow().date()
-    sent = set()
+    tz = ZoneInfo(REPORT_TZ)
+    now_local = datetime.now(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    sent: Set[str] = set()
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            status = row.get("status", "ok")
+            status = (row.get("status") or "ok").strip().lower()
             if status not in {"ok", "sent", "success"}:
                 continue
+            ts_raw = (row.get("last_sent_at") or "").strip()
+            if not ts_raw:
+                continue
             try:
-                dt = datetime.fromisoformat(row["last_sent_at"])
+                dt = datetime.fromisoformat(ts_raw)
             except Exception:
                 continue
-            if dt.date() == today:
-                sent.add(row["email"].lower())
+            if dt.tzinfo is None:
+                dt_local = dt.replace(tzinfo=tz)
+            else:
+                dt_local = dt.astimezone(tz)
+            if not (day_start <= dt_local < day_end):
+                continue
+            key = (row.get("key") or "").strip()
+            if not key:
+                key = canonical_for_history(row.get("email", ""))
+            if key:
+                sent.add(key)
     return sent
 
 
