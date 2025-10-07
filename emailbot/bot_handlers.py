@@ -55,6 +55,7 @@ from .session_store import load_last_summary, save_last_summary
 from .settings import REPORT_TZ, SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
 from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
+from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
 from utils.email_clean import sanitize_email
 from services.templates import get_template, get_template_label
@@ -785,6 +786,20 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def selfcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run self-diagnostics and report the status."""
+
+    message = update.effective_message
+    if message is None:
+        return
+    try:
+        checks = await asyncio.to_thread(run_selfcheck)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        await message.reply_text(f"❌ Не удалось выполнить диагностику: {exc}")
+        return
+    await message.reply_text(format_selfcheck(checks))
+
+
 async def dedupe_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to deduplicate sent log."""
 
@@ -810,6 +825,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["🚫 Добавить в исключения", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
         ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
+        ["🔁 Синхронизировать бонсы", "🩺 Диагностика"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -1340,6 +1356,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state = get_state(context)
     state.all_emails.update(allowed_all)
     state.all_files.extend(extracted_files)
+    if extracted_files:
+        context.chat_data["preview_source_files"] = list(dict.fromkeys(state.all_files))
     current = set(state.to_send)
     current.update(filtered)
     state.to_send = sorted(current)
@@ -3157,6 +3175,7 @@ __all__ = [
     "sync_imap_command",
     "reset_email_list",
     "diag",
+    "selfcheck_command",
     "dedupe_log_command",
     "handle_document",
     "refresh_preview",

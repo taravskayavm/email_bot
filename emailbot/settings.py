@@ -25,20 +25,6 @@ LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
 # Отчётная временная зона (используется в логах/отчётах)
 REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
-# ---- Canonical e-mail rules ----
-ENABLE_PROVIDER_CANON: int = int(os.getenv("ENABLE_PROVIDER_CANON", "1"))
-CANON_GMAIL_DOTS: int = int(os.getenv("CANON_GMAIL_DOTS", "1"))
-CANON_GMAIL_PLUS: int = int(os.getenv("CANON_GMAIL_PLUS", "1"))
-CANON_OTHER_PLUS: int = int(os.getenv("CANON_OTHER_PLUS", "1"))
-
-# ---- Bounce details ----
-BOUNCE_DETAIL_PATH: str = os.getenv("BOUNCE_DETAIL_PATH", "var/bounce_detail.csv")
-
-# ---- Adaptive per-domain throttling ----
-BASE_DOMAIN_DELAY: float = float(os.getenv("BASE_DOMAIN_DELAY", "1.0"))
-BACKOFF_STEP_SECONDS: float = float(os.getenv("BACKOFF_STEP_SECONDS", "1.5"))
-BACKOFF_MAX_SECONDS: float = float(os.getenv("BACKOFF_MAX_SECONDS", "15.0"))
-BACKOFF_DECAY_SUCCESS: float = float(os.getenv("BACKOFF_DECAY_SUCCESS", "0.5"))
 
 # ---- Reconcile (IMAP vs CSV) ----
 RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
@@ -140,15 +126,6 @@ __all__ = [
     "SKIPPED_PREVIEW_LIMIT",
     "LAST_SUMMARY_DIR",
     "REPORT_TZ",
-    "ENABLE_PROVIDER_CANON",
-    "CANON_GMAIL_DOTS",
-    "CANON_GMAIL_PLUS",
-    "CANON_OTHER_PLUS",
-    "BOUNCE_DETAIL_PATH",
-    "BASE_DOMAIN_DELAY",
-    "BACKOFF_STEP_SECONDS",
-    "BACKOFF_MAX_SECONDS",
-    "BACKOFF_DECAY_SUCCESS",
     "RECONCILE_SINCE_DAYS",
     "CRAWL_MAX_PAGES_PER_DOMAIN",
     "CRAWL_TIME_BUDGET_SECONDS",

@@ -14,7 +14,7 @@ import time
 import secrets
 import smtplib
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
@@ -166,7 +166,7 @@ def _parse_ts(value: str | None) -> datetime | None:
 def _load_recent_sent(days: int) -> set[str]:
     if days <= 0:
         return set()
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     recent: set[str] = set()
     try:
         _ensure_sent_log_schema(LOG_FILE)
@@ -856,7 +856,7 @@ def _load_sent_log() -> Dict[str, datetime]:
 
 def was_sent_within(email: str, days: int = 180) -> bool:
     """Return True if ``email`` was sent to within ``days`` days."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     cache = _load_sent_log()
     key = canonical_for_history(email)
     dt = cache.get(key)

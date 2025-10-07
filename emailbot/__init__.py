@@ -6,7 +6,10 @@ from .utils import load_env, log_error, setup_logging
 
 extraction = importlib.import_module(".extraction", __name__)
 reporting = importlib.import_module(".reporting", __name__)
-unsubscribe = importlib.import_module(".unsubscribe", __name__)
+try:  # pragma: no cover - optional dependency
+    unsubscribe = importlib.import_module(".unsubscribe", __name__)
+except Exception:  # pragma: no cover - allow running without aiohttp
+    unsubscribe = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency
     from .models import EmailEntry
