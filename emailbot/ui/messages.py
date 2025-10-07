@@ -53,13 +53,22 @@ def format_dispatch_preview(stats: Mapping[str, int], xlsx_name: str) -> str:
     )
 
 
-def format_dispatch_result(total: int, sent: int, cooldown_skipped: int, blocked: int) -> str:
-    left = max(total - sent - cooldown_skipped - blocked, 0)
-    return (
-        "📨 Рассылка завершена.\n"
-        f"📊 В очереди было: {total}\n"
-        f"✅ Отправлено: {sent}\n"
-        f"⏳ Пропущены (180-дневная неплотность): {cooldown_skipped}\n"
-        f"🚫 В блок-листе/недоступны: {blocked}\n"
-        f"ℹ️ Осталось без изменений: {left}"
-    )
+def format_dispatch_result(
+    total: int,
+    sent: int,
+    cooldown_skipped: int,
+    blocked: int,
+    duplicates: int = 0,
+) -> str:
+    left = max(total - sent - cooldown_skipped - blocked - duplicates, 0)
+    lines = [
+        "📨 Рассылка завершена.",
+        f"📊 В очереди было: {total}",
+        f"✅ Отправлено: {sent}",
+        f"⏳ Пропущены (по правилу «180 дней»): {cooldown_skipped}",
+        f"🚫 В блок-листе/недоступны: {blocked}",
+    ]
+    if duplicates:
+        lines.append(f"🔁 Дубликаты за 24 ч: {duplicates}")
+    lines.append(f"ℹ️ Осталось без изменений: {left}")
+    return "\n".join(lines)

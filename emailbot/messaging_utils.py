@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import imaplib
 import logging
 import os
@@ -10,7 +11,7 @@ import shutil
 import time
 import uuid
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
@@ -56,6 +57,7 @@ SUPPRESS_PATH = expand_path(_SUPPRESS_ENV)
 BOUNCE_LOG_PATH = expand_path(_BOUNCE_ENV)
 SYNC_SEEN_EVENTS_PATH = expand_path(_SYNC_ENV)
 SENT_CACHE_FILE = expand_path(os.getenv("SENT_MAILBOX_CACHE", "var/sent_mailbox.cache"))
+SENT_LOG_PATH = expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv"))
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +621,25 @@ def load_sent_log(path: Path) -> Dict[str, datetime]:
     return data
 
 
+def _iter_sent_rows() -> Iterable[Dict[str, str]]:
+    path = Path(SENT_LOG_PATH)
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", newline="", encoding="utf-8") as f:
+            yield from csv.DictReader(f)
+    except FileNotFoundError:
+        return []
+    except Exception:
+        logger.debug("failed to read sent log rows", exc_info=True)
+        return []
+
+
+def _content_hash_from_parts(key: str, subject: str, body: str) -> str:
+    payload = f"{key}|{subject}|{body}".encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
+
+
 def upsert_sent_log(
     path: str | Path,
     email: str,
@@ -819,6 +840,54 @@ def was_sent_within(email: str, days: int = 180) -> bool:
     from . import history_service as _history_service
 
     return _history_service.was_sent_within_days(email, "", days)
+
+
+def was_sent_today_same_content(email: str, subject: str, body: str) -> bool:
+    """Return True if the same message was sent within the last 24 hours."""
+
+    tz = ZoneInfo(REPORT_TZ)
+    subject_norm = subject or ""
+    body_norm = body or ""
+    start_local = datetime.now(tz) - timedelta(hours=24)
+    key = canonical_for_history(email)
+    if not key:
+        return False
+    target_hash = _content_hash_from_parts(key, subject_norm, body_norm)
+    for row in _iter_sent_rows():
+        status = (row.get("status") or "ok").strip().lower()
+        if status not in {"ok", "sent", "success"}:
+            continue
+        ts_raw = (row.get("last_sent_at") or row.get("ts") or "").strip()
+        if not ts_raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts_raw)
+        except Exception:
+            continue
+        if dt.tzinfo is None:
+            dt_local = dt.replace(tzinfo=tz)
+        else:
+            dt_local = dt.astimezone(tz)
+        if dt_local < start_local:
+            continue
+        row_key = (row.get("key") or "").strip()
+        if not row_key:
+            row_key = canonical_for_history(row.get("email", ""))
+        if row_key != key:
+            continue
+        existing_hash = (row.get("content_hash") or row.get("body_hash") or "").strip()
+        if existing_hash:
+            if existing_hash == target_hash:
+                return True
+            continue
+        row_subject = (row.get("subject") or "").strip()
+        row_body = (row.get("body") or "").strip()
+        if not row_subject and not row_body:
+            continue
+        old_hash = _content_hash_from_parts(row_key, row_subject, row_body)
+        if old_hash == target_hash:
+            return True
+    return False
 
 
 def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
@@ -1032,6 +1101,7 @@ __all__ = [
     "GENERIC_GTLD",
     "is_foreign",
     "was_sent_within",
+    "was_sent_today_same_content",
     "log_sent",
     "SecretFilter",
 ]

@@ -2062,6 +2062,7 @@ async def _send_batch_with_sessions(
         return
 
     errors: list[str] = []
+    duplicates: list[str] = []
     cancel_event = context.chat_data.get("cancel_event")
     host = os.getenv("SMTP_HOST", "smtp.mail.ru")
     port = int(os.getenv("SMTP_PORT", "465"))
@@ -2088,8 +2089,13 @@ async def _send_batch_with_sessions(
                         break
                     email_addr = to_send.pop(0)
                     try:
-                        outcome, token, log_key = send_email_with_sessions(
-                            client, imap, sent_folder, email_addr, template_path
+                        outcome, token, log_key, content_hash = send_email_with_sessions(
+                            client,
+                            imap,
+                            sent_folder,
+                            email_addr,
+                            template_path,
+                            subject=messaging.DEFAULT_SUBJECT,
                         )
                         if outcome == messaging.SendOutcome.SENT:
                             log_sent_email(
@@ -2100,9 +2106,16 @@ async def _send_batch_with_sessions(
                                 template_path,
                                 unsubscribe_token=token,
                                 key=log_key,
+                                subject=messaging.DEFAULT_SUBJECT,
+                                content_hash=content_hash,
                             )
                             sent_count += 1
                             await asyncio.sleep(1.5)
+                        elif outcome == messaging.SendOutcome.DUPLICATE:
+                            duplicates.append(email_addr)
+                            errors.append(
+                                f"{email_addr} — пропущено (дубль за 24 ч)"
+                            )
                         elif outcome == messaging.SendOutcome.COOLDOWN:
                             errors.append(
                                 f"{email_addr} — пропущено (кулдаун 180 дней)"
@@ -2717,6 +2730,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         sent_count = 0
         errors: list[str] = []
+        duplicates: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         host = os.getenv("SMTP_HOST", "smtp.mail.ru")
         port = int(os.getenv("SMTP_PORT", "465"))
@@ -2742,8 +2756,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             break
                         email_addr = to_send.pop(0)
                         try:
-                            outcome, token, log_key = send_email_with_sessions(
-                                client, imap, sent_folder, email_addr, template_path
+                            outcome, token, log_key, content_hash = send_email_with_sessions(
+                                client,
+                                imap,
+                                sent_folder,
+                                email_addr,
+                                template_path,
+                                subject=messaging.DEFAULT_SUBJECT,
                             )
                             if outcome == messaging.SendOutcome.SENT:
                                 log_sent_email(
@@ -2754,9 +2773,16 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                     template_path,
                                     unsubscribe_token=token,
                                     key=log_key,
+                                    subject=messaging.DEFAULT_SUBJECT,
+                                    content_hash=content_hash,
                                 )
                                 sent_count += 1
                                 await asyncio.sleep(1.5)
+                            elif outcome == messaging.SendOutcome.DUPLICATE:
+                                duplicates.append(email_addr)
+                                errors.append(
+                                    f"{email_addr} — пропущено (дубль за 24 ч)"
+                                )
                             elif outcome == messaging.SendOutcome.COOLDOWN:
                                 errors.append(
                                     f"{email_addr} — пропущено (кулдаун 180 дней)"
@@ -2928,6 +2954,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
+                    "skipped_duplicates": duplicates,
                 },
             )
 
@@ -2969,6 +2996,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
+                    "skipped_duplicates": duplicates,
                 },
             )
 
@@ -2996,8 +3024,13 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    outcome, token, log_key = send_email_with_sessions(
-                        client, imap, sent_folder, email_addr, template_path
+                    outcome, token, log_key, content_hash = send_email_with_sessions(
+                        client,
+                        imap,
+                        sent_folder,
+                        email_addr,
+                        template_path,
+                        subject=messaging.DEFAULT_SUBJECT,
                     )
                     if outcome == messaging.SendOutcome.SENT:
                         log_sent_email(
@@ -3008,9 +3041,16 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             template_path,
                             unsubscribe_token=token,
                             key=log_key,
+                            subject=messaging.DEFAULT_SUBJECT,
+                            content_hash=content_hash,
                         )
                         sent_ok.append(email_addr)
                         await asyncio.sleep(1.5)
+                    elif outcome == messaging.SendOutcome.DUPLICATE:
+                        duplicates.append(email_addr)
+                        errors.append(
+                            f"{email_addr} — пропущено (дубль за 24 ч)"
+                        )
                     elif outcome == messaging.SendOutcome.COOLDOWN:
                         errors.append(f"{email_addr} — пропущено (кулдаун 180 дней)")
                         if email_addr not in skipped_recent:
@@ -3078,12 +3118,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total_sent = len(sent_ok)
         total_skipped = len(skipped_recent)
         total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total = total_sent + total_skipped + total_blocked
+        total_duplicates = len(duplicates)
+        total = total_sent + total_skipped + total_blocked + total_duplicates
         report_text = format_dispatch_result(
             total,
             total_sent,
             total_skipped,
             total_blocked,
+            total_duplicates,
         )
         if blocked_foreign:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"

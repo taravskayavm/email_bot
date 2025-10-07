@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import email
+import hashlib
 import html
 import imaplib
 import logging
@@ -41,6 +42,7 @@ from .messaging_utils import (
     load_seen_events,
     save_seen_events,
     was_sent_within,
+    was_sent_today_same_content,
     SYNC_SEEN_EVENTS_PATH,
 )
 
@@ -95,11 +97,15 @@ TEMPLATE_MAP = {
 }
 
 
+DEFAULT_SUBJECT = "Издательство Лань приглашает к сотрудничеству"
+
+
 class SendOutcome(Enum):
     SENT = "sent"
     COOLDOWN = "cooldown"
     BLOCKED = "blocked"
     ERROR = "error"
+    DUPLICATE = "duplicate"
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -528,7 +534,7 @@ def build_message(
 def send_email(
     recipient: str,
     html_path: str,
-    subject: str = "Издательство Лань приглашает к сотрудничеству",
+    subject: str = DEFAULT_SUBJECT,
     notify_func=None,
     batch_id: str | None = None,
     *,
@@ -544,15 +550,27 @@ def send_email(
             except Exception:
                 logger.exception("cooldown check failed")
                 return SendOutcome.ERROR
-        if not _register_send(recipient, batch_id):
-            logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-            return SendOutcome.COOLDOWN
-        msg, _token = build_message(
+        msg, token = build_message(
             recipient,
             html_path,
             subject,
             override_180d=override_180d,
         )
+        html_part = msg.get_body("html")
+        html_body = html_part.get_content() if html_part else ""
+        body_for_hash = html_body.replace(token, "{token}") if token else html_body
+        subject_norm = subject or ""
+        if was_sent_today_same_content(recipient, subject_norm, body_for_hash):
+            logger.info("Skipping duplicate content for %s within 24h", recipient)
+            return SendOutcome.DUPLICATE
+        if not _register_send(recipient, batch_id):
+            logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+            return SendOutcome.COOLDOWN
+        key = canonical_for_history(recipient)
+        content_hash = None
+        if key:
+            payload = f"{key}|{subject_norm}|{body_for_hash}".encode("utf-8")
+            content_hash = hashlib.sha1(payload).hexdigest()
         raw = msg.as_string()
         send_raw_smtp_with_retry(raw, recipient, max_tries=3)
         save_to_sent_folder(raw)
@@ -560,6 +578,15 @@ def send_email(
             cooldown_mark_sent(recipient)
         except Exception:
             logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+        log_sent_email(
+            recipient,
+            Path(html_path).stem,
+            status="ok",
+            filename=html_path,
+            unsubscribe_token=token,
+            subject=subject_norm,
+            content_hash=content_hash,
+        )
         return SendOutcome.SENT
     except Exception as e:
         log_error(f"send_email: {recipient}: {e}")
@@ -605,7 +632,7 @@ def send_email_with_sessions(
     sent_folder: str,
     recipient: str,
     html_path: str,
-    subject: str = "Издательство Лань приглашает к сотрудничеству",
+    subject: str = DEFAULT_SUBJECT,
     batch_id: str | None = None,
     *,
     # параметры, которые уже пробрасывает manual_send.py — принимаем их,
@@ -614,31 +641,43 @@ def send_email_with_sessions(
     group_title: str | None = None,
     group_key: str | None = None,
     override_180d: bool = False,
-) -> tuple[SendOutcome, str, str | None]:
+) -> tuple[SendOutcome, str, str | None, str | None]:
     # 0) Проверка кулдауна (если не запросили явный override)
     if not override_180d:
         try:
             skip, reason = should_skip_by_cooldown(recipient)
             if skip:
                 logger.info("Cooldown skip for %s: %s", recipient, reason)
-                return SendOutcome.COOLDOWN, "", None
+                return SendOutcome.COOLDOWN, "", None, None
         except Exception:
             # Не роняем поток из-за побочного сервиса — fail-open запрещён,
             # поэтому при ошибке проверку считаем «нет допуска»
             logger.exception("cooldown check failed")
-            return SendOutcome.ERROR, "", None
+            return SendOutcome.ERROR, "", None, None
 
-    if not _register_send(recipient, batch_id):
-        logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return SendOutcome.COOLDOWN, "", None
-
-    # 1) Формируем письмо
     msg, token = build_message(
         recipient,
         html_path,
         subject,
         override_180d=override_180d,
     )
+    html_part = msg.get_body("html")
+    html_body = html_part.get_content() if html_part else ""
+    body_for_hash = html_body.replace(token, "{token}") if token else html_body
+    subject_norm = subject or ""
+    if was_sent_today_same_content(recipient, subject_norm, body_for_hash):
+        logger.info("Skipping duplicate content for %s within 24h", recipient)
+        return SendOutcome.DUPLICATE, "", None, None
+
+    if not _register_send(recipient, batch_id):
+        logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+        return SendOutcome.COOLDOWN, "", None, None
+
+    key = canonical_for_history(recipient)
+    content_hash = None
+    if key:
+        payload = f"{key}|{subject_norm}|{body_for_hash}".encode("utf-8")
+        content_hash = hashlib.sha1(payload).hexdigest()
     if fixed_from:
         try:
             msg.replace_header("From", fixed_from)
@@ -652,7 +691,7 @@ def send_email_with_sessions(
         save_to_sent_folder(raw, imap=imap, folder=sent_folder)
     except Exception:
         logger.exception("SMTP send failed for %s", recipient)
-        return SendOutcome.ERROR, "", None
+        return SendOutcome.ERROR, "", None, None
 
     # 3) Зафиксировать отправку для кулдауна
     try:
@@ -667,9 +706,11 @@ def send_email_with_sessions(
         status="ok",
         filename=html_path,
         unsubscribe_token=token,
+        subject=subject_norm,
+        content_hash=content_hash,
     )
 
-    return SendOutcome.SENT, token, log_key
+    return SendOutcome.SENT, token, log_key, content_hash
 
 
 def process_unsubscribe_requests():
@@ -787,6 +828,8 @@ def log_sent_email(
     *,
     key: str | None = None,
     ts: datetime | None = None,
+    subject: str | None = None,
+    content_hash: str | None = None,
 ) -> str | None:
     if status not in {"ok", "sent", "success"}:
         return None
@@ -801,6 +844,10 @@ def log_sent_email(
         "unsubscribed": unsubscribed,
         "unsubscribed_at": unsubscribed_at,
     }
+    if subject is not None:
+        extra["subject"] = subject
+    if content_hash is not None:
+        extra["content_hash"] = content_hash
     normalized = normalize_email(email_addr)
     used_key = key or str(uuid.uuid4())
     _, _ = upsert_sent_log(

@@ -205,6 +205,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "blocked_foreign": blocked_foreign,
                 "blocked_invalid": blocked_invalid,
                 "skipped_recent": skipped_recent,
+                "skipped_duplicates": [],
                 "batch_id": context.chat_data.get("batch_id"),
             },
         )
@@ -302,6 +303,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 blocked_foreign = list(saved_state.get("blocked_foreign", []))
                 blocked_invalid = list(saved_state.get("blocked_invalid", []))
                 skipped_recent = list(saved_state.get("skipped_recent", []))
+                skipped_duplicates = list(saved_state.get("skipped_duplicates", []))
                 sent_ok = list(saved_state.get("sent_ok", []))
                 base_candidates = list(saved_state.get("pending", []))
             else:
@@ -309,6 +311,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 blocked_foreign = list(state_obj.foreign or [])
                 blocked_invalid = []
                 skipped_recent = list(state_obj.cooldown_blocked or [])
+                skipped_duplicates: List[str] = []
                 sent_ok: List[str] = []
                 base_candidates = list(state_obj.to_send or emails)
 
@@ -442,6 +445,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
+                    "skipped_duplicates": skipped_duplicates,
                 },
             )
 
@@ -493,12 +497,13 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    outcome, token, log_key = send_email_with_sessions(
+                    outcome, token, log_key, content_hash = send_email_with_sessions(
                         smtp,
                         imap,
                         sent_folder,
                         email_addr,
                         template_path,
+                        subject=messaging.DEFAULT_SUBJECT,
                         fixed_from=fixed_map.get(email_addr),
                         group_title=template_label,
                         group_key=group_code,
@@ -513,10 +518,16 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             template_path,
                             unsubscribe_token=token,
                             key=log_key,
+                            subject=messaging.DEFAULT_SUBJECT,
+                            content_hash=content_hash,
                         )
                         sent_ok.append(email_addr)
                         _audit(email_addr, "sent")
                         await asyncio.sleep(1.5)
+                    elif outcome == SendOutcome.DUPLICATE:
+                        if email_addr not in skipped_duplicates:
+                            skipped_duplicates.append(email_addr)
+                        _audit(email_addr, "duplicate")
                     elif outcome == SendOutcome.COOLDOWN:
                         if email_addr not in skipped_recent:
                             skipped_recent.append(email_addr)
@@ -588,6 +599,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
                         "skipped_recent": skipped_recent,
+                        "skipped_duplicates": skipped_duplicates,
                     },
                 )
         finally:
@@ -599,12 +611,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total_sent = len(sent_ok)
         total_skipped = len(skipped_recent)
         total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total = total_sent + total_skipped + total_blocked
+        total_duplicates = len(skipped_duplicates)
+        total = total_sent + total_skipped + total_blocked + total_duplicates
         report_text = format_dispatch_result(
             total,
             total_sent,
             total_skipped,
             total_blocked,
+            total_duplicates,
         )
         filtered_lines = []
         for line in report_text.splitlines():
