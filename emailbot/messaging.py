@@ -14,7 +14,7 @@ import time
 import secrets
 import smtplib
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
@@ -917,7 +917,8 @@ def clear_recent_sent_cache():
 def get_sent_today() -> Set[str]:
     if not os.path.exists(LOG_FILE):
         return set()
-    today = datetime.utcnow().date()
+    tz = ZoneInfo(REPORT_TZ)
+    today = datetime.now(tz).date()
     sent = set()
     with open(LOG_FILE, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -929,7 +930,9 @@ def get_sent_today() -> Set[str]:
                 dt = datetime.fromisoformat(row["last_sent_at"])
             except Exception:
                 continue
-            if dt.date() == today:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt.astimezone(tz).date() == today:
                 sent.add(row["email"].lower())
     return sent
 
