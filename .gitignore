@@ -38,7 +38,8 @@ lib/
 lib64/
 parts/
 sdist/
-var/
+var/*
+!var/.gitkeep
 wheels/
 share/python-wheels/
 *.egg-info/

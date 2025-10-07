@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+"""
+Deprecated helpers for legacy rule checks.
+
+Historically this module managed an alternative JSONL log of sent messages and
+provided helpers to inspect it. The production pipeline has since migrated to
+``sent_log.csv`` managed by :mod:`emailbot.messaging_utils`. To avoid breaking
+older imports we keep thin wrappers that forward to the new implementation.
+"""
+
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from utils.paths import expand_path, ensure_parent
 
@@ -56,6 +66,25 @@ def seen_within_window(addr: str, months: int | None = None) -> bool:
     target = addr.strip().lower()
     if not target or not HISTORY_PATH.exists():
         return False
+
+
+def was_emailed_recently(email: str, days: int = 180) -> bool:  # pragma: no cover
+    """Legacy wrapper that proxies to :func:`emailbot.messaging_utils.was_sent_within`."""
+
+    from emailbot.messaging_utils import was_sent_within
+
+    try:
+        return was_sent_within(email, days=days)
+    except Exception:
+        return False
+
+
+def mark_emailed(email: str, meta: dict[str, Any] | None = None) -> None:  # pragma: no cover
+    """Compatibility shim. Records are now handled by :mod:`emailbot.messaging_utils`."""
+
+    # The unified ``sent_log.csv`` is updated via ``messaging_utils.log_sent``.
+    # Keeping this no-op avoids crashes if older extensions still import it.
+    return None
     try:
         with HISTORY_PATH.open("r", encoding="utf-8") as fh:
             for line in fh:

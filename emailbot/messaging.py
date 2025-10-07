@@ -844,43 +844,19 @@ def was_sent_within(email: str, days: int = 180) -> bool:
     return key in recent
 
 
-def was_emailed_recently(
-    email_addr: str,
-    since_days: int = 180,
-    imap: Optional[imaplib.IMAP4_SSL] = None,
-    folder: Optional[str] = None,
-) -> bool:
-    cutoff = datetime.utcnow() - timedelta(days=since_days)
-    cache = _load_sent_log()
-    key = canonical_for_history(email_addr)
-    dt = cache.get(key)
-    if dt and dt >= cutoff:
-        return True
+def was_emailed_recently(email: str, days: int = 180) -> bool:  # pragma: no cover
+    """[DEPRECATED] Используйте :func:`emailbot.messaging_utils.was_sent_within`.
+
+    Оставлено в качестве совместимой прослойки для старых импортов. Новая
+    реализация располагается в :mod:`emailbot.messaging_utils`.
+    """
+
+    from .messaging_utils import was_sent_within
+
     try:
-        close = False
-        if imap is None:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
-            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            close = True
-        if folder is None:
-            folder = get_preferred_sent_folder(imap)
-        status, _ = imap.select(f'"{folder}"')
-        if status != "OK":
-            logger.warning("select %s failed (%s), using Sent", folder, status)
-            folder = "Sent"
-            imap.select(f'"{folder}"')
-        date_str = (datetime.utcnow() - timedelta(days=since_days)).strftime("%d-%b-%Y")
-        status, data = imap.search(None, f'(SINCE {date_str} HEADER To "{email_addr}")')
-        return status == "OK" and bool(data and data[0])
-    except Exception as e:
-        log_error(f"was_emailed_recently: {e}")
+        return was_sent_within(email, days=days)
+    except Exception:
         return False
-    finally:
-        if close and imap is not None:
-            try:
-                imap.logout()
-            except Exception as e:
-                log_error(f"was_emailed_recently logout: {e}")
 
 
 def get_recent_6m_union() -> Set[str]:

@@ -260,6 +260,9 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.refresh_preview, pattern="^refresh_preview$")
     )
     app.add_handler(
+        CallbackQueryHandler(bot_handlers.show_skipped_examples, pattern="^skipped:")
+    )
+    app.add_handler(
         CallbackQueryHandler(
             bot_handlers.ask_include_numeric, pattern="^ask_include_numeric$"
         )
