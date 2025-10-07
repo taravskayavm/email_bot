@@ -25,6 +25,9 @@ LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
 # Отчётная временная зона (используется в логах/отчётах)
 REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
+# ---- Reconcile (IMAP vs CSV) ----
+RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
+
 # Краулер: бюджеты и кэш
 CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
 CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
@@ -122,6 +125,7 @@ __all__ = [
     "SKIPPED_PREVIEW_LIMIT",
     "LAST_SUMMARY_DIR",
     "REPORT_TZ",
+    "RECONCILE_SINCE_DAYS",
     "CRAWL_MAX_PAGES_PER_DOMAIN",
     "CRAWL_TIME_BUDGET_SECONDS",
     "ROBOTS_CACHE_PATH",
