@@ -9,7 +9,8 @@ from collections import deque
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional, Sequence
 from urllib import robotparser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+import xml.etree.ElementTree as ET
 
 import httpx
 
@@ -41,6 +42,14 @@ except Exception:  # pragma: no cover - fallback parser
         return parser.links
 
 from emailbot import config as C
+from emailbot.settings import (
+    ALLOWED_CONTENT_TYPES,
+    ENABLE_SITEMAP,
+    GET_TIMEOUT,
+    HEAD_TIMEOUT,
+    MAX_CONTENT_LENGTH,
+    SITEMAP_MAX_URLS,
+)
 from utils.charset_helper import best_effort_decode
 from utils.url_tools import canonicalize, same_domain
 
@@ -118,7 +127,12 @@ class Crawler:
         self.start_canonical = canonicalize(start_url, start_url) or start_url
         self.max_pages = max_pages or C.CRAWL_MAX_PAGES
         self.max_depth = max_depth or C.CRAWL_MAX_DEPTH
-        timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0)
+        timeout = httpx.Timeout(
+            connect=HEAD_TIMEOUT,
+            read=GET_TIMEOUT,
+            write=GET_TIMEOUT,
+            pool=HEAD_TIMEOUT,
+        )
         limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
         self.client = httpx.AsyncClient(
             http2=C.CRAWL_HTTP2,
@@ -134,6 +148,8 @@ class Crawler:
         self._start_ts = time.monotonic()
         self._domain_pages: dict[str, int] = {}
         self._robots_cache = RobotsCache(C.ROBOTS_CACHE_PATH, C.ROBOTS_CACHE_TTL_SECONDS)
+        self._head_checks: dict[str, bool] = {}
+        self._allowed_types = {item.strip().lower() for item in ALLOWED_CONTENT_TYPES if item.strip()}
 
     @staticmethod
     def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
@@ -241,6 +257,16 @@ class Crawler:
         queue.append((start_url, 0))
         seen: set[str] = set()
         queued: set[str] = {start_url}
+        if ENABLE_SITEMAP:
+            try:
+                sitemap_urls = await self._load_sitemap_urls(self.start)
+            except Exception:
+                sitemap_urls = []
+            for extra in sitemap_urls:
+                if extra in queued:
+                    continue
+                queue.append((extra, 0))
+                queued.add(extra)
         while queue and self.pages_scanned < self.max_pages:
             if self._time_budget_exceeded():
                 break
@@ -253,6 +279,8 @@ class Crawler:
             if not self._domain_budget_allows(url):
                 continue
             if not await self.allowed(url):
+                continue
+            if not await self._passes_head_filter(url):
                 continue
             self._mark_domain_usage(url)
             if C.CRAWL_DELAY_SEC:
@@ -338,4 +366,101 @@ class Crawler:
             return best_effort_decode(response.content) or response.text
         except Exception:
             return ""
+
+    async def _passes_head_filter(self, url: str) -> bool:
+        cached = self._head_checks.get(url)
+        if cached is not None:
+            return cached
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            self._head_checks[url] = True
+            return True
+
+        allowed = True
+        try:
+            response = await self.client.head(url, timeout=HEAD_TIMEOUT)
+            status = response.status_code
+            if status >= 400 and status not in {405, 501}:
+                allowed = False
+            else:
+                content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                length_header = response.headers.get("content-length")
+                content_length = 0
+                if length_header:
+                    try:
+                        content_length = int(length_header)
+                    except (TypeError, ValueError):
+                        content_length = 0
+                if self._allowed_types and content_type and content_type not in self._allowed_types:
+                    allowed = False
+                if MAX_CONTENT_LENGTH > 0 and content_length > MAX_CONTENT_LENGTH:
+                    allowed = False
+                if status in {405, 501}:
+                    allowed = True
+        except httpx.TimeoutException:
+            allowed = False
+        except httpx.HTTPStatusError:
+            allowed = False
+        except httpx.RequestError:
+            allowed = True
+        except Exception:
+            allowed = True
+
+        self._head_checks[url] = allowed
+        return allowed
+
+    async def _load_sitemap_urls(self, seed_url: str) -> list[str]:
+        if not ENABLE_SITEMAP or SITEMAP_MAX_URLS <= 0:
+            return []
+
+        parsed = urlparse(seed_url)
+        if not parsed.scheme or not parsed.netloc:
+            return []
+
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        candidates = ["/sitemap.xml", "/sitemap_index.xml"]
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        for suffix in candidates:
+            sitemap_url = urljoin(base.rstrip("/") + "/", suffix.lstrip("/"))
+            try:
+                response = await self.client.get(sitemap_url, timeout=GET_TIMEOUT)
+            except Exception:
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                text = response.text
+            except Exception:
+                try:
+                    text = best_effort_decode(response.content)
+                except Exception:
+                    text = ""
+            if not text:
+                continue
+            try:
+                root = ET.fromstring(text)
+            except Exception:
+                continue
+            for node in root.iter():
+                tag = node.tag.lower()
+                if not tag.endswith("loc"):
+                    continue
+                value = (node.text or "").strip()
+                if not value:
+                    continue
+                candidate = canonicalize(base, value) or value
+                if not candidate:
+                    continue
+                if not same_domain(self.start, candidate):
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                urls.append(candidate)
+                if len(urls) >= SITEMAP_MAX_URLS:
+                    return urls
+        return urls
 

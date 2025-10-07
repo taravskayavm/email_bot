@@ -14,6 +14,7 @@ from emailbot.notify import notify
 from services.templates import get_template_label
 
 from emailbot import config as C
+from emailbot import extraction as extraction_module
 from emailbot import history_service, mass_state, messaging
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
@@ -30,6 +31,7 @@ from utils.email_clean import (
     drop_leading_char_twins,
     parse_emails_unified,
 )
+from emailbot.parallel_parse import parallel_map_files
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers only
     from emailbot.bot_handlers import SessionState
@@ -41,6 +43,39 @@ _REFRESH_PREFIX = "preview_refresh:"
 
 MAX_TG = 4096
 _PARAGRAPH_CHUNK = 3000
+
+
+def _extract_emails_from_files(files: Sequence[str]) -> list[str]:
+    if not files:
+        return []
+
+    def _worker(path: str) -> list[str]:
+        try:
+            emails, _ = extraction_module.extract_any(path)
+            return list(emails)
+        except Exception:
+            return []
+
+    chunks = parallel_map_files(files, _worker)
+    combined: list[str] = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        combined.extend(chunk)
+    if not combined:
+        return []
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in combined:
+        candidate = str(item).strip()
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
 
 
 def _split_for_telegram(text: str) -> list[str]:
@@ -421,6 +456,11 @@ def _get_source_emails(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
     stored = context.chat_data.get("preview_source_emails")
     if isinstance(stored, list):
         return list(stored)
+    files_ref = context.chat_data.get("preview_source_files")
+    if isinstance(files_ref, list) and files_ref:
+        parsed = _extract_emails_from_files([str(item) for item in files_ref if str(item)])
+        if parsed:
+            return parsed
     preview = context.chat_data.get("send_preview")
     if isinstance(preview, dict):
         final = preview.get("final")
