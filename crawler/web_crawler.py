@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional, Sequence
 from urllib import robotparser
@@ -52,6 +53,18 @@ from emailbot.settings import (
 )
 from utils.charset_helper import best_effort_decode
 from utils.url_tools import canonicalize, same_domain
+
+
+BACKOFF_BASE_SECS = 1
+BACKOFF_MAX_SECS = 60
+BACKOFF_STATUS = {429, 503}
+BACKOFF_TTL_SECS = 60
+
+
+@dataclass
+class _BackoffState:
+    fail_count: int = 0
+    until_ts: float = 0.0
 
 
 class RobotsCache:
@@ -150,6 +163,7 @@ class Crawler:
         self._robots_cache = RobotsCache(C.ROBOTS_CACHE_PATH, C.ROBOTS_CACHE_TTL_SECONDS)
         self._head_checks: dict[str, bool] = {}
         self._allowed_types = {item.strip().lower() for item in ALLOWED_CONTENT_TYPES if item.strip()}
+        self._host_backoff: dict[str, _BackoffState] = {}
 
     @staticmethod
     def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
@@ -167,6 +181,50 @@ class Crawler:
             if cleaned not in result:
                 result.append(cleaned)
         return result
+
+    def _host_backoff_sleep(self, host: str) -> float:
+        state = self._host_backoff.get(host)
+        if not state:
+            return 0.0
+        now = time.time()
+        if state.until_ts > now:
+            return max(0.0, state.until_ts - now)
+        return 0.0
+
+    def _host_register_fail(self, host: str) -> None:
+        if not host:
+            return
+        state = self._host_backoff.setdefault(host, _BackoffState())
+        state.fail_count += 1
+        delay = min(BACKOFF_BASE_SECS * (2 ** (state.fail_count - 1)), BACKOFF_MAX_SECS)
+        state.until_ts = time.time() + max(delay, BACKOFF_TTL_SECS)
+
+    def _host_register_ok(self, host: str) -> None:
+        if not host:
+            return
+        self._host_backoff.pop(host, None)
+
+    async def _request_with_backoff(self, method: str, url: str, **kwargs) -> httpx.Response | None:
+        host = urlparse(url).netloc
+        if host:
+            sleep_for = self._host_backoff_sleep(host)
+            if sleep_for > 0:
+                try:
+                    await asyncio.sleep(sleep_for)
+                except Exception:
+                    pass
+        try:
+            response = await self.client.request(method, url, **kwargs)
+        except httpx.HTTPError:
+            if host:
+                self._host_register_fail(host)
+            raise
+        if host:
+            if response.status_code in BACKOFF_STATUS:
+                self._host_register_fail(host)
+                return None
+            self._host_register_ok(host)
+        return response
 
     def _path_allowed(self, url: str) -> bool:
         if not self.allowed_prefixes:
@@ -202,7 +260,17 @@ class Crawler:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                response = await self.client.get(url)
+                response = await self._request_with_backoff("GET", url)
+                if response is None:
+                    last_error = None
+                    self.last_error = None
+                    if attempt < 2:
+                        try:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                        except Exception:
+                            pass
+                        continue
+                    break
                 content_type = str(response.headers.get("content-type", "")).lower()
                 if (
                     content_type
@@ -357,8 +425,10 @@ class Crawler:
 
     async def _download_robots(self, robots_url: str) -> str | None:
         try:
-            response = await self.client.get(robots_url)
+            response = await self._request_with_backoff("GET", robots_url)
         except Exception:
+            return None
+        if response is None:
             return None
         if response.status_code != 200:
             return ""
@@ -379,25 +449,28 @@ class Crawler:
 
         allowed = True
         try:
-            response = await self.client.head(url, timeout=HEAD_TIMEOUT)
-            status = response.status_code
-            if status >= 400 and status not in {405, 501}:
+            response = await self._request_with_backoff("HEAD", url, timeout=HEAD_TIMEOUT)
+            if response is None:
                 allowed = False
             else:
-                content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-                length_header = response.headers.get("content-length")
-                content_length = 0
-                if length_header:
-                    try:
-                        content_length = int(length_header)
-                    except (TypeError, ValueError):
-                        content_length = 0
-                if self._allowed_types and content_type and content_type not in self._allowed_types:
+                status = response.status_code
+                if status >= 400 and status not in {405, 501}:
                     allowed = False
-                if MAX_CONTENT_LENGTH > 0 and content_length > MAX_CONTENT_LENGTH:
-                    allowed = False
-                if status in {405, 501}:
-                    allowed = True
+                else:
+                    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                    length_header = response.headers.get("content-length")
+                    content_length = 0
+                    if length_header:
+                        try:
+                            content_length = int(length_header)
+                        except (TypeError, ValueError):
+                            content_length = 0
+                    if self._allowed_types and content_type and content_type not in self._allowed_types:
+                        allowed = False
+                    if MAX_CONTENT_LENGTH > 0 and content_length > MAX_CONTENT_LENGTH:
+                        allowed = False
+                    if status in {405, 501}:
+                        allowed = True
         except httpx.TimeoutException:
             allowed = False
         except httpx.HTTPStatusError:
@@ -426,8 +499,10 @@ class Crawler:
         for suffix in candidates:
             sitemap_url = urljoin(base.rstrip("/") + "/", suffix.lstrip("/"))
             try:
-                response = await self.client.get(sitemap_url, timeout=GET_TIMEOUT)
+                response = await self._request_with_backoff("GET", sitemap_url, timeout=GET_TIMEOUT)
             except Exception:
+                continue
+            if response is None:
                 continue
             if response.status_code != 200:
                 continue
