@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import imaplib
+import io
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from telegram import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     Message,
     ReplyKeyboardMarkup,
     Update,
@@ -52,6 +54,7 @@ from . import mass_state
 from .session_store import load_last_summary, save_last_summary
 from .settings import REPORT_TZ, SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
+from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
 
 from utils.email_clean import sanitize_email
 from services.templates import get_template, get_template_label
@@ -1063,21 +1066,40 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Synchronize local log with the IMAP "Sent" folder."""
+    """Compare the local sent log with IMAP and report discrepancies."""
 
-    await update.message.reply_text(
-        "⏳ Сканируем папку «Отправленные» (последние 180 дней)..."
-    )
+    message = update.message
+    if message is None:
+        return
+
+    await message.reply_text("⏳ Сверяем локальный лог и IMAP…")
+
+    loop = asyncio.get_running_loop()
     try:
-        stats = sync_log_with_imap()
-        clear_recent_sent_cache()
-        await update.message.reply_text(
-            "🔄 "
-            f"новых: {stats['new_contacts']}, обновлено: {stats['updated_contacts']}, "
-            f"пропущено: {stats['skipped_events']}, всего: {stats['total_rows_after']}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка синхронизации: {e}")
+        result = await loop.run_in_executor(None, reconcile_csv_vs_imap)
+    except Exception as exc:
+        logger.exception("reconcile_csv_vs_imap failed: %s", exc)
+        await message.reply_text(f"❌ Ошибка сверки: {exc}")
+        return
+
+    summary_text = build_summary_text(result)
+    await message.reply_text(summary_text)
+
+    only_csv = list(result.get("only_csv") or [])
+    only_imap = list(result.get("only_imap") or [])
+
+    attachments: list[InputFile] = []
+    if only_csv:
+        buf = io.BytesIO(to_csv_bytes(only_csv, header=("email", "date_local")))
+        buf.name = "only_in_csv_not_in_imap.csv"
+        attachments.append(InputFile(buf, filename=buf.name))
+    if only_imap:
+        buf = io.BytesIO(to_csv_bytes(only_imap, header=("email", "date_local")))
+        buf.name = "only_in_imap_not_in_csv.csv"
+        attachments.append(InputFile(buf, filename=buf.name))
+
+    for file in attachments:
+        await message.reply_document(file)
 
 
 async def retry_last_command(
