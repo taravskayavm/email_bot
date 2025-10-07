@@ -493,7 +493,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    outcome, token = send_email_with_sessions(
+                    outcome, token, log_key = send_email_with_sessions(
                         smtp,
                         imap,
                         sent_folder,
@@ -512,6 +512,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             chat_id,
                             template_path,
                             unsubscribe_token=token,
+                            key=log_key,
                         )
                         sent_ok.append(email_addr)
                         _audit(email_addr, "sent")

@@ -8,8 +8,10 @@ import os
 import re
 import shutil
 import time
+import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -23,6 +25,7 @@ from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
 from emailbot import edit_service
+from .settings import REPORT_TZ
 from utils.email_norm import sanitize_for_send
 
 
@@ -253,6 +256,13 @@ class SecretFilter(logging.Filter):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_report_tz(dt: datetime) -> datetime:
+    tz = ZoneInfo(REPORT_TZ)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
 
 
 def _imap_utf7_encode(s: str) -> str:
@@ -518,7 +528,7 @@ def _normalize_ts(value: str) -> str:
                 return value
     if dt is None:
         return value
-    return ensure_aware_utc(dt).isoformat()
+    return _ensure_report_tz(dt).isoformat()
 
 
 def ensure_sent_log_schema(path: str) -> List[str]:
@@ -581,14 +591,31 @@ def _atomic_write(
 
 def load_sent_log(path: Path) -> Dict[str, datetime]:
     data: Dict[str, datetime] = {}
-    if path.exists():
-        with path.open(encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                try:
-                    dt = datetime.fromisoformat(row["last_sent_at"])
-                except Exception:
-                    continue
-                data[row["key"]] = ensure_aware_utc(dt)
+    if not path.exists():
+        return data
+
+    tz = ZoneInfo(REPORT_TZ)
+    with path.open(encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            email = (row.get("email") or "").strip()
+            if not email:
+                continue
+            ts_raw = (row.get("last_sent_at") or "").strip()
+            if not ts_raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts_raw)
+            except Exception:
+                continue
+            if dt.tzinfo is None:
+                dt_local = dt.replace(tzinfo=tz)
+            else:
+                dt_local = dt.astimezone(tz)
+            dt_utc = dt_local.astimezone(timezone.utc)
+            key = canonical_for_history(email)
+            current = data.get(key)
+            if current is None or current < dt_utc:
+                data[key] = dt_utc
     return data
 
 
@@ -599,15 +626,18 @@ def upsert_sent_log(
     source: str,
     status: str = "synced",
     extra: Dict[str, str] | None = None,
+    *,
+    key: str | None = None,
 ) -> Tuple[bool, bool]:
-    """Insert or update ``sent_log`` row."""
-
-    ts = ensure_aware_utc(ts)
+    """Insert or update ``sent_log`` row using ``key`` for deduplication."""
 
     p = Path(path)
     ensure_parent(p)
     fieldnames = ensure_sent_log_schema(str(p))
-    key = canonical_for_history(email)
+    event_key = (key or "").strip() or canonical_for_history(email)
+    tz = ZoneInfo(REPORT_TZ)
+    ts_local = _ensure_report_tz(ts)
+    ts_utc = ts_local.astimezone(timezone.utc)
     inserted = False
     updated = False
     with FileLock(p):
@@ -616,44 +646,54 @@ def upsert_sent_log(
             with p.open("r", newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
         for row in rows:
-            if row.get("key") == key:
-                existing_ts = row.get("last_sent_at", "")
+            row_key = (row.get("key") or "").strip()
+            if not row_key:
+                row_key = canonical_for_history(row.get("email", ""))
+            if row_key != event_key:
+                continue
+            existing_ts_raw = (row.get("last_sent_at") or "").strip()
+            ts_to_store = ts_local
+            if existing_ts_raw:
                 try:
-                    existing_dt = datetime.fromisoformat(existing_ts)
+                    existing_dt = datetime.fromisoformat(existing_ts_raw)
+                    if existing_dt.tzinfo is None:
+                        existing_local = existing_dt.replace(tzinfo=tz)
+                    else:
+                        existing_local = existing_dt.astimezone(tz)
+                    existing_utc = existing_local.astimezone(timezone.utc)
+                    if existing_utc > ts_utc:
+                        ts_to_store = existing_local
                 except Exception:
-                    existing_dt = None
-                if existing_dt is not None:
-                    existing_dt = ensure_aware_utc(existing_dt)
-                    if ts <= existing_dt:
-                        return False, False
-                row.update(
-                    {
-                        "email": email.strip(),
-                        "last_sent_at": ts.isoformat(),
-                        "source": source,
-                        "status": status,
-                    }
-                )
-                if extra:
-                    for k, v in extra.items():
-                        row[k] = str(v)
-                        if k not in fieldnames:
-                            fieldnames.append(k)
-                updated = True
-                break
+                    pass
+            row.update(
+                {
+                    "key": event_key,
+                    "email": email.strip(),
+                    "last_sent_at": ts_to_store.isoformat(),
+                    "source": source,
+                    "status": status,
+                }
+            )
+            if extra:
+                for k_extra, v_extra in extra.items():
+                    row[k_extra] = str(v_extra)
+                    if k_extra not in fieldnames:
+                        fieldnames.append(k_extra)
+            updated = True
+            break
         else:
             new_row = {
-                "key": key,
+                "key": event_key,
                 "email": email.strip(),
-                "last_sent_at": ts.isoformat(),
+                "last_sent_at": ts_local.isoformat(),
                 "source": source,
                 "status": status,
             }
             if extra:
-                for k, v in extra.items():
-                    new_row[k] = str(v)
-                    if k not in fieldnames:
-                        fieldnames.append(k)
+                for k_extra, v_extra in extra.items():
+                    new_row[k_extra] = str(v_extra)
+                    if k_extra not in fieldnames:
+                        fieldnames.append(k_extra)
             rows.append(new_row)
             inserted = True
 
@@ -676,42 +716,60 @@ def dedupe_sent_log_inplace(path: str | Path) -> Dict[str, int]:
     if p.exists():
         with p.open(encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
-    best: Dict[str, Dict[str, str]] = {}
+
+    tz = ZoneInfo(REPORT_TZ)
+    fieldnames: List[str] = list(REQUIRED_FIELDS)
     for r in rows:
-        key = r.get("key") or canonical_for_history(r.get("email", ""))
+        for k in r.keys():
+            if k not in fieldnames:
+                fieldnames.append(k)
+
+    deduped: List[Dict[str, str]] = []
+    index_by_key: Dict[str, int] = {}
+
+    def _parse_local(value: str) -> datetime | None:
+        if not value:
+            return None
         try:
-            ts_parsed = datetime.fromisoformat(r.get("last_sent_at", ""))
+            dt = datetime.fromisoformat(value)
         except Exception:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=tz)
+        return dt.astimezone(tz)
+
+    for row in rows:
+        current = dict(row)
+        key = (current.get("key") or "").strip()
+        if not key:
+            key = str(uuid.uuid4())
+            current["key"] = key
+        idx = index_by_key.get(key)
+        if idx is None:
+            for fn in fieldnames:
+                current.setdefault(fn, "")
+            deduped.append(current)
+            index_by_key[key] = len(deduped) - 1
             continue
-        ts = ensure_aware_utc(ts_parsed)
-        current = best.get(key)
-        current_dt = None
-        if current is not None:
-            try:
-                current_dt = datetime.fromisoformat(current["last_sent_at"])
-            except Exception:
-                current_dt = None
-            else:
-                current_dt = ensure_aware_utc(current_dt)
-        if current is None or current_dt is None or current_dt < ts:
-            r = dict(r)
-            r["key"] = key
-            r["last_sent_at"] = ts.isoformat()
-            best[key] = r
+        existing = deduped[idx]
+        new_ts = _parse_local(current.get("last_sent_at", ""))
+        old_ts = _parse_local(existing.get("last_sent_at", ""))
+        if old_ts is None or (new_ts is not None and new_ts.astimezone(timezone.utc) >= old_ts.astimezone(timezone.utc)):
+            merged = existing.copy()
+            merged.update({fn: current.get(fn, merged.get(fn, "")) for fn in fieldnames})
+            if new_ts is not None:
+                merged["last_sent_at"] = new_ts.isoformat()
+            deduped[idx] = merged
+
     before = len(rows)
-    after = len(best)
-    headers = ["key", "email", "last_sent_at", "source"]
-    if best:
-        extra_fields = set().union(*(r.keys() for r in best.values()))
-        headers = [h for h in headers if h in extra_fields] + [
-            h for h in extra_fields if h not in headers
-        ]
+    after = len(deduped)
+
     bak = p.with_suffix(p.suffix + ".bak")
     if p.exists() and not bak.exists():
         shutil.copy2(p, bak)
     with FileLock(p):
         try:
-            _atomic_write(p, best.values(), headers)
+            _atomic_write(p, deduped, fieldnames)
         except Exception:
             if bak.exists():
                 shutil.copy2(bak, p)
