@@ -900,20 +900,23 @@ def get_report(period: str = "day") -> str:
 
     cnt_ok = 0
     cnt_err = 0
-    with open(LOG_FILE, encoding="utf-8") as f:
-        reader = csv.reader(f)
+    with open(LOG_FILE, encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)  # ожидаем: key,email,last_sent_at,source,status
         for row in reader:
-            if len(row) < 4:
+            if not row:
+                continue
+            ts = (row.get("last_sent_at") or "").strip()
+            if not ts:
                 continue
             try:
-                dt = datetime.fromisoformat(row[0])
+                dt = datetime.fromisoformat(ts)
                 if dt.tzinfo is not None:
                     dt = dt.replace(tzinfo=None)
             except Exception:
                 continue
             if dt >= start_at:
-                st = (row[3] or "").strip().lower()
-                if st == "ok":
+                st = (row.get("status") or "").strip().lower()
+                if st in {"ok", "sent", "success"}:
                     cnt_ok += 1
                 else:
                     cnt_err += 1
