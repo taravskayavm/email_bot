@@ -22,6 +22,8 @@ EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
 # UI helpers
 SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
 LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
+# Отчётная временная зона (используется в логах/отчётах)
+REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
 # Краулер: бюджеты и кэш
 CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
@@ -119,6 +121,7 @@ __all__ = [
     "EXTERNAL_SOURCES",
     "SKIPPED_PREVIEW_LIMIT",
     "LAST_SUMMARY_DIR",
+    "REPORT_TZ",
     "CRAWL_MAX_PAGES_PER_DOMAIN",
     "CRAWL_TIME_BUDGET_SECONDS",
     "ROBOTS_CACHE_PATH",

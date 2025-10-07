@@ -13,6 +13,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
@@ -49,7 +50,7 @@ from .reporting import log_mass_filter_digest
 from . import settings
 from . import mass_state
 from .session_store import load_last_summary, save_last_summary
-from .settings import SKIPPED_PREVIEW_LIMIT
+from .settings import REPORT_TZ, SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
 
 from utils.email_clean import sanitize_email
@@ -1006,39 +1007,35 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def get_report(period: str = "day") -> str:
-    """Return statistics of sent e-mails for the given period."""
+    """Return statistics of sent e-mails for the given period in REPORT_TZ."""
 
     if not os.path.exists(LOG_FILE):
         return "Нет данных о рассылках."
-    now = datetime.now()
-    if period == "day":
-        start_at = now - timedelta(days=1)
-    elif period == "week":
-        start_at = now - timedelta(weeks=1)
-    elif period == "month":
-        start_at = now - timedelta(days=30)
-    elif period == "year":
-        start_at = now - timedelta(days=365)
-    else:
-        start_at = now - timedelta(days=1)
+
+    tz = ZoneInfo(REPORT_TZ)
+    now_local = datetime.now(tz)
+    delta_days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(period, 1)
+    start_local = now_local - timedelta(days=delta_days)
 
     cnt_ok = 0
     cnt_err = 0
     with open(LOG_FILE, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)  # ожидаем: key,email,last_sent_at,source,status
+        reader = csv.DictReader(f)
         for row in reader:
             if not row:
                 continue
-            ts = (row.get("last_sent_at") or "").strip()
-            if not ts:
+            ts_raw = (row.get("last_sent_at") or "").strip()
+            if not ts_raw:
                 continue
             try:
-                dt = datetime.fromisoformat(ts)
-                if dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)
+                dt = datetime.fromisoformat(ts_raw)
             except Exception:
                 continue
-            if dt >= start_at:
+            if dt.tzinfo is None:
+                dt_local = dt.replace(tzinfo=tz)
+            else:
+                dt_local = dt.astimezone(tz)
+            if dt_local >= start_local:
                 st = (row.get("status") or "").strip().lower()
                 if st in {"ok", "sent", "success"}:
                     cnt_ok += 1
@@ -2051,7 +2048,7 @@ async def _send_batch_with_sessions(
                         break
                     email_addr = to_send.pop(0)
                     try:
-                        outcome, token = send_email_with_sessions(
+                        outcome, token, log_key = send_email_with_sessions(
                             client, imap, sent_folder, email_addr, template_path
                         )
                         if outcome == messaging.SendOutcome.SENT:
@@ -2062,6 +2059,7 @@ async def _send_batch_with_sessions(
                                 chat_id,
                                 template_path,
                                 unsubscribe_token=token,
+                                key=log_key,
                             )
                             sent_count += 1
                             await asyncio.sleep(1.5)
@@ -2704,7 +2702,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             break
                         email_addr = to_send.pop(0)
                         try:
-                            outcome, token = send_email_with_sessions(
+                            outcome, token, log_key = send_email_with_sessions(
                                 client, imap, sent_folder, email_addr, template_path
                             )
                             if outcome == messaging.SendOutcome.SENT:
@@ -2715,6 +2713,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                     chat_id,
                                     template_path,
                                     unsubscribe_token=token,
+                                    key=log_key,
                                 )
                                 sent_count += 1
                                 await asyncio.sleep(1.5)
@@ -2957,7 +2956,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 email_addr = to_send.pop(0)
                 try:
-                    outcome, token = send_email_with_sessions(
+                    outcome, token, log_key = send_email_with_sessions(
                         client, imap, sent_folder, email_addr, template_path
                     )
                     if outcome == messaging.SendOutcome.SENT:
@@ -2968,6 +2967,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             chat_id,
                             template_path,
                             unsubscribe_token=token,
+                            key=log_key,
                         )
                         sent_ok.append(email_addr)
                         await asyncio.sleep(1.5)

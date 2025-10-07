@@ -3,6 +3,7 @@ import csv
 import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import aiohttp
@@ -13,6 +14,7 @@ from emailbot import messaging
 from emailbot import unsubscribe
 from emailbot import messaging_utils as mu
 from emailbot.reporting import build_mass_report_text
+from emailbot.settings import REPORT_TZ
 
 
 @pytest.fixture(autouse=True)
@@ -97,10 +99,10 @@ def test_log_sent_email_records_entries(temp_files):
     assert len(rows) == 1
     row = rows[0]
     ts = datetime.fromisoformat(row["last_sent_at"])
-    now = datetime.now(timezone.utc)
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    assert abs((now - ts).total_seconds()) < 5
+    assert ts.tzinfo is not None
+    tz = ZoneInfo(REPORT_TZ)
+    now = datetime.now(tz)
+    assert abs((now.astimezone(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()) < 5
     assert row["email"] == "user@example.com"
     assert row["source"] == "group1"
     assert row["status"] == "ok"

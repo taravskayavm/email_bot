@@ -91,13 +91,15 @@ def test_schema_migration_from_legacy_headers(tmp_path):
 def test_upsert_idempotent(tmp_path):
     path = tmp_path / "sent_log.csv"
     ts = datetime(2023, 1, 1)
-    ins, upd = mu.upsert_sent_log(path, "Test@Example.com", ts, "src")
+    ins, upd = mu.upsert_sent_log(path, "Test@Example.com", ts, "src", key="k1")
     assert (ins, upd) == (True, False)
-    ins2, upd2 = mu.upsert_sent_log(path, "test@example.com", ts, "src")
-    assert (ins2, upd2) == (False, False)
+    ins2, upd2 = mu.upsert_sent_log(path, "test@example.com", ts, "src", key="k1")
+    assert (ins2, upd2) == (False, True)
+    ins3, upd3 = mu.upsert_sent_log(path, "test@example.com", ts, "src", key="k2")
+    assert (ins3, upd3) == (True, False)
     with path.open() as f:
         rows = list(csv.DictReader(f))
-    assert len(rows) == 1
+    assert len(rows) == 2
 
 
 def test_classify_tld():

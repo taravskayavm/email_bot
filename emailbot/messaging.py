@@ -13,7 +13,9 @@ import re
 import time
 import secrets
 import smtplib
+import uuid
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
 from email.message import EmailMessage
@@ -24,6 +26,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
 from .utils import log_error
+from .settings import REPORT_TZ
 from .messaging_utils import (
     add_bounce,
     canonical_for_history,
@@ -611,23 +614,23 @@ def send_email_with_sessions(
     group_title: str | None = None,
     group_key: str | None = None,
     override_180d: bool = False,
-) -> tuple[SendOutcome, str]:
+) -> tuple[SendOutcome, str, str | None]:
     # 0) Проверка кулдауна (если не запросили явный override)
     if not override_180d:
         try:
             skip, reason = should_skip_by_cooldown(recipient)
             if skip:
                 logger.info("Cooldown skip for %s: %s", recipient, reason)
-                return SendOutcome.COOLDOWN, ""
+                return SendOutcome.COOLDOWN, "", None
         except Exception:
             # Не роняем поток из-за побочного сервиса — fail-open запрещён,
             # поэтому при ошибке проверку считаем «нет допуска»
             logger.exception("cooldown check failed")
-            return SendOutcome.ERROR, ""
+            return SendOutcome.ERROR, "", None
 
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return SendOutcome.COOLDOWN, ""
+        return SendOutcome.COOLDOWN, "", None
 
     # 1) Формируем письмо
     msg, token = build_message(
@@ -649,7 +652,7 @@ def send_email_with_sessions(
         save_to_sent_folder(raw, imap=imap, folder=sent_folder)
     except Exception:
         logger.exception("SMTP send failed for %s", recipient)
-        return SendOutcome.ERROR, ""
+        return SendOutcome.ERROR, "", None
 
     # 3) Зафиксировать отправку для кулдауна
     try:
@@ -657,7 +660,16 @@ def send_email_with_sessions(
     except Exception:
         logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
 
-    return SendOutcome.SENT, token
+    log_source = group_key or group_title or Path(html_path).stem or "session"
+    log_key = log_sent_email(
+        recipient,
+        log_source,
+        status="ok",
+        filename=html_path,
+        unsubscribe_token=token,
+    )
+
+    return SendOutcome.SENT, token, log_key
 
 
 def process_unsubscribe_requests():
@@ -772,9 +784,15 @@ def log_sent_email(
     unsubscribe_token="",
     unsubscribed="",
     unsubscribed_at="",
-):
+    *,
+    key: str | None = None,
+    ts: datetime | None = None,
+) -> str | None:
     if status not in {"ok", "sent", "success"}:
-        return
+        return None
+
+    tz = ZoneInfo(REPORT_TZ)
+    ts_local = ts.astimezone(tz) if ts and ts.tzinfo else (ts.replace(tzinfo=tz) if ts else datetime.now(tz))
     extra = {
         "user_id": user_id or "",
         "filename": filename or "",
@@ -783,16 +801,20 @@ def log_sent_email(
         "unsubscribed": unsubscribed,
         "unsubscribed_at": unsubscribed_at,
     }
-    upsert_sent_log(
+    normalized = normalize_email(email_addr)
+    used_key = key or str(uuid.uuid4())
+    _, _ = upsert_sent_log(
         LOG_FILE,
-        normalize_email(email_addr),
-        datetime.utcnow(),
+        normalized,
+        ts_local,
         group,
         status=status,
         extra=extra,
+        key=used_key,
     )
     global _log_cache
     _log_cache = None
+    return used_key
 
 
 def _parse_list_line(line: bytes):
@@ -1085,12 +1107,15 @@ def sync_log_with_imap() -> Dict[str, int]:
                         continue
                 except Exception:
                     dt = None
+                unique_marker = msgid or f"uid:{num.decode() if isinstance(num, bytes) else num}"
+                event_key = f"imap:{unique_marker}:{key}"
                 inserted, updated = upsert_sent_log(
                     LOG_FILE,
                     normalize_email(addr),
                     dt or datetime.utcnow(),
                     "imap_sync",
                     status="external",
+                    key=event_key,
                 )
                 if inserted:
                     stats["new_contacts"] += 1
