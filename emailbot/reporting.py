@@ -46,6 +46,7 @@ def build_mass_report_text(
     skipped_recent: Iterable[str],
     blocked_foreign: Optional[Iterable[str]] = None,
     blocked_invalid: Optional[Iterable[str]] = None,
+    duplicates_24h: Optional[Iterable[str]] = None,
 ) -> str:
     """Build summary text for mass mailing.
 
@@ -58,13 +59,17 @@ def build_mass_report_text(
     skipped_cnt = len(list(skipped_recent))
     blocked_cnt = len(list(blocked_invalid or []))
     foreign_cnt = len(list(blocked_foreign or []))
-    total = sent_cnt + skipped_cnt + blocked_cnt + foreign_cnt
+    dup_cnt = len(list(duplicates_24h or []))
+    total = sent_cnt + skipped_cnt + blocked_cnt + foreign_cnt + dup_cnt
 
-    return (
-        "✉️ Рассылка завершена.\n"
-        f"📦 В очереди было: {total}\n"
-        f"✅ Успешно отправлено: {sent_cnt}\n"
-        f"⏳ Пропущены (<180 дней/идемпотентность): {skipped_cnt}\n"
-        f"🚫 В блок-листе/недоступны: {blocked_cnt}\n"
-        f"🌍 Иностранные (отложены): {foreign_cnt}"
-    ).strip()
+    lines = [
+        "✉️ Рассылка завершена.",
+        f"📦 В очереди было: {total}",
+        f"✅ Успешно отправлено: {sent_cnt}",
+        f"⏳ Пропущены (по правилу «180 дней»): {skipped_cnt}",
+        f"🚫 В блок-листе/недоступны: {blocked_cnt}",
+        f"🌍 Иностранные (отложены): {foreign_cnt}",
+    ]
+    if dup_cnt:
+        lines.append(f"🔁 Дубликаты за 24 ч: {dup_cnt}")
+    return "\n".join(lines)

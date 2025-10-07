@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
@@ -119,9 +120,79 @@ def test_mass_report_has_no_addresses():
     assert "✉️ Рассылка завершена." in text
     assert "📦 В очереди было: 4" in text
     assert "✅ Успешно отправлено: 1" in text
-    assert "⏳ Пропущены (<180 дней/идемпотентность): 1" in text
+    assert "⏳ Пропущены (по правилу «180 дней»): 1" in text
     assert "🚫 В блок-листе/недоступны: 1" in text
     assert "🌍 Иностранные (отложены): 1" in text
+
+
+def test_was_sent_today_same_content_detects_duplicates(tmp_path, monkeypatch):
+    log_path = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(mu, "SENT_LOG_PATH", str(log_path))
+    email = "user@example.com"
+    subject = "Subject"
+    body = "<p>Hello</p>"
+    key = mu.canonical_for_history(email)
+    content_hash = hashlib.sha1(f"{key}|{subject}|{body}".encode("utf-8")).hexdigest()
+    ts = datetime.now(timezone.utc)
+    messaging.log_sent_email(
+        email,
+        "group1",
+        subject=subject,
+        content_hash=content_hash,
+        ts=ts,
+    )
+    assert mu.was_sent_today_same_content(email, subject, body)
+
+
+def test_send_email_with_sessions_skips_duplicate_content(tmp_path, monkeypatch):
+    html = tmp_path / "template.html"
+    html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
+    log_path = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(mu, "SENT_LOG_PATH", str(log_path))
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+    monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "secret")
+    monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
+    monkeypatch.setattr(messaging, "cooldown_mark_sent", lambda *a, **k: None)
+    monkeypatch.setattr(messaging, "should_skip_by_cooldown", lambda *_: (False, ""))
+
+    class DummyClient:
+        def send(self, from_addr, to_addr, raw):
+            pass
+
+    client = DummyClient()
+    imap = object()
+
+    outcome1, token1, log_key1, content_hash1 = messaging.send_email_with_sessions(
+        client,
+        imap,
+        "Sent",
+        "user@example.com",
+        str(html),
+        subject="Greeting",
+    )
+    assert outcome1 is messaging.SendOutcome.SENT
+    assert token1
+    assert log_key1
+    assert content_hash1
+
+    outcome2, token2, log_key2, content_hash2 = messaging.send_email_with_sessions(
+        client,
+        imap,
+        "Sent",
+        "user@example.com",
+        str(html),
+        subject="Greeting",
+    )
+    assert outcome2 is messaging.SendOutcome.DUPLICATE
+    assert token2 == ""
+    assert log_key2 is None
+    assert content_hash2 is None
+
+    with log_path.open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1
 
 
 def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
@@ -507,7 +578,7 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     second = messaging.send_email("u@example.com", str(html), batch_id="b1")
     assert len(sent) == 1
     assert first is messaging.SendOutcome.SENT
-    assert second is messaging.SendOutcome.COOLDOWN
+    assert second is messaging.SendOutcome.DUPLICATE
 
 
 def test_send_email_respects_cooldown(tmp_path, monkeypatch):
