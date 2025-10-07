@@ -23,6 +23,12 @@ EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
 SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
 LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
 
+# Краулер: бюджеты и кэш
+CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
+CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
+ROBOTS_CACHE_PATH = os.getenv("ROBOTS_CACHE_PATH", "var/robots_cache.json")
+ROBOTS_CACHE_TTL_SECONDS = int(os.getenv("ROBOTS_CACHE_TTL_SECONDS", "86400"))
+
 TPL_DIR = Path("templates")
 LABELS_FILE = TPL_DIR / "_labels.json"
 
@@ -113,6 +119,10 @@ __all__ = [
     "EXTERNAL_SOURCES",
     "SKIPPED_PREVIEW_LIMIT",
     "LAST_SUMMARY_DIR",
+    "CRAWL_MAX_PAGES_PER_DOMAIN",
+    "CRAWL_TIME_BUDGET_SECONDS",
+    "ROBOTS_CACHE_PATH",
+    "ROBOTS_CACHE_TTL_SECONDS",
     "load",
     "save",
     "list_available_directions",

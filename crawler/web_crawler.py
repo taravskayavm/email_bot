@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from collections import deque
+from pathlib import Path
 from typing import AsyncIterator, Callable, Optional, Sequence
 from urllib import robotparser
 from urllib.parse import urlparse
@@ -42,6 +45,63 @@ from utils.charset_helper import best_effort_decode
 from utils.url_tools import canonicalize, same_domain
 
 
+class RobotsCache:
+    """Simple persistent cache for robots.txt contents."""
+
+    def __init__(self, cache_path: str, ttl_seconds: int) -> None:
+        self.cache_path = Path(cache_path)
+        self.ttl_seconds = ttl_seconds
+        self._data: dict[str, dict[str, object]] | None = None
+
+    def _ensure_loaded(self) -> None:
+        if self._data is not None:
+            return
+        try:
+            raw = self.cache_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                self._data = data
+                return
+        except Exception:
+            pass
+        self._data = {}
+
+    def _save(self) -> None:
+        if self._data is None:
+            return
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            self.cache_path.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def get(self, host: str, now: float) -> str | None:
+        self._ensure_loaded()
+        if not self._data:
+            return None
+        entry = self._data.get(host)
+        if not isinstance(entry, dict):
+            return None
+        ts = entry.get("ts")
+        if not isinstance(ts, (int, float)):
+            return None
+        if now - float(ts) > self.ttl_seconds:
+            return None
+        text = entry.get("text")
+        if isinstance(text, str):
+            return text
+        return None
+
+    def set(self, host: str, text: str, now: float) -> None:
+        self._ensure_loaded()
+        assert self._data is not None  # for mypy
+        self._data[host] = {"ts": int(now), "text": str(text or "")}
+        self._save()
+
+
 class Crawler:
     """Simple breadth-first crawler with robots.txt support."""
 
@@ -67,17 +127,13 @@ class Crawler:
             follow_redirects=True,
             limits=limits,
         )
-        self.robots = robotparser.RobotFileParser()
         self.pages_scanned = 0
         self.on_page = on_page
         self.allowed_prefixes = self._normalize_prefixes(path_prefixes)
         self.last_error: Exception | None = None
-        try:
-            robots_url = canonicalize(start_url, "/robots.txt") or start_url
-            self.robots.set_url(robots_url)
-            self.robots.read()
-        except Exception:
-            pass
+        self._start_ts = time.monotonic()
+        self._domain_pages: dict[str, int] = {}
+        self._robots_cache = RobotsCache(C.ROBOTS_CACHE_PATH, C.ROBOTS_CACHE_TTL_SECONDS)
 
     @staticmethod
     def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
@@ -113,11 +169,14 @@ class Crawler:
         except Exception:
             pass
 
-    def allowed(self, url: str) -> bool:
+    async def allowed(self, url: str) -> bool:
         """Return ``True`` if ``url`` is allowed by robots.txt."""
 
+        parser = await self._get_robots_parser(url)
+        if parser is None:
+            return True
         try:
-            return self.robots.can_fetch(C.CRAWL_USER_AGENT, url)
+            return parser.can_fetch(C.CRAWL_USER_AGENT, url)
         except Exception:
             return True
 
@@ -183,14 +242,19 @@ class Crawler:
         seen: set[str] = set()
         queued: set[str] = {start_url}
         while queue and self.pages_scanned < self.max_pages:
+            if self._time_budget_exceeded():
+                break
             url, depth = queue.popleft()
             if url in seen:
                 continue
             seen.add(url)
             if C.CRAWL_SAME_DOMAIN and not same_domain(self.start, url):
                 continue
-            if not self.allowed(url):
+            if not self._domain_budget_allows(url):
                 continue
+            if not await self.allowed(url):
+                continue
+            self._mark_domain_usage(url)
             if C.CRAWL_DELAY_SEC:
                 try:
                     await asyncio.sleep(C.CRAWL_DELAY_SEC)
@@ -221,4 +285,57 @@ class Crawler:
                     continue
                 queue.append((link, depth + 1))
                 queued.add(link)
+
+    def _time_budget_exceeded(self) -> bool:
+        if C.CRAWL_TIME_BUDGET_SECONDS <= 0:
+            return False
+        return (time.monotonic() - self._start_ts) > C.CRAWL_TIME_BUDGET_SECONDS
+
+    def _domain_budget_allows(self, url: str) -> bool:
+        if C.CRAWL_MAX_PAGES_PER_DOMAIN <= 0:
+            return True
+        host = urlparse(url).netloc
+        if not host:
+            return True
+        count = self._domain_pages.get(host, 0)
+        return count < C.CRAWL_MAX_PAGES_PER_DOMAIN
+
+    def _mark_domain_usage(self, url: str) -> None:
+        host = urlparse(url).netloc
+        if not host:
+            return
+        self._domain_pages[host] = self._domain_pages.get(host, 0) + 1
+
+    async def _get_robots_parser(self, url: str) -> robotparser.RobotFileParser | None:
+        parsed = urlparse(url)
+        host = parsed.netloc
+        if not host:
+            return None
+        scheme = parsed.scheme or "https"
+        robots_url = f"{scheme}://{host}/robots.txt"
+        now = time.time()
+        cached_text = self._robots_cache.get(host, now)
+        if cached_text is None:
+            text = await self._download_robots(robots_url)
+            cached_text = text if text is not None else ""
+            self._robots_cache.set(host, cached_text, now)
+        parser = robotparser.RobotFileParser()
+        parser.set_url(robots_url)
+        try:
+            parser.parse(cached_text.splitlines())
+        except Exception:
+            return None
+        return parser
+
+    async def _download_robots(self, robots_url: str) -> str | None:
+        try:
+            response = await self.client.get(robots_url)
+        except Exception:
+            return None
+        if response.status_code != 200:
+            return ""
+        try:
+            return best_effort_decode(response.content) or response.text
+        except Exception:
+            return ""
 
