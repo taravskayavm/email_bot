@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import idna
 
 from .tld_registry import tld_of, is_known_tld
+from .text_normalize import normalize_text_for_emails
 
 __all__ = [
     "normalize_text",
@@ -174,6 +175,8 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
+
+    text = normalize_text_for_emails(text)
 
     if _GLUE_JOIN_RE.search(raw_input):
         return f"{text} [[JOINED_BY_GLUE]]"

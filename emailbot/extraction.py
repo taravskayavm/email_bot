@@ -358,8 +358,8 @@ def _is_left_boundary(ch: str | None) -> bool:
     return False
 
 _LIST_MARKER_RE = re.compile(
-    rf"(?m)[\s{re.escape(_BULLETS)}{re.escape(_BRACKETS_OPEN)}]"
-    r"[A-Za-z0-9][\)\.\:]\s+$"
+    rf"(?:^|\s)[{re.escape(_BULLETS)}{re.escape(_BRACKETS_OPEN)}]*"
+    r"[A-Za-z0-9][\)\.\:](?=\s)"
 )
 
 def _multi_prefix_mode(text: str) -> bool:
