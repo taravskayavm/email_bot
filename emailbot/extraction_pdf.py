@@ -257,7 +257,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        text = cleanup_text(text)
+        # Обработка текста из fallback ветки через единый preprocess_text
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
             for e in extract_emails_document(text, stats)
@@ -357,7 +357,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        text = cleanup_text(text)
+        text = preprocess_text(text, stats=None)
         hits = [
             EmailHit(email=e, source_ref=source_ref, origin="direct_at")
             for e in extract_emails_document(text, stats)
