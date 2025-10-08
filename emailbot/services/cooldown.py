@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import email.utils
-import json
 import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from utils.paths import expand_path, ensure_parent
 
@@ -132,7 +131,8 @@ def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
     key = normalize_email_for_key(email)
     if not key:
         return
-    ts = _coerce_utc(sent_at).isoformat()
+    ts_dt = _coerce_utc(sent_at)
+    ts = ts_dt.isoformat()
     conn: Optional[sqlite3.Connection] = None
     try:
         conn = _ensure_history_db()
@@ -151,6 +151,20 @@ def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
         if conn is not None:
             conn.close()
 
+    try:
+        from emailbot import history_service
+
+        history_service.mark_sent(
+            email,
+            "__cooldown__",
+            None,
+            ts_dt,
+            run_id="",
+            smtp_result="ok",
+        )
+    except Exception:
+        pass
+
 
 def _cooldown_days(days: Optional[int]) -> int:
     if days is not None:
@@ -163,33 +177,6 @@ def _cooldown_days(days: Optional[int]) -> int:
         except Exception:
             pass
     return _env_int("SEND_COOLDOWN_DAYS", COOLDOWN_DAYS)
-
-
-def _same_local_day(ts_utc: datetime) -> bool:
-    """Return True if ``ts_utc`` falls on the same calendar day in ``REPORT_TZ``."""
-
-    try:
-        tz = ZoneInfo(REPORT_TZ)
-    except Exception:
-        tz = timezone.utc
-    now_local = datetime.now(tz)
-    ts_local = ts_utc.astimezone(tz)
-    return now_local.date() == ts_local.date()
-
-
-def _append_to_sent_enabled() -> bool:
-    flag = os.getenv("APPEND_TO_SENT")
-    if flag is None:
-        return APPEND_TO_SENT
-    return str(flag).strip() == "1"
-
-
-def _sent_mailbox() -> str:
-    raw = os.getenv("SENT_MAILBOX")
-    if raw is None:
-        return SENT_MAILBOX
-    value = str(raw).strip()
-    return value or SENT_MAILBOX
 
 
 def _gmail_canonical(local: str, domain: str) -> str:
@@ -229,44 +216,6 @@ def normalize_email_for_key(raw: str) -> str:
     return f"{local}@{domain}".lower()
 
 
-def _iter_send_stats() -> Iterable[dict]:
-    path = _send_stats_path()
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except Exception:  # pragma: no cover - malformed record
-                    continue
-    except FileNotFoundError:
-        return []
-
-
-def _last_from_send_stats(email_norm: str) -> Optional[datetime]:
-    last: Optional[datetime] = None
-    for rec in _iter_send_stats():
-        e = normalize_email_for_key(rec.get("email", ""))
-        if not e or e != email_norm:
-            continue
-        ts = rec.get("ts") or rec.get("timestamp") or rec.get("date")
-        if not ts:
-            continue
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if last is None or dt > last:
-            last = dt
-    return last
-
-
 def _last_from_history(email_raw: str) -> tuple[Optional[datetime], Optional[str]]:
     try:
         from emailbot import history_service
@@ -290,62 +239,11 @@ def _last_from_history(email_raw: str) -> tuple[Optional[datetime], Optional[str
     return dt, group or None
 
 
-def _last_from_imap(email_norm: str) -> Optional[datetime]:
-    if not _append_to_sent_enabled():
-        return None
-
-    host = os.getenv("IMAP_HOST")
-    user = os.getenv("EMAIL_ADDRESS")
-    password = os.getenv("EMAIL_PASSWORD")
-    if not host or not user or not password:
-        return None
-
-    try:
-        from emailbot.mail.imap_lookup import find_last_sent_at
-    except Exception:  # pragma: no cover - optional dependency missing
-        return None
-
-    try:
-        days = _cooldown_days(None)
-        mailbox = _sent_mailbox()
-        return find_last_sent_at(email_norm, mailbox, days=days)
-    except Exception:  # pragma: no cover - IMAP issues
-        return None
-
-
-def _combine_last_times(
-    email_raw: str, email_norm: str
-) -> tuple[Optional[datetime], dict[str, Optional[str]]]:
-    best: Optional[datetime] = None
-    meta: dict[str, Optional[str]] = {"source": None, "group": None}
-
-    hist_dt, hist_group = _last_from_history(email_raw)
-    if hist_dt is not None:
-        best = hist_dt
-        meta = {"source": "history", "group": hist_group}
-
-    for source, candidate in (
-        ("send_stats", _last_from_send_stats(email_norm)),
-        ("imap", _last_from_imap(email_norm)),
-    ):
-        if candidate is None:
-            continue
-        if candidate.tzinfo is None:
-            candidate = candidate.replace(tzinfo=timezone.utc)
-        else:
-            candidate = candidate.astimezone(timezone.utc)
-        if best is None or candidate > best:
-            best = candidate
-            meta = {"source": source, "group": None}
-
-    return best, meta
-
-
 def get_last_sent_at(email_raw: str) -> Optional[datetime]:
     key = normalize_email_for_key(email_raw)
     if not key:
         return None
-    last, _ = _combine_last_times(email_raw, key)
+    last, _ = _last_from_history(email_raw)
     return last
 
 
@@ -369,7 +267,7 @@ def should_skip_by_cooldown(
         return False, ""
 
     window = _cooldown_days(days)
-    last, meta = _combine_last_times(email_raw, key)
+    last, group = _last_from_history(email_raw)
     if not last:
         return False, ""
 
@@ -378,13 +276,9 @@ def should_skip_by_cooldown(
     else:
         last = last.astimezone(timezone.utc)
 
-    if _same_local_day(last):
-        return True, "cooldown<same_day"
-
-    delta = now - last
     threshold = timedelta(days=window)
-    if delta < threshold:
-        remain = threshold - delta
+    if now - last < threshold:
+        remain = threshold - (now - last)
         total_seconds = int(remain.total_seconds())
         if total_seconds < 0:
             total_seconds = 0
@@ -392,11 +286,7 @@ def should_skip_by_cooldown(
         hours_left, remainder = divmod(remainder, 3600)
         mins_left = remainder // 60
         remain_parts = f"{days_left}d {hours_left}h {mins_left}m"
-        parts = [f"cooldown<{window}d", f"last={last.isoformat()}"]
-        source = meta.get("source")
-        if source:
-            parts.append(f"source={source}")
-        group = meta.get("group")
+        parts = [f"cooldown<{window}d", f"last={last.isoformat()}", "source=history"]
         if group:
             parts.append(f"group={group}")
         parts.append(f"remain≈{remain_parts}")

@@ -23,7 +23,7 @@ from telegram.ext import (
     filters,
 )
 
-from emailbot import bot_handlers, messaging
+from emailbot import bot_handlers, messaging, history_service
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
@@ -130,6 +130,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     load_env(SCRIPT_DIR)
+
+    try:
+        history_service.ensure_initialized()
+    except Exception:
+        logging.getLogger(__name__).debug("history init failed", exc_info=True)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     messaging.EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")

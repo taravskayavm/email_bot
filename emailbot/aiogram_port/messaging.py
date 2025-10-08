@@ -6,12 +6,14 @@ import asyncio
 import atexit
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 from emailbot.aiogram_port import cooldown
 from emailbot.aiogram_port.logs import mask_email
 from emailbot.aiogram_port.smtp_sender import SmtpSender
 from emailbot.messaging_utils import prepare_recipients_for_send
+from emailbot import history_service
 from utils import send_stats
 
 _SENDER: Optional[SmtpSender] = None
@@ -102,5 +104,15 @@ async def send_one_email(
         }
 
     cooldown.mark_sent(to_addr)
+    try:
+        history_service.mark_sent(
+            to_addr,
+            source or "__aiogram__",
+            None,
+            datetime.now(timezone.utc),
+            smtp_result="ok",
+        )
+    except Exception:
+        logger.debug("history mark_sent failed (non-fatal)", exc_info=True)
     send_stats.log_success(to_addr, source, {"trace_id": trace_id, "subject": subject})
     return True, {"trace_id": trace_id, "masked_to": masked}
