@@ -1,4 +1,6 @@
 from __future__ import annotations
+import re
+from collections import Counter
 from typing import Iterable, Mapping
 
 # Старый «приятный» стиль сообщений под Telegram (эмодзи + плотные подпункты).
@@ -26,9 +28,6 @@ def format_parse_summary(s: Mapping[str, int], examples: Iterable[str] = ()) -> 
         for e in ex[:10]:
             lines.append(f"• {e}")
         lines.append("")
-    lines.append("Дополнительные действия:")
-    lines.append("  ⬜ Показать ещё примеры")
-    lines.append("  🧭 Перейти к выбору направления")
     return "\n".join(lines)
 
 
@@ -104,4 +103,36 @@ def format_dispatch_result(
     if duplicates:
         lines.append(f"🔁 Дубликаты за 24 ч: {duplicates}")
     lines.append(f"ℹ️ Осталось без изменений: {left}")
+    return "\n".join(lines)
+
+
+_EMAIL_RE = re.compile(r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}")
+
+
+def format_error_details(details: Iterable[str]) -> str:
+    """Format a summary of error reasons without exposing e-mail addresses."""
+
+    sanitized: list[str] = []
+    for item in details:
+        text = str(item).strip()
+        if not text:
+            continue
+        sanitized.append(_EMAIL_RE.sub("[скрыто]", text))
+
+    if not sanitized:
+        return ""
+
+    counts = Counter(sanitized)
+    lines = ["Ошибки (адреса скрыты):"]
+    for reason, count in counts.most_common():
+        if not reason:
+            continue
+        if count > 1:
+            lines.append(f"• {reason} ×{count}")
+        else:
+            lines.append(f"• {reason}")
+
+    if len(lines) == 1:
+        lines.append(f"• Всего ошибок: {len(sanitized)}")
+
     return "\n".join(lines)
