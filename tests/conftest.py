@@ -1,5 +1,7 @@
 """Test configuration and shared fixtures."""
 
+import importlib.util
+import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass
@@ -7,6 +9,50 @@ from dataclasses import dataclass
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import pytest
+
+
+OPTIONAL_DEPENDENCIES = ["fitz", "lxml", "bs4", "pdfminer", "pdfminer.six"]
+
+
+def _missing_optional_dependencies() -> list[str]:
+    missing: list[str] = []
+    for name in OPTIONAL_DEPENDENCIES:
+        spec_name = name
+        if name == "pdfminer.six":
+            spec_name = "pdfminer"
+        if importlib.util.find_spec(spec_name) is None:
+            missing.append(name)
+    return sorted(set(missing))
+
+
+MISSING_OPTIONALS = _missing_optional_dependencies()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip optional tests when the required dependencies are unavailable."""
+
+    if not MISSING_OPTIONALS:
+        return
+
+    skip_optional = pytest.mark.skip(
+        reason=f"missing optional deps: {', '.join(MISSING_OPTIONALS)}"
+    )
+    for item in items:
+        if item.get_closest_marker("optional"):
+            item.add_marker(skip_optional)
+            continue
+        node_id = getattr(item, "nodeid", "")
+        if "/optional_" in node_id or "\\optional_" in node_id:
+            item.add_marker(skip_optional)
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Ensure minimal CI environments do not fail on missing optional deps."""
+
+    if os.getenv("CI_MINIMAL", "1") == "1" and MISSING_OPTIONALS:
+        session.config.addinivalue_line(
+            "markers", "optional: requires optional dependencies"
+        )
 
 from utils import rules
 
