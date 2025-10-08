@@ -26,6 +26,7 @@ from .tld_registry import tld_of
 
 from utils.tld_utils import allowed_tlds
 from emailbot import edit_service
+from .suppress_list import is_blocked
 from .settings import REPORT_TZ
 from utils.email_norm import sanitize_for_send
 
@@ -78,6 +79,12 @@ def prepare_recipients_for_send(
         if not fixed:
             if raw:
                 dropped_originals.add(raw)
+            continue
+        if is_blocked(fixed):
+            if raw:
+                dropped_originals.add(raw)
+            else:
+                dropped_originals.add(fixed)
             continue
         if fixed != raw:
             remap[raw] = fixed
