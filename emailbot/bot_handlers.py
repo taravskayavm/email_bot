@@ -39,7 +39,12 @@ from bot.keyboards import (
     groups_map,
 )
 from emailbot.ui.keyboards import directions_keyboard
-from emailbot.ui.messages import format_dispatch_result, format_parse_summary
+from emailbot.notify import notify
+from emailbot.ui.messages import (
+    format_dispatch_result,
+    format_dispatch_start,
+    format_parse_summary,
+)
 
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 
@@ -1025,16 +1030,28 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-def get_report(period: str = "day") -> str:
+def get_report(period: str = "day") -> dict[str, object]:
     """Return statistics of sent e-mails for the given period in REPORT_TZ."""
 
+    stats: dict[str, object] = {
+        "sent": 0,
+        "errors": 0,
+        "tz": REPORT_TZ,
+        "period": period,
+    }
+
     if not os.path.exists(LOG_FILE):
-        return "Нет данных о рассылках."
+        stats["message"] = "Нет данных о рассылках."
+        return stats
 
     tz = ZoneInfo(REPORT_TZ)
     now_local = datetime.now(tz)
-    delta_days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(period, 1)
-    start_local = now_local - timedelta(days=delta_days)
+    if period == "day":
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        delta_days = {"week": 7, "month": 30, "year": 365}.get(period, 1)
+        start_local = now_local - timedelta(days=delta_days)
+    end_local = now_local
 
     cnt_ok = 0
     cnt_err = 0
@@ -1054,13 +1071,21 @@ def get_report(period: str = "day") -> str:
                 dt_local = dt.replace(tzinfo=tz)
             else:
                 dt_local = dt.astimezone(tz)
-            if dt_local >= start_local:
-                st = (row.get("status") or "").strip().lower()
-                if st in {"ok", "sent", "success"}:
-                    cnt_ok += 1
-                else:
-                    cnt_err += 1
-    return f"Успешных: {cnt_ok}\nОшибок: {cnt_err}"
+            if period == "day":
+                include = start_local <= dt_local <= end_local and dt_local.date() == now_local.date()
+            else:
+                include = start_local <= dt_local <= end_local
+            if not include:
+                continue
+            st = (row.get("status") or "").strip().lower()
+            if st in {"ok", "sent", "success"}:
+                cnt_ok += 1
+            else:
+                cnt_err += 1
+
+    stats["sent"] = cnt_ok
+    stats["errors"] = cnt_err
+    return stats
 
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1075,10 +1100,16 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "month": "Отчёт за месяц",
         "year": "Отчёт за год",
     }
-    text = get_report(period)
-    await _safe_edit_message(
-        query, text=f"📊 {mapping.get(period, period)}:\n{text}"
-    )
+    report = get_report(period)
+    message = report.get("message")
+    if message:
+        body = str(message)
+    else:
+        body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
+    title = mapping.get(period, period)
+    if period == "day":
+        title = f"{title} ({report.get('tz', REPORT_TZ)})"
+    await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2886,19 +2917,31 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
 
+        planned_total = len(emails)
+        try:
+            planned_unique = len({normalize_email(e) for e in emails if e})
+        except Exception:
+            planned_unique = len({(e or "").strip().lower() for e in emails if e})
+
         saved_state = mass_state.load_chat_state(chat_id)
+        duplicates: List[str]
+        batch_duplicates: List[str]
         if saved_state and saved_state.get("pending"):
-            blocked_foreign = saved_state.get("blocked_foreign", [])
-            blocked_invalid = saved_state.get("blocked_invalid", [])
-            skipped_recent = saved_state.get("skipped_recent", [])
-            sent_ok = saved_state.get("sent_ok", [])
-            to_send = saved_state.get("pending", [])
+            blocked_foreign = list(saved_state.get("blocked_foreign", []))
+            blocked_invalid = list(saved_state.get("blocked_invalid", []))
+            skipped_recent = list(saved_state.get("skipped_recent", []))
+            sent_ok = list(saved_state.get("sent_ok", []))
+            to_send = list(saved_state.get("pending", []))
+            duplicates = list(saved_state.get("skipped_duplicates", []))
+            batch_duplicates = []
         else:
-            blocked_foreign: List[str] = []
-            blocked_invalid: List[str] = []
-            skipped_recent: List[str] = []
-            to_send: List[str] = []
-            sent_ok: List[str] = []
+            blocked_foreign = []
+            blocked_invalid = []
+            skipped_recent = []
+            to_send = []
+            sent_ok = []
+            duplicates = []
+            batch_duplicates = []
 
             initial = [e for e in emails if e not in blocked and e not in sent_today]
             for e in initial:
@@ -2923,11 +2966,11 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             deduped: List[str] = []
             seen_norm: Set[str] = set()
-            dup_skipped = 0
             for e in to_send:
                 norm = normalize_email(e)
                 if norm in seen_norm:
-                    dup_skipped += 1
+                    batch_duplicates.append(e)
+                    duplicates.append(e)
                 else:
                     seen_norm.add(norm)
                     deduped.append(e)
@@ -2940,7 +2983,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "foreign_blocked": len(blocked_foreign),
                     "after_180d": len(to_send),
                     "sent_planned": len(to_send),
-                    "skipped_by_dup_in_batch": dup_skipped,
+                    "skipped_by_dup_in_batch": len(batch_duplicates),
                 }
             )
 
@@ -2957,6 +3000,8 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "skipped_duplicates": duplicates,
                 },
             )
+
+        limited_from: int | None = None
 
         if not to_send:
             await query.message.reply_text(
@@ -2979,6 +3024,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if not is_force_send(chat_id) and len(to_send) > available:
+            limited_from = len(to_send)
             to_send = to_send[:available]
             await query.message.reply_text(
                 (
@@ -3000,9 +3046,17 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 },
             )
 
-        await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+        start_text = format_dispatch_start(
+            planned_total,
+            planned_unique,
+            len(to_send),
+            deferred=len(skipped_recent),
+            suppressed=len(blocked_invalid),
+            foreign=len(blocked_foreign),
+            duplicates=len(batch_duplicates),
+            limited_from=limited_from,
         )
+        await notify(query.message, start_text, event="start")
 
         try:
             imap = imaplib.IMAP4_SSL("imap.mail.ru")
@@ -3109,6 +3163,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
                         "skipped_recent": skipped_recent,
+                        "skipped_duplicates": duplicates,
                     },
                 )
         imap.logout()

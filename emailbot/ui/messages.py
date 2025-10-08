@@ -53,6 +53,39 @@ def format_dispatch_preview(stats: Mapping[str, int], xlsx_name: str) -> str:
     )
 
 
+def format_dispatch_start(
+    planned: int,
+    unique: int,
+    to_send: int,
+    *,
+    deferred: int = 0,
+    suppressed: int = 0,
+    foreign: int = 0,
+    duplicates: int = 0,
+    limited_from: int | None = None,
+) -> str:
+    lines = [
+        "✉️ Рассылка начата.",
+        f"Запрошено: {planned}",
+        f"Уникальных: {unique}",
+    ]
+    if limited_from is not None and limited_from > to_send:
+        lines.append(
+            f"К отправке (после фильтров и лимитов): {to_send} из {limited_from}"
+        )
+    else:
+        lines.append(f"К отправке (после фильтров): {to_send}")
+    if deferred:
+        lines.append(f"Отложено по правилу 180 дней: {deferred}")
+    if suppressed:
+        lines.append(f"Исключено (супресс/блок-лист): {suppressed}")
+    if foreign:
+        lines.append(f"Отложено (иностранные домены): {foreign}")
+    if duplicates:
+        lines.append(f"Дубликаты в пачке: {duplicates}")
+    return "\n".join(lines)
+
+
 def format_dispatch_result(
     total: int,
     sent: int,
