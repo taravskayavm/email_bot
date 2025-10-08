@@ -35,6 +35,7 @@ from telegram.ext import ApplicationHandlerStop, ContextTypes
 from bot.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
+    build_skipped_preview_entry_kb,
     build_skipped_preview_kb,
     groups_map,
 )
@@ -411,7 +412,7 @@ async def _maybe_send_skipped_summary(
         lines.append(f"• {label}: {count}")
 
     await query.message.reply_text(
-        "\n".join(lines), reply_markup=build_skipped_preview_kb()
+        "\n".join(lines), reply_markup=build_skipped_preview_entry_kb()
     )
 
 
@@ -431,6 +432,24 @@ def _group_keyboard(
     """Return a simple inline keyboard for selecting a mailing group."""
 
     return _build_group_markup(prefix=prefix, selected=selected)
+
+
+async def show_skipped_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Expand the skipped-address preview keyboard upon request."""
+
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=build_skipped_preview_kb()
+        )
+    except BadRequest:
+        await query.message.reply_text(
+            "Выберите, какие примеры показать:",
+            reply_markup=build_skipped_preview_kb(),
+        )
 
 
 def _clamp_bulk_edit_page(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1238,14 +1257,6 @@ async def _compose_report_and_save(
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
 
-    sample_allowed = sample_preview(state.preview_allowed_all, PREVIEW_ALLOWED)
-    sample_numeric = (
-        sample_preview(suspicious_numeric, PREVIEW_NUMERIC)
-        if suspicious_numeric
-        else []
-    )
-    sample_foreign = sample_preview(state.foreign, PREVIEW_FOREIGN)
-
     summary = format_parse_summary(
         {
             "total_found": len(allowed_all),
@@ -1256,16 +1267,8 @@ async def _compose_report_and_save(
             "pages_skipped": 0,
             "footnote_dupes_removed": footnote_dupes,
         },
-        examples=sample_allowed,
+        examples=(),
     )
-
-    extra_sections: list[str] = []
-    if sample_numeric:
-        extra_sections.append("🔢 Примеры цифровых:\n" + "\n".join(sample_numeric))
-    if sample_foreign:
-        extra_sections.append("🌍 Примеры иностранных:\n" + "\n".join(sample_foreign))
-    if extra_sections:
-        return "\n\n".join([summary, *extra_sections])
     return summary
 
 
@@ -3282,5 +3285,6 @@ __all__ = [
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",
+    "show_skipped_menu",
     "show_skipped_examples",
 ]
