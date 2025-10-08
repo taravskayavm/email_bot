@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import idna
 
 from .tld_registry import tld_of, is_known_tld
+from .footnotes import remove_footnotes_safe
 from .text_normalize import normalize_text_for_emails
 
 __all__ = [
@@ -159,6 +160,7 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     """
 
     raw_input = text or ""
+    text = remove_footnotes_safe(raw_input)
     text = normalize_text(text)
 
     # Count occurrences where the guard prevented removal
