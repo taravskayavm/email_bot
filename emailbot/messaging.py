@@ -28,6 +28,7 @@ from .extraction import normalize_email, strip_html
 from .smtp_client import SmtpClient
 from .utils import log_error
 from .settings import REPORT_TZ
+from emailbot import history_service
 from .messaging_utils import (
     add_bounce,
     canonical_for_history,
@@ -578,6 +579,16 @@ def send_email(
             cooldown_mark_sent(recipient)
         except Exception:
             logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+        try:
+            history_service.mark_sent(
+                recipient,
+                Path(html_path).stem,
+                msg.get("Message-ID"),
+                datetime.now(timezone.utc),
+                smtp_result="ok",
+            )
+        except Exception:
+            logger.debug("history mark_sent failed (non-fatal)", exc_info=True)
         log_sent_email(
             recipient,
             Path(html_path).stem,
@@ -698,6 +709,16 @@ def send_email_with_sessions(
         cooldown_mark_sent(recipient)
     except Exception:
         logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+    try:
+        history_service.mark_sent(
+            recipient,
+            group_key or group_title or Path(html_path).stem,
+            msg.get("Message-ID"),
+            datetime.now(timezone.utc),
+            smtp_result="ok",
+        )
+    except Exception:
+        logger.debug("history mark_sent failed (non-fatal)", exc_info=True)
 
     log_source = group_key or group_title or Path(html_path).stem or "session"
     log_key = log_sent_email(
