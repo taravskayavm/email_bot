@@ -30,6 +30,7 @@ def _tcp_ping(host: str, port: int, timeout: float = 5.0) -> bool:
 
 def run_selfcheck() -> List[Check]:
     checks: List[Check] = []
+    warnings: List[str] = []
 
     required_env = ["EMAIL_ADDRESS", "EMAIL_PASSWORD", "IMAP_HOST", "IMAP_PORT"]
     missing = [name for name in required_env if not os.getenv(name)]
@@ -53,10 +54,17 @@ def run_selfcheck() -> List[Check]:
 
     imap_host = os.getenv("IMAP_HOST", "")
     imap_port = int(os.getenv("IMAP_PORT", "993") or 0)
-    smtp_host = os.getenv("SMTP_HOST", imap_host)
+    smtp_host = os.getenv("SMTP_HOST") or "smtp.mail.ru"
     smtp_port = int(os.getenv("SMTP_PORT", "465") or 0)
+    if smtp_host.lower().startswith("imap."):
+        warnings.append(
+            f"SMTP_HOST='{smtp_host}' выглядит как IMAP. Используйте 'smtp.'"
+        )
     checks.append(Check("TCP:IMAP", _tcp_ping(imap_host, imap_port), f"{imap_host}:{imap_port}"))
     checks.append(Check("TCP:SMTP", _tcp_ping(smtp_host, smtp_port), f"{smtp_host}:{smtp_port}"))
+
+    if warnings:
+        checks.append(Check("WARN", True, " | ".join(warnings)))
 
     return checks
 
