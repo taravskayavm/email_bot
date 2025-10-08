@@ -41,7 +41,7 @@ from emailbot.messaging_utils import (
     suppress_add,
 )
 from emailbot.reporting import log_mass_filter_digest
-from emailbot.ui.messages import format_dispatch_result
+from emailbot.ui.messages import format_dispatch_result, format_error_details
 from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
 
@@ -487,7 +487,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 logger.debug("bulk audit append failed", exc_info=True)
 
-        errors: list[str] = []
+        error_details: list[str] = []
         error_addresses: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         smtp = RobustSMTP()
@@ -539,14 +539,14 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     elif outcome == SendOutcome.ERROR:
                         if email_addr not in error_addresses:
                             error_addresses.append(email_addr)
-                        detail = "send outcome error"
-                        errors.append(f"{email_addr} — {detail}")
+                        detail = "ошибка при отправке"
+                        error_details.append(detail)
                         _audit(email_addr, "error", detail)
                     else:
                         if email_addr not in error_addresses:
                             error_addresses.append(email_addr)
-                        detail = f"outcome {outcome}"
-                        errors.append(f"{email_addr} — {detail}")
+                        detail = f"непредвиденный исход: {outcome}"
+                        error_details.append(detail)
                         _audit(email_addr, "error", detail)
                 except smtplib.SMTPResponseException as e:
                     code = int(getattr(e, "smtp_code", 0) or 0)
@@ -555,8 +555,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         msg = raw.decode("utf-8", "ignore")
                     else:
                         msg = str(raw)
-                    detail = f"{code} {msg}".strip()
-                    errors.append(f"{email_addr} — {detail}")
+                    code_text = f"{code} " if code else ""
+                    detail = f"SMTP {code_text}{msg}".strip()
+                    error_details.append(detail)
                     add_bounce(email_addr, code, msg, phase="send")
                     if is_hard_bounce(code, msg):
                         suppress_add(email_addr, code, "hard bounce on send")
@@ -567,7 +568,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         target_list.append(email_addr)
                     _audit(email_addr, "error", detail)
                 except Exception as e:
-                    errors.append(f"{email_addr} — {e}")
+                    error_details.append(str(e))
                     code = None
                     msg = None
                     if (
@@ -643,12 +644,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Безопасная отправка: notify сам разрежет текст на куски < 4096
         await notify(query.message, report_text, event="finish")
-        if errors:
-            await notify(
-                query.message,
-                "Ошибки:\n" + "\n".join(errors),
-                event="error",
-            )
+        if error_details:
+            error_report = format_error_details(error_details)
+            if error_report:
+                await notify(query.message, error_report, event="error")
 
         clear_recent_sent_cache()
         bot_handlers_module.disable_force_send(chat_id)

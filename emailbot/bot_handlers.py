@@ -43,6 +43,7 @@ from emailbot.notify import notify
 from emailbot.ui.messages import (
     format_dispatch_result,
     format_dispatch_start,
+    format_error_details,
     format_parse_summary,
 )
 
@@ -2092,7 +2093,7 @@ async def _send_batch_with_sessions(
         await query.message.reply_text(f"❌ IMAP ошибка: {exc}")
         return
 
-    errors: list[str] = []
+    error_details: list[str] = []
     duplicates: list[str] = []
     cancel_event = context.chat_data.get("cancel_event")
     host = os.getenv("SMTP_HOST", "smtp.mail.ru")
@@ -2144,21 +2145,13 @@ async def _send_batch_with_sessions(
                             await asyncio.sleep(1.5)
                         elif outcome == messaging.SendOutcome.DUPLICATE:
                             duplicates.append(email_addr)
-                            errors.append(
-                                f"{email_addr} — пропущено (дубль за 24 ч)"
-                            )
+                            error_details.append("пропущено (дубль за 24 ч)")
                         elif outcome == messaging.SendOutcome.COOLDOWN:
-                            errors.append(
-                                f"{email_addr} — пропущено (кулдаун 180 дней)"
-                            )
+                            error_details.append("пропущено (кулдаун 180 дней)")
                         elif outcome == messaging.SendOutcome.BLOCKED:
-                            errors.append(
-                                f"{email_addr} — пропущено (блок-лист)"
-                            )
+                            error_details.append("пропущено (блок-лист)")
                         else:
-                            errors.append(
-                                f"{email_addr} — не отправлено (ошибка отправки)"
-                            )
+                            error_details.append("ошибка отправки")
                     except messaging.TemplateRenderError as err:
                         missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                         await context.bot.send_message(
@@ -2177,7 +2170,7 @@ async def _send_batch_with_sessions(
                             pass
                         return
                     except Exception as err:
-                        errors.append(f"{email_addr} — {err}")
+                        error_details.append(str(err))
                         code, msg = None, None
                         if (
                             hasattr(err, "recipients")
@@ -2224,8 +2217,10 @@ async def _send_batch_with_sessions(
         )
     else:
         await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-    if errors:
-        await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+    if error_details:
+        summary = format_error_details(error_details)
+        if summary:
+            await query.message.reply_text(summary)
 
     clear_recent_sent_cache()
     disable_force_send(chat_id)
@@ -2760,7 +2755,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
         sent_count = 0
-        errors: list[str] = []
+        error_details: list[str] = []
         duplicates: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         host = os.getenv("SMTP_HOST", "smtp.mail.ru")
@@ -2811,21 +2806,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                 await asyncio.sleep(1.5)
                             elif outcome == messaging.SendOutcome.DUPLICATE:
                                 duplicates.append(email_addr)
-                                errors.append(
-                                    f"{email_addr} — пропущено (дубль за 24 ч)"
-                                )
+                                error_details.append("пропущено (дубль за 24 ч)")
                             elif outcome == messaging.SendOutcome.COOLDOWN:
-                                errors.append(
-                                    f"{email_addr} — пропущено (кулдаун 180 дней)"
-                                )
+                                error_details.append("пропущено (кулдаун 180 дней)")
                             elif outcome == messaging.SendOutcome.BLOCKED:
-                                errors.append(
-                                    f"{email_addr} — пропущено (блок-лист)"
-                                )
+                                error_details.append("пропущено (блок-лист)")
                             else:
-                                errors.append(
-                                    f"{email_addr} — не отправлено (ошибка отправки)"
-                                )
+                                error_details.append("ошибка отправки")
                         except messaging.TemplateRenderError as err:
                             missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                             await context.bot.send_message(
@@ -2844,7 +2831,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                 pass
                             return
                         except Exception as e:
-                            errors.append(f"{email_addr} — {e}")
+                            error_details.append(str(e))
                             code, msg = None, None
                             if (
                                 hasattr(e, "recipients")
@@ -2881,8 +2868,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         else:
             await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-        if errors:
-            await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+        if error_details:
+            summary = format_error_details(error_details)
+            if summary:
+                await query.message.reply_text(summary)
 
         context.user_data["manual_emails"] = []
         clear_recent_sent_cache()
@@ -3068,7 +3057,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        errors: list[str] = []
+        error_details: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
@@ -3102,19 +3091,17 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         await asyncio.sleep(1.5)
                     elif outcome == messaging.SendOutcome.DUPLICATE:
                         duplicates.append(email_addr)
-                        errors.append(
-                            f"{email_addr} — пропущено (дубль за 24 ч)"
-                        )
+                        error_details.append("пропущено (дубль за 24 ч)")
                     elif outcome == messaging.SendOutcome.COOLDOWN:
-                        errors.append(f"{email_addr} — пропущено (кулдаун 180 дней)")
+                        error_details.append("пропущено (кулдаун 180 дней)")
                         if email_addr not in skipped_recent:
                             skipped_recent.append(email_addr)
                     elif outcome == messaging.SendOutcome.BLOCKED:
-                        errors.append(f"{email_addr} — пропущено (блок-лист)")
+                        error_details.append("пропущено (блок-лист)")
                         if email_addr not in blocked_invalid:
                             blocked_invalid.append(email_addr)
                     else:
-                        errors.append(f"{email_addr} — не отправлено (ошибка отправки)")
+                        error_details.append("ошибка отправки")
                 except messaging.TemplateRenderError as err:
                     missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                     await context.bot.send_message(
@@ -3133,7 +3120,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         pass
                     return
                 except Exception as e:
-                    errors.append(f"{email_addr} — {e}")
+                    error_details.append(str(e))
                     code, msg = None, None
                     if (
                         hasattr(e, "recipients")
@@ -3188,8 +3175,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
 
         await query.message.reply_text(report_text)
-        if errors:
-            await query.message.reply_text("Ошибки:\n" + "\n".join(errors))
+        if error_details:
+            summary = format_error_details(error_details)
+            if summary:
+                await query.message.reply_text(summary)
 
         clear_recent_sent_cache()
         disable_force_send(chat_id)
