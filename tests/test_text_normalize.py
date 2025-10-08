@@ -14,3 +14,13 @@ def test_normalize_replaces_newlines_with_spaces():
 def test_normalize_inserts_space_before_email_token():
     raw = "Россияnik@example.com"
     assert normalize_text_for_emails(raw) == "Россия nik@example.com"
+
+
+def test_normalize_inserts_space_after_closing_symbols():
+    raw = ")ivanov@example.com"
+    assert normalize_text_for_emails(raw) == ") ivanov@example.com"
+
+
+def test_normalize_inserts_space_after_email_label():
+    raw = "E-mail:ivanov@example.com"
+    assert normalize_text_for_emails(raw) == "E-mail: ivanov@example.com"
