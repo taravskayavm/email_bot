@@ -37,19 +37,15 @@ SUPERSCRIPTS = "\u00B9\u00B2\u00B3" + "".join(chr(c) for c in range(0x2070, 0x20
 BASIC_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 
 
-def cleanup_text(text: str) -> str:
-    """Удаляем невидимые символы, которые часто «съедают» первую букву e-mail."""
+def _legacy_cleanup_text(text: str) -> str:
+    """Старый мягкий клинап (оставляем на всякий случай как pre-step).
+    Основная нормализация теперь всегда через preprocess_text()."""
 
     for ch in INVISIBLES:
         text = text.replace(ch, "")
     text = text.translate({ord(c): None for c in SUPERSCRIPTS})
+    # Только безопасное склеивание переносов внутри слов; остальное сделает preprocess_text
     text = re.sub(r"([A-Za-z0-9])-\n([A-Za-z0-9])", r"\1\2", text)
-    return text
-
-
-def separate_around_emails(text: str) -> str:
-    text = re.sub(rf"([^\s])({BASIC_EMAIL})", r"\1 \2", text)
-    text = re.sub(rf"({BASIC_EMAIL})([^\s])", r"\1 \2", text)
     return text
 
 
@@ -205,6 +201,19 @@ def _pdfminer_extract(path: Path) -> str:
         return ""
 
 
+def cleanup_text(text: str) -> str:
+    if not text:
+        return ""
+    text = _legacy_cleanup_text(text)
+    return preprocess_text(text, stats=None)
+
+
+def separate_around_emails(text: str) -> str:
+    """Historical shim: preprocessing теперь делает нужные вставки пробелов."""
+
+    return text
+
+
 def extract_text_from_pdf(path: str | Path) -> str:
     pdf_path = Path(path)
 
@@ -216,8 +225,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         text = _pdfminer_extract(pdf_path)
     if not text:
         return ""
-    text = cleanup_text(text)
-    return separate_around_emails(text)
+    return cleanup_text(text)
 
 
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
@@ -234,6 +242,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
+    stats: Dict[str, int] = {"pages": 0}
+
     try:
         import fitz  # type: ignore
     except Exception:
@@ -247,6 +257,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = cleanup_text(text)
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
             for e in extract_emails_document(text, stats)
@@ -254,7 +265,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         return _dedupe(hits), {"pages": 0, "needs_ocr": True}
 
     hits: List[EmailHit] = []
-    stats: Dict[str, int] = {"pages": 0}
     doc = fitz.open(path)
     ocr_pages = 0
     ocr_start = time.time()
@@ -283,6 +293,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
         for email in extract_emails_document(text, stats):
@@ -332,6 +343,8 @@ def extract_from_pdf_stream(
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
+    stats: Dict[str, int] = {"pages": 0}
+
     try:
         import fitz  # type: ignore
     except Exception:
@@ -344,6 +357,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = cleanup_text(text)
         hits = [
             EmailHit(email=e, source_ref=source_ref, origin="direct_at")
             for e in extract_emails_document(text, stats)
@@ -351,7 +365,6 @@ def extract_from_pdf_stream(
         return _dedupe(hits), {"pages": 0, "needs_ocr": True}
 
     hits: List[EmailHit] = []
-    stats: Dict[str, int] = {"pages": 0}
     doc = fitz.open(stream=data, filetype="pdf")
     ocr_pages = 0
     ocr_start = time.time()
@@ -380,6 +393,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
         for email in extract_emails_document(text, stats):
