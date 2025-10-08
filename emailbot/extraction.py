@@ -557,7 +557,7 @@ DEBUG_EMAIL_PARSE_LOG_PATH = os.getenv(
 
 # Чтобы сохранить обратную совместимость
 def extract_emails_document(text: str, stats: Dict[str, int] | None = None) -> list[str]:
-    # ГАРАНТИЯ: всегда прогоняем единый пайплайн (разлепление «слово+email», сноски и т.д.)
+    # EB-PARSE-PIPE-014G: единый предобработчик обязателен (разлепление, сноски и пр.)
     raw_in = text or ""
     before = raw_in[:2000]
     norm = preprocess_text(raw_in, stats)
