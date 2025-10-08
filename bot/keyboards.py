@@ -101,7 +101,7 @@ def build_after_parse_combined_kb(
     """
 
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("👀 Показать ещё примеры", callback_data="refresh_preview")],
+        [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
         [InlineKeyboardButton("🧭 Перейти к выбору направления", callback_data="proceed_group")],
         [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
     ]
@@ -116,6 +116,14 @@ def build_after_parse_combined_kb(
     if extra_rows:
         rows.extend(extra_rows)
     return InlineKeyboardMarkup(rows)
+
+
+def build_skipped_preview_entry_kb() -> InlineKeyboardMarkup:
+    """Keyboard with a single entry button for skipped-address examples."""
+
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("👀 Показать примеры", callback_data="skipped_menu")]]
+    )
 
 
 def build_sections_suggest_kb(
