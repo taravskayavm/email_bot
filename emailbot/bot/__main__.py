@@ -14,6 +14,8 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import BotCommand
 
+from emailbot.run_control import clear_stop, request_stop
+
 try:  # pragma: no cover - optional dependency
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - optional dependency
@@ -108,6 +110,7 @@ async def main() -> None:
     token = _resolve_token()
     bot = _make_bot(token)
     dispatcher = Dispatcher()
+    clear_stop()
     try:
         from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
 
@@ -122,7 +125,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, lambda: (request_stop(), stop_event.set()))
         except NotImplementedError:  # pragma: no cover - specific to Windows/embedded loops
             # Windows Py<3.8 и некоторые окружения
             pass
@@ -134,7 +137,7 @@ async def main() -> None:
                 allowed_updates=dispatcher.resolve_used_update_types(),
             )
         )
-        polling.add_done_callback(lambda _: stop_event.set())
+        polling.add_done_callback(lambda _: (request_stop(), stop_event.set()))
         await stop_event.wait()
         if not polling.done():
             polling.cancel()

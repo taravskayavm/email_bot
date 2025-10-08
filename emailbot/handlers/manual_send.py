@@ -42,6 +42,7 @@ from emailbot.messaging_utils import (
 )
 from emailbot.reporting import log_mass_filter_digest
 from emailbot.ui.messages import format_dispatch_result, format_error_details
+from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
 from utils.smtp_client import RobustSMTP
 
@@ -490,10 +491,15 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         error_details: list[str] = []
         error_addresses: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
+        aborted = False
         smtp = RobustSMTP()
         try:
             while to_send:
+                if should_stop():
+                    aborted = True
+                    break
                 if cancel_event and cancel_event.is_set():
+                    aborted = True
                     break
                 email_addr = to_send.pop(0)
                 try:
@@ -620,6 +626,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             total_skipped,
             total_blocked,
             total_duplicates,
+            aborted=aborted,
         )
         filtered_lines = []
         for line in report_text.splitlines():
@@ -652,7 +659,12 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         clear_recent_sent_cache()
         bot_handlers_module.disable_force_send(chat_id)
 
-    messaging.create_task_with_logging(long_job(), query.message.reply_text)
+    clear_stop()
+    messaging.create_task_with_logging(
+        long_job(),
+        query.message.reply_text,
+        task_name="manual_mass_send",
+    )
 
 
 async def handle_send_flow_actions(

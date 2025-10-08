@@ -22,6 +22,7 @@ from enum import Enum
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
+from itertools import count
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
@@ -47,6 +48,9 @@ from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
 )
 from . import suppress_list
+from .run_control import register_task
+
+_TASK_SEQ = count()
 
 logger = logging.getLogger(__name__)
 
@@ -623,10 +627,17 @@ async def async_send_email(recipient: str, html_path: str) -> SendOutcome:
 def create_task_with_logging(
     coro,
     notify_func: Callable[[str], Awaitable[None]] | None = None,
+    *,
+    task_name: str | None = None,
 ):
     async def runner():
         try:
-            await coro
+            await asyncio.shield(coro)
+        except asyncio.CancelledError:
+            logger.info(
+                "Background task %s cancelled", task_name or f"task-{id(coro):x}"
+            )
+            raise
         except Exception as e:
             logger.exception(e)
             log_error(e)
@@ -637,7 +648,9 @@ def create_task_with_logging(
                     logger.exception(inner)
                     log_error(inner)
 
-    return asyncio.create_task(runner())
+    task = asyncio.create_task(runner())
+    register_task(task_name or f"task_{next(_TASK_SEQ)}", task)
+    return task
 
 
 def send_email_with_sessions(

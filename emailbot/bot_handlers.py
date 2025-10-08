@@ -49,6 +49,7 @@ from emailbot.ui.messages import (
 )
 
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
+from emailbot.run_control import clear_stop, should_stop, stop_and_status
 
 from . import messaging
 from . import messaging_utils as mu
@@ -169,6 +170,17 @@ from .messaging_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _format_stop_message(status: dict) -> str:
+    running = status.get("running") or {}
+    if not running:
+        return "🛑 Останавливаю все процессы… Активных задач нет."
+    lines = ["🛑 Останавливаю все процессы…", "Текущие задачи:"]
+    for name, info in sorted(running.items()):
+        lines.append(f"• {name}: {info}")
+    return "\n".join(lines)
+
 
 ADMIN_IDS = {
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
@@ -882,10 +894,11 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stop_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the stop button by signalling cancellation."""
+    status = stop_and_status()
     event = context.chat_data.get("cancel_event")
     if event:
         event.set()
-    await update.message.reply_text("Остановлено…")
+    await update.message.reply_text(_format_stop_message(status))
     context.chat_data["cancel_event"] = asyncio.Event()
 
 
@@ -2109,6 +2122,7 @@ async def _send_batch_with_sessions(
     import smtplib
 
     sent_count = 0
+    aborted = False
     attempt = 0
     while True:
         try:
@@ -2120,7 +2134,11 @@ async def _send_batch_with_sessions(
                 use_ssl=use_ssl,
             ) as client:
                 while to_send:
+                    if should_stop():
+                        aborted = True
+                        break
                     if cancel_event and cancel_event.is_set():
+                        aborted = True
                         break
                     email_addr = to_send.pop(0)
                     try:
@@ -2214,9 +2232,9 @@ async def _send_batch_with_sessions(
     except Exception:
         pass
 
-    if cancel_event and cancel_event.is_set():
+    if aborted:
         await query.message.reply_text(
-            f"Остановлено. Отправлено писем: {sent_count}"
+            f"🛑 Остановлено. Отправлено писем: {sent_count}"
         )
     else:
         await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
@@ -2758,6 +2776,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
         sent_count = 0
+        aborted = False
         error_details: list[str] = []
         duplicates: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
@@ -2781,7 +2800,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     use_ssl=use_ssl,
                 ) as client:
                     while to_send:
+                        if should_stop():
+                            aborted = True
+                            break
                         if cancel_event and cancel_event.is_set():
+                            aborted = True
                             break
                         email_addr = to_send.pop(0)
                         try:
@@ -2865,9 +2888,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await asyncio.sleep(backoff)
                 backoff *= 2
         imap.logout()
-        if cancel_event and cancel_event.is_set():
+        if aborted:
             await query.message.reply_text(
-                f"Остановлено. Отправлено писем: {sent_count}"
+                f"🛑 Остановлено. Отправлено писем: {sent_count}"
             )
         else:
             await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
@@ -2880,7 +2903,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
-    messaging.create_task_with_logging(long_job(), query.message.reply_text)
+    clear_stop()
+    messaging.create_task_with_logging(
+        long_job(),
+        query.message.reply_text,
+        task_name="manual_mass_send",
+    )
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3062,11 +3090,16 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         error_details: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
+        aborted = False
         with SmtpClient(
             "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
         ) as client:
             while to_send:
+                if should_stop():
+                    aborted = True
+                    break
                 if cancel_event and cancel_event.is_set():
+                    aborted = True
                     break
                 email_addr = to_send.pop(0)
                 try:
@@ -3171,6 +3204,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             total_skipped,
             total_blocked,
             total_duplicates,
+            aborted=aborted,
         )
         if blocked_foreign:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
@@ -3186,7 +3220,12 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         clear_recent_sent_cache()
         disable_force_send(chat_id)
 
-    messaging.create_task_with_logging(long_job(), query.message.reply_text)
+    clear_stop()
+    messaging.create_task_with_logging(
+        long_job(),
+        query.message.reply_text,
+        task_name="bulk_mass_send",
+    )
 
 
 async def show_skipped_examples(

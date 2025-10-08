@@ -22,6 +22,7 @@ from .extraction import (
 from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
 from emailbot import settings
 from emailbot.settings_store import get
+from .run_control import should_stop
 
 _OBFUSCATED_RE = re.compile(
     r"""(?xi)
@@ -186,7 +187,9 @@ def fetch_url(
             chunks: List[bytes] = []
             total = 0
             while True:
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                if should_stop() or (
+                    stop_event and getattr(stop_event, "is_set", lambda: False)()
+                ):
                     return None
                 chunk = resp.read(_READ_CHUNK)
                 if not chunk:
@@ -228,7 +231,9 @@ def fetch_url(
                 chunks = []
                 total = 0
                 for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
-                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    if should_stop() or (
+                        stop_event and getattr(stop_event, "is_set", lambda: False)()
+                    ):
                         return None
                     chunks.append(chunk)
                     total += len(chunk)
@@ -287,7 +292,9 @@ def fetch_bytes(
             chunks: List[bytes] = []
             total = 0
             while True:
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                if should_stop() or (
+                    stop_event and getattr(stop_event, "is_set", lambda: False)()
+                ):
                     return None
                 chunk = resp.read(_READ_CHUNK)
                 if not chunk:
@@ -317,7 +324,9 @@ def fetch_bytes(
                 chunks = []
                 total = 0
                 for chunk in resp.iter_bytes(chunk_size=_READ_CHUNK):
-                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    if should_stop() or (
+                        stop_event and getattr(stop_event, "is_set", lambda: False)()
+                    ):
                         return None
                     chunks.append(chunk)
                     total += len(chunk)
@@ -413,7 +422,9 @@ def extract_bundle_hits(
     for src in srcs:
         if count >= max_assets:
             break
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
             stats["stop_interrupts"] = stats.get("stop_interrupts", 0) + 1
             break
         url = urllib.parse.urljoin(base_url, src)
@@ -487,7 +498,9 @@ def extract_sitemap_hits(
         except Exception:
             continue
         for loc in root.findall(".//{*}loc"):
-            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+            if should_stop() or (
+                stop_event and getattr(stop_event, "is_set", lambda: False)()
+            ):
                 stats["stop_interrupts"] = stats.get("stop_interrupts", 0) + 1
                 break
             url = loc.text or ""
@@ -537,6 +550,11 @@ def extract_api_hits(
             break
         if not patterns.search(href):
             continue
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
+            stats["stop_interrupts"] = stats.get("stop_interrupts", 0) + 1
+            break
         url = urllib.parse.urljoin(base_url, href)
         ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
         if ext not in _DOC_EXTS:

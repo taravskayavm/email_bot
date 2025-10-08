@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from emailbot import settings
 from emailbot.settings_store import get
 from .extraction_common import preprocess_text
+from .run_control import should_stop
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -269,7 +270,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     ocr_pages = 0
     ocr_start = time.time()
     for page_idx, page in enumerate(doc, start=1):
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
             break
         stats["pages"] += 1
         if layout:
@@ -310,7 +313,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                         post=post,
                     )
                 )
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
             break
     doc.close()
     if ocr:
@@ -369,7 +374,9 @@ def extract_from_pdf_stream(
     ocr_pages = 0
     ocr_start = time.time()
     for page_idx, page in enumerate(doc, start=1):
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
             break
         stats["pages"] += 1
         if layout:
@@ -410,7 +417,9 @@ def extract_from_pdf_stream(
                         post=post,
                     )
                 )
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        if should_stop() or (
+            stop_event and getattr(stop_event, "is_set", lambda: False)()
+        ):
             break
     doc.close()
     if ocr:
