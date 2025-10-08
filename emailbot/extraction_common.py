@@ -163,6 +163,9 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     text = remove_footnotes_safe(raw_input)
     text = normalize_text(text)
 
+    # --- EB-PARSE-GLUE-014D: разлепление «слово+email» прямо в общем пайплайне ---
+    # Вставляем пробел ПЕРЕД e-mail, если слева «прилип» символ (буква/цифра/закрывающий знак/кавычка/двоеточие/равно).
+    # Покрывает кейсы: "Россияivanov@...", ")ivanov@...", "E-mail:ivanov@..."
     # Count occurrences where the guard prevented removal
     if stats is not None:
         m1 = re.findall(r"(?<=\w)-?\s*\n(?=[\w.])", text)
@@ -177,6 +180,25 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
+
+    EMAIL_TOKEN = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+    before_email = re.compile(
+        r"(?<=[A-Za-zА-Яа-яЁё0-9\)\]\u00BB\u201D'\":=])(?=" + EMAIL_TOKEN + r")"
+    )
+    current_text = text
+    inserted_count = 0
+
+    def _insert_left_space(match: re.Match[str]) -> str:
+        nonlocal inserted_count
+        pos = match.start()
+        if pos > 0 and EMAIL_LIKE.match(current_text[pos - 1 :]):
+            return ""
+        inserted_count += 1
+        return " "
+
+    text = before_email.sub(_insert_left_space, current_text)
+    if inserted_count and stats is not None:
+        stats["email_left_glue_fixed"] = stats.get("email_left_glue_fixed", 0) + inserted_count
 
     text = normalize_text_for_emails(text)
 
