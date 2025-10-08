@@ -10,6 +10,7 @@ EMAIL_PLACEHOLDER = r"\x00E\d+\x00"
 _re_email = re.compile(EMAIL_TOKEN)
 
 
+# --- EB-FOOTNOTE-TIGHT-017: безопасная маскировка e-mail перед чисткой ---
 def _mask_emails(text: str) -> tuple[str, list[str]]:
     """
     Заменяем e-mail на плейсхолдеры, возвращаем (новый_текст, список_адресов).
@@ -44,7 +45,7 @@ def remove_footnotes_safe(text: str) -> str:
     if not text:
         return text
 
-    # 0) Маскируем e-mail
+    # 0) EB-FOOTNOTE-TIGHT-017 — сначала маскируем e-mail, чтобы не обрезать первые буквы
     text, masked = _mask_emails(text)
 
     # 1) Удаляем надстрочные/подстрочные индексы после слова
@@ -88,5 +89,5 @@ def remove_footnotes_safe(text: str) -> str:
     for pat, repl in tight_patterns:
         text = re.sub(pat, repl, text)
 
-    # 4) Размаскируем e-mail обратно
+    # 4) Размаскируем e-mail обратно (восстанавливаем локал целиком)
     return _unmask_emails(text, masked)

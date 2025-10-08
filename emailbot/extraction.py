@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 import logging
+import os
 import re
 import unicodedata
 import time
@@ -18,6 +19,7 @@ from datetime import datetime
 from collections import Counter
 from dataclasses import dataclass, field
 from html import unescape
+from pathlib import Path
 from typing import List, Tuple, Dict, Iterable, Set, Optional, Any, Callable, TYPE_CHECKING
 
 from . import settings
@@ -545,9 +547,33 @@ def extract_emails_manual(text: str) -> list[str]:
     return out
 
 
+# Опциональная отладка предобработки (включается .env флагами)
+DEBUG_EMAIL_PARSE = os.getenv("DEBUG_EMAIL_PARSE", "0") == "1"
+DEBUG_EMAIL_PARSE_LOG = os.getenv("DEBUG_EMAIL_PARSE_LOG", "0") == "1"
+DEBUG_EMAIL_PARSE_LOG_PATH = os.getenv(
+    "DEBUG_EMAIL_PARSE_LOG_PATH", "var/email_parse_debug.log"
+)
+
+
 # Чтобы сохранить обратную совместимость
 def extract_emails_document(text: str, stats: Dict[str, int] | None = None) -> list[str]:
-    return smart_extract_emails(text, stats)
+    # ГАРАНТИЯ: всегда прогоняем единый пайплайн (разлепление «слово+email», сноски и т.д.)
+    raw_in = text or ""
+    before = raw_in[:2000]
+    norm = preprocess_text(raw_in, stats)
+    after = norm[:2000]
+    if DEBUG_EMAIL_PARSE and DEBUG_EMAIL_PARSE_LOG:
+        try:
+            Path(DEBUG_EMAIL_PARSE_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+            with open(DEBUG_EMAIL_PARSE_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write("=== extract_emails_document preprocess ===\n")
+                f.write("[BEFORE]\n")
+                f.write(before.replace("\r", "") + "\n")
+                f.write("[AFTER]\n")
+                f.write(after.replace("\r", "") + "\n")
+        except Exception:
+            pass
+    return smart_extract_emails(norm, stats)
 
 
 # ====================== ФАЙЛЫ И САЙТЫ ======================
