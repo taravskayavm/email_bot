@@ -46,6 +46,7 @@ from .messaging_utils import (
     was_sent_today_same_content,
     SYNC_SEEN_EVENTS_PATH,
 )
+from . import suppress_list
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
+
+suppress_list.init_blocked(BLOCKED_FILE)
 
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
@@ -761,10 +764,7 @@ def _canonical_blocked(email_str: str) -> str:
 
 
 def get_blocked_emails() -> Set[str]:
-    if not os.path.exists(BLOCKED_FILE):
-        return set()
-    with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        return {_canonical_blocked(line) for line in f if "@" in line}
+    return suppress_list.get_blocked_set()
 
 
 def add_blocked_email(email_str: str) -> bool:
@@ -776,6 +776,7 @@ def add_blocked_email(email_str: str) -> bool:
         return False
     with open(BLOCKED_FILE, "a", encoding="utf-8") as f:
         f.write(email_norm + "\n")
+    suppress_list.refresh_if_changed()
     return True
 
 
@@ -786,6 +787,7 @@ def dedupe_blocked_file():
         keep = {_canonical_blocked(line) for line in f if "@" in line}
     with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(keep)) + "\n")
+    suppress_list.refresh_if_changed()
 
 
 def verify_unsubscribe_token(email_addr: str, token: str) -> bool:

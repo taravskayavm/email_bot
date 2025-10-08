@@ -24,6 +24,7 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
+from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
@@ -154,6 +155,15 @@ def main() -> None:
 
     os.makedirs(messaging.DOWNLOAD_DIR, exist_ok=True)
     messaging.dedupe_blocked_file()
+
+    try:
+        init_blocked(messaging.BLOCKED_FILE)
+        blocked_total = get_blocked_count()
+        logging.getLogger(__name__).info(
+            "Stoplist loaded", extra={"event": "stoplist", "count": blocked_total}
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("Stoplist init failed", exc_info=True)
 
     app = ApplicationBuilder().token(token).build()
     app.add_error_handler(error_handler)

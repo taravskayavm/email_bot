@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import os
+import re
+import threading
+from pathlib import Path
+from typing import Set
+
+from utils.paths import expand_path
+
+try:  # pragma: no cover - optional dependency
+    from .extraction_common import normalize_email as _normalize_email
+except Exception:  # pragma: no cover - fallback when extraction module unavailable
+    def _normalize_email(value: str) -> str:
+        return (value or "").strip().lower()
+
+
+_LOCK = threading.RLock()
+_BLOCKED_PATH: Path = expand_path(os.getenv("BLOCKED_EMAILS_PATH", "blocked_emails.txt"))
+_CACHE: Set[str] = set()
+_MTIME: float | None = None
+
+_LEADING_DOTS_RE = re.compile(r"^\.+")
+_LEADING_DIGITS_RE = re.compile(r"^\d{1,2}(?=[A-Za-z])")
+
+
+def _normalize(email: str) -> str:
+    """Return canonical representation for stop-list comparison."""
+
+    try:
+        value = _normalize_email(email)
+    except Exception:
+        value = (email or "").strip().lower()
+    value = _LEADING_DOTS_RE.sub("", value)
+    value = _LEADING_DIGITS_RE.sub("", value)
+    return value
+
+
+def _load_file() -> None:
+    global _CACHE, _MTIME
+
+    path = _BLOCKED_PATH
+    if not path.exists():
+        _CACHE = set()
+        _MTIME = None
+        return
+
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _CACHE = set()
+        _MTIME = None
+        return
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        _CACHE = set()
+        _MTIME = stat.st_mtime
+        return
+
+    items: Set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        norm = _normalize(stripped)
+        if norm:
+            items.add(norm)
+    _CACHE = items
+    _MTIME = stat.st_mtime
+
+
+def refresh_if_changed() -> None:
+    """Reload the stop-list if the backing file has changed."""
+
+    with _LOCK:
+        try:
+            stat = _BLOCKED_PATH.stat()
+            mtime = stat.st_mtime
+        except FileNotFoundError:
+            mtime = None
+        if mtime != _MTIME:
+            _load_file()
+
+
+def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
+    """Initialise the stop-list cache explicitly (e.g. during startup)."""
+
+    global _BLOCKED_PATH
+
+    with _LOCK:
+        if path is not None:
+            _BLOCKED_PATH = expand_path(path)
+        _load_file()
+
+
+def is_blocked(email: str) -> bool:
+    """Return True if ``email`` is present in ``blocked_emails.txt``."""
+
+    refresh_if_changed()
+    return _normalize(email) in _CACHE
+
+
+def get_blocked_count() -> int:
+    """Return the number of cached blocked addresses."""
+
+    refresh_if_changed()
+    return len(_CACHE)
+
+
+def get_blocked_set() -> Set[str]:
+    """Return a snapshot of the cached blocked addresses."""
+
+    refresh_if_changed()
+    return set(_CACHE)
+
+
+def invalidate_cache() -> None:
+    """Force cache reload on the next access (useful after manual updates)."""
+
+    global _MTIME
+    with _LOCK:
+        _MTIME = None
+
+
+__all__ = [
+    "init_blocked",
+    "refresh_if_changed",
+    "is_blocked",
+    "get_blocked_count",
+    "get_blocked_set",
+    "invalidate_cache",
+]

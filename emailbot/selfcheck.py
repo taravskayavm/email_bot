@@ -9,6 +9,7 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from emailbot.settings import REPORT_TZ
+from emailbot.suppress_list import get_blocked_count
 
 
 @dataclass
@@ -65,6 +66,11 @@ def run_selfcheck() -> List[Check]:
 
     if warnings:
         checks.append(Check("WARN", True, " | ".join(warnings)))
+
+    try:
+        checks.append(Check("STOPLIST", True, f"blocked={get_blocked_count()}"))
+    except Exception as exc:
+        checks.append(Check("STOPLIST", False, f"error: {exc}"))
 
     return checks
 
