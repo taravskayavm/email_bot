@@ -85,6 +85,8 @@ def format_dispatch_result(
     cooldown_skipped: int,
     blocked: int,
     duplicates: int = 0,
+    *,
+    aborted: bool = False,
 ) -> str:
     left = max(total - sent - cooldown_skipped - blocked - duplicates, 0)
     lines = [
@@ -97,6 +99,8 @@ def format_dispatch_result(
     if duplicates:
         lines.append(f"🔁 Дубликаты за 24 ч: {duplicates}")
     lines.append(f"ℹ️ Осталось без изменений: {left}")
+    if aborted:
+        lines.append("🛑 Процесс был остановлен по запросу.")
     return "\n".join(lines)
 def format_error_details(details: Iterable[str]) -> str:
     """Return an empty string to avoid sending hidden error summaries."""

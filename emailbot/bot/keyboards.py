@@ -91,5 +91,6 @@ def send_flow_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🚀 Отправить", callback_data="bulk:send:start")
     builder.button(text="↩️ Вернуться / Править", callback_data="bulk:send:back")
     builder.button(text="✏️ Исправить адрес", callback_data="bulk:send:edit")
+    builder.button(text="🛑 Стоп", callback_data="stop_all")
     builder.adjust(1)
     return builder.as_markup()
