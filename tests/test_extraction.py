@@ -45,7 +45,7 @@ def test_negative(raw):
 def test_preprocess_preserves_digits():
     from emailbot.extraction_common import preprocess_text
 
-    assert preprocess_text("9\n6soul@mail.ru").startswith("9\n6soul")
+    assert preprocess_text("9\n6soul@mail.ru").startswith("9 6soul")
     assert preprocess_text("name-\nname@domain.ru").startswith("namename@domain.ru")
     assert preprocess_text("name\u00ADname@domain.ru").startswith("namename@domain.ru")
 
