@@ -3,7 +3,11 @@ import logging
 import zipfile
 
 from emailbot import extraction
-from emailbot.reporting import build_mass_report_text, log_mass_filter_digest
+from emailbot.reporting import (
+    build_mass_report_text,
+    log_mass_filter_digest,
+    render_summary,
+)
 
 
 def _records(caplog):
@@ -93,4 +97,13 @@ def test_build_mass_report_text_counts_only():
     assert "⏳ Пропущены (по правилу «180 дней»): 1" in text
     assert "🚫 В блок-листе/недоступны: 1" in text
     assert "🌍 Иностранные (отложены): 1" in text
+
+
+def test_render_summary_always_shows_blocked_line():
+    stats = {"total_found": 5, "unique_after_cleanup": 3, "blocked_total": 0}
+
+    summary = render_summary(stats)
+
+    assert "📦 К отправке: 3" in summary
+    assert "🚫 Из блок-листа: 0" in summary
 
