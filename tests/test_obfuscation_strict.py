@@ -1,6 +1,5 @@
 from emailbot.extraction_url import extract_obfuscated_hits
 
-
 def emails(hits):
     return sorted({h.email for h in hits})
 
@@ -25,13 +24,3 @@ def test_mailto_is_kept():
     hits = extract_obfuscated_hits(html, "zip:/dummy.html")
     em = emails(hits)
     assert any(x.endswith("@xn--e1afmkfd.xn--p1ai") for x in em)
-
-
-def test_numeric_locals_can_be_allowed(monkeypatch):
-    html = """
-      <p>12345 [at] uni [dot] edu</p>
-    """
-    monkeypatch.setenv("OBFUSCATION_ALLOW_NUMERIC_LOCAL", "1")
-    hits = extract_obfuscated_hits(html, "zip:/dummy.html")
-    em = emails(hits)
-    assert "12345@uni.edu" in em

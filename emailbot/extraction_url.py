@@ -30,10 +30,6 @@ from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
 
-# Локаль: 2–64 символа из допустимого набора.
-# Требование «обязательно ≥1 буква» будем применять УСЛОВНО (через флаг).
-_LOCAL_BASE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{2,64}"
-
 # Доменный лейбл: 1–63, не начинается/заканчивается дефисом, и содержит хотя бы одну букву.
 _LABEL_STRICT = (
     r"(?=[\w-]*[^\W\d_])"
@@ -41,8 +37,6 @@ _LABEL_STRICT = (
 )
 
 # Обфускация: local (at|@|собака) label (dot label)*
-_OBFUSCATED_RE_BASE = rf"""
-    (?P<local>{_LOCAL_BASE})
     \s*
     (?P<at>
         @
@@ -603,13 +597,6 @@ def extract_obfuscated_hits(
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
     hits: List[EmailHit] = []
-    allow_numeric_local = os.getenv("OBFUSCATION_ALLOW_NUMERIC_LOCAL", "0").lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
     for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', text, flags=re.I):
         addr = urllib.parse.unquote(m.group(1)).strip()
         if not addr or "@" not in addr:
@@ -653,13 +640,6 @@ def extract_obfuscated_hits(
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
         # Усиленные фильтры против мусора
-        if len(local) < 2:
-            if stats is not None:
-                stats["numeric_from_obfuscation_dropped"] = stats.get(
-                    "numeric_from_obfuscation_dropped", 0
-                ) + 1
-            continue
-        if not allow_numeric_local and not re.search(r"[A-Za-z]", local):
             if stats is not None:
                 stats["numeric_from_obfuscation_dropped"] = stats.get(
                     "numeric_from_obfuscation_dropped", 0
