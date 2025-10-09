@@ -70,6 +70,10 @@ _BRACKETED_FOOTNOTE_RX = re.compile(r'(?:(?<=\s)|^)\[(?:\d{1,3}|[ivxlcdm]+)\]\s*
 _SUPERSCRIPT_FOOTNOTE_RX = re.compile(r'(?:(?<=\s)|^)[¹²³⁴⁵⁶⁷⁸⁹⁰]+\s*(?=[A-Za-z0-9._%+-]+@)')
 _AT_WORDS = r"(at|обака|собака|sobaka|\(at\)|\[at\]|\{at\}|\(собака\)|\[собака\]|\{собака\}|\(на\)|\[на\]|\{на\})"
 _DOT_WORDS = r"(dot|точка|tochka|\(dot\)|\[dot\]|\{dot\}|\(точка\)|\[точка\]|\{точка\})"
+
+# Артефакты «сноска вместо локала»: "1@gmail.com", "0@yandex.ru" и т.п.
+# Сохраняем достаточную гибкость и режем только полностью цифровые локалы длиной 1–2.
+_NUMERIC_LOCAL_FOOTNOTE_RE = re.compile(r"^\d{1,2}$")
 _OBF_SEP = r"[\s\(\)\[\]\{\}]*"
 _OBFUSCATION_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(_OBF_SEP + _AT_WORDS + _OBF_SEP, re.IGNORECASE), "@"),
@@ -1382,6 +1386,12 @@ def sanitize_email(
 
     local, domain = s.split("@", 1)
     domain_original = domain
+    # Отсечь артефакты типа "1@gmail.com" (сноска «¹» → "1") до дальнейших ремонтов.
+    # Это безопасно для вашего кейса (академические контакты) и не режет валидные адреса,
+    # кроме крайне экзотичных полностью цифровых локалов длиной 1–2.
+    if _NUMERIC_LOCAL_FOOTNOTE_RE.fullmatch(local):
+        final_reason = _merge_reason(reason, "looks-like-footnote") if reason else "looks-like-footnote"
+        return _finalize("", final_reason, meta_extra={"domain": domain})
     original_local = ""
     if "@" in compact_original:
         original_local = compact_original.split("@", 1)[0]
@@ -1447,6 +1457,10 @@ def sanitize_email(
 
     if tail_repaired:
         reason = _merge_reason(reason, "tld-repaired")
+
+    # Повторная страховка: если после ремонтов локал стал чисто цифровой длиной 1–2 — дропаем.
+    if _NUMERIC_LOCAL_FOOTNOTE_RE.fullmatch(local):
+        return _finalize("", _merge_reason(reason, "looks-like-footnote"))
 
     if AGGR and _POPULAR.match(domain_ascii):
         m = _REPAIR_RE.match(local)

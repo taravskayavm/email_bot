@@ -1,7 +1,5 @@
 import pytest
 
-import pytest
-
 import config
 import utils.email_clean as email_clean
 from utils.email_clean import dedupe_keep_original, parse_emails_unified
@@ -72,3 +70,14 @@ def test_debug_flag_does_not_change_output(monkeypatch, flag):
     src = "a@b.com, c@d.com"
     got = parse_emails_unified(src)
     assert got == ["a@b.com", "c@d.com"]
+
+
+def test_numeric_only_local_from_footnote_is_rejected():
+    # типичный артефакт: «¹» в PDF превратился в "1" и «приклеился» к домену
+    src = "1@gmail.com, author.name@uni.ru, 0@yandex.ru"
+    got, meta = parse_emails_unified(src, return_meta=True)
+    # должны остаться только валидные адреса, а «1@…» и «0@…» уйдут с причиной looks-like-footnote
+    assert got == ["author.name@uni.ru"]
+    drop_reasons = {item["raw"]: item["reason"] for item in meta["items"]}
+    assert drop_reasons.get("1@gmail.com") == "looks-like-footnote"
+    assert drop_reasons.get("0@yandex.ru") == "looks-like-footnote"
