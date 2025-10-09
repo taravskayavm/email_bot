@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
-from typing import Dict, List, Optional, Tuple, Callable, Protocol
+from typing import Callable, Dict, List, Optional, Protocol, Tuple
 import json
 import os
 import httpx
@@ -19,29 +19,49 @@ from .extraction import (
     _is_suspicious_local,
     extract_emails_document,
 )
-from .extraction_common import normalize_text, maybe_decode_base64, strip_phone_prefix
+from .extraction_common import (
+    normalize_domain,
+    normalize_text,
+    maybe_decode_base64,
+    strip_phone_prefix,
+)
 from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
 
+# Локаль: 2–64 символа из допустимого набора И как минимум одна буква.
+_LOCAL_STRICT = (
+    r"(?=[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*[A-Za-z])"
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{2,64}"
+)
+
+# Доменный лейбл: 1–63, не начинается/заканчивается дефисом, и содержит хотя бы одну букву.
+_LABEL_STRICT = (
+    r"(?=[\w-]*[^\W\d_])"
+    r"[\w](?:[\w-]{0,61}[\w])?"
+)
+
+# Обфускация: local (at|@|собака) label (dot label)*
 _OBFUSCATED_RE = re.compile(
-    r"""(?xi)
-    (?P<local>[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+)
+    rf"""(?xi)
+    (?P<local>{_LOCAL_STRICT})
     \s*
     (?P<at>
         @
-      | \(at\) | \[at\] | \{at\} | \bat\b
+      | \(at\) | \[at\] | \{{at\}} | \bat\b
       | собака | собакa | arroba | sobaka
     )
     \s*
     (?P<domain>
-        (?:[A-Za-z0-9-]+
-           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)\s*[A-Za-z0-9-]+)+)
+        (?:{_LABEL_STRICT}
+           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{{dot\}}|точка|ponto|tochka)\s*{_LABEL_STRICT})+)
     )
     """,
 )
 
-_DOT_SPLIT_RE = re.compile(r"\s*(?:\.|dot|\(dot\)|\[dot\]|{dot}|точка|ponto|tochka)\s*", re.I)
+_DOT_SPLIT_RE = re.compile(
+    r"\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)\s*", re.I
+)
 
 _SOB_WORD_RE = re.compile(
     r"(?<!\w)(?:[\[\(\{]\s*)?(?:[сcs][оo0](?:б|b)[аa@][кk][аa@])(?:\s*[\]\)\}])?(?!\w)",
@@ -581,16 +601,35 @@ def extract_obfuscated_hits(
 ) -> List[EmailHit]:
     """Return all ``EmailHit`` objects found via obfuscation patterns."""
 
-    strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+    hits: List[EmailHit] = []
+
+    for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', text, flags=re.I):
+        addr = urllib.parse.unquote(m.group(1)).strip()
+        if not addr or "@" not in addr:
+            continue
+        local_raw, domain_raw = addr.split("@", 1)
+        local = local_raw.strip().lower()
+        domain_raw = domain_raw.strip()
+        if not local or not domain_raw:
+            continue
+        ascii_domain = normalize_domain(domain_raw)
+        if not ascii_domain:
+            continue
+        if not (_valid_local(local) and _valid_domain(ascii_domain)):
+            continue
+        email = f"{local}@{ascii_domain}".lower()
+        hits.append(EmailHit(email=email, source_ref=source_ref, origin="mailto"))
+        if stats is not None:
+            stats["hits_mailto"] = stats.get("hits_mailto", 0) + 1
+
     text = normalize_text(text)
     text = _SOB_WORD_ATTACHED_RE.sub(" at ", text)
     text = _SOB_WORD_RE.sub(" at ", text)
     text = _DOT_WORD_ATTACHED_RE.sub(" dot ", text)
     text = _DOT_WORD_RE.sub(" dot ", text)
-    hits: List[EmailHit] = []
     for m in _OBFUSCATED_RE.finditer(text):
         local = m.group("local")
         domain_raw = m.group("domain")
@@ -606,13 +645,27 @@ def extract_obfuscated_hits(
         post = text[end : end + 16]
         local, _ = _strip_left_noise(local, pre, stats)
 
+        # Базовая проверка формата (включая IDNA/TLD и т.п.)
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
-        if strict and local.isdigit():
+        # Усиленные фильтры против мусора
+        if len(local) < 2 or not re.search(r"[A-Za-z]", local):
             if stats is not None:
                 stats["numeric_from_obfuscation_dropped"] = stats.get(
                     "numeric_from_obfuscation_dropped", 0
                 ) + 1
+            continue
+        if "." not in domain:
+            continue
+        tld = domain.rsplit(".", 1)[-1]
+        if not (2 <= len(tld) <= 24):
+            continue
+        labels_ok = True
+        for lbl in domain.split("."):
+            if not re.search(r"[A-Za-z]", lbl):
+                labels_ok = False
+                break
+        if not labels_ok:
             continue
         email = f"{local}@{domain}".lower()
 

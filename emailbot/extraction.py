@@ -195,7 +195,11 @@ def _is_local_char(ch: str) -> bool:
     return ch.isalnum() or ch in _ATEXT_PUNCT
 
 def _valid_local(local: str) -> bool:
-    if not (1 <= len(local) <= 64):
+    # минимально 2 символа и хотя бы одна буква — снижает шум «a@…», «5@…»
+    if not (2 <= len(local) <= 64):
+        return False
+    if not re.search(r"[A-Za-z]", local):
+        # чисто цифровые локали почти всегда шум; если они нужны, настройку проще ослабить выше по стеку
         return False
     if local.startswith(".") or local.endswith(".") or ".." in local:
         return False
