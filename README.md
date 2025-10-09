@@ -10,6 +10,14 @@ pre-commit run -a
 Этот проект настраивается через локальный файл `.env` (не коммитится в репозиторий).
 Все переменные читаются через `os.getenv`, поэтому **код править не нужно** — достаточно отредактировать `.env`.
 
+## Запуск (legacy, python-telegram-bot)
+
+```bash
+pip install -r requirements.txt
+# Рекомендуется pin: python-telegram-bot==13.15
+python email_bot.py
+```
+
 ## Конфигурация через .env
 Подробности переменных окружения см. в файле `.env.example`.
 
