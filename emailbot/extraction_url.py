@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
 import urllib.parse
-from typing import Callable, Dict, List, Optional, Protocol, Tuple
-import json
-import os
-import httpx
 import urllib.request
+from typing import Callable, Dict, List, Optional, Protocol, Tuple
+
+import httpx
 
 from .extraction import (
     EmailHit,
@@ -29,12 +30,6 @@ from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
 
-# Локаль: 2–64 символа из допустимого набора И как минимум одна буква.
-_LOCAL_STRICT = (
-    r"(?=[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*[A-Za-z])"
-    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{2,64}"
-)
-
 # Доменный лейбл: 1–63, не начинается/заканчивается дефисом, и содержит хотя бы одну букву.
 _LABEL_STRICT = (
     r"(?=[\w-]*[^\W\d_])"
@@ -42,9 +37,6 @@ _LABEL_STRICT = (
 )
 
 # Обфускация: local (at|@|собака) label (dot label)*
-_OBFUSCATED_RE = re.compile(
-    rf"""(?xi)
-    (?P<local>{_LOCAL_STRICT})
     \s*
     (?P<at>
         @
@@ -56,8 +48,8 @@ _OBFUSCATED_RE = re.compile(
         (?:{_LABEL_STRICT}
            (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{{dot\}}|точка|ponto|tochka)\s*{_LABEL_STRICT})+)
     )
-    """,
-)
+"""
+_OBFUSCATED_RE = re.compile(_OBFUSCATED_RE_BASE, re.IGNORECASE | re.VERBOSE | re.UNICODE)
 
 _DOT_SPLIT_RE = re.compile(
     r"\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)\s*", re.I
@@ -605,7 +597,6 @@ def extract_obfuscated_hits(
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
     hits: List[EmailHit] = []
-
     for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', text, flags=re.I):
         addr = urllib.parse.unquote(m.group(1)).strip()
         if not addr or "@" not in addr:
@@ -649,7 +640,6 @@ def extract_obfuscated_hits(
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
         # Усиленные фильтры против мусора
-        if len(local) < 2 or not re.search(r"[A-Za-z]", local):
             if stats is not None:
                 stats["numeric_from_obfuscation_dropped"] = stats.get(
                     "numeric_from_obfuscation_dropped", 0

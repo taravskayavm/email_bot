@@ -1,6 +1,4 @@
 from emailbot.extraction_url import extract_obfuscated_hits
-from emailbot.extraction import EmailHit
-
 
 def emails(hits):
     return sorted({h.email for h in hits})
