@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
+import sys
 from typing import Dict, List
 
 import requests
 from telegram import ParseMode
+from telegram.error import Conflict, NetworkError, TelegramError
 from telegram.ext import CommandHandler, Filters, MessageHandler, Updater
+from telegram.utils.request import Request
 
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
 from emailbot.utils.email_clean import clean_and_normalize_email
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
+from emailbot.utils.single_instance import single_instance_lock
+
+LOGLEVEL = os.getenv("LOGLEVEL", "INFO")
+logging.basicConfig(level=LOGLEVEL)
+logger = logging.getLogger(__name__)
 
 URL_RE = re.compile(r"(https?://[^\s]+)", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
@@ -159,8 +168,34 @@ def handle_document(update, context):
         ack.edit_text("Произошла ошибка при разборе файла.")
 
 
+def _parse_timeout(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logger.warning("Invalid %s=%r. Using default %s s.", name, raw, default)
+        return default
+
+
 def main():
-    updater = Updater(token=os.environ["TELEGRAM_BOT_TOKEN"], use_context=True)
+    if os.getenv("TELEGRAM_LEGACY_UI_ENABLED", "0") != "1":
+        print(
+            "Legacy telegram_ui disabled. Set TELEGRAM_LEGACY_UI_ENABLED=1 to enable.",
+            file=sys.stderr,
+        )
+        return
+
+    connect_timeout = _parse_timeout("TELEGRAM_CONNECT_TIMEOUT", 10)
+    read_timeout = _parse_timeout("TELEGRAM_READ_TIMEOUT", 30)
+    request = Request(connect_timeout=connect_timeout, read_timeout=read_timeout)
+    updater = Updater(
+        token=os.environ["TELEGRAM_BOT_TOKEN"], request=request, use_context=True
+    )
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
@@ -168,9 +203,37 @@ def main():
     dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_url))
     dp.add_handler(MessageHandler(Filters.document, handle_document))
 
-    updater.start_polling()
-    updater.idle()
+    try:
+        info = updater.bot.get_webhook_info()
+        if info and (info.url or info.pending_update_count):
+            updater.bot.delete_webhook(drop_pending_updates=True)
+    except Exception as exc:
+        logger.info("Webhook reset skipped: %s", exc)
+
+    try:
+        updater.start_polling(clean=True, timeout=30, drop_pending_updates=True)
+        updater.idle()
+    except Conflict as exc:
+        logger.error(
+            "Telegram 409 Conflict (legacy): %s. Another poller/webhook active.",
+            exc,
+        )
+        try:
+            updater.stop()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+        sys.exit(0)
+    except (NetworkError, TelegramError) as exc:
+        logger.exception("Telegram error (legacy): %s", exc)
+        sys.exit(4)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        with single_instance_lock("telegram-bot-legacy"):
+            main()
+    except RuntimeError as exc:
+        if str(exc).startswith("lock-busy:"):
+            print("Another legacy instance is already running. Exit.", file=sys.stderr)
+            sys.exit(0)
+        raise

@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import BotCommand
 
 from emailbot.run_control import clear_stop, request_stop
+from emailbot.utils.single_instance import single_instance_lock
 
 try:  # pragma: no cover - optional dependency
     from dotenv import load_dotenv
@@ -23,19 +24,53 @@ except Exception:  # pragma: no cover - optional dependency
     def load_dotenv(*args, **kwargs):
         return False
 
+logger = logging.getLogger(__name__)
+
+
 def _make_bot(token: str) -> Bot:
     """
     Создаёт Bot корректно для aiogram <3.7 и >=3.7.
     UI/логика не меняются (HTML по умолчанию).
     """
 
+    session_timeout = 60.0
+    timeout_env = os.getenv("TELEGRAM_REQUEST_TIMEOUT")
+    if timeout_env:
+        try:
+            parsed_timeout = float(timeout_env)
+            if parsed_timeout <= 0:
+                raise ValueError
+            session_timeout = parsed_timeout
+        except ValueError:
+            logger.warning(
+                "Invalid TELEGRAM_REQUEST_TIMEOUT=%r. Using default %s s.",
+                timeout_env,
+                session_timeout,
+            )
+
+    session = None
+    try:
+        from aiogram.client.session.aiohttp import AiohttpSession
+
+        session = AiohttpSession(timeout=session_timeout)
+    except Exception:
+        logger.debug("Falling back to default aiogram session", exc_info=True)
+
+    bot_kwargs = {}
+    if session is not None:
+        bot_kwargs["session"] = session
+
     try:
         from aiogram.client.default import DefaultBotProperties
         from aiogram.enums import ParseMode
 
-        return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        return Bot(
+            token=token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            **bot_kwargs,
+        )
     except Exception:
-        return Bot(token=token, parse_mode="HTML")
+        return Bot(token=token, parse_mode="HTML", **bot_kwargs)
 
 
 def _load_dotenv() -> None:
@@ -121,6 +156,26 @@ async def main() -> None:
     include_all_routers(dispatcher)
     await _set_bot_commands(bot)
 
+    polling_timeout = 30
+    polling_timeout_env = os.getenv("TELEGRAM_POLLING_TIMEOUT")
+    if polling_timeout_env:
+        try:
+            parsed_timeout = int(polling_timeout_env)
+            if parsed_timeout <= 0:
+                raise ValueError
+            polling_timeout = parsed_timeout
+        except ValueError:
+            logger.warning(
+                "Invalid TELEGRAM_POLLING_TIMEOUT=%r. Using default %s s.",
+                polling_timeout_env,
+                polling_timeout,
+            )
+
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as exc:
+        logger.info("Webhook reset skipped: %s", exc)
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -134,7 +189,8 @@ async def main() -> None:
         polling = asyncio.create_task(
             dispatcher.start_polling(
                 bot,
-                allowed_updates=dispatcher.resolve_used_update_types(),
+                allowed_updates=None,
+                polling_timeout=polling_timeout,
             )
         )
         polling.add_done_callback(lambda _: (request_stop(), stop_event.set()))
@@ -153,4 +209,11 @@ if __name__ == "__main__":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
         except Exception:
             pass
-    asyncio.run(main())
+    try:
+        with single_instance_lock("telegram-bot-aiogram"):
+            asyncio.run(main())
+    except RuntimeError as exc:
+        if str(exc).startswith("lock-busy:"):
+            print("Another aiogram instance is already running. Exit.", file=sys.stderr)
+            sys.exit(0)
+        raise
