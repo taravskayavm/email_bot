@@ -22,8 +22,20 @@ def start(update, context):
     update.message.reply_text("📥 Загрузите данные с e-mail-адресами или пришлите ссылку.")
 
 
-def _render_stats(ok: List[str], rejects: Dict[str, int], warn: str | None = None, errors: List[str] | None = None) -> str:
-    txt = f"Найдено адресов: {len(ok)}"
+def _render_stats(
+    ok: List[str],
+    rejects: Dict[str, int],
+    warn: str | None = None,
+    errors: List[str] | None = None,
+    *,
+    blocked_hits: int = 0,
+    total_found: int | None = None,
+) -> str:
+    found = total_found if total_found is not None else len(ok) + blocked_hits
+    txt = f"Найдено адресов: {found}"
+    txt += f"\n📦 К отправке: {len(ok)}"
+    if blocked_hits:
+        txt += f"\n🚫 В блок-листе: {blocked_hits}"
     if rejects:
         txt += "\nПричины отбраковки:" + "".join(f"\n • {key} — {val}" for key, val in rejects.items())
     if warn:
@@ -62,6 +74,8 @@ def handle_url(update, context):
     total_ok: List[str] = []
     total_rejects: Dict[str, int] = {}
     errors: List[str] = []
+    found_addresses: set[str] = set()
+    blocked_addresses: set[str] = set()
 
     for url in urls:
         try:
@@ -77,15 +91,28 @@ def handle_url(update, context):
                     key = str(reason) if reason else "unknown"
                     total_rejects[key] = total_rejects.get(key, 0) + 1
                     continue
-                if is_blocked(email) or is_suppressed(email):
+                found_addresses.add(email)
+                blocked = is_blocked(email)
+                suppressed = is_suppressed(email)
+                if blocked:
+                    blocked_addresses.add(email)
+                if blocked or suppressed:
                     continue
                 total_ok.append(email)
         except Exception as exc:  # pragma: no cover - network errors
             errors.append(f"{url} — {type(exc).__name__}")
 
     total_ok = list(dict.fromkeys(total_ok))
+    total_found = len(found_addresses)
+    blocked_hits = len(blocked_addresses)
     ack.edit_text(
-        _render_stats(total_ok, total_rejects, errors=errors),
+        _render_stats(
+            total_ok,
+            total_rejects,
+            errors=errors,
+            blocked_hits=blocked_hits,
+            total_found=total_found,
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -101,9 +128,31 @@ def handle_document(update, context):
     data = buf.getvalue()
     try:
         ok, rejects, warn = extract_emails_from_bytes(data, doc.file_name or "file")
-        ok = [addr for addr in ok if not (is_blocked(addr) or is_suppressed(addr))]
-        ok = list(dict.fromkeys(ok))
-        ack.edit_text(_render_stats(ok, rejects, warn=warn), parse_mode=ParseMode.MARKDOWN)
+        found_addresses: set[str] = set()
+        blocked_addresses: set[str] = set()
+        filtered: List[str] = []
+        for addr in ok:
+            found_addresses.add(addr)
+            blocked = is_blocked(addr)
+            suppressed = is_suppressed(addr)
+            if blocked:
+                blocked_addresses.add(addr)
+            if blocked or suppressed:
+                continue
+            filtered.append(addr)
+        ok = list(dict.fromkeys(filtered))
+        total_found = len(found_addresses)
+        blocked_hits = len(blocked_addresses)
+        ack.edit_text(
+            _render_stats(
+                ok,
+                rejects,
+                warn=warn,
+                blocked_hits=blocked_hits,
+                total_found=total_found,
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
     except ExtractError as exc:
         ack.edit_text(f"Не удалось обработать файл: {exc}")
     except Exception:  # pragma: no cover - defensive
