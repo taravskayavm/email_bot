@@ -9,5 +9,6 @@ pdfminer.six
 PyMuPDF
 lxml
 beautifulsoup4
+aiohttp
 aiogram
 openpyxl
