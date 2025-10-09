@@ -450,10 +450,11 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
                 list_context = bool(_LIST_MARKER_RE.search(left_slice))
 
                 if prefix_char.isdigit():
-                    if prefix_char == "1":
-                        choose_v2 = True
-                    elif prefix_char == "2" and not local2[:1].isdigit():
-                        choose_v2 = True
+                    if len(local2) >= 2:
+                        if prefix_char == "1":
+                            choose_v2 = True
+                        elif prefix_char == "2" and not local2[:1].isdigit():
+                            choose_v2 = True
                 elif prefix_char.lower() in {"a", "b", "c"} and (
                     list_context or multi_mode
                 ):
