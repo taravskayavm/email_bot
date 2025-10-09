@@ -43,6 +43,38 @@ def log_mass_filter_digest(ctx: dict) -> None:
     _DIGEST_LOGGER.info(json.dumps(data, ensure_ascii=False))
 
 
+def render_summary(stats: dict) -> str:
+    """Render a short textual summary for extraction statistics."""
+
+    lines: List[str] = []
+
+    total_found = stats.get("total_found")
+    if total_found is not None:
+        lines.append(f"📊 Найдено адресов: {total_found}")
+
+    to_send = stats.get("unique_after_cleanup")
+    if to_send is None:
+        to_send = stats.get("total_ready", 0)
+    lines.append(f"📦 К отправке: {to_send}")
+
+    suspicious = stats.get("suspicious_numeric_localpart")
+    if suspicious:
+        lines.append(f"🟡 Подозрительные: {suspicious}")
+
+    blocked_total = stats.get("blocked_total", 0)
+    lines.append(f"🚫 Из блок-листа: {blocked_total}")
+
+    missed_pages = stats.get("pdf_pages_failed")
+    if missed_pages:
+        lines.append(f"📄 Не распознаны страницы PDF: {missed_pages}")
+
+    invalid_tld = stats.get("invalid_tld")
+    if invalid_tld:
+        lines.append(f"❗ Некорректные домены: {invalid_tld}")
+
+    return "\n".join(lines)
+
+
 def build_mass_report_text(
     sent_ok: Iterable[str],
     skipped_recent: Iterable[str],

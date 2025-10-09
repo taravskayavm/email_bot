@@ -151,6 +151,7 @@ class EmailHit:
 _BULLETS = "•·⋅◦"
 _BRACKETS_OPEN = "([{〔【〈《"
 _BRACKETS_CLOSE = ")]}\u3015\u3011\u3009\u300B"
+_SHORT_NUMERIC_LOCAL_RE = re.compile(r"^\d{1,2}$")
 
 # ====================== STRIP HTML ======================
 
@@ -624,11 +625,36 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
         allowed = set(emails)
         hits = [h for h in hits if h.email in allowed]
     stats["unique_after_cleanup"] = len(hits)
+    prev_suspicious = stats.get("suspicious_numeric_localpart", 0)
     suspicious = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
-    if suspicious:
-        stats["suspicious_numeric_localpart"] = stats.get(
-            "suspicious_numeric_localpart", 0
-        ) + suspicious
+    total_suspicious = prev_suspicious + suspicious
+    if total_suspicious:
+        stats["suspicious_numeric_localpart"] = total_suspicious
+    else:
+        stats.pop("suspicious_numeric_localpart", None)
+
+    kept: list[EmailHit] = []
+    dropped_cnt = 0
+    for h in hits:
+        local = h.email.split("@", 1)[0]
+        if _SHORT_NUMERIC_LOCAL_RE.fullmatch(local):
+            dropped_cnt += 1
+            continue
+        kept.append(h)
+
+    if dropped_cnt:
+        stats["dropped_numeric_local_1_2"] = stats.get(
+            "dropped_numeric_local_1_2", 0
+        ) + dropped_cnt
+        hits = kept
+        stats["unique_after_cleanup"] = len(hits)
+        suspicious_after = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
+        total_suspicious = prev_suspicious + suspicious_after
+        if total_suspicious:
+            stats["suspicious_numeric_localpart"] = total_suspicious
+        else:
+            stats.pop("suspicious_numeric_localpart", None)
+
     return hits
 
 
