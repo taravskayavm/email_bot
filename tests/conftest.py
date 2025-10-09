@@ -1,12 +1,168 @@
 """Test configuration and shared fixtures."""
 
+import importlib.util
+import os
 import sys
+import types
 from pathlib import Path
 from dataclasses import dataclass
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import pytest
+
+
+OPTIONAL_DEPENDENCIES = [
+    "fitz",
+    "lxml",
+    "bs4",
+    "pdfminer",
+    "pdfminer.six",
+    "aiohttp",
+    "aiogram",
+]
+
+
+def _missing_optional_dependencies() -> list[str]:
+    missing: list[str] = []
+    for name in OPTIONAL_DEPENDENCIES:
+        spec_name = name
+        if name == "pdfminer.six":
+            spec_name = "pdfminer"
+        if importlib.util.find_spec(spec_name) is None:
+            missing.append(name)
+    return sorted(set(missing))
+
+
+MISSING_OPTIONALS = _missing_optional_dependencies()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip optional tests when the required dependencies are unavailable."""
+
+    if not MISSING_OPTIONALS:
+        return
+
+    skip_optional = pytest.mark.skip(
+        reason=f"missing optional deps: {', '.join(MISSING_OPTIONALS)}"
+    )
+    for item in items:
+        if item.get_closest_marker("optional") or item.get_closest_marker("net"):
+            item.add_marker(skip_optional)
+            continue
+        node_id = getattr(item, "nodeid", "")
+        if any(seg in node_id for seg in ("/optional_", "\\optional_", "/net_", "\\net_")):
+            item.add_marker(skip_optional)
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Ensure minimal CI environments do not fail on missing optional deps."""
+
+    if os.getenv("CI_MINIMAL", "1") == "1" and MISSING_OPTIONALS:
+        session.config.addinivalue_line(
+            "markers", "optional: requires optional dependencies"
+        )
+        # Provide lightweight stubs for optional modules to allow tests to reach skip markers.
+        if "aiohttp" in MISSING_OPTIONALS and "aiohttp" not in sys.modules:
+            aiohttp = types.ModuleType("aiohttp")
+
+            class _ClientSession:  # pragma: no cover - simple stub for tests
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+                async def get(self, *args, **kwargs):
+                    raise RuntimeError("aiohttp unavailable in CI_MINIMAL")
+
+                async def post(self, *args, **kwargs):
+                    raise RuntimeError("aiohttp unavailable in CI_MINIMAL")
+
+                async def close(self):
+                    return None
+
+            def _unavailable(*_args, **_kwargs):
+                raise RuntimeError("aiohttp unavailable in CI_MINIMAL")
+
+            aiohttp.ClientSession = _ClientSession
+            aiohttp.client = types.ModuleType("aiohttp.client")
+            aiohttp.client.ClientSession = _ClientSession
+            aiohttp.web = types.ModuleType("aiohttp.web")
+            aiohttp.web.Application = _unavailable
+            aiohttp.web.Response = _unavailable
+            aiohttp.web.json_response = _unavailable
+            sys.modules["aiohttp"] = aiohttp
+            sys.modules["aiohttp.client"] = aiohttp.client
+            sys.modules["aiohttp.web"] = aiohttp.web
+
+        if "aiogram" in MISSING_OPTIONALS and "aiogram" not in sys.modules:
+            def _unavailable_proxy(qualname: str):
+                message = f"{qualname} unavailable in CI_MINIMAL"
+
+                class _Proxy:
+                    __name__ = qualname.rsplit(".", 1)[-1]
+
+                    def __call__(self, *args, **kwargs):
+                        raise RuntimeError(message)
+
+                    def __getattr__(self, _attr):
+                        raise RuntimeError(message)
+
+                return _Proxy()
+
+            def _stub_module(name: str, attrs: tuple[str, ...] = ()) -> types.ModuleType:
+                module = types.ModuleType(name)
+
+                def __getattr__(attr: str):
+                    return _unavailable_proxy(f"{name}.{attr}")
+
+                module.__getattr__ = __getattr__  # type: ignore[attr-defined]
+                for attr in attrs:
+                    module.__dict__[attr] = _unavailable_proxy(f"{name}.{attr}")
+                return module
+
+            aiogram = _stub_module(
+                "aiogram",
+                ("Bot", "Dispatcher", "Router", "BaseMiddleware", "F"),
+            )
+            aiogram.types = _stub_module(
+                "aiogram.types",
+                (
+                    "Message",
+                    "CallbackQuery",
+                    "InlineKeyboardMarkup",
+                    "BotCommand",
+                    "CommandObject",
+                ),
+            )
+            aiogram.filters = _stub_module(
+                "aiogram.filters",
+                ("Command", "CommandStart"),
+            )
+            aiogram.enums = _stub_module("aiogram.enums", ("ParseMode",))
+            aiogram.utils = _stub_module("aiogram.utils")
+            aiogram.utils.keyboard = _stub_module(
+                "aiogram.utils.keyboard",
+                ("InlineKeyboardBuilder",),
+            )
+            aiogram.client = types.ModuleType("aiogram.client")
+            aiogram.client.default = _stub_module(
+                "aiogram.client.default",
+                ("DefaultBotProperties",),
+            )
+
+            sys.modules["aiogram"] = aiogram
+            sys.modules["aiogram.types"] = aiogram.types
+            sys.modules["aiogram.filters"] = aiogram.filters
+            sys.modules["aiogram.enums"] = aiogram.enums
+            sys.modules["aiogram.utils"] = aiogram.utils
+            sys.modules["aiogram.utils.keyboard"] = aiogram.utils.keyboard
+            sys.modules["aiogram.client"] = aiogram.client
+            sys.modules["aiogram.client.default"] = aiogram.client.default
 
 from utils import rules
 

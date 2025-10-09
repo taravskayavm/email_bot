@@ -21,11 +21,21 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - fallback when SMTP client can't be imported
     SmtpClient = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - optional dependency
+    from .legacy_messaging import LegacySMTPClient, send_batch, send_mail
+except Exception:  # pragma: no cover - fallback when legacy shims are unavailable
+    LegacySMTPClient = None  # type: ignore[assignment]
+    send_batch = None  # type: ignore[assignment]
+    send_mail = None  # type: ignore[assignment]
+
 __all__ = [
     "load_env",
     "setup_logging",
     "log_error",
     "SmtpClient",
+    "LegacySMTPClient",
+    "send_mail",
+    "send_batch",
     "extraction",
     "messaging",
     "unsubscribe",
