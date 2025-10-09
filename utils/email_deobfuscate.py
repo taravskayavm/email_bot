@@ -37,6 +37,10 @@ _PAT_DOTS = [
 ]
 
 
+_PAT_SPACED_LETTERS = [
+    re.compile(r"\b(?:[A-Za-z0-9]\s+){1,}[A-Za-z0-9]\b")
+]
+
 def deobfuscate_text(text: str) -> str:
     """Return text with simple e-mail obfuscations normalised."""
 
@@ -79,6 +83,17 @@ def deobfuscate_text(text: str) -> str:
             lambda m: f"{m.group('L')}@{m.group('R')}",
             "at",
         ):
+            changed = True
+        if _sub_all(
+            _PAT_SPACED_LETTERS,
+            lambda m: m.group(0).replace(" ", ""),
+            "spaced",
+        ):
+            changed = True
+        new_current, hyphen_count = re.subn(r"(?<=\w)\s*-\s*(?=\w)", "-", current)
+        if new_current != current:
+            current = new_current
+            rules.add("hyphen")
             changed = True
         if not changed:
             break

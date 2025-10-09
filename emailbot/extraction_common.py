@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 import idna
 
+from utils.email_deobfuscate import deobfuscate_text
 from .tld_registry import tld_of, is_known_tld
 from .footnotes import remove_footnotes_safe
 from .text_normalize import normalize_text_for_emails
@@ -160,26 +161,63 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     """
 
     raw_input = text or ""
+    # 1) Снять сноски безопасно (не ломая локал e-mail)
     text = remove_footnotes_safe(raw_input)
+
+    used_rules: set[str] = set()
+    deobf_changes = 0
+
+    def _apply_deobfuscation(current: str) -> str:
+        nonlocal deobf_changes
+        try:
+            before = current
+            after = deobfuscate_text(current)
+            rules = getattr(deobfuscate_text, "last_rules", [])
+            if rules:
+                used_rules.update(rules)
+            if after != before:
+                deobf_changes += 1
+            return after
+        except Exception:
+            # Не роняем пайплайн, если модуль regex недоступен — просто продолжаем без деобфускации
+            return current
+
+    # 2) Базовая нормализация (NFKC, invisibles, пунктуация, idna-подготовка и т.д.)
+    text = _apply_deobfuscation(text)
     text = normalize_text(text)
+    # 3) EB-OBFUSC-043A: деобфускация «собака/точка», "at/dot", разреженные буквы и т.п.
+    text = _apply_deobfuscation(text)
+    if stats is not None and used_rules:
+        stats["deobfuscation_rules"] = stats.get("deobfuscation_rules", 0) + len(used_rules)
+    if stats is not None and deobf_changes:
+        stats["deobfuscated_inputs"] = stats.get("deobfuscated_inputs", 0) + deobf_changes
 
     # --- EB-PARSE-GLUE-014F ---
     # Вставить пробел ПЕРЕД e-mail, если слева «прилип» символ (буква/цифра/закрывающий/кавычка/двоеточие/равно).
     # Покрывает: "Россияivanov@...", ")ivanov@...", "E-mail:ivanov@..."
     EMAIL_TOKEN = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
-    _before_email = re.compile(
-        r"(?<=[A-Za-zА-Яа-яЁё0-9\)\]\u00BB\u201D'\":=])(?=" + EMAIL_TOKEN + r")"
-    )
-    if _before_email.search(text):
-        fix_count = 0
+    fix_count = 0
+    result_parts: list[str] = []
+    last_index = 0
 
-        def _ins(_: re.Match[str]) -> str:
-            nonlocal fix_count
+    def _needs_space(ch: str) -> bool:
+        return ch.isalnum() or ch in ")]\u00BB\u201D'\":="
+
+    for match in re.finditer(EMAIL_TOKEN, text):
+        start, end = match.span()
+        if start > last_index:
+            result_parts.append(text[last_index:start])
+        if start > 0 and not text[start - 1].isspace() and _needs_space(text[start - 1]):
+            result_parts.append(" ")
             fix_count += 1
-            return " "
+        result_parts.append(match.group(0))
+        last_index = end
 
-        text = _before_email.sub(_ins, text)
-        if stats is not None and fix_count:
+    if last_index:
+        result_parts.append(text[last_index:])
+    if fix_count:
+        text = "".join(result_parts)
+        if stats is not None:
             stats["email_left_glue_fixed"] = stats.get("email_left_glue_fixed", 0) + fix_count
 
     # Count occurrences where the guard prevented removal
