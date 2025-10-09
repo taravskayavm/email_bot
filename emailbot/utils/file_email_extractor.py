@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import re
 import zipfile
 from typing import Dict, List, Tuple
+from urllib.parse import unquote
 
 from emailbot.utils.email_clean import clean_and_normalize_email
 
@@ -44,12 +46,55 @@ def _from_text(data: bytes) -> Tuple[List[str], Dict[str, int]]:
     return _norm_and_dedupe(EMAIL_RE.findall(text))
 
 
+def _find_obfuscated_emails(text: str) -> List[str]:
+    """Extract addresses that use simple textual obfuscation patterns."""
+
+    local_part = r"(?P<local>[\w.+-]{1,64})"
+    at_token = r"(?:\(|\[)?\s*(?:@|at|собака)\s*(?:\)|\])?"
+    label = r"(?P<label>[\w-]{1,63})"
+    dot_token = r"(?:\(|\[)?\s*(?:\.|dot|точка)\s*(?:\)|\])?"
+    pattern = re.compile(
+        rf"\b{local_part}\b\s*{at_token}\s*\b{label}\b(?:\s*{dot_token}\s*\b{label}\b)*",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    emails: list[str] = []
+    seen: set[str] = set()
+    connectors = {"at", "dot", "точка", "собака"}
+
+    for match in pattern.finditer(text):
+        local = match.group("local")
+        tail = match.group(0)[match.end("local") - match.start(0) :]
+        parts: list[str] = []
+        for token in re.finditer(r"\b[\w-]{1,63}\b", tail, flags=re.UNICODE):
+            value = token.group(0)
+            if value.lower() in connectors:
+                continue
+            parts.append(value)
+        if not parts:
+            continue
+        email = f"{local}@{'.'.join(parts)}"
+        if email not in seen:
+            seen.add(email)
+            emails.append(email)
+    return emails
+
+
 def _from_html(data: bytes) -> Tuple[List[str], Dict[str, int]]:
-    text = data.decode("utf-8", errors="ignore")
+    html_text = data.decode("utf-8", errors="ignore")
+    mailto = re.findall(r"mailto:([^""' >]+)", html_text, flags=re.I)
+    mailto = [unquote(m.split("?")[0]) for m in mailto]
+
+    text = re.sub(r"<!--.*?-->", " ", html_text, flags=re.S)
     text = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
     text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = html.unescape(text)
     text = re.sub(r"<[^>]+>", " ", text)
-    return _norm_and_dedupe(EMAIL_RE.findall(text))
+
+    cands = set(EMAIL_RE.findall(text))
+    cands.update(_find_obfuscated_emails(text))
+    cands.update(mailto)
+    return _norm_and_dedupe(list(cands))
 
 
 def _from_csv(data: bytes) -> Tuple[List[str], Dict[str, int]]:
