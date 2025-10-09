@@ -51,7 +51,7 @@ def _find_obfuscated_emails(text: str) -> List[str]:
 
     local_part = r"(?P<local>[\w.+-]{1,64})"
     at_token = r"(?:\(|\[)?\s*(?:@|at|собака)\s*(?:\)|\])?"
-    label = r"(?P<label>[\w-]{1,63})"
+    label = r"(?:[\w-]{1,63})"
     dot_token = r"(?:\(|\[)?\s*(?:\.|dot|точка)\s*(?:\)|\])?"
     pattern = re.compile(
         rf"\b{local_part}\b\s*{at_token}\s*\b{label}\b(?:\s*{dot_token}\s*\b{label}\b)*",
