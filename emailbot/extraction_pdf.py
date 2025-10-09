@@ -28,6 +28,7 @@ _SUP_DIGITS = str.maketrans({
 
 _OCR_PAGE_LIMIT = 10
 _OCR_TIME_LIMIT = 30  # seconds
+_PDF_TEXT_TRUNCATE_LIMIT = 2_000_000
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,8 @@ def extract_text_from_pdf(path: str | Path) -> str:
         text = _pdfminer_extract(pdf_path)
     if not text:
         return ""
+    if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+        text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
     return cleanup_text(text)
 
 
@@ -258,6 +261,13 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        # --- EB-PDF-043D: аварийный таймаут/обрезка текста ---
+        # На случай зацикливания pdfminer или OCR-процесса. Ограничим длину
+        # текста (например, 2 МБ), чтобы downstream-обработка не подвисала на
+        # аномально больших буферах.
+        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
         # Обработка текста из fallback ветки через единый preprocess_text
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
@@ -296,6 +306,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
@@ -362,6 +375,9 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
         text = preprocess_text(text, stats=None)
         hits = [
             EmailHit(email=e, source_ref=source_ref, origin="direct_at")
@@ -400,6 +416,9 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
