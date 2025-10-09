@@ -30,30 +30,45 @@ from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
 
+# Локаль: 1–64 символа из допустимого набора (минимум и наличие буквы проверяем отдельно).
+_LOCAL_BASE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}"
+
 # Доменный лейбл: 1–63, не начинается/заканчивается дефисом, и содержит хотя бы одну букву.
 _LABEL_STRICT = (
     r"(?=[\w-]*[^\W\d_])"
     r"[\w](?:[\w-]{0,61}[\w])?"
 )
 
-# Обфускация: local (at|@|собака) label (dot label)*
-    \s*
-    (?P<at>
-        @
-      | \(at\) | \[at\] | \{{at\}} | \bat\b
-      | собака | собакa | arroba | sobaka
-    )
-    \s*
-    (?P<domain>
-        (?:{_LABEL_STRICT}
-           (?:\s*(?:\.|dot|\(dot\)|\[dot\]|\{{dot\}}|точка|ponto|tochka)\s*{_LABEL_STRICT})+)
-    )
-"""
-_OBFUSCATED_RE = re.compile(_OBFUSCATED_RE_BASE, re.IGNORECASE | re.VERBOSE | re.UNICODE)
-
-_DOT_SPLIT_RE = re.compile(
-    r"\s*(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)\s*", re.I
+# Обфускация: local (at|@|собака) label (dot label)* — собираем паттерн без f-строк.
+_DOT_VARIANT = r"(?:\.|dot|\(dot\)|\[dot\]|\{dot\}|точка|ponto|tochka)"
+_OBFUSCATED_PATTERN = "".join(
+    [
+        r"(?xi)",
+        r"(?P<local>",
+        _LOCAL_BASE,
+        r")",
+        r"\s*",
+        r"(?P<at>",
+        r"@",
+        r"| \(at\) | \[at\] | \{at\} | \bat\b",
+        r"| собака | собакa | arroba | sobaka",
+        r")",
+        r"\s*",
+        r"(?P<domain>",
+        r"(?:",
+        _LABEL_STRICT,
+        r"(?:\s*",
+        _DOT_VARIANT,
+        r"\s*",
+        _LABEL_STRICT,
+        r")+",
+        r")",
+        r")",
+    ]
 )
+_OBFUSCATED_RE = re.compile(_OBFUSCATED_PATTERN, re.IGNORECASE | re.VERBOSE | re.UNICODE)
+
+_DOT_SPLIT_RE = re.compile(r"\s*" + _DOT_VARIANT + r"\s*", re.I)
 
 _SOB_WORD_RE = re.compile(
     r"(?<!\w)(?:[\[\(\{]\s*)?(?:[сcs][оo0](?:б|b)[аa@][кk][аa@])(?:\s*[\]\)\}])?(?!\w)",
@@ -621,6 +636,12 @@ def extract_obfuscated_hits(
     text = _SOB_WORD_RE.sub(" at ", text)
     text = _DOT_WORD_ATTACHED_RE.sub(" dot ", text)
     text = _DOT_WORD_RE.sub(" dot ", text)
+    allow_numeric_local = os.getenv("OBFUSCATION_ALLOW_NUMERIC_LOCAL", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     for m in _OBFUSCATED_RE.finditer(text):
         local = m.group("local")
         domain_raw = m.group("domain")
@@ -639,7 +660,18 @@ def extract_obfuscated_hits(
         # Базовая проверка формата (включая IDNA/TLD и т.п.)
         if not (_valid_local(local) and _valid_domain(domain)):
             continue
-        # Усиленные фильтры против мусора
+        # Усиленные фильтры против мусора:
+        # 1) Локаль не должна быть односимвольной.
+        if len(local) < 2:
+            if stats is not None:
+                stats["numeric_from_obfuscation_dropped"] = stats.get(
+                    "numeric_from_obfuscation_dropped", 0
+                ) + 1
+            continue
+        if len(local) > 64:
+            continue
+        # 1a) По умолчанию локаль должна содержать хотя бы одну букву.
+        if (not allow_numeric_local) and not re.search(r"[A-Za-z]", local):
             if stats is not None:
                 stats["numeric_from_obfuscation_dropped"] = stats.get(
                     "numeric_from_obfuscation_dropped", 0
