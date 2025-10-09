@@ -80,7 +80,8 @@ def prepare_recipients_for_send(
             if raw:
                 dropped_originals.add(raw)
             continue
-        if is_blocked(fixed):
+        # не шлём тем, кто отписался (txt) или попал в suppress CSV (bounce/жалоба)
+        if is_blocked(fixed) or is_suppressed(fixed):
             if raw:
                 dropped_originals.add(raw)
             else:
