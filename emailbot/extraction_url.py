@@ -657,8 +657,13 @@ def extract_obfuscated_hits(
         post = text[end : end + 16]
         local, _ = _strip_left_noise(local, pre, stats)
 
-        # Базовая проверка формата (включая IDNA/TLD и т.п.)
-        if not (_valid_local(local) and _valid_domain(domain)):
+        if not _valid_domain(domain):
+            continue
+
+        if local.startswith(".") or local.endswith(".") or ".." in local:
+            continue
+
+        if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local):
             continue
         # Усиленные фильтры против мусора:
         # 1) Локаль не должна быть односимвольной.
