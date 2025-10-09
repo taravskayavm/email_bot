@@ -7,6 +7,8 @@ import logging
 from datetime import datetime
 from typing import Iterable, List, Optional
 
+from emailbot.suppress_list import is_blocked
+
 
 def _now_ts() -> str:
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
@@ -73,3 +75,9 @@ def build_mass_report_text(
     if dup_cnt:
         lines.append(f"🔁 Дубликаты за 24 ч: {dup_cnt}")
     return "\n".join(lines)
+
+
+def count_blocked(emails: Iterable[str]) -> int:
+    """Return how many addresses are present in the block list."""
+
+    return sum(1 for email in emails if is_blocked(email))
