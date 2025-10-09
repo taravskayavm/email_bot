@@ -47,33 +47,50 @@ def _from_text(data: bytes) -> Tuple[List[str], Dict[str, int]]:
 
 
 def _find_obfuscated_emails(text: str) -> List[str]:
-    """Extract addresses that use simple textual obfuscation patterns."""
+    """
+    Ищем реальный шаблон локаль + (at|@|собака) + домен (+ dot + …), но:
+    - локаль должна содержать хотя бы ОДНУ букву и быть длиной ≥2;
+    - каждый доменный лейбл должен содержать хотя бы ОДНУ букву,
+      не начинаться/заканчиваться дефисом; TLD длиной 2–24.
+    """
 
-    local_part = r"(?P<local>[\w.+-]{1,64})"
+    # локальная часть: 1–64, обязательно ≥1 буква и длина ≥2
+    local_part = r"(?P<local>(?=[A-Za-z0-9.+-]{2,64}$)(?=.*[A-Za-z])[A-Za-z0-9.+-]{2,64})"
     at_token = r"(?:\(|\[)?\s*(?:@|at|собака)\s*(?:\)|\])?"
-    label = r"(?P<label>[\w-]{1,63})"
+    # доменный лейбл: 1–63, ≥1 буква, не начин/заканч с дефиса
+    label = r"(?P<label>(?=[A-Za-z0-9-]{1,63}$)(?=.*[A-Za-z])[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)"
     dot_token = r"(?:\(|\[)?\s*(?:\.|dot|точка)\s*(?:\)|\])?"
     pattern = re.compile(
         rf"\b{local_part}\b\s*{at_token}\s*\b{label}\b(?:\s*{dot_token}\s*\b{label}\b)*",
         re.IGNORECASE | re.UNICODE,
     )
 
-    emails: list[str] = []
+    emails: List[str] = []
     seen: set[str] = set()
-    connectors = {"at", "dot", "точка", "собака"}
 
     for match in pattern.finditer(text):
         local = match.group("local")
-        tail = match.group(0)[match.end("local") - match.start(0) :]
-        parts: list[str] = []
-        for token in re.finditer(r"\b[\w-]{1,63}\b", tail, flags=re.UNICODE):
-            value = token.group(0)
-            if value.lower() in connectors:
-                continue
-            parts.append(value)
+        span_text = match.group(0)
+        labels = re.findall(r"\b([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)\b", span_text)
+        if not labels:
+            continue
+        parts = [p for p in labels if p.lower() != local.lower()]
         if not parts:
             continue
-        email = f"{local}@{'.'.join(parts)}"
+        domain = ".".join(parts)
+        if "." not in domain:
+            continue
+        tld = domain.rsplit(".", 1)[-1]
+        if not (2 <= len(tld) <= 24):
+            continue
+        labels_ok = True
+        for lbl in domain.split("."):
+            if not re.search(r"[A-Za-z]", lbl):
+                labels_ok = False
+                break
+        if not labels_ok:
+            continue
+        email = f"{local}@{domain}"
         if email not in seen:
             seen.add(email)
             emails.append(email)
