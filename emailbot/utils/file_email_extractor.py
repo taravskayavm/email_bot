@@ -6,7 +6,7 @@ import csv
 import io
 import re
 import zipfile
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 from emailbot.utils.email_clean import clean_and_normalize_email
 
@@ -19,9 +19,9 @@ class ExtractError(Exception):
     """Raised when we cannot process a file."""
 
 
-def _norm_and_dedupe(cands: Iterable[str]) -> Tuple[List[str], Dict[str, int]]:
+def _norm_and_dedupe(cands: List[str]) -> Tuple[List[str], Dict[str, int]]:
     ok: List[str] = []
-    seen: Set[str] = set()
+    seen: set[str] = set()
     rejects: Dict[str, int] = {}
     for raw in cands:
         email, reason = clean_and_normalize_email(raw)
@@ -36,15 +36,11 @@ def _norm_and_dedupe(cands: Iterable[str]) -> Tuple[List[str], Dict[str, int]]:
     return ok, rejects
 
 
-def _from_text(data: bytes, encoding_guess: str | None = None) -> Tuple[List[str], Dict[str, int]]:
-    text: str
-    if encoding_guess:
-        text = data.decode(encoding_guess, errors="ignore")
-    else:
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = data.decode("latin-1", errors="ignore")
+def _from_text(data: bytes) -> Tuple[List[str], Dict[str, int]]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("latin-1", errors="ignore")
     return _norm_and_dedupe(EMAIL_RE.findall(text))
 
 
@@ -64,14 +60,12 @@ def _from_csv(data: bytes) -> Tuple[List[str], Dict[str, int]]:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
-    buf.seek(0)
     reader = csv.reader(buf, dialect)
     cands: List[str] = []
     for row in reader:
         for cell in row:
-            if not cell:
-                continue
-            cands.extend(EMAIL_RE.findall(cell))
+            if cell:
+                cands.extend(EMAIL_RE.findall(cell))
     return _norm_and_dedupe(cands)
 
 
@@ -86,9 +80,8 @@ def _from_xlsx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     for ws in wb.worksheets:
         for row in ws.iter_rows(values_only=True):
             for val in row:
-                if val is None:
-                    continue
-                cands.extend(EMAIL_RE.findall(str(val)))
+                if val is not None:
+                    cands.extend(EMAIL_RE.findall(str(val)))
     ok, rej = _norm_and_dedupe(cands)
     return ok, rej, None
 
@@ -100,9 +93,7 @@ def _from_docx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
         return [], {"missing_dep_python_docx": 1}, "Для .docx нужен пакет python-docx"
 
     document = docx.Document(io.BytesIO(data))
-    texts: List[str] = []
-    for p in document.paragraphs:
-        texts.append(p.text)
+    texts = [p.text for p in document.paragraphs]
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -130,37 +121,34 @@ def _safe_zip_name(name: str) -> bool:
 
 
 def _from_zip(data: bytes) -> Tuple[List[str], Dict[str, int], List[str]]:
-    errors: List[str] = []
     ok_all: List[str] = []
-    rejects_total: Dict[str, int] = {}
+    rejects: Dict[str, int] = {}
+    errors: List[str] = []
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
-            fname = info.filename
-            if not _safe_zip_name(fname):
-                errors.append(f"{fname}: пропущен (подозрительный путь)")
-                continue
-            if info.is_dir():
+            filename = info.filename
+            if info.is_dir() or not _safe_zip_name(filename):
+                if not _safe_zip_name(filename):
+                    errors.append(f"{filename}: пропуск (путь)")
                 continue
             if info.file_size > MAX_BYTES:
-                errors.append(
-                    f"{fname}: пропущен (> {MAX_BYTES // (1024 * 1024)}MB)"
-                )
+                errors.append(f"{filename}: пропуск (> {MAX_BYTES // (1024 * 1024)}MB)")
                 continue
-            ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
             if ext not in ALLOWED_IN_ZIP:
                 continue
             with zf.open(info) as fh:
                 content = fh.read()
-            ok, rejects, warn = extract_emails_from_bytes(content, fname)
+            ok, rej, warn = extract_emails_from_bytes(content, filename)
             ok_all.extend(ok)
-            for key, val in rejects.items():
-                rejects_total[key] = rejects_total.get(key, 0) + val
+            for key, val in rej.items():
+                rejects[key] = rejects.get(key, 0) + val
             if warn:
-                errors.append(f"{fname}: {warn}")
+                errors.append(f"{filename}: {warn}")
 
     ok_all = list(dict.fromkeys(ok_all))
-    return ok_all, rejects_total, errors
+    return ok_all, rejects, errors
 
 
 def extract_emails_from_bytes(data: bytes, filename: str) -> Tuple[List[str], Dict[str, int], str | None]:
