@@ -43,6 +43,7 @@ except Exception:  # pragma: no cover - fallback parser
         return parser.links
 
 from emailbot import config as C
+from emailbot.run_control import should_stop
 from emailbot.settings import (
     ALLOWED_CONTENT_TYPES,
     ENABLE_SITEMAP,
@@ -135,6 +136,7 @@ class Crawler:
         max_depth: int | None = None,
         on_page: Optional[Callable[[int, str], None]] = None,
         path_prefixes: Sequence[str] | None = None,
+        stop_cb: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.start = start_url
         self.start_canonical = canonicalize(start_url, start_url) or start_url
@@ -164,6 +166,8 @@ class Crawler:
         self._head_checks: dict[str, bool] = {}
         self._allowed_types = {item.strip().lower() for item in ALLOWED_CONTENT_TYPES if item.strip()}
         self._host_backoff: dict[str, _BackoffState] = {}
+        self.stop_cb = stop_cb
+        self.stopped = False
 
     @staticmethod
     def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
@@ -181,6 +185,16 @@ class Crawler:
             if cleaned not in result:
                 result.append(cleaned)
         return result
+
+    def _stop_requested(self) -> bool:
+        if should_stop():
+            return True
+        if self.stop_cb is None:
+            return False
+        try:
+            return bool(self.stop_cb())
+        except Exception:
+            return should_stop()
 
     def _host_backoff_sleep(self, host: str) -> float:
         state = self._host_backoff.get(host)
@@ -205,16 +219,25 @@ class Crawler:
         self._host_backoff.pop(host, None)
 
     async def _request_with_backoff(self, method: str, url: str, **kwargs) -> httpx.Response | None:
+        if self._stop_requested():
+            self.stopped = True
+            return None
         host = urlparse(url).netloc
         if host:
             sleep_for = self._host_backoff_sleep(host)
             if sleep_for > 0:
+                if self._stop_requested():
+                    self.stopped = True
+                    return None
                 try:
                     await asyncio.sleep(sleep_for)
                 except Exception:
                     pass
         try:
             response = await self.client.request(method, url, **kwargs)
+            if self._stop_requested():
+                self.stopped = True
+                return None
         except httpx.HTTPError:
             if host:
                 self._host_register_fail(host)
@@ -259,6 +282,9 @@ class Crawler:
 
         last_error: Exception | None = None
         for attempt in range(3):
+            if self._stop_requested():
+                self.stopped = True
+                return None, None
             try:
                 response = await self._request_with_backoff("GET", url)
                 if response is None:
@@ -296,6 +322,9 @@ class Crawler:
                     await asyncio.sleep(0.5 * (attempt + 1))
                 except Exception:
                     pass
+                if self._stop_requested():
+                    self.stopped = True
+                    return None, None
                 continue
             break
         if last_error is not None:
@@ -336,9 +365,15 @@ class Crawler:
                 queue.append((extra, 0))
                 queued.add(extra)
         while queue and self.pages_scanned < self.max_pages:
+            if self._stop_requested():
+                self.stopped = True
+                break
             if self._time_budget_exceeded():
                 break
             url, depth = queue.popleft()
+            if self._stop_requested():
+                self.stopped = True
+                break
             if url in seen:
                 continue
             seen.add(url)
@@ -352,11 +387,19 @@ class Crawler:
                 continue
             self._mark_domain_usage(url)
             if C.CRAWL_DELAY_SEC:
+                if self._stop_requested():
+                    self.stopped = True
+                    break
                 try:
                     await asyncio.sleep(C.CRAWL_DELAY_SEC)
                 except Exception:
                     pass
+            if self._stop_requested():
+                self.stopped = True
+                break
             final_url, html = await self.fetch_html(url)
+            if self.stopped:
+                break
             if not html:
                 continue
             target_url = final_url or url
@@ -373,6 +416,9 @@ class Crawler:
             if depth >= self.max_depth:
                 continue
             for link in self.extract_links(target_url, html):
+                if self._stop_requested():
+                    self.stopped = True
+                    break
                 if link in seen or link in queued:
                     continue
                 if C.CRAWL_SAME_DOMAIN and not same_domain(self.start, link):
@@ -381,6 +427,8 @@ class Crawler:
                     continue
                 queue.append((link, depth + 1))
                 queued.add(link)
+            if self.stopped:
+                break
 
     def _time_budget_exceeded(self) -> bool:
         if C.CRAWL_TIME_BUDGET_SECONDS <= 0:
@@ -498,6 +546,9 @@ class Crawler:
 
         for suffix in candidates:
             sitemap_url = urljoin(base.rstrip("/") + "/", suffix.lstrip("/"))
+            if self._stop_requested():
+                self.stopped = True
+                break
             try:
                 response = await self._request_with_backoff("GET", sitemap_url, timeout=GET_TIMEOUT)
             except Exception:
@@ -506,6 +557,9 @@ class Crawler:
                 continue
             if response.status_code != 200:
                 continue
+            if self._stop_requested():
+                self.stopped = True
+                break
             try:
                 text = response.text
             except Exception:
@@ -520,6 +574,9 @@ class Crawler:
             except Exception:
                 continue
             for node in root.iter():
+                if self._stop_requested():
+                    self.stopped = True
+                    break
                 tag = node.tag.lower()
                 if not tag.endswith("loc"):
                     continue
@@ -537,5 +594,9 @@ class Crawler:
                 urls.append(candidate)
                 if len(urls) >= SITEMAP_MAX_URLS:
                     return urls
+            if self.stopped:
+                break
+        if self.stopped:
+            return urls
         return urls
 

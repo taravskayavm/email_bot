@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from emailbot import config as C
+from emailbot.run_control import should_stop
 from crawler.web_crawler import Crawler
 from utils.charset_helper import best_effort_decode
 
@@ -58,8 +59,13 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     rejected: List[dict] = []
     foreign_filtered_pre = 0
     role_rejected_early = 0
+    aborted = False
 
     for item in items:
+        if should_stop():
+            aborted = True
+            meta["aborted"] = True
+            break
         normalized = (item.get("normalized") or "").strip()
         if "@" not in normalized:
             continue
@@ -192,13 +198,18 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     deobf_count = meta.get("deobfuscated_count", 0)
     conf_count = meta.get("confusables_fixed", 0)
     foreign = 0
-    for item in items:
-        normalized = (item.get("normalized") or "").strip()
-        if "@" not in normalized:
-            continue
-        domain = normalized.rsplit("@", 1)[1]
-        if is_foreign_domain(domain):
-            foreign += 1
+    if not aborted:
+        for item in items:
+            if should_stop():
+                aborted = True
+                meta["aborted"] = True
+                break
+            normalized = (item.get("normalized") or "").strip()
+            if "@" not in normalized:
+                continue
+            domain = normalized.rsplit("@", 1)[1]
+            if is_foreign_domain(domain):
+                foreign += 1
     dropped = sum(1 for item in items if not item.get("sanitized"))
     meta["foreign_domains"] = foreign
 
@@ -233,6 +244,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         return raw_text[left:right]
 
     for item in items:
+        if aborted or should_stop():
+            aborted = True
+            meta["aborted"] = True
+            break
         normalized = (item.get("normalized") or "").strip()
         sanitized = (item.get("sanitized") or "").strip()
         candidate = sanitized or normalized
@@ -266,6 +281,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
 
     raw_text_lower = raw_text.lower()
     for addr in unique:
+        if aborted or should_stop():
+            aborted = True
+            meta["aborted"] = True
+            break
         if addr not in snippets:
             index = raw_text_lower.find(addr.lower())
             if index >= 0:
@@ -278,6 +297,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
 
     role_stats: Dict[str, int] = {"personal": 0, "role": 0, "unknown": 0}
     classified: Dict[str, Dict[str, object]] = {}
+    default_filtered = list(unique)
     filtered: List[str] = []
     drop_reasons: Dict[str, str] = {}
     foreign_filtered = foreign_filtered_pre
@@ -285,6 +305,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     fio_scores: Dict[str, float] = {}
 
     for addr in unique:
+        if aborted or should_stop():
+            aborted = True
+            meta["aborted"] = True
+            break
         if "@" not in addr:
             fio_scores[addr] = 0.0
             continue
@@ -328,6 +352,9 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
             continue
         filtered.append(addr)
 
+    if meta.get("aborted") and not filtered:
+        filtered = default_filtered
+
     meta["role_stats"] = role_stats
     meta["classified"] = classified
     meta["source_context"] = contexts
@@ -339,6 +366,10 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     filtered_set = set(filtered)
     dropped_candidates: Dict[str, str] = {}
     for item in items:
+        if aborted or should_stop():
+            aborted = True
+            meta["aborted"] = True
+            break
         normalized = (item.get("normalized") or "").strip()
         sanitized = (item.get("sanitized") or "").strip()
         candidate = sanitized or normalized
@@ -382,6 +413,7 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "items": items,
         "items_rejected": rejected,
         "suspicious_count": len(suspects),
+        "aborted": bool(meta.get("aborted", False)),
     }
 
     return filtered, stats
@@ -395,6 +427,8 @@ def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
     filtered_final: List[str] = []
     drop_reasons: Dict[str, str] = {}
     for addr in final:
+        if should_stop():
+            break
         if "@" not in addr:
             continue
         local, _, domain = addr.partition("@")
@@ -411,6 +445,8 @@ def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
     dropped: List[Tuple[str, str]] = []
     final_set = set(final)
     for item in meta.get("items", []):
+        if should_stop():
+            break
         normalized = (item.get("normalized") or "").strip()
         sanitized = (item.get("sanitized") or "").strip()
         candidate = sanitized or normalized or str(item.get("raw") or "")
@@ -500,6 +536,18 @@ async def extract_from_url_async(
                 seen.append(cleaned)
         prefixes_list = seen
 
+    if should_stop():
+        stats: dict[str, object] = {
+            "pages": 0,
+            "unique": 0,
+            "page_urls": [],
+            "last_url": url,
+            "aborted": True,
+        }
+        if prefixes_list:
+            stats["path_prefixes"] = list(prefixes_list)
+        return [], stats
+
     if not deep:
         if progress_cb:
             try:
@@ -516,18 +564,32 @@ async def extract_from_url_async(
             raise RuntimeError(
                 f"Не удалось загрузить {url}: {exc.__class__.__name__}"
             ) from exc
+        if should_stop():
+            stats = {
+                "pages": 0,
+                "unique": 0,
+                "page_urls": [],
+                "last_url": url,
+                "aborted": True,
+            }
+            if prefixes_list:
+                stats["path_prefixes"] = list(prefixes_list)
+            return [], stats
         emails, meta = extract_emails_pipeline(html or "")
         stats = dict(meta) if isinstance(meta, dict) else {}
         stats["pages"] = 1 if html else 0
         stats["unique"] = len(emails)
         stats["page_urls"] = [url] if html else []
         stats["last_url"] = url
+        if meta and isinstance(meta, dict) and meta.get("aborted"):
+            stats["aborted"] = True
         if prefixes_list:
             stats["path_prefixes"] = list(prefixes_list)
         return emails, stats
 
     pages: list[tuple[str, str]] = []
     last_seen = url
+    aborted = False
 
     def _on_page(pages_scanned: int, page_url: str) -> None:
         nonlocal last_seen
@@ -540,10 +602,21 @@ async def extract_from_url_async(
         except Exception:
             pass
 
-    crawler = Crawler(url, on_page=_on_page, path_prefixes=prefixes_list)
+    crawler = Crawler(
+        url,
+        on_page=_on_page,
+        path_prefixes=prefixes_list,
+        stop_cb=should_stop,
+    )
     try:
         async for page_url, text in crawler.crawl():
+            if should_stop():
+                aborted = True
+                break
             pages.append((page_url, text))
+            if should_stop():
+                aborted = True
+                break
     except httpx.HTTPError as exc:
         raise RuntimeError(
             f"HTTP ошибка при загрузке {url}: {exc.__class__.__name__}"
@@ -555,7 +628,9 @@ async def extract_from_url_async(
     finally:
         await crawler.close()
 
-    if not pages:
+    aborted = aborted or getattr(crawler, "stopped", False)
+
+    if not pages and not aborted:
         last_error = getattr(crawler, "last_error", None)
         if last_error is not None:
             if isinstance(last_error, httpx.HTTPError):
@@ -568,14 +643,21 @@ async def extract_from_url_async(
 
     combined_parts: list[str] = []
     for page_url, text in pages:
+        if should_stop():
+            aborted = True
+            break
         marker = f"<!-- {page_url} -->"
         combined_parts.append(f"{marker}\n{text}")
     combined_text = "\n\n".join(combined_parts)
 
-    if combined_text:
+    if aborted:
+        emails_raw, meta = [], {}
+    elif combined_text:
         emails_raw, meta = extract_emails_pipeline(combined_text)
     else:
         emails_raw, meta = [], {}
+    if isinstance(meta, dict) and meta.get("aborted"):
+        aborted = True
 
     emails = list(dict.fromkeys(emails_raw))
     stats = dict(meta) if isinstance(meta, dict) else {}
@@ -583,6 +665,7 @@ async def extract_from_url_async(
     stats["unique"] = len(emails)
     stats["page_urls"] = [page_url for page_url, _ in pages]
     stats["last_url"] = last_seen
+    stats["aborted"] = bool(stats.get("aborted") or aborted)
     if prefixes_list:
         stats["path_prefixes"] = list(prefixes_list)
     return emails, stats
