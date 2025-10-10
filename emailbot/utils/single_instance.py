@@ -40,6 +40,7 @@ def single_instance_lock(name: str = "bot") -> Iterator[None]:
     lock_path = _LOCK_DIR / f"{name}.lock"
     if os.name == "nt":
         fh = open(lock_path, "a+", encoding="utf-8")
+        fh.seek(0)
         try:
             _win_lock(fh)
         except Exception as exc:  # pragma: no cover - platform specific
