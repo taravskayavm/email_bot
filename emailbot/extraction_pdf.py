@@ -310,7 +310,7 @@ def extract_text(path: str) -> str:
 
 
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
-    """Extract e-mail addresses from a PDF file."""
+    """Extract e-mail addresses from a PDF file (pdfminer → fitz fallback)."""
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
@@ -325,6 +325,26 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     stats: Dict[str, int] = {"pages": 0}
 
+    if _PDFMINER_AVAILABLE:
+        try:
+            text = _pdfminer_extract(Path(path))
+        except Exception:
+            text = ""
+        if text:
+            text = _maybe_join_pdf_breaks(
+                text,
+                join_hyphen=join_hyphen_breaks,
+                join_email=join_email_breaks,
+            )
+            if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+                text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+                stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+            hits = [
+                EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
+                for e in extract_emails_document(text, stats)
+            ]
+            return _dedupe(hits), stats
+
     try:
         import fitz  # type: ignore
     except Exception:
@@ -338,19 +358,15 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        # --- EB-PDF-043D: аварийный таймаут/обрезка текста ---
-        # На случай зацикливания pdfminer или OCR-процесса. Ограничим длину
-        # текста (например, 2 МБ), чтобы downstream-обработка не подвисала на
-        # аномально больших буферах.
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-        # Обработка текста из fallback ветки через единый preprocess_text
         hits = [
             EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
             for e in extract_emails_document(text, stats)
         ]
-        return _dedupe(hits), {"pages": 0, "needs_ocr": True}
+        stats["needs_ocr"] = True
+        return _dedupe(hits), stats
 
     hits: List[EmailHit] = []
     doc = fitz.open(path)
@@ -388,8 +404,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
-        fast_norms: set[str] = set()
         if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+            fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
                 norm = normalize_email(raw_email)
@@ -411,7 +427,13 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 hits.extend(fast_hits)
             stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
             stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+            continue
 
+        fast_norms = {
+            norm
+            for raw_email, _, _ in quick_matches
+            if (norm := normalize_email(raw_email))
+        }
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
@@ -527,8 +549,8 @@ def extract_from_pdf_stream(
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
-        fast_norms: set[str] = set()
         if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+            fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
                 norm = normalize_email(raw_email)
@@ -550,7 +572,13 @@ def extract_from_pdf_stream(
                 hits.extend(fast_hits)
             stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
             stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+            continue
 
+        fast_norms = {
+            norm
+            for raw_email, _, _ in quick_matches
+            if (norm := normalize_email(raw_email))
+        }
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
