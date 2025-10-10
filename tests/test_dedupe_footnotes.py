@@ -1,11 +1,27 @@
 import fitz  # PyMuPDF
 
+from typing import Optional
+
 from emailbot.dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
 from emailbot.extraction import EmailHit, extract_any
 
 
-def make_hit(email: str, pre: str, source: str = "doc.pdf|1") -> EmailHit:
-    return EmailHit(email=email, source_ref=source, origin="direct_at", pre=pre, post="")
+def make_hit(
+    email: str,
+    pre: str,
+    source: str = "doc.pdf|1",
+    *,
+    meta: Optional[dict] = None,
+) -> EmailHit:
+    extra = dict(meta) if meta else {}
+    return EmailHit(
+        email=email,
+        source_ref=source,
+        origin="direct_at",
+        pre=pre,
+        post="",
+        meta=extra,
+    )
 
 
 def test_trimmed_variant_removed():
@@ -24,6 +40,21 @@ def test_different_addresses_not_merged():
     res = merge_footnote_prefix_variants([a, b], stats)
     assert {h.email for h in res} == {a.email, b.email}
     assert stats.get("footnote_pairs_merged", 0) == 0
+
+
+def test_fast_path_preserves_merge_with_case_variants():
+    base = make_hit(
+        "1FOO@example.com",
+        pre="",
+        meta={"normalized_email": "1foo@example.com"},
+    )
+    trimmed = make_hit("foo@example.com", pre="1")
+    stats = {}
+    res = merge_footnote_prefix_variants([base, trimmed], stats)
+    emails = [h.email for h in res]
+    assert "foo@example.com" not in emails
+    assert "1FOO@example.com" in emails
+    assert stats.get("footnote_pairs_merged") == 1
 
 
 def _make_pdf(path, text):
@@ -108,4 +139,18 @@ def test_ambiguous_removed_if_full_exists():
     emails = [x.email for x in res]
     assert "1alex@yandex.ru" not in emails
     assert "alex@yandex.ru" in emails
+
+
+def test_singleton_trim_uses_normalized_meta():
+    base = make_hit(
+        "FOO@example.com",
+        pre="",
+        source="pdf:doc.pdf",
+        meta={"normalized_email": "foo@example.com"},
+    )
+    variant = make_hit("1foo@example.com", pre="1", source="pdf:doc.pdf")
+    res, _ = repair_footnote_singletons([variant, base])
+    emails = [x.email for x in res]
+    assert "1foo@example.com" not in emails
+    assert "FOO@example.com" in emails
 

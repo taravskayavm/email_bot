@@ -52,6 +52,15 @@ def _split_ref(ref: str) -> Tuple[str, int]:
     return base, page
 
 
+def _normalized_email(hit: "EmailHit") -> str:
+    """Return a normalised representation of ``hit`` for comparisons."""
+
+    meta_norm = hit.meta.get("normalized_email")
+    if isinstance(meta_norm, str) and meta_norm:
+        return meta_norm
+    return hit.email
+
+
 def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int] | None = None) -> List["EmailHit"]:
     """Merge footnote-trimmed variants of the same e-mail within one source."""
 
@@ -69,7 +78,8 @@ def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int]
         # Прединдексация по домену и локальной части для снижения числа сравнений
         by_domain: dict[str, list[tuple[int, "EmailHit", int, str]]] = {}
         for idx, h, page in lst:
-            local, dom = h.email.split("@", 1)
+            email_norm = _normalized_email(h)
+            local, dom = email_norm.split("@", 1)
             by_domain.setdefault(dom, []).append((idx, h, page, local))
 
         for dom, items in by_domain.items():
@@ -125,7 +135,7 @@ def repair_footnote_singletons(
         "footnote_guard_skips": 0,
         "footnote_ambiguous_kept": 0,
     }
-    all_emails = {h.email for h in hits}
+    all_emails = {_normalized_email(h) for h in hits}
     out: List[EmailHit] = []
     for h in hits:
         if h.meta.get("repaired"):
@@ -135,7 +145,8 @@ def repair_footnote_singletons(
         if not prev:
             out.append(h)
             continue
-        local, dom = h.email.split("@", 1)
+        email_norm = _normalized_email(h)
+        local, dom = email_norm.split("@", 1)
 
         if is_superscript_digit(prev):
             digit = _SUPER_TO_DIGIT.get(prev, "")
