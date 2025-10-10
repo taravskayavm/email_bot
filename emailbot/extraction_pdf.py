@@ -405,6 +405,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                         origin="direct_at",
                         pre=pre,
                         post=post,
+                        meta={"normalized_email": norm},
                     )
                 )
             if fast_hits:
@@ -544,6 +545,7 @@ def extract_from_pdf_stream(
                         origin="direct_at",
                         pre=pre,
                         post=post,
+                        meta={"normalized_email": norm},
                     )
                 )
             if fast_hits:
