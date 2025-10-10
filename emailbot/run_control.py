@@ -44,10 +44,12 @@ def register_task(name: str, task: asyncio.Task) -> None:
     task.add_done_callback(_cleanup)
 
 
-def unregister_task(name: str) -> None:
+def unregister_task(name: str, task: Optional[asyncio.Task] = None) -> None:
     """Remove a previously registered task without cancelling it."""
 
-    _tasks.pop(name, None)
+    current = _tasks.get(name)
+    if task is None or current is task:
+        _tasks.pop(name, None)
 
 
 def get_task(name: str) -> Optional[asyncio.Task]:
