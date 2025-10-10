@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -60,6 +61,8 @@ BACKOFF_BASE_SECS = 1
 BACKOFF_MAX_SECS = 60
 BACKOFF_STATUS = {429, 503}
 BACKOFF_TTL_SECS = 60
+
+LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
 
 
 @dataclass
@@ -140,8 +143,12 @@ class Crawler:
     ) -> None:
         self.start = start_url
         self.start_canonical = canonicalize(start_url, start_url) or start_url
-        self.max_pages = max_pages or C.CRAWL_MAX_PAGES
-        self.max_depth = max_depth or C.CRAWL_MAX_DEPTH
+        default_max_pages = C.CRAWL_MAX_PAGES
+        default_max_depth = C.CRAWL_MAX_DEPTH
+        if LEGACY_MODE:
+            default_max_depth = 1
+        self.max_pages = max_pages if max_pages is not None else default_max_pages
+        self.max_depth = max_depth if max_depth is not None else default_max_depth
         timeout = httpx.Timeout(
             connect=HEAD_TIMEOUT,
             read=GET_TIMEOUT,
@@ -168,6 +175,14 @@ class Crawler:
         self._host_backoff: dict[str, _BackoffState] = {}
         self.stop_cb = stop_cb
         self.stopped = False
+        budget = C.CRAWL_TIME_BUDGET_SECONDS
+        if LEGACY_MODE:
+            if budget <= 0:
+                budget = 45
+            else:
+                budget = min(budget, 45)
+        self._time_budget_limit = budget
+        self._frontier_cap = 150 if LEGACY_MODE else 0
 
     @staticmethod
     def _normalize_prefixes(prefixes: Sequence[str] | None) -> list[str]:
@@ -354,6 +369,7 @@ class Crawler:
         queue.append((start_url, 0))
         seen: set[str] = set()
         queued: set[str] = {start_url}
+        frontier_cap = self._frontier_cap
         if ENABLE_SITEMAP:
             try:
                 sitemap_urls = await self._load_sitemap_urls(self.start)
@@ -415,9 +431,12 @@ class Crawler:
                 yield target_url, html
             if depth >= self.max_depth:
                 continue
+            added_links = 0
             for link in self.extract_links(target_url, html):
                 if self._stop_requested():
                     self.stopped = True
+                    break
+                if frontier_cap and (added_links >= frontier_cap or len(queue) >= frontier_cap):
                     break
                 if link in seen or link in queued:
                     continue
@@ -427,13 +446,15 @@ class Crawler:
                     continue
                 queue.append((link, depth + 1))
                 queued.add(link)
+                if frontier_cap:
+                    added_links += 1
             if self.stopped:
                 break
 
     def _time_budget_exceeded(self) -> bool:
-        if C.CRAWL_TIME_BUDGET_SECONDS <= 0:
+        if self._time_budget_limit <= 0:
             return False
-        return (time.monotonic() - self._start_ts) > C.CRAWL_TIME_BUDGET_SECONDS
+        return (time.monotonic() - self._start_ts) > self._time_budget_limit
 
     def _domain_budget_allows(self, url: str) -> bool:
         if C.CRAWL_MAX_PAGES_PER_DOMAIN <= 0:
@@ -486,6 +507,9 @@ class Crawler:
             return ""
 
     async def _passes_head_filter(self, url: str) -> bool:
+        if LEGACY_MODE:
+            self._head_checks[url] = True
+            return True
         cached = self._head_checks.get(url)
         if cached is not None:
             return cached
@@ -532,6 +556,8 @@ class Crawler:
         return allowed
 
     async def _load_sitemap_urls(self, seed_url: str) -> list[str]:
+        if LEGACY_MODE:
+            return []
         if not ENABLE_SITEMAP or SITEMAP_MAX_URLS <= 0:
             return []
 

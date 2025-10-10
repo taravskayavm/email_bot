@@ -59,6 +59,12 @@ _OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
 _OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
 
+LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
+_pdf_backend_env = (os.getenv("PDF_BACKEND", "fitz") or "fitz").strip().lower()
+if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
+    _pdf_backend_env = "fitz"
+PDF_BACKEND = _pdf_backend_env
+
 logger = logging.getLogger(__name__)
 
 _SOFT_HYPH = "\u00AD"
@@ -266,6 +272,33 @@ def _pdfminer_extract(path: Path) -> str:
         return ""
 
 
+def _backend_order() -> tuple[str, ...]:
+    backend = PDF_BACKEND
+    if LEGACY_MODE and backend != "pdfminer":
+        backend = "fitz"
+    if backend == "auto":
+        return ("fitz", "pdfminer")
+    if backend == "pdfminer":
+        return ("pdfminer",)
+    return ("fitz", "pdfminer")
+
+
+def _extract_with_backend(path: Path, backend: str) -> str:
+    if backend == "fitz":
+        return _fitz_extract(path)
+    if backend == "pdfminer":
+        if not _PDFMINER_AVAILABLE:
+            return ""
+        try:
+            return _pdfminer_extract(path)
+        except Exception as exc:  # pragma: no cover - depends on runtime env
+            logging.getLogger(__name__).warning(
+                "pdfminer extraction failed for %s: %s", path, exc
+            )
+            return ""
+    return ""
+
+
 def cleanup_text(text: str) -> str:
     if not text:
         return ""
@@ -282,12 +315,14 @@ def separate_around_emails(text: str) -> str:
 def extract_text_from_pdf(path: str | Path) -> str:
     pdf_path = Path(path)
 
-    text = _fitz_extract(pdf_path)
+    text = ""
+    for backend in _backend_order():
+        text = _extract_with_backend(pdf_path, backend)
+        if text:
+            break
     if not text or not text.strip():
         fallback = _extract_with_pypdf(pdf_path)
         text = fallback if fallback.strip() else ""
-    if not text:
-        text = _pdfminer_extract(pdf_path)
     if not text:
         return ""
     if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
@@ -300,17 +335,10 @@ def extract_text(path: str) -> str:
 
     pdf_path = Path(path)
 
-    text = _fitz_extract(pdf_path)
-    if text:
-        return text
-
-    try:
-        if _PDFMINER_AVAILABLE:
-            text = _pdfminer_extract(pdf_path)
-            if text:
-                return text
-    except Exception as exc:  # pragma: no cover - зависит от окружения
-        logging.getLogger(__name__).warning("pdf extract failed for %s: %s", pdf_path, exc)
+    for backend in _backend_order():
+        text = _extract_with_backend(pdf_path, backend)
+        if text:
+            return text
     return ""
 
 
@@ -349,45 +377,33 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 stats[key] = stats.get(key, 0) + value
         return _dedupe(merged)
 
-    text = ""
-    if _fitz is not None:
-        try:
-            text = extract_text(path)
-        except Exception:
-            text = ""
-    if text:
-        text = _maybe_join_pdf_breaks(
-            text,
+    def _prepare_text(raw: str) -> str:
+        if not raw:
+            return ""
+        prepared = _maybe_join_pdf_breaks(
+            raw,
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+        if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
+            prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-        hits = _finalize_hits(extract_emails_document(text, stats), f"pdf:{path}")
+        return prepared
+
+    pdf_path = Path(path)
+    for backend in _backend_order():
+        text = _extract_with_backend(pdf_path, backend)
+        if not text:
+            continue
+        prepared = _prepare_text(text)
+        if not prepared:
+            continue
+        hits = _finalize_hits(
+            extract_emails_document(prepared, stats),
+            f"pdf:{path}",
+        )
         if hits or not ocr:
             return hits, stats
-
-    if _PDFMINER_AVAILABLE:
-        try:
-            text = _pdfminer_extract(Path(path))
-        except Exception:
-            text = ""
-        if text:
-            text = _maybe_join_pdf_breaks(
-                text,
-                join_hyphen=join_hyphen_breaks,
-                join_email=join_email_breaks,
-            )
-            if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-                text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
-                stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-            hits = _finalize_hits(
-                extract_emails_document(text, stats),
-                f"pdf:{path}",
-            )
-            if hits or not ocr:
-                return hits, stats
 
     if _fitz is None:
         try:
@@ -395,16 +411,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 text = f.read().decode("utf-8", "ignore")
         except Exception:
             return [], {"errors": ["cannot open"]}
-        text = _maybe_join_pdf_breaks(
-            text,
-            join_hyphen=join_hyphen_breaks,
-            join_email=join_email_breaks,
-        )
-        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
-            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+        prepared = _prepare_text(text)
         hits = _finalize_hits(
-            extract_emails_document(text, stats),
+            extract_emails_document(prepared, stats),
             f"pdf:{path}",
         )
         stats["needs_ocr"] = True
