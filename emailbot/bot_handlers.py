@@ -61,6 +61,7 @@ from emailbot.run_control import clear_stop, should_stop, stop_and_status
 from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
+from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import log_mass_filter_digest
 from . import settings
@@ -109,6 +110,23 @@ def collect_repairs_from_files(files):
     return []
 
 
+async def _download_file(update: Update, download_dir: str) -> str:
+    """Download the document from ``update`` into ``download_dir``."""
+
+    doc = update.message.document
+    if not doc:
+        raise ValueError("update.message.document is required")
+
+    chat_id = update.effective_chat.id if update.effective_chat else "anon"
+    filename = doc.file_name or "document"
+    safe_name = filename.replace(os.sep, "_")
+    path = os.path.join(download_dir, f"{chat_id}_{int(time.time())}_{safe_name}")
+
+    telegram_file = await doc.get_file()
+    await telegram_file.download_to_drive(path)
+    return path
+
+
 async def extract_emails_from_zip(path: str, *_, **__):
     emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
     emails = set(e.lower().strip() for e in emails)
@@ -127,10 +145,37 @@ def extract_emails_loose(text):
 def extract_from_uploaded_file(path: str):
     """Return normalized and raw e-mail candidates from ``path``."""
 
+    hits, stats = _extraction.extract_any(path, _return_hits=True)
+    stats = stats or {}
+
+    allowed: set[str] = set()
+    context_chunks: list[str] = []
+    for hit in hits or []:
+        email = getattr(hit, "email", "")
+        if not email:
+            continue
+        norm = normalize_email(email)
+        if norm:
+            allowed.add(norm)
+        pre = getattr(hit, "pre", "") or ""
+        post = getattr(hit, "post", "") or ""
+        snippet = f"{pre}{email}{post}".strip()
+        if snippet:
+            context_chunks.append(snippet)
+
+    loose_hits: set[str] = set()
+    if context_chunks:
+        try:
+            raw_candidates = _extraction.smart_extract_emails("\n".join(context_chunks))
+        except Exception:
+            raw_candidates = []
+        loose_hits = {normalize_email(candidate) for candidate in raw_candidates if candidate}
+
     if loose_hits:
         loose_hits.update(allowed)
     else:
         loose_hits = set(allowed)
+
     logger.info(
         "extraction complete",
         extra={"event": "extract", "source": path, "count": len(allowed)},
@@ -199,6 +244,8 @@ def _format_stop_message(status: dict) -> str:
 ADMIN_IDS = {
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
+
+MANUAL_WAIT_INPUT = "manual_wait_input"
 
 PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
@@ -292,6 +339,7 @@ class SessionState:
     suspect_numeric: List[str] = field(default_factory=list)
     foreign: List[str] = field(default_factory=list)
     preview_allowed_all: List[str] = field(default_factory=list)
+    dropped: List[tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
     group: Optional[str] = None
@@ -1349,7 +1397,7 @@ async def _send_combined_parse_response(
     context.user_data["run_id"] = run_id
     xlsx_path = _export_emails_xlsx(emails, run_id)
 
-    user = message.from_user
+    user = getattr(message, "from_user", None)
     is_admin = bool(user and user.id in ADMIN_IDS)
     markup = build_after_parse_combined_kb(extra_rows=extra_rows, is_admin=is_admin)
     with xlsx_path.open("rb") as fh:
@@ -1367,23 +1415,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     doc = update.message.document
     if not doc:
         return
-    chat_id = update.effective_chat.id
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    file_path = os.path.join(
-        DOWNLOAD_DIR, f"{chat_id}_{int(time.time())}_{doc.file_name}"
-    )
-    f = await doc.get_file()
-    await f.download_to_drive(file_path)
+    file_path = await _download_file(update, DOWNLOAD_DIR)
 
-    await update.message.reply_text("Файл загружен. Идёт анализ...")
-    progress_msg = await update.message.reply_text("🔎 Анализируем...")
+    progress_msg = await update.message.reply_text("📥 Читаю файл…")
 
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
     repairs: List[tuple[str, str]] = []
     footnote_dupes = 0
+    stats: dict = {}
 
     try:
+        try:
+            await progress_msg.edit_text("🔎 Ищу адреса…")
+        except Exception:
+            pass
         if file_path.lower().endswith(".zip"):
             allowed, extracted_files, loose, stats = await extract_emails_from_zip(
                 file_path
@@ -1402,8 +1449,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             extracted_files.append(file_path)
             repairs = collect_repairs_from_files([file_path])
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
+        try:
+            await progress_msg.edit_text("🧹 Чищу дубликаты и нормализую…")
+        except Exception:
+            pass
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
+        try:
+            await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
+        except Exception:
+            pass
         await update.message.reply_text(
             "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
         )
@@ -1438,6 +1493,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
     total_footnote = state.footnote_dupes + footnote_dupes
 
+    try:
+        await progress_msg.edit_text("✅ Готово. Формирую превью…")
+    except Exception:
+        pass
+
     report = await _compose_report_and_save(
         context,
         all_allowed,
@@ -1446,6 +1506,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
     )
+
+    filename = (doc.file_name or "").lower()
+    if filename.endswith(".pdf"):
+        backend_states = _pdf.backend_status()
+        report += "\n\n" + "\n".join(
+            [
+                "📄 PDF-бэкенды:",
+                f" • PDFMiner: {'доступен' if backend_states.get('pdfminer') else 'недоступен'}",
+                f" • OCR: {'включён' if backend_states.get('ocr') else 'не включён'}",
+            ]
+        )
 
     await _send_combined_parse_response(update.message, context, report, state)
 

@@ -8,6 +8,26 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# Детект доступности pdfminer.six (и других бэкендов по мере добавления)
+try:  # pragma: no cover - доступность зависит от окружения
+    import pdfminer  # type: ignore  # noqa: F401
+
+    _PDFMINER_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _PDFMINER_AVAILABLE = False
+
+# Заглушка: когда появится OCR, заменить на фактическую проверку.
+_OCR_AVAILABLE = False
+
+
+def backend_status() -> Dict[str, bool]:
+    """Return availability flags for PDF extraction backends."""
+
+    return {
+        "pdfminer": _PDFMINER_AVAILABLE,
+        "ocr": _OCR_AVAILABLE,
+    }
+
 from emailbot import settings
 from emailbot.settings_store import get
 from .extraction_common import preprocess_text
