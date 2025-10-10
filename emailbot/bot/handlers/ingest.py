@@ -18,7 +18,7 @@ from emailbot.settings import resolve_label
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
 
 router = Router()
-URL_RE = re.compile(r"(https?://[^\s]+)", re.IGNORECASE)
+URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
 REJECT_LABELS = {
     "no_at_sign": "нет символа @",
     "empty_local_or_domain": "пустая локаль/домен",
@@ -74,7 +74,13 @@ async def handle_ingest(msg: types.Message) -> None:
 
 @router.message(F.text.func(lambda t: bool(t) and URL_RE.search(t)))
 async def handle_url_ingest(msg: types.Message) -> None:
-    urls = URL_RE.findall(msg.text)
+    raw = [m.group(1) for m in URL_RE.finditer(msg.text)]
+    urls = []
+    for u in raw:
+        u = u.rstrip('.,;:!?)]}')
+        if not u.lower().startswith(('http://','https://')):
+            u = 'https://' + u
+        urls.append(u)
     ack = await msg.reply("Приняла ссылку, парсю страницу…")
     total_ok: list[str] = []
     total_rejects: dict[str, int] = {}
