@@ -55,9 +55,9 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
-_OCR_PAGE_LIMIT = 10
-_OCR_TIME_LIMIT = 30  # seconds
-_PDF_TEXT_TRUNCATE_LIMIT = 2_000_000
+_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
+_OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
+_PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +299,11 @@ def extract_text(path: str) -> str:
     """Упрощённое извлечение текста для ``emailbot.extraction``."""
 
     pdf_path = Path(path)
+
+    text = _fitz_extract(pdf_path)
+    if text:
+        return text
+
     try:
         if _PDFMINER_AVAILABLE:
             text = _pdfminer_extract(pdf_path)
@@ -310,7 +315,7 @@ def extract_text(path: str) -> str:
 
 
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
-    """Extract e-mail addresses from a PDF file (pdfminer → fitz fallback)."""
+    """Extract e-mail addresses from a PDF file (PyMuPDF → pdfminer fallback)."""
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
@@ -324,6 +329,44 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
     stats: Dict[str, int] = {"pages": 0}
+
+    try:
+        import fitz as _fitz  # type: ignore
+    except Exception:
+        _fitz = None
+
+    def _finalize_hits(emails: List[str], source_ref: str) -> List[EmailHit]:
+        raw_hits = [
+            EmailHit(email=e, source_ref=source_ref, origin="direct_at")
+            for e in emails
+        ]
+        if not raw_hits:
+            return []
+        merged = merge_footnote_prefix_variants(raw_hits, stats)
+        merged, fstats = repair_footnote_singletons(merged, layout)
+        for key, value in fstats.items():
+            if value:
+                stats[key] = stats.get(key, 0) + value
+        return _dedupe(merged)
+
+    text = ""
+    if _fitz is not None:
+        try:
+            text = extract_text(path)
+        except Exception:
+            text = ""
+    if text:
+        text = _maybe_join_pdf_breaks(
+            text,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
+        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+        hits = _finalize_hits(extract_emails_document(text, stats), f"pdf:{path}")
+        if hits or not ocr:
+            return hits, stats
 
     if _PDFMINER_AVAILABLE:
         try:
@@ -339,15 +382,14 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
                 text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
                 stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-            hits = [
-                EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
-                for e in extract_emails_document(text, stats)
-            ]
-            return _dedupe(hits), stats
+            hits = _finalize_hits(
+                extract_emails_document(text, stats),
+                f"pdf:{path}",
+            )
+            if hits or not ocr:
+                return hits, stats
 
-    try:
-        import fitz  # type: ignore
-    except Exception:
+    if _fitz is None:
         try:
             with open(path, "rb") as f:
                 text = f.read().decode("utf-8", "ignore")
@@ -361,15 +403,15 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-        hits = [
-            EmailHit(email=e, source_ref=f"pdf:{path}", origin="direct_at")
-            for e in extract_emails_document(text, stats)
-        ]
+        hits = _finalize_hits(
+            extract_emails_document(text, stats),
+            f"pdf:{path}",
+        )
         stats["needs_ocr"] = True
-        return _dedupe(hits), stats
+        return hits, stats
 
     hits: List[EmailHit] = []
-    doc = fitz.open(path)
+    doc = _fitz.open(path)
     ocr_pages = 0
     ocr_start = time.time()
     for page_idx, page in enumerate(doc, start=1):
@@ -404,7 +446,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
-        if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+        fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
+        if fast_mode:
             fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
@@ -439,7 +482,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         low_text = text.lower()
         for email in extract_emails_document(text, stats):
             norm = normalize_email(email)
-            if norm and norm in fast_norms:
+            if norm and fast_mode and norm in fast_norms:
                 continue
             for m in re.finditer(re.escape(email), low_text):
                 start, end = m.span()
@@ -549,7 +592,8 @@ def extract_from_pdf_stream(
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
-        if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+        fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
+        if fast_mode:
             fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
@@ -584,7 +628,7 @@ def extract_from_pdf_stream(
         low_text = text.lower()
         for email in extract_emails_document(text, stats):
             norm = normalize_email(email)
-            if norm and norm in fast_norms:
+            if norm and fast_mode and norm in fast_norms:
                 continue
             for m in re.finditer(re.escape(email), low_text):
                 start, end = m.span()
