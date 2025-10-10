@@ -6,10 +6,10 @@ pdfminer.six>=20221105
 python-docx>=1.1
 python-dotenv>=1.0
 pytest-asyncio>=0.23
+regex>=2024.5.15  # нужен для быстрых и безопасных таймаутов в очистке/поиске e-mail
 email-validator==2.3.0
 idna==3.7
 httpx[http2]~=0.26.0
 beautifulsoup4>=4.12
-regex>=2024.5.15
 charset-normalizer>=3.3
 dnspython>=2.6
