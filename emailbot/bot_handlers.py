@@ -39,9 +39,6 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Состояние finite-state-машины для ручного ввода адресов в чате.
-MANUAL_WAIT_INPUT = "manual_wait_input"
-
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -130,18 +127,6 @@ def extract_emails_loose(text):
 def extract_from_uploaded_file(path: str):
     """Return normalized and raw e-mail candidates from ``path``."""
 
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            raw_text = fh.read()
-        loose_hits = {
-            e.lower().strip()
-            for e in _extraction.smart_extract_emails(raw_text)
-        }
-    except Exception:
-        loose_hits = set()
-
-    allowed_hits, stats = _extraction.extract_any(path)
-    allowed = {e.lower().strip() for e in allowed_hits}
     if loose_hits:
         loose_hits.update(allowed)
     else:
