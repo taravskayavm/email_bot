@@ -127,16 +127,6 @@ def extract_emails_loose(text):
 def extract_from_uploaded_file(path: str):
     """Return normalized and raw e-mail candidates from ``path``."""
 
-    loose_hits: set[str] = set()
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            raw_text = fh.read()
-        loose_hits = {e.lower().strip() for e in smart_extract_emails(raw_text)}
-    except Exception:
-        loose_hits = set()
-
-    allowed_list, stats = _extraction.extract_any(path)
-    allowed = {e.lower().strip() for e in allowed_list}
     if loose_hits:
         loose_hits.update(allowed)
     else:
@@ -2042,6 +2032,21 @@ async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def manual_input_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Route manual input messages through the text handler and stop processing."""
+
+    if context.user_data.get("state") != MANUAL_WAIT_INPUT:
+        return
+    try:
+        await handle_text(update, context)
+    finally:
+        context.user_data.pop("state", None)
+        context.user_data["awaiting_manual_email"] = False
+    raise ApplicationHandlerStop
+
+
 async def route_text_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2373,6 +2378,8 @@ async def prompt_manual_email(
 
     clear_all_awaiting(context)
     context.user_data.pop("manual_emails", None)
+    context.chat_data.pop("manual_all_emails", None)
+    context.chat_data.pop("manual_drop_reasons", None)
     context.chat_data["manual_emails"] = []
     context.chat_data["manual_group"] = None
     context.chat_data["awaiting_manual_emails"] = True
@@ -2383,6 +2390,7 @@ async def prompt_manual_email(
         )
     )
     context.user_data["awaiting_manual_email"] = True
+    context.user_data["state"] = MANUAL_WAIT_INPUT
 
 
 async def _handle_bulk_edit_text(
@@ -2512,6 +2520,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if filtered:
             context.user_data["manual_emails"] = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
+            context.user_data.pop("state", None)
             await update.message.reply_text(
                 (
                     f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
@@ -3343,6 +3352,7 @@ __all__ = [
     "proceed_to_group",
     "select_group",
     "prompt_manual_email",
+    "manual_input_router",
     "manual_start",
     "manual_select_group",
     "route_text_message",

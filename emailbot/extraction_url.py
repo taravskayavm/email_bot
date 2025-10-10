@@ -122,10 +122,14 @@ def _is_allowed_content_type(value: str) -> bool:
 
 
 def _fetch_get(url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    if httpx is None:  # pragma: no cover - guarded by caller
+        raise RuntimeError("optional dependency 'httpx' is not installed")
     return httpx.get(url, timeout=timeout, headers=headers)
 
 
 def _fetch_stream(method: str, url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    if httpx is None:  # pragma: no cover - guarded by caller
+        raise RuntimeError("optional dependency 'httpx' is not installed")
     return httpx.stream(method, url, timeout=timeout, headers=headers)
 
 
