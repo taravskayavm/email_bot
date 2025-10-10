@@ -18,7 +18,18 @@ from emailbot.settings import resolve_label
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
 
 router = Router()
-URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
+URL_RE = re.compile(
+    r"""(?ix)
+    (?<!@)\b(
+        (?:https?://|www\.)[^\s<>()]+
+        |
+        (?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
+        (?:[a-z][a-z0-9-]*[a-z])
+        (?:/[^\s<>()]*)?
+    )
+    (?=$|[\s,;:!?)}\]])
+    """
+)
 REJECT_LABELS = {
     "no_at_sign": "нет символа @",
     "empty_local_or_domain": "пустая локаль/домен",

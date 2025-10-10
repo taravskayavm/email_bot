@@ -40,7 +40,16 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 URL_RE = re.compile(
-    r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])"""
+    r"""(?ix)
+    (?<!@)\b(
+        (?:https?://|www\.)[^\s<>()]+
+        |
+        (?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
+        (?:[a-z][a-z0-9-]*[a-z])
+        (?:/[^\s<>()]*)?
+    )
+    (?=$|[\s,;:!?)}\]])
+    """
 )
 
 from emailbot.ui.keyboards import (
