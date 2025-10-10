@@ -5,6 +5,7 @@ import base64
 import binascii
 import re
 import unicodedata
+from collections import Counter
 from datetime import datetime
 from html import unescape
 from typing import Any, Iterable
@@ -234,8 +235,46 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
-    if re.search(r"(?<=\w)-\s*\n(?=[\w.])", raw_input):
-        text = re.sub(r"(?<=\w)-(?=[\w.])", "", text)
+
+    contexts = Counter(
+        (match.group("left"), match.group("right"))
+        for match in re.finditer(r"(?P<left>\w+)-\s*\n(?P<right>[\w.]+)", raw_input)
+    )
+    if contexts:
+        def _strip_linebreak_hyphen(match: re.Match[str]) -> str:
+            left = match.group("left")
+            right = match.group("right")
+            key = (left, right)
+            remaining = contexts.get(key)
+            if not remaining:
+                return match.group(0)
+            if remaining == 1:
+                del contexts[key]
+            else:
+                contexts[key] = remaining - 1
+            return f"{left}{right}"
+
+        text = re.sub(r"(?P<left>\w+)-(?P<right>[\w.]+)", _strip_linebreak_hyphen, text)
+
+    soft_contexts = Counter(
+        (match.group("left"), match.group("right"))
+        for match in re.finditer(r"(?P<left>\w+)\u00AD(?P<right>[\w.]+)", raw_input)
+    )
+    if soft_contexts:
+        def _strip_soft_hyphen(match: re.Match[str]) -> str:
+            left = match.group("left")
+            right = match.group("right")
+            key = (left, right)
+            remaining = soft_contexts.get(key)
+            if not remaining:
+                return match.group(0)
+            if remaining == 1:
+                del soft_contexts[key]
+            else:
+                soft_contexts[key] = remaining - 1
+            return f"{left}{right}"
+
+        text = re.sub(r"(?P<left>\w+)\u00AD(?P<right>[\w.]+)", _strip_soft_hyphen, text)
 
     text = normalize_text_for_emails(text)
 
