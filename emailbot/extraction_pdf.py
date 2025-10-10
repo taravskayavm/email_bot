@@ -130,6 +130,9 @@ def _ocr_page(page) -> str:
         import pytesseract  # type: ignore
         from PIL import Image  # type: ignore
     except Exception:
+        logger.warning(
+            "pytesseract/Pillow are not installed; PDF OCR is disabled"
+        )
         return ""
     try:
         pix = page.get_pixmap(dpi=200)
@@ -143,12 +146,14 @@ def _fitz_extract(path: Path) -> str:
     try:
         import fitz  # type: ignore
     except Exception:
+        logger.warning("PyMuPDF (fitz) is not installed; PDF text extraction disabled")
         return ""
 
     doc = None
     try:
         doc = fitz.open(str(path))
     except Exception:
+        logger.warning("Failed to open PDF with PyMuPDF; falling back to other backends")
         return ""
 
     chunks: list[str] = []
@@ -173,6 +178,7 @@ def _extract_with_pypdf(path: Path) -> str:
     try:
         import pypdf
     except Exception:
+        logger.warning("pypdf is not installed; PDF text extraction fallback disabled")
         return ""
 
     try:
@@ -195,6 +201,7 @@ def _pdfminer_extract(path: Path) -> str:
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
+        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
         return ""
 
     try:

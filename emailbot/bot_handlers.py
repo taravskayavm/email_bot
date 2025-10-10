@@ -32,14 +32,24 @@ from telegram import (
 from telegram.error import BadRequest
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
-from bot.keyboards import (
+BASE_DIR = Path(__file__).resolve().parent
+# Каталог для загрузок по умолчанию (рядом с логами/вар):
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
+    (BASE_DIR / ".." / "var" / "uploads").resolve()
+)
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Состояние finite-state-машины для ручного ввода адресов в чате.
+MANUAL_WAIT_INPUT = "manual_wait_input"
+
+from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
     build_skipped_preview_entry_kb,
     build_skipped_preview_kb,
+    directions_keyboard,
     groups_map,
 )
-from emailbot.ui.keyboards import directions_keyboard
 from emailbot.notify import notify
 from emailbot.ui.messages import (
     format_dispatch_result,
@@ -54,7 +64,6 @@ from emailbot.run_control import clear_stop, should_stop, stop_and_status
 from . import messaging
 from . import messaging_utils as mu
 from . import extraction as _extraction
-from . import extraction_url as _extraction_url
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .reporting import log_mass_filter_digest
 from . import settings
@@ -80,6 +89,11 @@ def apply_numeric_truncation_removal(allowed):
 async def async_extract_emails_from_url(
     url: str, session, chat_id=None, batch_id: str | None = None
 ):
+    from . import extraction_url as _extraction_url  # noqa: E402
+
+    if batch_id is not None:
+        _extraction_url.set_batch(batch_id)
+
     hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
     emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
@@ -114,13 +128,29 @@ def extract_emails_loose(text):
 
 
 def extract_from_uploaded_file(path: str):
-    emails, stats = _extraction.extract_any(path)
-    emails = set(e.lower().strip() for e in emails)
+    """Return normalized and raw e-mail candidates from ``path``."""
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            raw_text = fh.read()
+        loose_hits = {
+            e.lower().strip()
+            for e in _extraction.smart_extract_emails(raw_text)
+        }
+    except Exception:
+        loose_hits = set()
+
+    allowed_hits, stats = _extraction.extract_any(path)
+    allowed = {e.lower().strip() for e in allowed_hits}
+    if loose_hits:
+        loose_hits.update(allowed)
+    else:
+        loose_hits = set(allowed)
     logger.info(
         "extraction complete",
-        extra={"event": "extract", "source": path, "count": len(emails)},
+        extra={"event": "extract", "source": path, "count": len(allowed)},
     )
-    return emails, set(emails), stats
+    return allowed, loose_hits, stats
 
 
 def is_allowed_tld(email_addr: str) -> bool:
@@ -140,7 +170,6 @@ def sample_preview(items, k: int):
 
 
 from .messaging import (
-    DOWNLOAD_DIR,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
@@ -1379,7 +1408,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             repairs = collect_repairs_from_files(extracted_files)
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
         else:
-            allowed, loose, stats = extract_from_uploaded_file(file_path)
+            allowed, loose, stats = await asyncio.to_thread(
+                extract_from_uploaded_file,
+                file_path,
+            )
             allowed_all.update(allowed)
             loose_all.update(loose)
             extracted_files.append(file_path)
@@ -1387,6 +1419,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             footnote_dupes += stats.get("footnote_pairs_merged", 0)
     except Exception as e:
         log_error(f"handle_document: {file_path}: {e}")
+        await update.message.reply_text(
+            "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
+        )
+        return
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
@@ -2011,6 +2047,21 @@ async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def manual_input_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Route manual input messages through the text handler and stop processing."""
+
+    if context.user_data.get("state") != MANUAL_WAIT_INPUT:
+        return
+    try:
+        await handle_text(update, context)
+    finally:
+        context.user_data.pop("state", None)
+        context.user_data["awaiting_manual_email"] = False
+    raise ApplicationHandlerStop
+
+
 async def route_text_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2342,6 +2393,8 @@ async def prompt_manual_email(
 
     clear_all_awaiting(context)
     context.user_data.pop("manual_emails", None)
+    context.chat_data.pop("manual_all_emails", None)
+    context.chat_data.pop("manual_drop_reasons", None)
     context.chat_data["manual_emails"] = []
     context.chat_data["manual_group"] = None
     context.chat_data["awaiting_manual_emails"] = True
@@ -2352,6 +2405,7 @@ async def prompt_manual_email(
         )
     )
     context.user_data["awaiting_manual_email"] = True
+    context.user_data["state"] = MANUAL_WAIT_INPUT
 
 
 async def _handle_bulk_edit_text(
@@ -2481,6 +2535,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if filtered:
             context.user_data["manual_emails"] = sorted(filtered)
             context.user_data["awaiting_manual_email"] = False
+            context.user_data.pop("state", None)
             await update.message.reply_text(
                 (
                     f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
@@ -2507,6 +2562,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         batch_id = secrets.token_hex(8)
         context.chat_data["batch_id"] = batch_id
         mass_state.set_batch(chat_id, batch_id)
+        from . import extraction_url as _extraction_url  # noqa: E402
+
         _extraction_url.set_batch(batch_id)
         context.chat_data["entry_url"] = urls[0]
         await update.message.reply_text("🌐 Загружаем страницы...")
@@ -3310,6 +3367,7 @@ __all__ = [
     "proceed_to_group",
     "select_group",
     "prompt_manual_email",
+    "manual_input_router",
     "manual_start",
     "manual_select_group",
     "route_text_message",

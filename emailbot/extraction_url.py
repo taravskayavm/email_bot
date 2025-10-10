@@ -10,7 +10,10 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
-import httpx
+try:  # pragma: no cover - optional dependency
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
 
 from .extraction import (
     EmailHit,
@@ -119,10 +122,14 @@ def _is_allowed_content_type(value: str) -> bool:
 
 
 def _fetch_get(url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    if httpx is None:  # pragma: no cover - guarded by caller
+        raise RuntimeError("optional dependency 'httpx' is not installed")
     return httpx.get(url, timeout=timeout, headers=headers)
 
 
 def _fetch_stream(method: str, url: str, *, timeout: int = 15, headers: dict[str, str] | None = None):
+    if httpx is None:  # pragma: no cover - guarded by caller
+        raise RuntimeError("optional dependency 'httpx' is not installed")
     return httpx.stream(method, url, timeout=timeout, headers=headers)
 
 
@@ -164,6 +171,9 @@ def fetch_url(
     fetch: Callable[[str], ResponseLike] | None = None,
 ) -> Optional[str]:
     """Fetch ``url`` and return decoded text respecting several limits."""
+
+    if httpx is None:
+        raise RuntimeError("optional dependency 'httpx' is not installed")
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in allowed_schemes:
