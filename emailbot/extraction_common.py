@@ -234,6 +234,8 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
     # the second local-part character so that leading digits aren't lost.
     text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
     text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
+    if re.search(r"(?<=\w)-\s*\n(?=[\w.])", raw_input):
+        text = re.sub(r"(?<=\w)-(?=[\w.])", "", text)
 
     text = normalize_text_for_emails(text)
 

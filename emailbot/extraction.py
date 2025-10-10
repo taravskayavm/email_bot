@@ -13,14 +13,26 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 import unicodedata
 import time
 from datetime import datetime
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
-from typing import List, Tuple, Dict, Iterable, Set, Optional, Any, Callable, TYPE_CHECKING
+from typing import (
+    List,
+    Tuple,
+    Dict,
+    Iterable,
+    Set,
+    Optional,
+    Any,
+    Callable,
+    TYPE_CHECKING,
+)
 
 from . import settings
 from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
@@ -68,6 +80,110 @@ __all__ = [
 
 
 logger = logging.getLogger(__name__)
+
+
+# Анти-катастрофический поиск e-mail
+try:  # pragma: no cover - зависит от окружения
+    import regex as _rx  # type: ignore
+
+    _RX_AVAILABLE = True
+except Exception:  # pragma: no cover - модуль может быть недоступен
+    import re as _rx
+
+    _RX_AVAILABLE = False
+
+# короткий, но устойчивый к бэктрекингу паттерн (без избыточных обратных ссылок и жадностей)
+# допускаем базовый local-part и домен (IDNA нормализация далее в пайплайне)
+_EMAIL_PATTERN = r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,24}"
+_EMAIL_RE = _rx.compile(_EMAIL_PATTERN, _rx.IGNORECASE)
+
+_EMAIL_SCAN_TIMEOUT_MS = int(os.environ.get("EMAIL_REGEX_TIMEOUT_MS", "150"))
+_MAX_TOKEN = int(os.environ.get("EMAIL_SCAN_MAX_TOKEN", "512"))
+_MAX_TEXT_CHUNK = int(os.environ.get("EMAIL_SCAN_MAX_TEXT_CHUNK", str(1 * 1024 * 1024)))
+
+# Таймауты на извлечение текста для одного файла
+_TEXT_EXTRACT_TIMEOUT = int(os.environ.get("TEXT_EXTRACT_TIMEOUT", "20"))
+_POOL = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("EXTRACT_POOL_WORKERS", "4"))
+)
+
+
+def _safe_tokenize(text: str) -> list[str]:
+    """Быстрая фильтрация «слов» по длине для защиты re от RE DoS."""
+
+    out: list[str] = []
+    for tok in text.split():
+        if len(tok) <= _MAX_TOKEN:
+            out.append(tok)
+    return out
+
+
+def safe_find_emails(text: str) -> set[str]:
+    """Поиск e-mail с ограничением времени (если доступен ``regex``)."""
+
+    if not text:
+        return set()
+    if len(text) > _MAX_TEXT_CHUNK:
+        text = text[:_MAX_TEXT_CHUNK]
+
+    if _RX_AVAILABLE and hasattr(_EMAIL_RE, "finditer"):
+        hits: set[str] = set()
+        try:
+            for match in _EMAIL_RE.finditer(
+                text,
+                overlapped=False,
+                timeout=_EMAIL_SCAN_TIMEOUT_MS / 1000.0,
+            ):
+                hits.add(match.group(0))
+            return hits
+        except Exception:
+            pass
+
+    hits = set()
+    for token in _safe_tokenize(text):
+        match = _EMAIL_RE.search(token)
+        if match:
+            hits.add(match.group(0))
+    return hits
+
+
+def _extract_text_from_path(path: str | Path) -> str:
+    """Извлечь текст из файла с таймаутом выполнения."""
+
+    p = Path(path)
+    suffix = p.suffix.lower()
+
+    if suffix == ".pdf":
+        from .extraction_pdf import extract_text_from_pdf as _extract_pdf_text
+
+        fn: Callable[[], str] = lambda: _extract_pdf_text(p)
+    else:
+        fn = lambda: p.read_text(encoding="utf-8", errors="ignore")
+
+    future = _POOL.submit(fn)
+    done, _ = wait({future}, timeout=_TEXT_EXTRACT_TIMEOUT, return_when=FIRST_COMPLETED)
+    if future in done:
+        try:
+            return future.result() or ""
+        except Exception as exc:  # pragma: no cover - логирование
+            logging.getLogger(__name__).warning("text extract failed: %s", exc)
+            return ""
+
+    logging.getLogger(__name__).warning("text extract timeout for %s", path)
+    return ""
+
+
+def _extract_text_from_bytes(name: str, data: bytes) -> str:
+    """Сохранить байты во временный файл и извлечь текст через общий путь."""
+
+    suffix = ""
+    if "." in name:
+        suffix = "." + name.rsplit(".", 1)[-1]
+
+    with tempfile.NamedTemporaryFile(prefix="eb_", suffix=suffix, delete=True) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        return _extract_text_from_path(tmp.name)
 
 
 # --- EB-LEFT-GLUE-CLEAN: левошумные токены, часто «пришитые» к локалу слева ---
@@ -819,11 +935,7 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
                     stats["lines"] += 1
                     for cell in row:
                         s = str(cell)
-                        for e in re.findall(
-                            r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                            s,
-                        ):
-                            email = e
+                        for email in sorted(safe_find_emails(s)):
                             email, _ = strip_phone_prefix(email, stats)
                             hits.append(
                                 EmailHit(
@@ -838,11 +950,7 @@ def extract_from_csv_or_text(path: str, stop_event: Optional[object] = None) -> 
                     if stop_event and getattr(stop_event, "is_set", lambda: False)():
                         break
                     stats["lines"] += 1
-                    for e in re.findall(
-                        r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                        line,
-                    ):
-                        email = e
+                    for email in sorted(safe_find_emails(line)):
                         email, _ = strip_phone_prefix(email, stats)
                         hits.append(
                             EmailHit(
@@ -989,9 +1097,6 @@ def extract_from_csv_or_text_stream(
 ) -> tuple[list[EmailHit], Dict]:
     import csv
     import io
-    import re
-
-    pattern = r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     hits: List[EmailHit] = []
     stats: Dict[str, int] = {"lines": 0}
     text = data.decode("utf-8", "ignore")
@@ -1003,8 +1108,7 @@ def extract_from_csv_or_text_stream(
             stats["lines"] += 1
             for cell in row:
                 s = str(cell)
-                for e in re.findall(pattern, s):
-                    email = e
+                for email in sorted(safe_find_emails(s)):
                     email, _ = strip_phone_prefix(email, stats)
                     hits.append(EmailHit(email=email, source_ref=source_ref, origin="direct_at"))
     else:
@@ -1012,8 +1116,7 @@ def extract_from_csv_or_text_stream(
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 break
             stats["lines"] += 1
-            for e in re.findall(pattern, line):
-                email = e
+            for email in sorted(safe_find_emails(line)):
                 email, _ = strip_phone_prefix(email, stats)
                 hits.append(EmailHit(email=email, source_ref=source_ref, origin="direct_at"))
 
@@ -1262,13 +1365,12 @@ def extract_any(
         return sorted({h.email for h in hits}), stats
 
     start = time.monotonic()
-    with open(source, encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+    text = _extract_text_from_path(source)
+    stats: Dict[str, int] = {}
     hits = [
         EmailHit(email=e, source_ref=f"txt:{source}", origin="direct_at")
         for e in extract_emails_document(text, stats)
     ]
-    stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
     stats["mode"] = "file"
     stats["entry"] = source
