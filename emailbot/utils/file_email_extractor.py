@@ -10,6 +10,7 @@ import zipfile
 from typing import Dict, List, Tuple
 from urllib.parse import unquote
 
+from emailbot.run_control import should_stop
 from emailbot.utils.email_clean import clean_and_normalize_email
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
@@ -26,6 +27,8 @@ def _norm_and_dedupe(cands: List[str]) -> Tuple[List[str], Dict[str, int]]:
     seen: set[str] = set()
     rejects: Dict[str, int] = {}
     for raw in cands:
+        if should_stop():
+            break
         email, reason = clean_and_normalize_email(raw)
         if email is None:
             key = str(reason) if reason else "unknown"
@@ -69,6 +72,8 @@ def _find_obfuscated_emails(text: str) -> List[str]:
     seen: set[str] = set()
 
     for match in pattern.finditer(text):
+        if should_stop():
+            break
         local = match.group("local")
         span_text = match.group(0)
         labels = re.findall(r"\b([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)\b", span_text)
@@ -85,6 +90,9 @@ def _find_obfuscated_emails(text: str) -> List[str]:
             continue
         labels_ok = True
         for lbl in domain.split("."):
+            if should_stop():
+                labels_ok = False
+                break
             if not re.search(r"[A-Za-z]", lbl):
                 labels_ok = False
                 break
@@ -125,7 +133,11 @@ def _from_csv(data: bytes) -> Tuple[List[str], Dict[str, int]]:
     reader = csv.reader(buf, dialect)
     cands: List[str] = []
     for row in reader:
+        if should_stop():
+            break
         for cell in row:
+            if should_stop():
+                break
             if cell:
                 cands.extend(EMAIL_RE.findall(cell))
     return _norm_and_dedupe(cands)
@@ -140,8 +152,14 @@ def _from_xlsx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     cands: List[str] = []
     for ws in wb.worksheets:
+        if should_stop():
+            break
         for row in ws.iter_rows(values_only=True):
+            if should_stop():
+                break
             for val in row:
+                if should_stop():
+                    break
                 if val is not None:
                     cands.extend(EMAIL_RE.findall(str(val)))
     ok, rej = _norm_and_dedupe(cands)
@@ -157,11 +175,19 @@ def _from_docx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     document = docx.Document(io.BytesIO(data))
     texts = [p.text for p in document.paragraphs]
     for table in document.tables:
+        if should_stop():
+            break
         for row in table.rows:
+            if should_stop():
+                break
             for cell in row.cells:
+                if should_stop():
+                    break
                 texts.append(cell.text)
     cands: List[str] = []
     for text in texts:
+        if should_stop():
+            break
         cands.extend(EMAIL_RE.findall(text))
     ok, rej = _norm_and_dedupe(cands)
     return ok, rej, None
@@ -173,6 +199,8 @@ def _from_pdf(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     except Exception:
         return [], {"missing_dep_pdfminer": 1}, "Для .pdf нужен пакет pdfminer.six"
 
+    if should_stop():
+        return [], {}, None
     text = extract_text(io.BytesIO(data), maxpages=200) or ""
     ok, rej = _norm_and_dedupe(EMAIL_RE.findall(text))
     return ok, rej, None
@@ -189,6 +217,8 @@ def _from_zip(data: bytes) -> Tuple[List[str], Dict[str, int], List[str]]:
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
+            if should_stop():
+                break
             filename = info.filename
             if info.is_dir() or not _safe_zip_name(filename):
                 if not _safe_zip_name(filename):
@@ -202,6 +232,8 @@ def _from_zip(data: bytes) -> Tuple[List[str], Dict[str, int], List[str]]:
                 continue
             with zf.open(info) as fh:
                 content = fh.read()
+            if should_stop():
+                break
             ok, rej, warn = extract_emails_from_bytes(content, filename)
             ok_all.extend(ok)
             for key, val in rej.items():

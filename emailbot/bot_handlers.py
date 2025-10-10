@@ -2662,7 +2662,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
-        emails = {normalize_email(x) for x in extract_emails_loose(clean) if "@" in x}
+        clear_stop()
+        raw_emails = await asyncio.to_thread(extract_emails_loose, clean)
+        emails = {normalize_email(x) for x in raw_emails if "@" in x}
         added = [e for e in emails if add_blocked_email(e)]
         await update.message.reply_text(
             f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
@@ -2670,7 +2672,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
-        found = extract_emails_manual(text)
+        clear_stop()
+        found = await asyncio.to_thread(extract_emails_manual, text)
         filtered = sorted(set(e.lower().strip() for e in found))
         logger.info(
             "Manual input parsing: raw=%r found=%r filtered=%r",
