@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import logging
-import re
+import os
 import statistics
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+try:  # pragma: no cover - ``regex`` may be unavailable in runtime
+    import regex as re  # type: ignore
+
+    _REGEX_HAS_TIMEOUT = True
+except Exception:  # pragma: no cover - fallback to stdlib ``re``
+    import re  # type: ignore
+
+    _REGEX_HAS_TIMEOUT = False
 
 # Детект доступности pdfminer.six (и других бэкендов по мере добавления)
 try:  # pragma: no cover - доступность зависит от окружения
@@ -30,7 +39,7 @@ def backend_status() -> Dict[str, bool]:
 
 from emailbot import settings
 from emailbot.settings_store import get
-from .extraction_common import preprocess_text
+from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 
 _SUP_DIGITS = str.maketrans({
@@ -57,6 +66,12 @@ _SOFT_HYPH = "\u00AD"
 INVISIBLES = ["\xad", "\u200b", "\u200c", "\u200d", "\ufeff"]
 SUPERSCRIPTS = "\u00B9\u00B2\u00B3" + "".join(chr(c) for c in range(0x2070, 0x207A))
 BASIC_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+
+# Быстрый детектор «обычных» e-mail без тяжёлой предобработки
+_QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
+# Порог, начиная с которого страницу считаем «простой» и не гоним через тяжёлый пайплайн
+_PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
+_PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
 
 
 def _legacy_cleanup_text(text: str) -> str:
@@ -116,6 +131,27 @@ def _maybe_join_pdf_breaks(text: str, *, join_hyphen: bool, join_email: bool) ->
     if join_email:
         out = _join_email_linebreaks(out)
     return out
+
+
+def _quick_email_matches(text: str) -> list[tuple[str, int, int]]:
+    if not text:
+        return []
+    matches: list[tuple[str, int, int]] = []
+    iterator = None
+    if _REGEX_HAS_TIMEOUT:
+        try:
+            iterator = _QUICK_EMAIL_RE.finditer(
+                text,
+                overlapped=False,
+                timeout=_PDF_FAST_TIMEOUT_MS / 1000.0,
+            )
+        except Exception:
+            iterator = _QUICK_EMAIL_RE.finditer(text)
+    else:
+        iterator = _QUICK_EMAIL_RE.finditer(text)
+    for match in iterator:
+        matches.append((match.group(0), match.start(), match.end()))
+    return matches
 
 
 def _page_text_layout(page) -> str:
@@ -350,6 +386,33 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+
+        quick_matches = _quick_email_matches(text)
+        if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+            seen_norm: set[str] = set()
+            fast_hits: list[EmailHit] = []
+            for raw_email, start, end in quick_matches:
+                norm = normalize_email(raw_email)
+                if not norm or norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                pre = text[max(0, start - 16) : start]
+                post = text[end : end + 16]
+                fast_hits.append(
+                    EmailHit(
+                        email=norm,
+                        source_ref=f"pdf:{path}#page={page_idx}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+            if fast_hits:
+                hits.extend(fast_hits)
+            stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
+            stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+            continue
+
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
@@ -460,6 +523,33 @@ def extract_from_pdf_stream(
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+
+        quick_matches = _quick_email_matches(text)
+        if len(quick_matches) >= _PDF_FAST_MIN_HITS:
+            seen_norm: set[str] = set()
+            fast_hits: list[EmailHit] = []
+            for raw_email, start, end in quick_matches:
+                norm = normalize_email(raw_email)
+                if not norm or norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                pre = text[max(0, start - 16) : start]
+                post = text[end : end + 16]
+                fast_hits.append(
+                    EmailHit(
+                        email=norm,
+                        source_ref=f"{source_ref}#page={page_idx}",
+                        origin="direct_at",
+                        pre=pre,
+                        post=post,
+                    )
+                )
+            if fast_hits:
+                hits.extend(fast_hits)
+            stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
+            stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+            continue
+
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
