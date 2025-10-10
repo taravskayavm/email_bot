@@ -259,6 +259,20 @@ def extract_text_from_pdf(path: str | Path) -> str:
     return cleanup_text(text)
 
 
+def extract_text(path: str) -> str:
+    """Упрощённое извлечение текста для ``emailbot.extraction``."""
+
+    pdf_path = Path(path)
+    try:
+        if _PDFMINER_AVAILABLE:
+            text = _pdfminer_extract(pdf_path)
+            if text:
+                return text
+    except Exception as exc:  # pragma: no cover - зависит от окружения
+        logging.getLogger(__name__).warning("pdf extract failed for %s: %s", pdf_path, exc)
+    return ""
+
+
 def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from a PDF file."""
 
@@ -488,6 +502,7 @@ __all__ = [
     "cleanup_text",
     "separate_around_emails",
     "extract_text_from_pdf",
+    "extract_text",
     "extract_from_pdf",
     "extract_from_pdf_stream",
 ]
