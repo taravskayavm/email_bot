@@ -148,10 +148,10 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     assert state.all_emails == {"good@example.com", "123@site.com"}
     assert state.dropped == []
     assert state.foreign == ["foreign@example.de"]
-    report = update.message.replies[2]
+    report = update.message.replies[-1]
     assert "Найдено адресов: 2" in report
-    assert "📧 К отправке: 2 адресов" in report
-    assert "⚠️ Подозрительные: 0 адресов" in report
+    assert "📦 К отправке: 2" in report
+    assert "🟡 Подозрительные: 1" in report
 
 
 def test_request_fix_sets_state(monkeypatch):
