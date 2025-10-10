@@ -404,8 +404,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
+        fast_norms: set[str] = set()
         if len(quick_matches) >= _PDF_FAST_MIN_HITS:
-            fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
                 norm = normalize_email(raw_email)
@@ -429,11 +429,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
             continue
 
-        fast_norms = {
-            norm
-            for raw_email, _, _ in quick_matches
-            if (norm := normalize_email(raw_email))
-        }
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
@@ -549,8 +544,8 @@ def extract_from_pdf_stream(
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
 
         quick_matches = _quick_email_matches(text)
+        fast_norms: set[str] = set()
         if len(quick_matches) >= _PDF_FAST_MIN_HITS:
-            fast_norms: set[str] = set()
             fast_hits: list[EmailHit] = []
             for raw_email, start, end in quick_matches:
                 norm = normalize_email(raw_email)
@@ -574,11 +569,6 @@ def extract_from_pdf_stream(
             stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
             continue
 
-        fast_norms = {
-            norm
-            for raw_email, _, _ in quick_matches
-            if (norm := normalize_email(raw_email))
-        }
         text = _legacy_cleanup_text(text)
         text = preprocess_text(text, stats)
         low_text = text.lower()
