@@ -1552,7 +1552,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     finally:
         if current_task:
-            unregister_task(job_name)
+            unregister_task(job_name, current_task)
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
@@ -2797,7 +2797,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         finally:
             if current_task:
-                unregister_task(job_name)
+                unregister_task(job_name, current_task)
 
 
 async def ask_include_numeric(
