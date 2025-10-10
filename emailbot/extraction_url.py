@@ -10,7 +10,10 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
-import httpx
+try:  # pragma: no cover - optional dependency
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
 
 from .extraction import (
     EmailHit,
@@ -164,6 +167,9 @@ def fetch_url(
     fetch: Callable[[str], ResponseLike] | None = None,
 ) -> Optional[str]:
     """Fetch ``url`` and return decoded text respecting several limits."""
+
+    if httpx is None:
+        raise RuntimeError("optional dependency 'httpx' is not installed")
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in allowed_schemes:
