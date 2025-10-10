@@ -39,6 +39,10 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+URL_RE = re.compile(
+    r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])"""
+)
+
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -1415,10 +1419,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     doc = update.message.document
     if not doc:
         return
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    file_path = await _download_file(update, DOWNLOAD_DIR)
+    progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+    try:
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        file_path = await _download_file(update, DOWNLOAD_DIR)
+    except Exception as e:
+        try:
+            await progress_msg.edit_text(f"⛔ Не удалось скачать файл: {type(e).__name__}")
+        except Exception:
+            pass
+        return
 
-    progress_msg = await update.message.reply_text("📥 Читаю файл…")
+    try:
+        await progress_msg.edit_text("📥 Читаю файл…")
+    except Exception:
+        pass
 
     allowed_all, loose_all = set(), set()
     extracted_files: List[str] = []
@@ -2603,7 +2618,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("❌ Не найдено ни одного email.")
         return
 
-    urls = re.findall(r"https?://\S+", text)
+    raw = [m.group(1) for m in URL_RE.finditer(text)]
+    urls = []
+    for u in raw:
+        u = u.rstrip('.,;:!?)]}')
+        if not u.lower().startswith(('http://','https://')):
+            u = 'https://' + u
+        urls.append(u)
     if urls:
         lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
         if lock.locked():
