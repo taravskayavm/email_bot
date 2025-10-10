@@ -6,6 +6,8 @@ from typing import Iterable, Mapping, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
+
 _DEFAULT_ICONS = {
     "bioinformatics": "🧬",
     "geography": "🗺️",
@@ -84,3 +86,141 @@ def directions_keyboard(
             text = f"{text} ✅"
         rows.append([InlineKeyboardButton(text, callback_data=f"{prefix}{code}")])
     return InlineKeyboardMarkup(rows)
+
+
+groups_map = {
+    "bioinformatics": "Биоинформатика",
+    "geography": "География",
+    "psychology": "Психология",
+    "beauty": "Индустрия красоты",
+    "medicine": "Медицина",
+    "sport": "Спорт",
+    "tourism": "Туризм",
+}
+
+
+def build_after_parse_combined_kb(
+    extra_rows: Sequence[Sequence[InlineKeyboardButton]] | None = None,
+    *,
+    is_admin: bool = True,
+) -> InlineKeyboardMarkup:
+    """Keyboard shown after parsing with follow-up actions."""
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
+        [
+            InlineKeyboardButton(
+                "🧭 Перейти к выбору направления",
+                callback_data="proceed_group",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Отправить правки текстом",
+                callback_data="bulk:txt:start",
+            )
+        ],
+    ]
+    if ENABLE_INLINE_EMAIL_EDITOR and is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Исправить адреса (встроенно)",
+                    callback_data="bulk:edit:start",
+                )
+            ]
+        )
+    if extra_rows:
+        rows.extend(extra_rows)
+    return InlineKeyboardMarkup(rows)
+
+
+def build_bulk_edit_kb(
+    emails: Sequence[str],
+    page: int = 0,
+    page_size: int = 10,
+) -> InlineKeyboardMarkup:
+    """Keyboard for paginated bulk e-mail editing."""
+
+    total = len(emails)
+    if page_size <= 0:
+        page_size = 10
+    max_page = max((total - 1) // page_size, 0) if total else 0
+    page = max(0, min(page, max_page))
+    start = page * page_size
+    end = start + page_size
+    visible = emails[start:end]
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("➕ Добавить", callback_data="bulk:edit:add"),
+            InlineKeyboardButton("🔁 Заменить", callback_data="bulk:edit:replace"),
+        ]
+    ]
+
+    for email in visible:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🗑 {email}", callback_data=f"bulk:edit:del:{email}"
+                )
+            ]
+        )
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton("⬅️", callback_data=f"bulk:edit:page:{page - 1}")
+        )
+    if end < total:
+        nav.append(
+            InlineKeyboardButton("➡️", callback_data=f"bulk:edit:page:{page + 1}")
+        )
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("✅ Готово", callback_data="bulk:edit:done")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_skipped_preview_entry_kb() -> InlineKeyboardMarkup:
+    """Keyboard entry point for skipped-address previews."""
+
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("👀 Показать примеры", callback_data="skipped_menu")]]
+    )
+
+
+def build_skipped_preview_kb() -> InlineKeyboardMarkup:
+    """Keyboard with quick-access buttons for skipped e-mail categories."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: 180 дней", callback_data="skipped:180d"
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: сегодня", callback_data="skipped:today"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: кулдаун", callback_data="skipped:cooldown"
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: роль/служебные",
+                    callback_data="skipped:blocked_role",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👀 Примеры: загр. домены",
+                    callback_data="skipped:blocked_foreign",
+                ),
+                InlineKeyboardButton(
+                    "👀 Примеры: невалидные", callback_data="skipped:invalid"
+                ),
+            ],
+        ]
+    )
