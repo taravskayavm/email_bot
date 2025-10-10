@@ -39,6 +39,17 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+
+def _build_parse_task_name(update: Update, mode: str) -> str:
+    """Compose a unique task name for long-running parsing jobs."""
+
+    effective_user = getattr(update, "effective_user", None)
+    effective_chat = getattr(update, "effective_chat", None)
+    user_id = getattr(effective_user, "id", None)
+    chat_id = getattr(effective_chat, "id", None)
+    base = user_id or chat_id or "anon"
+    return f"parse:{base}:{mode}"
+
 # Компилируем один раз: быстрый матч URL, поддержка bare-доменов, аккуратное «обрезание» хвостовой пунктуации
 URL_RE = re.compile(
     r"""(?ix)\b(
@@ -68,7 +79,13 @@ from emailbot.ui.messages import (
 )
 
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
-from emailbot.run_control import clear_stop, should_stop, stop_and_status
+from emailbot.run_control import (
+    clear_stop,
+    register_task,
+    should_stop,
+    stop_and_status,
+    unregister_task,
+)
 
 from . import messaging
 from . import messaging_utils as mu
@@ -1427,65 +1444,115 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     doc = update.message.document
     if not doc:
         return
-    progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+
+    clear_stop()
+    job_name = _build_parse_task_name(update, "file")
+    current_task = asyncio.current_task()
+    if current_task:
+        register_task(job_name, current_task)
+
+    progress_msg = None
+    file_path: str | None = None
+
     try:
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        file_path = await _download_file(update, DOWNLOAD_DIR)
-    except Exception as e:
+        progress_msg = await update.message.reply_text("📥 Загружаю файл…")
         try:
-            await progress_msg.edit_text(f"⛔ Не удалось скачать файл: {type(e).__name__}")
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+            file_path = await _download_file(update, DOWNLOAD_DIR)
+        except Exception as e:
+            try:
+                if progress_msg:
+                    await progress_msg.edit_text(
+                        f"⛔ Не удалось скачать файл: {type(e).__name__}"
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⛔ Не удалось скачать файл: {type(e).__name__}"
+                    )
+            except Exception:
+                pass
+            return
+
+        try:
+            if progress_msg:
+                await progress_msg.edit_text("📥 Читаю файл…")
         except Exception:
             pass
-        return
 
-    try:
-        await progress_msg.edit_text("📥 Читаю файл…")
-    except Exception:
-        pass
+        allowed_all, loose_all = set(), set()
+        extracted_files: List[str] = []
+        repairs: List[tuple[str, str]] = []
+        footnote_dupes = 0
+        stats: dict = {}
 
-    allowed_all, loose_all = set(), set()
-    extracted_files: List[str] = []
-    repairs: List[tuple[str, str]] = []
-    footnote_dupes = 0
-    stats: dict = {}
-
-    try:
         try:
-            await progress_msg.edit_text("🔎 Ищу адреса…")
-        except Exception:
-            pass
-        if file_path.lower().endswith(".zip"):
-            allowed, extracted_files, loose, stats = await extract_emails_from_zip(
-                file_path
+            try:
+                if progress_msg:
+                    await progress_msg.edit_text("🔎 Ищу адреса…")
+            except Exception:
+                pass
+            if (file_path or "").lower().endswith(".zip"):
+                allowed, extracted_files, loose, stats = await extract_emails_from_zip(
+                    file_path
+                )
+                allowed_all.update(allowed)
+                loose_all.update(loose)
+                repairs = collect_repairs_from_files(extracted_files)
+                footnote_dupes += stats.get("footnote_pairs_merged", 0)
+            else:
+                allowed, loose, stats = await asyncio.to_thread(
+                    extract_from_uploaded_file,
+                    file_path,
+                )
+                allowed_all.update(allowed)
+                loose_all.update(loose)
+                if file_path:
+                    extracted_files.append(file_path)
+                    repairs = collect_repairs_from_files([file_path])
+                else:
+                    repairs = []
+                footnote_dupes += stats.get("footnote_pairs_merged", 0)
+            try:
+                if progress_msg:
+                    await progress_msg.edit_text("🧹 Чищу дубликаты и нормализую…")
+            except Exception:
+                pass
+        except Exception as e:
+            log_error(f"handle_document: {file_path}: {e}")
+            try:
+                if progress_msg:
+                    await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
+                else:
+                    await update.message.reply_text("🛑 Ошибка при анализе файла.")
+            except Exception:
+                pass
+            await update.message.reply_text(
+                "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
             )
-            allowed_all.update(allowed)
-            loose_all.update(loose)
-            repairs = collect_repairs_from_files(extracted_files)
-            footnote_dupes += stats.get("footnote_pairs_merged", 0)
-        else:
-            allowed, loose, stats = await asyncio.to_thread(
-                extract_from_uploaded_file,
-                file_path,
-            )
-            allowed_all.update(allowed)
-            loose_all.update(loose)
-            extracted_files.append(file_path)
-            repairs = collect_repairs_from_files([file_path])
-            footnote_dupes += stats.get("footnote_pairs_merged", 0)
-        try:
-            await progress_msg.edit_text("🧹 Чищу дубликаты и нормализую…")
-        except Exception:
-            pass
-    except Exception as e:
-        log_error(f"handle_document: {file_path}: {e}")
-        try:
-            await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
-        except Exception:
-            pass
-        await update.message.reply_text(
-            "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
-        )
+            return
+
+    except asyncio.CancelledError:
+        if file_path:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        notified = False
+        if progress_msg:
+            try:
+                await progress_msg.edit_text("🛑 Процесс был остановлен.")
+                notified = True
+            except Exception:
+                pass
+        if not notified:
+            try:
+                await update.message.reply_text("🛑 Процесс был остановлен.")
+            except Exception:
+                pass
         return
+    finally:
+        if current_task:
+            unregister_task(job_name)
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
@@ -2643,66 +2710,91 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if last and last.get("urls") == urls and now - last.get("ts", 0) < 10:
             await update.message.reply_text("⏳ Уже идёт анализ этого URL")
             return
-        context.chat_data["last_url"] = {"urls": urls, "ts": now}
+        clear_stop()
+        job_name = _build_parse_task_name(update, "url")
+        current_task = asyncio.current_task()
+        if current_task:
+            register_task(job_name, current_task)
+
+        status_msg = None
         batch_id = secrets.token_hex(8)
-        context.chat_data["batch_id"] = batch_id
-        mass_state.set_batch(chat_id, batch_id)
-        from . import extraction_url as _extraction_url  # noqa: E402
+        try:
+            context.chat_data["last_url"] = {"urls": urls, "ts": now}
+            context.chat_data["batch_id"] = batch_id
+            mass_state.set_batch(chat_id, batch_id)
+            from . import extraction_url as _extraction_url  # noqa: E402
 
-        _extraction_url.set_batch(batch_id)
-        context.chat_data["entry_url"] = urls[0]
-        await update.message.reply_text("🌐 Загружаем страницы...")
-        results = []
-        async with lock:
-            async with aiohttp.ClientSession() as session:
-                tasks = [
-                    async_extract_emails_from_url(url, session, chat_id, batch_id)
-                    for url in sorted(urls)
-                ]
-                results = await asyncio.gather(*tasks)
-        if batch_id != context.chat_data.get("batch_id"):
+            _extraction_url.set_batch(batch_id)
+            context.chat_data["entry_url"] = urls[0]
+            status_msg = await update.message.reply_text("🌐 Загружаем страницы...")
+            results = []
+            async with lock:
+                async with aiohttp.ClientSession() as session:
+                    tasks = [
+                        async_extract_emails_from_url(url, session, chat_id, batch_id)
+                        for url in sorted(urls)
+                    ]
+                    results = await asyncio.gather(*tasks)
+            if batch_id != context.chat_data.get("batch_id"):
+                return
+            allowed_all: Set[str] = set()
+            foreign_all: Set[str] = set()
+            repairs_all: List[tuple[str, str]] = []
+            footnote_dupes = 0
+            for _, allowed, foreign, repairs, stats in results:
+                allowed_all.update(allowed)
+                foreign_all.update(foreign)
+                repairs_all.extend(repairs)
+                footnote_dupes += stats.get("footnote_pairs_merged", 0)
+
+            technical_emails = [
+                e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
+            ]
+            filtered = sorted(
+                e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
+            )
+            suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
+
+            state = get_state(context)
+            state.all_emails.update(allowed_all)
+            current = set(state.to_send)
+            current.update(filtered)
+            state.to_send = sorted(current)
+            foreign_total = set(state.foreign) | set(foreign_all)
+            state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
+            state.repairs_sample = sample_preview(
+                [f"{b} → {g}" for (b, g) in state.repairs], 6
+            )
+            suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
+            total_footnote = state.footnote_dupes + footnote_dupes
+
+            report = await _compose_report_and_save(
+                context,
+                state.all_emails,
+                state.to_send,
+                suspicious_total,
+                sorted(foreign_total),
+                total_footnote,
+            )
+            await _send_combined_parse_response(update.message, context, report, state)
             return
-        allowed_all: Set[str] = set()
-        foreign_all: Set[str] = set()
-        repairs_all: List[tuple[str, str]] = []
-        footnote_dupes = 0
-        for _, allowed, foreign, repairs, stats in results:
-            allowed_all.update(allowed)
-            foreign_all.update(foreign)
-            repairs_all.extend(repairs)
-            footnote_dupes += stats.get("footnote_pairs_merged", 0)
-
-        technical_emails = [
-            e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
-        ]
-        filtered = sorted(
-            e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
-        )
-        suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
-
-        state = get_state(context)
-        state.all_emails.update(allowed_all)
-        current = set(state.to_send)
-        current.update(filtered)
-        state.to_send = sorted(current)
-        foreign_total = set(state.foreign) | set(foreign_all)
-        state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
-        state.repairs_sample = sample_preview(
-            [f"{b} → {g}" for (b, g) in state.repairs], 6
-        )
-        suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
-        total_footnote = state.footnote_dupes + footnote_dupes
-
-        report = await _compose_report_and_save(
-            context,
-            state.all_emails,
-            state.to_send,
-            suspicious_total,
-            sorted(foreign_total),
-            total_footnote,
-        )
-        await _send_combined_parse_response(update.message, context, report, state)
-        return
+        except asyncio.CancelledError:
+            notified = False
+            if status_msg:
+                try:
+                    await status_msg.edit_text("🛑 Процесс был остановлен.")
+                    notified = True
+                except Exception:
+                    pass
+            if not notified:
+                try:
+                    await update.message.reply_text("🛑 Процесс был остановлен.")
+                except Exception:
+                    pass
+            return
+        finally:
+            if current_task:
+                unregister_task(job_name)
 
 
 async def ask_include_numeric(
