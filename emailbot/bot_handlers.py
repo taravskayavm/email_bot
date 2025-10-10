@@ -39,8 +39,16 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# Компилируем один раз: быстрый матч URL, поддержка bare-доменов, аккуратное «обрезание» хвостовой пунктуации
 URL_RE = re.compile(
-    r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])"""
+    r"""(?ix)\b(
+        (?:https?://)?          # опциональная схема
+        (?:www\.)?              # опциональный www
+        [^\s<>()]+?\.[^\s<>()]{2,}  # домен + tld
+        [^\s<>()]*              # путь/квери/якорь
+    )
+    (?=$|[\s,;:!?)}\]])         # стоп-символы
+    """
 )
 
 from emailbot.ui.keyboards import (
