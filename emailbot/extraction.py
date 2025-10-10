@@ -81,6 +81,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@(?!-)(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}")
+
 
 # Анти-катастрофический поиск e-mail
 try:  # pragma: no cover - зависит от окружения
@@ -504,6 +507,9 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
     - переносы строк и типографику внутри адресов.
     Не режет валидный local-part (поддержаны все символы RFC atext).
     """
+    if LEGACY_MODE:
+        return EMAIL_RE.findall(text)
+
     text = preprocess_text(text, stats)
     low_text = text.lower()
     multi_mode = _multi_prefix_mode(text)

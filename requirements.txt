@@ -1,15 +1,16 @@
 python-telegram-bot>=20,<21
 pandas>=2.0
 openpyxl>=3.1
-PyMuPDF>=1.24
-pdfminer.six>=20221105
+aiohttp==3.9.5
+PyMuPDF==1.24.9
+pdfminer.six==20221105
 python-docx>=1.1
 python-dotenv>=1.0
 pytest-asyncio>=0.23
-regex>=2024.5.15  # нужен для быстрых и безопасных таймаутов в очистке/поиске e-mail
+regex==2024.5.15  # нужен для быстрых и безопасных таймаутов в очистке/поиске e-mail
 email-validator==2.3.0
 idna==3.7
 httpx[http2]~=0.26.0
-beautifulsoup4>=4.12
+beautifulsoup4==4.12.3
 charset-normalizer>=3.3
 dnspython>=2.6
