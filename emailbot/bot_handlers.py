@@ -85,7 +85,6 @@ from emailbot.ui.keyboards import (
     build_bulk_edit_kb,
     build_skipped_preview_entry_kb,
     build_skipped_preview_kb,
-    directions_keyboard,
     groups_map,
 )
 from emailbot.notify import notify
@@ -121,7 +120,7 @@ from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_by
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
 from utils.email_clean import sanitize_email
-from services.templates import get_template, get_template_label
+from services.templates import get_template, get_template_label, list_templates
 
 
 def _preclean_text_for_emails(text: str) -> str:
@@ -605,22 +604,218 @@ async def _maybe_send_skipped_summary(
     )
 
 
-def _build_group_markup(
-    prefix: str = "group_", *, selected: str | None = None
-) -> InlineKeyboardMarkup:
-    return directions_keyboard(
-        groups_map,
-        selected_code=selected,
-        prefix=prefix,
+_BUTTON_LABELS_RU: dict[str, str] = {
+    "beauty": "💄 Индустрия красоты",
+    "geography": "🗺️ География",
+    "highmedicine": "🏥 Медицина ВО",
+    "medicalcybernetics": "🤖 Медицинская биохимия, биофизика и кибернетика",
+    "lowmedicine": "💉 Медицина СПО",
+    "nursing": "👩‍⚕️ Сестринское дело",
+    "pharmacy": "💊 Фармация",
+    "preventiomed": "🛡️ Медико-профилактическое дело",
+    "psychology": "🧠 Психология",
+    "sport": "⚽ Физкультура и спорт",
+    "stomatology": "🦷 Стоматология",
+    "tourism": "✈️Туризм и гостиничное дело",
+}
+
+
+def _normalize_template_code(value: str | None) -> str:
+    """Return a normalized template code suitable for lookups."""
+
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    if ":" in cleaned:
+        cleaned = cleaned.split(":", 1)[1]
+    prefixes = (
+        "manual_group_",
+        "group_",
+        "manual_tpl_",
+        "tpl_",
+        "manual_dir_",
+        "dir_",
     )
+    for prefix in prefixes:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    return cleaned.strip().lower()
+
+
+def _split_direction_callback(data: str | None) -> tuple[str, str]:
+    """Split callback ``data`` into ``(prefix, payload)`` parts."""
+
+    value = (data or "").strip()
+    if not value:
+        return "", ""
+    if value.startswith("manual_group_"):
+        return "manual_group_", value[len("manual_group_") :]
+    if value.startswith("group_"):
+        return "group_", value[len("group_") :]
+    if ":" in value:
+        prefix, payload = value.split(":", 1)
+        return f"{prefix}:", payload
+    return "", value
+
+
+def _direction_button_label(code: str, fallback: str) -> str:
+    label = _BUTTON_LABELS_RU.get(code)
+    if label:
+        return label
+    return fallback
+
+
+def _store_direction_meta(
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    mapping: dict[str, dict[str, object]],
+) -> None:
+    if context is None:
+        return
+    storage = context.user_data.setdefault("direction_meta", {})
+    storage[prefix] = mapping
+    context.user_data["available_dirs"] = {
+        key: dict(value) for key, value in mapping.items()
+    }
+
+
+def _build_group_markup(
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str = "dir:",
+    *,
+    selected: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Construct direction selection keyboard with cached metadata."""
+
+    selected_norm = _normalize_template_code(selected)
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+    mapping: dict[str, dict[str, object]] = {}
+    seen: set[str] = set()
+
+    for entry in list_templates():
+        raw_code = str(
+            entry.get("code")
+            or entry.get("slug")
+            or entry.get("value")
+            or ""
+        ).strip()
+        normalized = _normalize_template_code(raw_code)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        info = {k: v for k, v in entry.items()}
+        info.setdefault("code", raw_code or normalized)
+        info["normalized"] = normalized
+        label_base = str(
+            entry.get("label")
+            or entry.get("title")
+            or entry.get("name")
+            or groups_map.get(normalized)
+            or raw_code
+            or normalized
+        ).strip()
+        button_text = _direction_button_label(normalized, label_base or normalized)
+        if selected_norm and normalized == selected_norm:
+            button_text = f"{button_text} ✅"
+        mapping[normalized] = info
+        current_row.append(
+            InlineKeyboardButton(button_text, callback_data=f"{prefix}{normalized}")
+        )
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+
+    if not rows and not current_row:
+        for code, label in groups_map.items():
+            normalized = _normalize_template_code(code)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            mapping[normalized] = {
+                "code": code,
+                "normalized": normalized,
+                "label": label,
+            }
+            button_text = _direction_button_label(normalized, label)
+            if selected_norm and normalized == selected_norm:
+                button_text = f"{button_text} ✅"
+            current_row.append(
+                InlineKeyboardButton(button_text, callback_data=f"{prefix}{normalized}")
+            )
+            if len(current_row) == 2:
+                rows.append(current_row)
+                current_row = []
+
+    if current_row:
+        rows.append(current_row)
+
+    if not rows:
+        rows = [[InlineKeyboardButton("Обновите шаблоны", callback_data="noop")]]
+
+    _store_direction_meta(context, prefix, mapping)
+    return InlineKeyboardMarkup(rows)
+
+
+def get_template_from_map(
+    context: ContextTypes.DEFAULT_TYPE, prefix: str, code: str
+) -> dict[str, object] | None:
+    storage = context.user_data.get("direction_meta") if context else None
+    if not isinstance(storage, dict):
+        return None
+    mapping = storage.get(prefix) or storage.get("dir:") or storage.get("group_")
+    if not isinstance(mapping, dict):
+        return None
+    normalized = _normalize_template_code(code)
+    if not normalized:
+        return None
+    entry = mapping.get(normalized)
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def _template_path(template_info: dict[str, object] | None) -> Path | None:
+    if not isinstance(template_info, dict):
+        return None
+    raw_path = template_info.get("path")
+    if isinstance(raw_path, str) and raw_path.strip():
+        return Path(raw_path.strip())
+    return None
+
+
+def _template_label(template_info: dict[str, object] | None) -> str:
+    if not isinstance(template_info, dict):
+        return ""
+    for key in ("label", "title", "name"):
+        raw = template_info.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ""
 
 
 def _group_keyboard(
-    prefix: str = "group_", selected: str | None = None
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str = "dir:",
+    selected: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Return a simple inline keyboard for selecting a mailing group."""
 
-    return _build_group_markup(prefix=prefix, selected=selected)
+    return _build_group_markup(context, prefix=prefix, selected=selected)
+
+
+async def _send_direction_prompt(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    selected: str | None = None,
+    prefix: str = "dir:",
+) -> None:
+    if not message:
+        return
+    markup = _build_group_markup(context, prefix=prefix, selected=selected)
+    await message.reply_text(
+        "⬇️ Выберите направление рассылки:", reply_markup=markup
+    )
 
 
 async def show_skipped_menu(
@@ -1118,10 +1313,7 @@ async def prompt_change_group(
         return
     state = context.chat_data.get(SESSION_KEY)
     selected = getattr(state, "group", None) if state else None
-    await message.reply_text(
-        "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(selected=selected),
-    )
+    await _send_direction_prompt(message, context, selected=selected)
 
 
 async def imap_folders_command(
@@ -1526,6 +1718,12 @@ async def _send_combined_parse_response(
             caption=caption,
             reply_markup=markup,
         )
+    await _send_direction_prompt(
+        message,
+        context,
+        selected=getattr(state, "group", None),
+        prefix="dir:",
+    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1755,10 +1953,7 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     state = context.chat_data.get(SESSION_KEY)
     selected = getattr(state, "group", None) if state else None
-    await query.message.reply_text(
-        "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(selected=selected),
-    )
+    await _send_direction_prompt(query.message, context, selected=selected)
 
 
 async def bulk_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1927,10 +2122,7 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     state = context.chat_data.get(SESSION_KEY)
     selected = getattr(state, "group", None) if state else None
-    await query.message.reply_text(
-        "⬇️ Выберите направление рассылки:",
-        reply_markup=_build_group_markup(selected=selected),
-    )
+    await _send_direction_prompt(query.message, context, selected=selected)
 
 
 async def prompt_mass_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2140,25 +2332,50 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle group selection and prepare messages for sending."""
 
     query = update.callback_query
-    data = (query.data or "").strip()
-    # Безопасно извлекаем код группы (поддержка <3.9 и дефенсив от шумных callback'ов)
-    group_code = (data[len("group_"):] if data.startswith("group_") else data).strip()
-    if not group_code:
+    raw_data = (query.data or "").strip()
+    prefix, payload = _split_direction_callback(raw_data)
+    group_key = payload or raw_data
+    group_code_norm = _normalize_template_code(group_key)
+    if not group_code_norm:
         await query.answer(
             cache_time=0,
             text="Некорректное направление. Обновите меню и попробуйте снова.",
             show_alert=True,
         )
         return
-    label = groups_map.get(group_code, group_code)
-    template_info = get_template(group_code)
-    template_path = None
+    template_info = get_template_from_map(context, prefix or "dir:", group_key)
+    label = groups_map.get(group_code_norm, group_code_norm)
+    signature = ""
+    template_code = group_code_norm
     if template_info:
-        raw_path = template_info.get("path")
+        raw_code = str(template_info.get("code") or "").strip()
+        if raw_code:
+            template_code = raw_code
+            normalized = _normalize_template_code(raw_code)
+            if normalized:
+                group_code_norm = normalized
+        meta_label = _template_label(template_info)
+        if meta_label:
+            label = meta_label
+        raw_signature = template_info.get("signature")
+        if isinstance(raw_signature, str) and raw_signature.strip():
+            signature = raw_signature.strip()
+
+    template_path = None
+    info = template_info or get_template(template_code)
+    if info:
+        raw_path = info.get("path") if isinstance(info, dict) else None
         if isinstance(raw_path, str) and raw_path.strip():
             template_path = raw_path.strip()
+        if not label:
+            inferred = _template_label(info)
+            if inferred:
+                label = inferred
     if not template_path:
-        template_path = TEMPLATE_MAP.get(group_code)
+        template_path = (
+            TEMPLATE_MAP.get(group_code_norm)
+            or TEMPLATE_MAP.get(template_code)
+        )
     if not template_path:
         await query.answer(
             cache_time=0,
@@ -2174,7 +2391,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             show_alert=True,
         )
         return
-    template_label = get_template_label(group_code) or group_code
+    template_label = (
+        get_template_label(template_code)
+        or label
+        or template_code
+    )
     template_path_str = str(path_obj)
     state = get_state(context)
     # Нормализуем источник адресов после возможных правок/предпросмотра:
@@ -2199,9 +2420,22 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             show_alert=True,
         )
         return
-    state.group = group_code
+    state.group = group_code_norm
     state.template = template_path_str
-    markup = _build_group_markup(selected=group_code)
+    state.template_label = template_label
+    context.user_data["selected_dir"] = group_code_norm
+    if signature:
+        context.user_data["selected_signature"] = signature
+    else:
+        context.user_data.pop("selected_signature", None)
+    context.chat_data["current_template_code"] = group_code_norm
+    context.chat_data["current_template_label"] = template_label
+    context.chat_data["current_template_path"] = template_path_str
+    markup = _build_group_markup(
+        context,
+        prefix=prefix or "dir:",
+        selected=group_code_norm,
+    )
     # Обновляем клавиатуру устойчиво: при любых проблемах — тихий фоллбэк в новый месседж
     try:
         await query.edit_message_reply_markup(reply_markup=markup)
@@ -2230,7 +2464,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.exception(
             "prepare_mass_mailing failed",
-            extra={"event": "select_group", "code": group_code, "phase": "prepare"},
+            extra={
+                "event": "select_group",
+                "code": group_code_norm,
+                "phase": "prepare",
+            },
         )
         await query.message.reply_text(
             "⚠️ Не удалось подготовить список к рассылке. "
@@ -2252,7 +2490,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     mass_state.save_chat_state(
         chat_id,
         {
-            "group": group_code,
+            "group": group_code_norm,
             "template": template_path_str,
             "template_label": template_label,
             "pending": ready,
@@ -2264,7 +2502,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     summary_payload = _store_mass_summary(
         chat_id,
-        group=group_code,
+        group=group_code_norm,
         ready=ready,
         blocked_foreign=blocked_foreign,
         blocked_invalid=blocked_invalid,
@@ -2357,7 +2595,7 @@ async def route_text_message(
 
     await message.reply_text(
         f"Принято адресов: {len(emails)}\nТеперь выберите направление:",
-        reply_markup=_group_keyboard(prefix="manual_group_"),
+        reply_markup=_group_keyboard(context, prefix="manual_group_"),
     )
 
     raise ApplicationHandlerStop
@@ -2802,7 +3040,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
                     "⬇️ Выберите направление письма:"
                 ),
-                reply_markup=_build_group_markup(prefix="manual_group_"),
+                reply_markup=_group_keyboard(context, prefix="manual_group_"),
             )
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")

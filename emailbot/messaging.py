@@ -95,13 +95,23 @@ suppress_list.init_blocked(BLOCKED_FILE)
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
+    "beauty": os.path.join(TEMPLATES_DIR, "beauty.html"),
+    "geography": os.path.join(TEMPLATES_DIR, "geography.html"),
+    "highmedicine": os.path.join(TEMPLATES_DIR, "highmedicine.html"),
+    "medicalcybernetics": os.path.join(
+        TEMPLATES_DIR, "medicalcybernetics.html"
+    ),
+    "lowmedicine": os.path.join(TEMPLATES_DIR, "lowmedicine.html"),
+    "nursing": os.path.join(TEMPLATES_DIR, "nursing.html"),
+    "pharmacy": os.path.join(TEMPLATES_DIR, "pharmacy.html"),
+    "preventiomed": os.path.join(TEMPLATES_DIR, "preventiomed.html"),
+    "psychology": os.path.join(TEMPLATES_DIR, "psychology.html"),
     "sport": os.path.join(TEMPLATES_DIR, "sport.html"),
+    "stomatology": os.path.join(TEMPLATES_DIR, "stomatology.html"),
     "tourism": os.path.join(TEMPLATES_DIR, "tourism.html"),
+    # Дополнительные коды для обратной совместимости
     "medicine": os.path.join(TEMPLATES_DIR, "medicine.html"),
     "bioinformatics": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),
-    "geography": os.path.join(TEMPLATES_DIR, "geography.html"),
-    "psychology": os.path.join(TEMPLATES_DIR, "psychology.html"),
-    "beauty": os.path.join(TEMPLATES_DIR, "beauty.html"),
 }
 
 

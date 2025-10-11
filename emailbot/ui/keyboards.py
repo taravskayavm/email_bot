@@ -9,13 +9,18 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 
 _DEFAULT_ICONS = {
-    "bioinformatics": "🧬",
+    "beauty": "💄",
     "geography": "🗺️",
+    "highmedicine": "🏥",
+    "medicalcybernetics": "🤖",
+    "lowmedicine": "💉",
+    "nursing": "👩‍⚕️",
+    "pharmacy": "💊",
+    "preventiomed": "🛡️",
     "psychology": "🧠",
-    "beauty": "💅",
-    "medicine": "💊",
-    "sport": "🏃",
-    "tourism": "🌍",
+    "sport": "⚽",
+    "stomatology": "🦷",
+    "tourism": "✈️",
 }
 
 
@@ -89,13 +94,18 @@ def directions_keyboard(
 
 
 groups_map = {
-    "bioinformatics": "Биоинформатика",
-    "geography": "География",
-    "psychology": "Психология",
     "beauty": "Индустрия красоты",
-    "medicine": "Медицина",
-    "sport": "Спорт",
-    "tourism": "Туризм",
+    "geography": "География",
+    "highmedicine": "Медицина ВО",
+    "medicalcybernetics": "Медицинская биохимия, биофизика и кибернетика",
+    "lowmedicine": "Медицина СПО",
+    "nursing": "Сестринское дело",
+    "pharmacy": "Фармация",
+    "preventiomed": "Медико-профилактическое дело",
+    "psychology": "Психология",
+    "sport": "Физкультура и спорт",
+    "stomatology": "Стоматология",
+    "tourism": "Туризм и гостиничное дело",
 }
 
 
