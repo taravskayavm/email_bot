@@ -79,6 +79,14 @@ __all__ = [
     "extract_any_stream",
 ]
 
+# Базовый ASCII e-mail шаблон, используется для «аккуратного отклеивания»
+# адреса от прилепившегося текста.
+EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
+EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
+EMAIL_STRICT_RE = re.compile(
+    rf"(?<![A-Za-z0-9._%+\-])({EMAIL_CORE})(?![A-Za-z0-9\-])"
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +471,27 @@ def _trim_appended_word(domain: str) -> str:
 
     return domain
 
+# ====================== «ОТКЛЕЙКА» ХВОСТОВ ======================
+
+def _unglue_email(value: str) -> str | None:
+    """
+    Вернуть «чистый» e-mail, если ``value`` содержит его, но он прилип к тексту.
+
+    Сначала пробуем строгие границы (не буква/цифра по краям). Если не удалось,
+    ищем первую валидную подпоследовательность. Возвращаем ``None``, если
+    ничего не найдено.
+    """
+
+    if not value or "@" not in value:
+        return None
+    strict = EMAIL_STRICT_RE.search(value)
+    if strict:
+        return strict.group(1)
+    anywhere = EMAIL_ANYWHERE_RE.search(value)
+    if anywhere:
+        return anywhere.group(0)
+    return None
+
 # ====================== ГРАНИЦЫ/ПРЕФИКСЫ ======================
 
 def _is_left_boundary(ch: str | None) -> bool:
@@ -587,6 +616,10 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
                     choose_v2 = True  # a/b/c только при явном контексте
 
         final_email = email_v2 if choose_v2 else email_v1
+        unglued = _unglue_email(final_email)
+        if unglued:
+            final_email = unglued.lower()
+
         loc, dom = final_email.split("@", 1)
         local_ok = _valid_local(loc)
         domain_ok = _valid_domain(dom)
