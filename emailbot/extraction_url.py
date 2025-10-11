@@ -32,6 +32,7 @@ from .extraction_common import (
 from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
+from .progress_watchdog import heartbeat_now
 
 # Локаль: 1–64 символа из допустимого набора (минимум и наличие буквы проверяем отдельно).
 _LOCAL_BASE = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}"
@@ -521,6 +522,7 @@ def extract_sitemap_hits(
         sitemap_urls.append(urllib.parse.urljoin(base_url, "/sitemap.xml"))
     seen = 0
     for sm in sitemap_urls:
+        heartbeat_now()
         if seen >= max_urls:
             break
         data = fetch_bytes(sm, stop_event, fetch=fetch)
@@ -583,6 +585,7 @@ def extract_api_hits(
     patterns = re.compile(r"/api/files/document/|/download/|/media/|/content/", re.I)
     count = 0
     for href in links:
+        heartbeat_now()
         if count >= max_docs:
             break
         if not patterns.search(href):

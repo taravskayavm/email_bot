@@ -56,6 +56,7 @@ from .settings_store import get
 from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
+from .progress_watchdog import heartbeat_now
 
 if TYPE_CHECKING:  # pragma: no cover
     from .models import EmailEntry
@@ -521,7 +522,10 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
 
     emails: list[str] = []
     i, n = 0, len(text)
+    checks = 0
     while True:
+        if (checks & 0x3FF) == 0:
+            heartbeat_now()
         at = text.find("@", i)
         if at == -1:
             break
@@ -599,6 +603,7 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
                 stats["quarantined"] = stats.get("quarantined", 0) + 1
 
         i = at + 1
+        checks += 1
 
     # Дедуп с сохранением порядка
     out: list[str] = []
