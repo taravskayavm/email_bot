@@ -113,8 +113,8 @@ def _word_pattern(base: str) -> str:
     letters = list(base)
     if not letters:
         return ""
-    rest = [rf"\\W?{_regex_mod.escape(ch)}" for ch in letters[1:]]
-    return rf"{_regex_mod.escape(letters[0])}\\s*" + "\\s*".join(rest)
+    rest = [rf"\W?{_regex_mod.escape(ch)}" for ch in letters[1:]]
+    return rf"{_regex_mod.escape(letters[0])}\s*" + r"\s*".join(rest)
 
 
 _LOCAL_FRAGMENT = r"[\w.%+\-]{1,64}"
