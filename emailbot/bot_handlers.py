@@ -2978,8 +2978,8 @@ async def include_numeric_emails(
     await query.answer()
     current = set(state.to_send)
     added = [e for e in numeric if e not in current]
-   current.update(numeric)
-   state.to_send = sorted(current)
+    current.update(numeric)
+    state.to_send = sorted(current)
     state.blocked_after_parse = count_blocked(state.to_send)
     await query.message.reply_text(
         (
