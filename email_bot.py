@@ -269,6 +269,11 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.toggle_ignore_180, pattern="^toggle_ignore_180$")
     )
     app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.toggle_ignore_180d, pattern="^toggle_ignore_180d$"
+        )
+    )
+    app.add_handler(
         CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$")
     )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
