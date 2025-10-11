@@ -120,8 +120,8 @@ def build_after_parse_combined_kb(
         [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
         [
             InlineKeyboardButton(
-                "🧭 Перейти к выбору направления",
-                callback_data="proceed_group",
+                "🧭 Выбрать направление",
+                callback_data="open_dirs",
             )
         ],
         [

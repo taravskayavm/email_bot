@@ -107,7 +107,7 @@ def build_after_parse_combined_kb(
 
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
-        [InlineKeyboardButton("🧭 Перейти к выбору направления", callback_data="proceed_group")],
+        [InlineKeyboardButton("🧭 Выбрать направление", callback_data="open_dirs")],
         [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
     ]
     if ENABLE_INLINE_EMAIL_EDITOR:
