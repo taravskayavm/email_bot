@@ -1,6 +1,7 @@
 """PDF extraction helpers with optional layout and OCR features."""
 from __future__ import annotations
 
+import io
 import logging
 import os
 import statistics
@@ -42,6 +43,7 @@ from emailbot.settings_store import get
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
+from emailbot.timebudget import TimeBudget
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -59,6 +61,7 @@ _SUP_DIGITS = str.maketrans({
 _OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
 _OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
+MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "200"))
 
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
 _pdf_backend_env = (os.getenv("PDF_BACKEND", "fitz") or "fitz").strip().lower()
@@ -311,6 +314,63 @@ def separate_around_emails(text: str) -> str:
     """Historical shim: preprocessing теперь делает нужные вставки пробелов."""
 
     return text
+
+
+def extract_text_from_pdf_bytes(
+    data: bytes, budget: TimeBudget | None = None
+) -> str:
+    """Read PDF bytes directly, using PyMuPDF with pdfminer fallback."""
+
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        fitz = None  # type: ignore
+
+    text = ""
+    if fitz is not None:
+        doc = None
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+        except Exception:
+            doc = None
+        if doc is not None:
+            try:
+                chunks: list[str] = []
+                for i, page in enumerate(doc):
+                    heartbeat_now()
+                    if budget:
+                        budget.checkpoint()
+                    if i >= MAX_PAGES:
+                        break
+                    try:
+                        chunk = page.get_text("text")
+                    except Exception:
+                        chunk = page.get_text()
+                    if chunk:
+                        chunks.append(chunk)
+                text = "\n".join(chunks)
+            finally:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+    if not text:
+        try:
+            from pdfminer.high_level import extract_text as pdfminer_extract
+        except Exception:
+            return ""
+        heartbeat_now()
+        if budget:
+            budget.checkpoint()
+        try:
+            text = pdfminer_extract(io.BytesIO(data)) or ""
+        except Exception:
+            return ""
+    if not text:
+        return ""
+    if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+        text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+    return cleanup_text(text)
 
 
 def extract_text_from_pdf(path: str | Path) -> str:
@@ -678,6 +738,7 @@ __all__ = [
     "BASIC_EMAIL",
     "cleanup_text",
     "separate_around_emails",
+    "extract_text_from_pdf_bytes",
     "extract_text_from_pdf",
     "extract_text",
     "extract_from_pdf",

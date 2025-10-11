@@ -51,7 +51,7 @@ from .extraction_pdf import (
     extract_from_pdf as _extract_from_pdf,
     extract_from_pdf_stream as _extract_from_pdf_stream,
 )
-from .extraction_zip import extract_emails_from_zip
+from .extraction_zip import extract_emails_from_zip, extract_text_from_zip
 from .settings_store import get
 from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
@@ -161,6 +161,8 @@ def _extract_text_from_path(path: str | Path) -> str:
         from .extraction_pdf import extract_text_from_pdf as _extract_pdf_text
 
         fn: Callable[[], str] = lambda: _extract_pdf_text(p)
+    elif suffix == ".zip":
+        fn = lambda: extract_text_from_zip(str(p))
     else:
         fn = lambda: p.read_text(encoding="utf-8", errors="ignore")
 

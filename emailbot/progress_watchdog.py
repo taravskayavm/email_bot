@@ -33,7 +33,7 @@ def heartbeat_now() -> None:
 async def start_watchdog(
     task: asyncio.Task[object],
     *,
-    idle_seconds: float = 30.0,
+    idle_seconds: float = 45.0,
     dump_path: str = "var/hang_dump.txt",
 ) -> None:
     """Monitor ``task`` and cancel it if no heartbeat is observed."""
@@ -53,7 +53,9 @@ async def start_watchdog(
             try:
                 with open(dump_path, "w", encoding="utf-8") as fh:
                     fh.write(f"=== HANG DUMP (idle {idle:.1f}s) ===\n")
-                    faulthandler.dump_traceback(file=fh)
+                    fh.write(f"Task: {task!r}\n")
+                    # Dump *all* threads to help investigate deadlocks.
+                    faulthandler.dump_traceback(file=fh, all_threads=True)
             except Exception as exc:  # pragma: no cover - best effort logging
                 logging.error("Watchdog: dump failed: %r", exc)
             task.cancel("watchdog")
