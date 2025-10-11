@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 import unicodedata
 from datetime import datetime
@@ -169,6 +170,8 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
 
     def _apply_deobfuscation(current: str) -> str:
         nonlocal deobf_changes
+        if os.getenv("OBFUSCATION_ENABLE", "1") != "1":
+            return current
         try:
             before = current
             after = deobfuscate_text(current)
