@@ -7,7 +7,7 @@ import os
 import statistics
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - ``regex`` may be unavailable in runtime
     import regex as re  # type: ignore
@@ -191,6 +191,53 @@ def _page_text_layout(page) -> str:
     return "".join(out)
 
 
+def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]:
+    """Return concatenated text and a count of pages with non-empty content."""
+
+    out: list[str] = []
+    pages_with_text = 0
+    for i, page in enumerate(doc):
+        heartbeat_now()
+        if budget:
+            budget.checkpoint()
+        if i >= MAX_PAGES:
+            break
+        try:
+            text = page.get_text("text")
+        except Exception:
+            try:
+                text = page.get_text()
+            except Exception:
+                text = ""
+        if text and text.strip():
+            pages_with_text += 1
+            out.append(text)
+    return "\n".join(out), pages_with_text
+
+
+def _fitz_extract_with_stats(path: Path | str, budget: TimeBudget | None = None) -> Tuple[str, int]:
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        logger.warning("PyMuPDF (fitz) is not installed; PDF text extraction disabled")
+        return "", 0
+
+    doc = None
+    try:
+        doc = fitz.open(str(path))
+    except Exception:
+        logger.warning("Failed to open PDF with PyMuPDF; falling back to other backends")
+        return "", 0
+
+    try:
+        return _collect_fitz_text(doc, budget)
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
 def _ocr_page(page) -> str:
     try:
         import pytesseract  # type: ignore
@@ -209,35 +256,13 @@ def _ocr_page(page) -> str:
 
 
 def _fitz_extract(path: Path) -> str:
-    try:
-        import fitz  # type: ignore
-    except Exception:
-        logger.warning("PyMuPDF (fitz) is not installed; PDF text extraction disabled")
-        return ""
+    text, _ = _fitz_extract_with_stats(path)
+    return text
 
-    doc = None
-    try:
-        doc = fitz.open(str(path))
-    except Exception:
-        logger.warning("Failed to open PDF with PyMuPDF; falling back to other backends")
-        return ""
 
-    chunks: list[str] = []
-    try:
-        for page in doc:
-            try:
-                text = page.get_text() or ""
-            except Exception:
-                text = ""
-            if text:
-                chunks.append(text)
-    finally:
-        try:
-            if doc is not None:
-                doc.close()
-        except Exception:
-            pass
-    return "\n".join(chunks)
+def _pdfminer_extract(path: Path) -> str:
+    text, _ = _pdfminer_extract_with_stats(path)
+    return text
 
 
 def _extract_with_pypdf(path: Path) -> str:
@@ -263,17 +288,44 @@ def _extract_with_pypdf(path: Path) -> str:
     return "\n".join(chunks)
 
 
-def _pdfminer_extract(path: Path) -> str:
+def _pdfminer_extract_with_stats(
+    path: Path | str, budget: TimeBudget | None = None
+) -> Tuple[str, int]:
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
         logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
-        return ""
+        return "", 0
+
+    if budget:
+        budget.checkpoint()
 
     try:
-        return pdfminer_extract(str(path)) or ""
+        text = pdfminer_extract(str(path)) or ""
     except Exception:
-        return ""
+        text = ""
+    pages_with_text = 1 if text and text.strip() else 0
+    return text, pages_with_text
+
+
+def _pdfminer_extract_bytes_with_stats(
+    data: bytes, budget: TimeBudget | None = None
+) -> Tuple[str, int]:
+    try:
+        from pdfminer.high_level import extract_text as pdfminer_extract
+    except Exception:
+        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
+        return "", 0
+
+    if budget:
+        budget.checkpoint()
+
+    try:
+        text = pdfminer_extract(io.BytesIO(data)) or ""
+    except Exception:
+        text = ""
+    pages_with_text = 1 if text and text.strip() else 0
+    return text, pages_with_text
 
 
 def _backend_order() -> tuple[str, ...]:
@@ -317,16 +369,20 @@ def separate_around_emails(text: str) -> str:
 
 
 def extract_text_from_pdf_bytes(
-    data: bytes, budget: TimeBudget | None = None
+    data: bytes,
+    stats: Dict[str, int] | None = None,
+    budget: TimeBudget | None = None,
 ) -> str:
     """Read PDF bytes directly, using PyMuPDF with pdfminer fallback."""
+
+    pages_with_text = 0
+    text = ""
 
     try:
         import fitz  # type: ignore
     except Exception:
         fitz = None  # type: ignore
 
-    text = ""
     if fitz is not None:
         doc = None
         try:
@@ -335,37 +391,33 @@ def extract_text_from_pdf_bytes(
             doc = None
         if doc is not None:
             try:
-                chunks: list[str] = []
-                for i, page in enumerate(doc):
-                    heartbeat_now()
-                    if budget:
-                        budget.checkpoint()
-                    if i >= MAX_PAGES:
-                        break
-                    try:
-                        chunk = page.get_text("text")
-                    except Exception:
-                        chunk = page.get_text()
-                    if chunk:
-                        chunks.append(chunk)
-                text = "\n".join(chunks)
+                text, pages_with_text = _collect_fitz_text(doc, budget)
             finally:
                 try:
                     doc.close()
                 except Exception:
                     pass
-    if not text:
+
+    if not text.strip() and _PDFMINER_AVAILABLE:
         try:
             from pdfminer.high_level import extract_text as pdfminer_extract
         except Exception:
-            return ""
-        heartbeat_now()
-        if budget:
-            budget.checkpoint()
-        try:
-            text = pdfminer_extract(io.BytesIO(data)) or ""
-        except Exception:
-            return ""
+            pdfminer_extract = None
+        if pdfminer_extract is not None:
+            heartbeat_now()
+            if budget:
+                budget.checkpoint()
+            try:
+                text_pdfminer = pdfminer_extract(io.BytesIO(data)) or ""
+            except Exception:
+                text_pdfminer = ""
+            if text_pdfminer.strip():
+                text = text_pdfminer
+                pages_with_text = max(pages_with_text, 1)
+
+    if stats is not None and pages_with_text:
+        stats["pages"] = stats.get("pages", 0) + pages_with_text
+
     if not text:
         return ""
     if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
@@ -377,9 +429,15 @@ def extract_text_from_pdf(path: str | Path) -> str:
     pdf_path = Path(path)
 
     text = ""
+    pages = 0
     for backend in _backend_order():
-        text = _extract_with_backend(pdf_path, backend)
-        if text:
+        if backend == "fitz":
+            text, pages = _fitz_extract_with_stats(pdf_path)
+        elif backend == "pdfminer":
+            text, pages = _pdfminer_extract_with_stats(pdf_path)
+        else:
+            text, pages = "", 0
+        if text and text.strip():
             break
     if not text or not text.strip():
         fallback = _extract_with_pypdf(pdf_path)
@@ -391,15 +449,29 @@ def extract_text_from_pdf(path: str | Path) -> str:
     return cleanup_text(text)
 
 
-def extract_text(path: str) -> str:
+def extract_text(
+    path: str,
+    stats: Dict[str, int] | None = None,
+    budget: TimeBudget | None = None,
+) -> str:
     """Упрощённое извлечение текста для ``emailbot.extraction``."""
 
     pdf_path = Path(path)
 
-    for backend in _backend_order():
-        text = _extract_with_backend(pdf_path, backend)
-        if text:
-            return text
+    text_fitz, pages_fitz = _fitz_extract_with_stats(pdf_path, budget)
+    if text_fitz and text_fitz.strip():
+        if stats is not None and pages_fitz:
+            stats["pages"] = stats.get("pages", 0) + pages_fitz
+        return text_fitz
+
+    text_pdfminer, pages_pdfminer = _pdfminer_extract_with_stats(pdf_path, budget)
+    if text_pdfminer and text_pdfminer.strip():
+        if stats is not None:
+            stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
+        return text_pdfminer
+
+    if stats is not None and max(pages_fitz, pages_pdfminer):
+        stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
     return ""
 
 
@@ -452,19 +524,27 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         return prepared
 
     pdf_path = Path(path)
+    text = ""
+    pages_with_text = 0
     for backend in _backend_order():
-        text = _extract_with_backend(pdf_path, backend)
-        if not text:
-            continue
+        if backend == "fitz":
+            text, pages_with_text = _fitz_extract_with_stats(pdf_path)
+        elif backend == "pdfminer":
+            text, pages_with_text = _pdfminer_extract_with_stats(pdf_path)
+        else:
+            text, pages_with_text = "", 0
+        if text and text.strip():
+            break
+
+    if text and text.strip():
+        if pages_with_text:
+            stats["pages"] = stats.get("pages", 0) + pages_with_text
         prepared = _prepare_text(text)
-        if not prepared:
-            continue
         hits = _finalize_hits(
             extract_emails_document(prepared, stats),
             f"pdf:{path}",
         )
-        if hits or not ocr:
-            return hits, stats
+        return hits, stats
 
     if _fitz is None:
         try:
@@ -477,20 +557,19 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             extract_emails_document(prepared, stats),
             f"pdf:{path}",
         )
-        stats["needs_ocr"] = True
         return hits, stats
 
     hits: List[EmailHit] = []
     doc = _fitz.open(path)
     ocr_pages = 0
     ocr_start = time.time()
+    ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
         heartbeat_now()
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
             break
-        stats["pages"] += 1
         if layout:
             try:
                 text = _page_text_layout(page)
@@ -503,10 +582,16 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 ocr_pages < _OCR_PAGE_LIMIT
                 and time.time() - ocr_start < _OCR_TIME_LIMIT
             ):
+                if not ocr_marked:
+                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
+                    ocr_marked = True
                 text = _ocr_page(page)
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
+        if not text or not text.strip():
+            continue
+        stats["pages"] = stats.get("pages", 0) + 1
         text = _maybe_join_pdf_breaks(
             text,
             join_hyphen=join_hyphen_breaks,
@@ -608,35 +693,90 @@ def extract_from_pdf_stream(
     try:
         import fitz  # type: ignore
     except Exception:
+        fitz = None
+
+    def _finalize_hits(emails: List[str], ref: str) -> List[EmailHit]:
+        raw_hits = [
+            EmailHit(email=e, source_ref=ref, origin="direct_at") for e in emails
+        ]
+        if not raw_hits:
+            return []
+        merged = merge_footnote_prefix_variants(raw_hits, stats)
+        merged, fstats = repair_footnote_singletons(merged, layout)
+        for key, value in fstats.items():
+            if value:
+                stats[key] = stats.get(key, 0) + value
+        return _dedupe(merged)
+
+    def _prepare_text(raw: str) -> str:
+        if not raw:
+            return ""
+        prepared = _maybe_join_pdf_breaks(
+            raw,
+            join_hyphen=join_hyphen_breaks,
+            join_email=join_email_breaks,
+        )
+        if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
+            prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
+            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+        return prepared
+
+    text = ""
+    pages_with_text = 0
+
+    if fitz is not None:
+        doc_for_text = None
+        try:
+            doc_for_text = fitz.open(stream=data, filetype="pdf")
+        except Exception:
+            doc_for_text = None
+        if doc_for_text is not None:
+            try:
+                text, pages_with_text = _collect_fitz_text(doc_for_text)
+            finally:
+                try:
+                    doc_for_text.close()
+                except Exception:
+                    pass
+
+    if not text.strip():
+        text_pdfminer, pages_pdfminer = _pdfminer_extract_bytes_with_stats(data)
+        if text_pdfminer.strip():
+            text = text_pdfminer
+            pages_with_text = max(pages_with_text, pages_pdfminer)
+
+    if text and text.strip():
+        if pages_with_text:
+            stats["pages"] = stats.get("pages", 0) + pages_with_text
+        prepared = _prepare_text(text)
+        hits = _finalize_hits(
+            extract_emails_document(prepared, stats),
+            source_ref,
+        )
+        return hits, stats
+
+    if fitz is None:
         try:
             text = data.decode("utf-8", "ignore")
         except Exception:
             return [], {"errors": ["cannot open"]}
-        text = _maybe_join_pdf_breaks(
-            text,
-            join_hyphen=join_hyphen_breaks,
-            join_email=join_email_breaks,
+        prepared = _prepare_text(text)
+        hits = _finalize_hits(
+            extract_emails_document(prepared, stats),
+            source_ref,
         )
-        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
-            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-        text = preprocess_text(text, stats=None)
-        hits = [
-            EmailHit(email=e, source_ref=source_ref, origin="direct_at")
-            for e in extract_emails_document(text, stats)
-        ]
-        return _dedupe(hits), {"pages": 0, "needs_ocr": True}
+        return hits, stats
 
     hits: List[EmailHit] = []
     doc = fitz.open(stream=data, filetype="pdf")
     ocr_pages = 0
     ocr_start = time.time()
+    ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
             break
-        stats["pages"] += 1
         if layout:
             try:
                 text = _page_text_layout(page)
@@ -649,10 +789,16 @@ def extract_from_pdf_stream(
                 ocr_pages < _OCR_PAGE_LIMIT
                 and time.time() - ocr_start < _OCR_TIME_LIMIT
             ):
+                if not ocr_marked:
+                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
+                    ocr_marked = True
                 text = _ocr_page(page)
                 if text:
                     ocr_pages += 1
                     stats["ocr_pages"] = ocr_pages
+        if not text or not text.strip():
+            continue
+        stats["pages"] = stats.get("pages", 0) + 1
         text = _maybe_join_pdf_breaks(
             text,
             join_hyphen=join_hyphen_breaks,

@@ -49,7 +49,9 @@ async def start_watchdog(
             idle = time.monotonic() - _last_beat
             if idle < idle_seconds:
                 continue
-            logging.error("Watchdog: no progress for %.1fs, cancelling task…", idle)
+            logging.error(
+                f"Watchdog: no progress for {float(idle):.1f}s, cancelling task…"
+            )
             try:
                 with open(dump_path, "w", encoding="utf-8") as fh:
                     fh.write(f"=== HANG DUMP (idle {idle:.1f}s) ===\n")
