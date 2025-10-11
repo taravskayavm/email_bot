@@ -335,6 +335,8 @@ from .smtp_client import SmtpClient
 from .utils import log_error
 from .messaging_utils import (
     add_bounce,
+    log_soft_bounce,
+    mark_soft_bounce_success,
     is_foreign,
     is_hard_bounce,
     is_soft_bounce,
@@ -2905,6 +2907,10 @@ async def _send_batch_with_sessions(
                                 subject=messaging.DEFAULT_SUBJECT,
                                 content_hash=content_hash,
                             )
+                            try:
+                                mark_soft_bounce_success(email_addr)
+                            except Exception:
+                                pass
                             sent_count += 1
                             await asyncio.sleep(1.5)
                         elif outcome == messaging.SendOutcome.DUPLICATE:
@@ -2948,6 +2954,27 @@ async def _send_batch_with_sessions(
                         add_bounce(email_addr, code, str(msg or err), phase="manual_send")
                         if is_hard_bounce(code, msg):
                             suppress_add(email_addr, code, "hard bounce on send")
+                        elif is_soft_bounce(code, msg):
+                            try:
+                                code_int: Optional[int]
+                                try:
+                                    code_int = int(code) if code is not None else None
+                                except Exception:
+                                    code_int = None
+                                if isinstance(msg, (bytes, bytearray)):
+                                    reason_text = msg.decode("utf-8", "ignore")
+                                else:
+                                    reason_text = str(msg or err)
+                                log_soft_bounce(
+                                    email_addr,
+                                    reason=reason_text,
+                                    group_code=group_code,
+                                    chat_id=chat_id,
+                                    template_path=template_path,
+                                    code=code_int,
+                                )
+                            except Exception:
+                                pass
                         log_sent_email(
                             email_addr,
                             group_code,
@@ -3665,6 +3692,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         messaging.EMAIL_PASSWORD,
                         use_ssl=use_ssl,
                     ) as client:
+                        def on_sent(
+                            email_addr: str,
+                            token: str,
+                            log_key: str | None,
+                            content_hash: str | None,
+                        ) -> None:
+                            try:
+                                mark_soft_bounce_success(email_addr)
+                            except Exception:
+                                pass
+
                         def on_duplicate(email_addr: str) -> None:
                             duplicates.append(email_addr)
                             error_details.append("пропущено (дубль за 24 ч)")
@@ -3686,6 +3724,29 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         ) -> None:
                             error_details.append(str(exc))
                             add_bounce(email_addr, code, str(msg or exc), phase="send")
+                            if is_hard_bounce(code, msg):
+                                suppress_add(email_addr, code, "hard bounce on send")
+                            elif is_soft_bounce(code, msg):
+                                try:
+                                    code_int: Optional[int]
+                                    try:
+                                        code_int = int(code) if code is not None else None
+                                    except Exception:
+                                        code_int = None
+                                    if isinstance(msg, (bytes, bytearray)):
+                                        reason_text = msg.decode("utf-8", "ignore")
+                                    else:
+                                        reason_text = str(msg or exc)
+                                    log_soft_bounce(
+                                        email_addr,
+                                        reason=reason_text,
+                                        group_code=group_code,
+                                        chat_id=chat_id,
+                                        template_path=template_path,
+                                        code=code_int,
+                                    )
+                                except Exception:
+                                    pass
 
                         sent_now, aborted_now = await run_smtp_send(
                             client,
@@ -3698,6 +3759,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             sleep_between=1.5,
                             cancel_event=cancel_event,
                             should_stop_cb=should_stop,
+                            on_sent=on_sent,
                             on_duplicate=on_duplicate,
                             on_cooldown=on_cooldown,
                             on_blocked=on_blocked,
@@ -3982,6 +4044,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     content_hash: str | None,
                 ) -> None:
                     sent_ok.append(email_addr)
+                    try:
+                        mark_soft_bounce_success(email_addr)
+                    except Exception:
+                        pass
 
                 def on_duplicate(email_addr: str) -> None:
                     duplicates.append(email_addr)
@@ -4010,6 +4076,27 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     add_bounce(email_addr, code, str(msg or exc), phase="send")
                     if is_hard_bounce(code, msg):
                         suppress_add(email_addr, code, "hard bounce on send")
+                    elif is_soft_bounce(code, msg):
+                        try:
+                            code_int: Optional[int]
+                            try:
+                                code_int = int(code) if code is not None else None
+                            except Exception:
+                                code_int = None
+                            if isinstance(msg, (bytes, bytearray)):
+                                reason_text = msg.decode("utf-8", "ignore")
+                            else:
+                                reason_text = str(msg or exc)
+                            log_soft_bounce(
+                                email_addr,
+                                reason=reason_text,
+                                group_code=group_code,
+                                chat_id=chat_id,
+                                template_path=template_path,
+                                code=code_int,
+                            )
+                        except Exception:
+                            pass
 
                 def after_each(email_addr: str) -> None:
                     mass_state.save_chat_state(

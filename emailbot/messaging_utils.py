@@ -4,6 +4,7 @@ import base64
 import csv
 import hashlib
 import imaplib
+import json
 import logging
 import os
 import re
@@ -53,14 +54,33 @@ def parse_imap_date_to_utc(date_str: str | None) -> datetime:
 _SUPPRESS_ENV = os.getenv("SUPPRESS_LIST_PATH", "var/suppress_list.csv")
 _BOUNCE_ENV = os.getenv("BOUNCE_LOG_PATH", "var/bounce_log.csv")
 _SYNC_ENV = os.getenv("SYNC_SEEN_EVENTS_PATH", "var/sync_seen_events.csv")
+_SOFT_BOUNCE_ENV = os.getenv("SOFT_BOUNCE_PATH", "var/soft_bounces.jsonl")
 
 SUPPRESS_PATH = expand_path(_SUPPRESS_ENV)
 BOUNCE_LOG_PATH = expand_path(_BOUNCE_ENV)
 SYNC_SEEN_EVENTS_PATH = expand_path(_SYNC_ENV)
 SENT_CACHE_FILE = expand_path(os.getenv("SENT_MAILBOX_CACHE", "var/sent_mailbox.cache"))
 SENT_LOG_PATH = expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv"))
+SOFT_BOUNCE_PATH = expand_path(_SOFT_BOUNCE_ENV)
+
+
+def _parse_int(value: str | None, default: int) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+SOFT_BOUNCE_RETRY_HOURS = _parse_int(os.getenv("SOFT_BOUNCE_RETRY_HOURS"), 48)
+SOFT_BOUNCE_MAX_RETRIES = _parse_int(os.getenv("SOFT_BOUNCE_MAX_RETRIES"), 2)
 
 logger = logging.getLogger(__name__)
+
+
+def _append_jsonl(path: Path, row: dict) -> None:
+    ensure_parent(path)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def prepare_recipients_for_send(
@@ -921,6 +941,63 @@ def add_bounce(email: str, code: int | None, msg: str, phase: str) -> None:
     )
 
 
+def log_soft_bounce(
+    email: str,
+    *,
+    reason: str,
+    group_code: str,
+    chat_id: int,
+    template_path: str,
+    code: int | None = None,
+) -> None:
+    """Persist soft-bounce details for scheduled retries."""
+
+    key = _normalize_key(email)
+    if not key:
+        return
+    now = datetime.now(timezone.utc)
+    next_retry = now + timedelta(hours=SOFT_BOUNCE_RETRY_HOURS)
+    row = {
+        "ts": now.isoformat(),
+        "email": key,
+        "reason": (reason or "")[:300],
+        "group": group_code,
+        "chat_id": chat_id,
+        "template": template_path,
+        "next_retry_at": next_retry.isoformat(),
+        "retry_count": 0,
+        "max_retries": SOFT_BOUNCE_MAX_RETRIES,
+        "status": "soft_bounce",
+        "code": code,
+    }
+    _append_jsonl(SOFT_BOUNCE_PATH, row)
+
+
+def mark_soft_bounce_success(email: str) -> None:
+    """Remove pending soft-bounce retries once delivery succeeds."""
+
+    key = _normalize_key(email)
+    if not key or not SOFT_BOUNCE_PATH.exists():
+        return
+    path = SOFT_BOUNCE_PATH
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with path.open("r", encoding="utf-8") as src, tmp.open("w", encoding="utf-8") as dst:
+            for line in src:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    dst.write(line)
+                    continue
+                if _normalize_key(row.get("email", "")) == key and row.get("status") == "soft_bounce":
+                    continue
+                dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except FileNotFoundError:
+        return
+    else:
+        tmp.replace(path)
+
+
 def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
     """Best effort extraction of SMTP status code."""
 
@@ -1090,6 +1167,7 @@ __all__ = [
     "SUPPRESS_PATH",
     "BOUNCE_LOG_PATH",
     "SYNC_SEEN_EVENTS_PATH",
+    "SOFT_BOUNCE_PATH",
     "REQUIRED_FIELDS",
     "LEGACY_MAP",
     "ensure_aware_utc",
@@ -1099,6 +1177,8 @@ __all__ = [
     "upsert_sent_log",
     "dedupe_sent_log_inplace",
     "add_bounce",
+    "log_soft_bounce",
+    "mark_soft_bounce_success",
     "is_hard_bounce",
     "is_soft_bounce",
     "suppress_add",
