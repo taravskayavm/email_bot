@@ -91,7 +91,7 @@ EMAIL_STRICT_RE = re.compile(
 logger = logging.getLogger(__name__)
 
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@(?!-)(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}")
 
 
 # Анти-катастрофический поиск e-mail
@@ -532,125 +532,11 @@ def _multi_prefix_mode(text: str) -> bool:
 # ====================== ОСНОВНАЯ ФУНКЦИЯ ======================
 
 def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
-    """
-    Возвращает список e-mail из «грязного» текста (PDF/ZIP), очищая:
-    - префиксные сноски (1/a/б/… без скобок) перед адресами;
-    - «пришитые» слова/хвосты после TLD;
-    - переносы строк и типографику внутри адресов.
-    Не режет валидный local-part (поддержаны все символы RFC atext).
-    """
-    if LEGACY_MODE:
-        return EMAIL_RE.findall(text)
-
-    text = preprocess_text(text, stats)
-    low_text = text.lower()
-    multi_mode = _multi_prefix_mode(text)
-
-    # Словарь «похожих на почту» форм (для скоринга V2 независимо от порядка)
-    seen_in_text = set(m.group(0) for m in re.finditer(
-        r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+", low_text
-    ))
-
-    emails: list[str] = []
-    i, n = 0, len(text)
-    checks = 0
-    while True:
-        if (checks & 0x3FF) == 0:
-            heartbeat_now()
-        at = text.find("@", i)
-        if at == -1:
-            break
-
-        local, left_idx = _scan_local_left(text, at)
-        local, _ = strip_phone_prefix(local, stats)
-
-        # Expand left by a single alphabetic character if a tag break inserted
-        # a space before the first letter of the local part.
-        if left_idx >= 0 and text[left_idx] == " ":
-            if left_idx >= 1:
-                prev = text[left_idx - 1]
-                prev_prev = text[left_idx - 2] if left_idx >= 2 else " "
-                if prev.isalpha() and not prev_prev.isalnum():
-                    local = prev + local
-                    left_idx -= 1
-                    if stats is not None:
-                        stats["left_char_expanded"] = stats.get(
-                            "left_char_expanded", 0
-                        ) + 1
-        domain_raw = _scan_domain_right(text, at)
-        domain = domain_raw
-        if not local or not domain:
-            i = at + 1
-            continue
-
-        domain = _trim_appended_word(domain)
-
-        # Вариант V1 — как есть
-        email_v1 = f"{local}@{domain}".lower()
-
-        # Вариант V2 — снять 1 префикс (если слева граница и после снятия local валиден)
-        choose_v2 = False
-        email_v2 = email_v1
-        left_char = text[left_idx] if left_idx >= 0 else None
-
-        if local.isdigit():
-            choose_v2 = False
-        elif len(local) >= 2 and _is_left_boundary(left_char):
-            prefix_char = local[0]
-            local2 = local[1:]
-            if _valid_local(local2):
-                email_v2 = f"{local2}@{domain}".lower()
-
-                left_slice_start = max(0, at - len(local) - 4)
-                left_slice = text[left_slice_start: at - len(local)]
-                list_context = bool(_LIST_MARKER_RE.search(left_slice))
-
-                if prefix_char.isdigit():
-                    if prefix_char == "1":
-                        choose_v2 = True
-                    elif prefix_char == "2" and not local2[:1].isdigit():
-                        choose_v2 = True
-                elif prefix_char.lower() in {"a", "b", "c"} and (
-                    list_context or multi_mode
-                ):
-                    choose_v2 = True  # a/b/c только при явном контексте
-
-        final_email = email_v2 if choose_v2 else email_v1
-        unglued = _unglue_email(final_email)
-        if unglued:
-            final_email = unglued.lower()
-
-        loc, dom = final_email.split("@", 1)
-        local_ok = _valid_local(loc)
-        domain_ok = _valid_domain(dom)
-        features = {"tld_known": domain_ok}
-        if local_ok and domain_ok:
-            if not is_allowed_domain(dom):
-                if stats is not None:
-                    stats["foreign_domains"] = stats.get("foreign_domains", 0) + 1
-            elif score_candidate(features) >= CANDIDATE_SCORE_THRESHOLD:
-                emails.append(final_email)
-            else:
-                if stats is not None:
-                    stats["quarantined"] = stats.get("quarantined", 0) + 1
-        else:
-            if stats is not None:
-                stats["quarantined"] = stats.get("quarantined", 0) + 1
-
-        i = at + 1
-        checks += 1
-
-    # Дедуп с сохранением порядка
-    out: list[str] = []
-    seen: Set[str] = set()
-    for e in emails:
-        cleaned = sanitize_for_send(e)
-        if not cleaned:
-            continue
-        if cleaned not in seen:
-            seen.add(cleaned)
-            out.append(cleaned)
-    return out
+    hits = EMAIL_RE.findall(text) if text else []
+    deduped = list(dict.fromkeys(hits))
+    if stats is not None:
+        stats["total_found"] = stats.get("total_found", 0) + len(deduped)
+    return deduped
 
 
 # --- MANUAL mode (for chat input) ---------------------------------
