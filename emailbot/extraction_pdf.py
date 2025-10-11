@@ -777,6 +777,7 @@ def extract_from_pdf_stream(
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
             break
+        stats["pages"] = stats.get("pages", 0) + 1
         if layout:
             try:
                 text = _page_text_layout(page)
@@ -798,7 +799,6 @@ def extract_from_pdf_stream(
                     stats["ocr_pages"] = ocr_pages
         if not text or not text.strip():
             continue
-        stats["pages"] = stats.get("pages", 0) + 1
         text = _maybe_join_pdf_breaks(
             text,
             join_hyphen=join_hyphen_breaks,
