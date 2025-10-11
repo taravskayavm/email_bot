@@ -327,6 +327,7 @@ from .messaging import (
     sync_log_with_imap,
     was_emailed_recently,
     count_sent_today,
+    maybe_sync_before_send,
 )
 from .perf import PerfTimer
 from .send_core import build_send_list, run_smtp_send
@@ -341,6 +342,7 @@ from .messaging_utils import (
     suppress_add,
     BOUNCE_LOG_PATH,
 )
+from .cancel import start_cancel, request_cancel, is_cancelled, clear_cancel
 
 logger = logging.getLogger(__name__)
 
@@ -3443,11 +3445,28 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         template_path = TEMPLATE_MAP[group_code]
 
-        await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
-        with PerfTimer("imap_sync_manual"):
+        start_cancel(chat_id)
+        await query.message.reply_text(
+            "⏳ Проверяю актуальность истории отправки…",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⏹️ Стоп", callback_data="stop_job")]]
+            ),
+        )
+        did_sync = False
+        with PerfTimer("imap_sync_gate_manual"):
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, sync_log_with_imap)
+            did_sync, _, _ = await loop.run_in_executor(
+                None, lambda: maybe_sync_before_send(logger=logger, chat_id=chat_id)
+            )
             clear_recent_sent_cache()
+        if did_sync:
+            await query.message.reply_text("🔄 Обновила историю (6 мес) из IMAP (дельта).")
+        else:
+            await query.message.reply_text("✅ История свежая — синхронизация не требуется.")
+        if is_cancelled(chat_id):
+            clear_cancel(chat_id)
+            await query.message.reply_text("⛔ Остановлено по запросу.")
+            return
 
         # manual отправка не учитывает супресс-лист
         blocked = get_blocked_emails()
@@ -3462,6 +3481,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             log_error(f"imap connect: {e}")
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+            clear_cancel(chat_id)
             return
 
         with PerfTimer("filtering_manual"):
@@ -3471,6 +3491,15 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 sent_today,
                 lookup_days=lookup_days,
             )
+
+        if is_cancelled(chat_id):
+            await query.message.reply_text("⛔ Остановлено (после фильтрации).")
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            clear_cancel(chat_id)
+            return
 
         if not to_send:
             await query.message.reply_text(
@@ -3482,6 +3511,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except Exception:
                 pass
             clear_recent_sent_cache()
+            clear_cancel(chat_id)
             return
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
@@ -3496,6 +3526,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     "«🚀 Игнорировать лимит» и запустите ещё раз."
                 )
             )
+            clear_cancel(chat_id)
             return
         if not is_force_send(chat_id) and len(to_send) > available:
             to_send = to_send[:available]
@@ -3594,13 +3625,16 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         imap.logout()
                     except Exception:
                         pass
+                    clear_cancel(chat_id)
                     return
                 except (smtplib.SMTPServerDisconnected, TimeoutError, OSError):
                     attempt += 1
                     if attempt >= retries:
+                        clear_cancel(chat_id)
                         raise
                     await asyncio.sleep(backoff)
                     backoff *= 2
+        clear_cancel(chat_id)
         imap.logout()
         if aborted:
             await query.message.reply_text(
@@ -3645,14 +3679,30 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         await query.answer()
         await query.message.reply_text("Запущено — выполняю в фоне...")
-    
+
         async def long_job() -> None:
-            await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
-            with PerfTimer("imap_sync_bulk"):
+            start_cancel(chat_id)
+            await query.message.reply_text(
+                "⏳ Проверяю актуальность истории отправки…",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⏹️ Стоп", callback_data="stop_job")]]
+                ),
+            )
+            with PerfTimer("imap_sync_gate_bulk"):
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, sync_log_with_imap)
+                did_sync, _, _ = await loop.run_in_executor(
+                    None, lambda: maybe_sync_before_send(logger=logger, chat_id=chat_id)
+                )
                 clear_recent_sent_cache()
-    
+            if did_sync:
+                await query.message.reply_text("🔄 Обновила историю (6 мес) из IMAP (дельта).")
+            else:
+                await query.message.reply_text("✅ История свежая — синхронизация не требуется.")
+            if is_cancelled(chat_id):
+                clear_cancel(chat_id)
+                await query.message.reply_text("⛔ Остановлено по запросу.")
+                return
+
             with PerfTimer("filtering_bulk"):
                 lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
                 blocked = get_blocked_emails()
@@ -3742,14 +3792,20 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             "skipped_duplicates": duplicates,
                         },
                     )
-        
-        limited_from: int | None = None
 
-        if not to_send:
-            await query.message.reply_text(
-                "❗ Все адреса уже есть в истории отправок или в блок-листах."
-            )
-            return
+            if is_cancelled(chat_id):
+                clear_cancel(chat_id)
+                await query.message.reply_text("⛔ Остановлено (после фильтрации).")
+                return
+
+            limited_from: int | None = None
+
+            if not to_send:
+                await query.message.reply_text(
+                    "❗ Все адреса уже есть в истории отправок или в блок-листах."
+                )
+                clear_cancel(chat_id)
+                return
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
@@ -3764,6 +3820,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     "«🚀 Игнорировать лимит» и запустите ещё раз."
                 )
             )
+            clear_cancel(chat_id)
             return
         if not is_force_send(chat_id) and len(to_send) > available:
             limited_from = len(to_send)
@@ -3808,6 +3865,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             log_error(f"imap connect: {e}")
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
+            clear_cancel(chat_id)
             return
 
         error_details: list[str] = []
@@ -3905,8 +3963,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         imap.logout()
                     except Exception:
                         pass
+                    clear_cancel(chat_id)
                     return
                 aborted = aborted or aborted_now
+        clear_cancel(chat_id)
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
@@ -4002,6 +4062,18 @@ async def autosync_imap_with_message(query: CallbackQuery) -> None:
     )
 
 
+async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the ⏹️ stop button by requesting cancellation for the chat."""
+
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
+    request_cancel(chat_id)
+    await query.message.reply_text(
+        "🛑 Запрос на остановку принят. Завершаю текущую операцию…"
+    )
+
+
 def _chunk_list(items: List[str], size: int = 60) -> List[List[str]]:
     """Split ``items`` into chunks of ``size`` elements."""
 
@@ -4046,6 +4118,7 @@ __all__ = [
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",
+    "stop_job_callback",
     "show_skipped_menu",
     "show_skipped_examples",
 ]
