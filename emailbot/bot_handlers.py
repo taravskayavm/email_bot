@@ -328,6 +328,8 @@ from .messaging import (
     was_emailed_recently,
     count_sent_today,
 )
+from .perf import PerfTimer
+from .send_core import build_send_list, run_smtp_send
 from .smtp_client import SmtpClient
 from .utils import log_error
 from .messaging_utils import (
@@ -3442,9 +3444,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         template_path = TEMPLATE_MAP[group_code]
 
         await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, sync_log_with_imap)
-        clear_recent_sent_cache()
+        with PerfTimer("imap_sync_manual"):
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sync_log_with_imap)
+            clear_recent_sent_cache()
 
         # manual отправка не учитывает супресс-лист
         blocked = get_blocked_emails()
@@ -3461,13 +3464,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        to_send: list[str] = []
-        for email_addr in emails:
-            if email_addr in blocked or email_addr in sent_today:
-                continue
-            if was_emailed_recently(email_addr, lookup_days):
-                continue
-            to_send.append(email_addr)
+        with PerfTimer("filtering_manual"):
+            to_send = build_send_list(
+                emails,
+                blocked,
+                sent_today,
+                lookup_days=lookup_days,
+            )
 
         if not to_send:
             await query.message.reply_text(
@@ -3480,7 +3483,6 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 pass
             clear_recent_sent_cache()
             return
-
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
             logger.info(
@@ -3523,103 +3525,82 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         import smtplib  # наверху можно не поднимать, локальный импорт ок
 
         attempt = 0
-        while True:
-            try:
-                with SmtpClient(
-                    host,
-                    port,
-                    messaging.EMAIL_ADDRESS,
-                    messaging.EMAIL_PASSWORD,
-                    use_ssl=use_ssl,
-                ) as client:
-                    while to_send:
-                        if should_stop():
-                            aborted = True
-                            break
-                        if cancel_event and cancel_event.is_set():
-                            aborted = True
-                            break
-                        email_addr = to_send.pop(0)
-                        try:
-                            outcome, token, log_key, content_hash = send_email_with_sessions(
-                                client,
-                                imap,
-                                sent_folder,
-                                email_addr,
-                                template_path,
-                                subject=messaging.DEFAULT_SUBJECT,
-                            )
-                            if outcome == messaging.SendOutcome.SENT:
-                                log_sent_email(
-                                    email_addr,
-                                    group_code,
-                                    "ok",
-                                    chat_id,
-                                    template_path,
-                                    unsubscribe_token=token,
-                                    key=log_key,
-                                    subject=messaging.DEFAULT_SUBJECT,
-                                    content_hash=content_hash,
-                                )
-                                sent_count += 1
-                                await asyncio.sleep(1.5)
-                            elif outcome == messaging.SendOutcome.DUPLICATE:
-                                duplicates.append(email_addr)
-                                error_details.append("пропущено (дубль за 24 ч)")
-                            elif outcome == messaging.SendOutcome.COOLDOWN:
-                                error_details.append("пропущено (кулдаун 180 дней)")
-                            elif outcome == messaging.SendOutcome.BLOCKED:
-                                error_details.append("пропущено (блок-лист)")
-                            else:
-                                error_details.append("ошибка отправки")
-                        except messaging.TemplateRenderError as err:
-                            missing = ", ".join(sorted(err.missing)) if err.missing else "—"
-                            await context.bot.send_message(
-                                chat_id=query.message.chat.id,
-                                text=(
-                                    "⚠️ Шаблон не готов к отправке.\n"
-                                    f"Файл: {err.path}\n"
-                                    f"Не заполнены: {missing}\n\n"
-                                    "Подставь значения или создай рядом файл с текстом письма:\n"
-                                    "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{{BODY}}."
-                                ),
-                            )
-                            try:
-                                imap.logout()
-                            except Exception:
-                                pass
-                            return
-                        except Exception as e:
-                            error_details.append(str(e))
-                            code, msg = None, None
-                            if (
-                                hasattr(e, "recipients")
-                                and isinstance(e.recipients, dict)
-                                and email_addr in e.recipients
-                            ):
-                                code, msg = (
-                                    e.recipients[email_addr][0],
-                                    e.recipients[email_addr][1],
-                                )
-                            elif hasattr(e, "smtp_code"):
-                                code = getattr(e, "smtp_code", None)
-                                msg = getattr(e, "smtp_error", None)
-                            add_bounce(email_addr, code, str(msg or e), phase="send")
-                            log_sent_email(
-                                email_addr,
-                                group_code,
-                                "error",
-                                chat_id,
-                                template_path,
-                                str(e),
-                            )
-                break  # успешно отработали без коннект-ошибок
-            except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as e:
-                attempt += 1
-                if attempt >= retries:
-                    raise
-                await asyncio.sleep(backoff)
-                backoff *= 2
+        initial_count = len(to_send)
+        with PerfTimer("sending_manual", extra={"count": initial_count}):
+            while True:
+                try:
+                    with SmtpClient(
+                        host,
+                        port,
+                        messaging.EMAIL_ADDRESS,
+                        messaging.EMAIL_PASSWORD,
+                        use_ssl=use_ssl,
+                    ) as client:
+                        def on_duplicate(email_addr: str) -> None:
+                            duplicates.append(email_addr)
+                            error_details.append("пропущено (дубль за 24 ч)")
+
+                        def on_cooldown(email_addr: str) -> None:
+                            error_details.append("пропущено (кулдаун 180 дней)")
+
+                        def on_blocked(email_addr: str) -> None:
+                            error_details.append("пропущено (блок-лист)")
+
+                        def on_unknown(email_addr: str) -> None:
+                            error_details.append("ошибка отправки")
+
+                        def on_error(
+                            email_addr: str,
+                            exc: Exception,
+                            code: Optional[int],
+                            msg: Optional[str],
+                        ) -> None:
+                            error_details.append(str(exc))
+                            add_bounce(email_addr, code, str(msg or exc), phase="send")
+
+                        sent_now, aborted_now = await run_smtp_send(
+                            client,
+                            to_send,
+                            template_path=template_path,
+                            group_code=group_code,
+                            imap=imap,
+                            sent_folder=sent_folder,
+                            chat_id=chat_id,
+                            sleep_between=1.5,
+                            cancel_event=cancel_event,
+                            should_stop_cb=should_stop,
+                            on_duplicate=on_duplicate,
+                            on_cooldown=on_cooldown,
+                            on_blocked=on_blocked,
+                            on_error=on_error,
+                            on_unknown=on_unknown,
+                        )
+                        sent_count += sent_now
+                        aborted = aborted or aborted_now
+                    break  # успешно отработали без коннект-ошибок
+                except messaging.TemplateRenderError as err:
+                    missing = ", ".join(sorted(err.missing)) if err.missing else "—"
+                    await context.bot.send_message(
+                        chat_id=query.message.chat.id,
+                        text=(
+                            "⚠️ Шаблон не готов к отправке.\n"
+                            f"Файл: {err.path}\n"
+                            f"Не заполнены: {missing}\n\n"
+                            "Подставь значения или создай рядом файл с текстом письма:\n"
+                            "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{BODY}."
+                        ),
+                    )
+                    try:
+                        imap.logout()
+                    except Exception:
+                        pass
+                    return
+                except (smtplib.SMTPServerDisconnected, TimeoutError, OSError):
+                    attempt += 1
+                    if attempt >= retries:
+                        raise
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
         imap.logout()
         if aborted:
             await query.message.reply_text(
@@ -3631,135 +3612,137 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             summary = format_error_details(error_details)
             if summary:
                 await query.message.reply_text(summary)
-
+    
         context.user_data["manual_emails"] = []
         clear_recent_sent_cache()
         disable_force_send(chat_id)
-
-    clear_stop()
-    messaging.create_task_with_logging(
-        long_job(),
-        query.message.reply_text,
-        task_name="manual_mass_send",
-    )
-
-
-async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send all prepared e-mails respecting limits."""
-
-    query = update.callback_query
-    chat_id = query.message.chat.id
-    saved = mass_state.load_chat_state(chat_id)
-    if saved and saved.get("pending"):
-        emails = saved.get("pending", [])
-        group_code = saved.get("group")
-        template_path = saved.get("template")
-    else:
-        state = get_state(context)
-        emails = state.to_send
-        group_code = state.group
-        template_path = state.template
-    if not emails or not group_code or not template_path:
-        await query.answer("Нет данных для отправки", show_alert=True)
-        return
-    await query.answer()
-    await query.message.reply_text("Запущено — выполняю в фоне...")
-
-    async def long_job() -> None:
-        await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, sync_log_with_imap)
-        clear_recent_sent_cache()
-
-        lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
-        blocked = get_blocked_emails()
-        sent_today = get_sent_today()
-
-        planned_total = len(emails)
-        try:
-            planned_unique = len({normalize_email(e) for e in emails if e})
-        except Exception:
-            planned_unique = len({(e or "").strip().lower() for e in emails if e})
-
-        saved_state = mass_state.load_chat_state(chat_id)
-        duplicates: List[str]
-        batch_duplicates: List[str]
-        if saved_state and saved_state.get("pending"):
-            blocked_foreign = list(saved_state.get("blocked_foreign", []))
-            blocked_invalid = list(saved_state.get("blocked_invalid", []))
-            skipped_recent = list(saved_state.get("skipped_recent", []))
-            sent_ok = list(saved_state.get("sent_ok", []))
-            to_send = list(saved_state.get("pending", []))
-            duplicates = list(saved_state.get("skipped_duplicates", []))
-            batch_duplicates = []
+    
+        clear_stop()
+        messaging.create_task_with_logging(
+            long_job(),
+            query.message.reply_text,
+            task_name="manual_mass_send",
+        )
+    
+    
+    async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send all prepared e-mails respecting limits."""
+    
+        query = update.callback_query
+        chat_id = query.message.chat.id
+        saved = mass_state.load_chat_state(chat_id)
+        if saved and saved.get("pending"):
+            emails = saved.get("pending", [])
+            group_code = saved.get("group")
+            template_path = saved.get("template")
         else:
-            blocked_foreign = []
-            blocked_invalid = []
-            skipped_recent = []
-            to_send = []
-            sent_ok = []
-            duplicates = []
-            batch_duplicates = []
-
-            initial = [e for e in emails if e not in blocked and e not in sent_today]
-            for e in initial:
-                if is_foreign(e):
-                    blocked_foreign.append(e)
+            state = get_state(context)
+            emails = state.to_send
+            group_code = state.group
+            template_path = state.template
+        if not emails or not group_code or not template_path:
+            await query.answer("Нет данных для отправки", show_alert=True)
+            return
+        await query.answer()
+        await query.message.reply_text("Запущено — выполняю в фоне...")
+    
+        async def long_job() -> None:
+            await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
+            with PerfTimer("imap_sync_bulk"):
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, sync_log_with_imap)
+                clear_recent_sent_cache()
+    
+            with PerfTimer("filtering_bulk"):
+                lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+                blocked = get_blocked_emails()
+                sent_today = get_sent_today()
+        
+                planned_total = len(emails)
+                try:
+                    planned_unique = len({normalize_email(e) for e in emails if e})
+                except Exception:
+                    planned_unique = len({(e or "").strip().lower() for e in emails if e})
+        
+                saved_state = mass_state.load_chat_state(chat_id)
+                duplicates: List[str]
+                batch_duplicates: List[str]
+                if saved_state and saved_state.get("pending"):
+                    blocked_foreign = list(saved_state.get("blocked_foreign", []))
+                    blocked_invalid = list(saved_state.get("blocked_invalid", []))
+                    skipped_recent = list(saved_state.get("skipped_recent", []))
+                    sent_ok = list(saved_state.get("sent_ok", []))
+                    to_send = list(saved_state.get("pending", []))
+                    duplicates = list(saved_state.get("skipped_duplicates", []))
+                    batch_duplicates = []
                 else:
-                    to_send.append(e)
-
-            queue: List[str] = []
-            for e in to_send:
-                if is_suppressed(e):
-                    blocked_invalid.append(e)
-                else:
-                    queue.append(e)
-
-            to_send = []
-            ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
-            for e in queue:
-                if not ignore_cooldown and was_emailed_recently(e, lookup_days):
-                    skipped_recent.append(e)
-                else:
-                    to_send.append(e)
-
-            deduped: List[str] = []
-            seen_norm: Set[str] = set()
-            for e in to_send:
-                norm = normalize_email(e)
-                if norm in seen_norm:
-                    batch_duplicates.append(e)
-                    duplicates.append(e)
-                else:
-                    seen_norm.add(norm)
-                    deduped.append(e)
-            to_send = deduped
-
-            log_mass_filter_digest(
-                {
-                    "input_total": len(emails),
-                    "after_suppress": len(queue),
-                    "foreign_blocked": len(blocked_foreign),
-                    "after_180d": len(to_send),
-                    "sent_planned": len(to_send),
-                    "skipped_by_dup_in_batch": len(batch_duplicates),
-                }
-            )
-
-            mass_state.save_chat_state(
-                chat_id,
-                {
-                    "group": group_code,
-                    "template": template_path,
-                    "pending": to_send,
-                    "sent_ok": sent_ok,
-                    "blocked_foreign": blocked_foreign,
-                    "blocked_invalid": blocked_invalid,
-                    "skipped_recent": skipped_recent,
-                    "skipped_duplicates": duplicates,
-                },
-            )
-
+                    blocked_foreign = []
+                    blocked_invalid = []
+                    skipped_recent = []
+                    to_send = []
+                    sent_ok = []
+                    duplicates = []
+                    batch_duplicates = []
+        
+                    initial = [e for e in emails if e not in blocked and e not in sent_today]
+                    for e in initial:
+                        if is_foreign(e):
+                            blocked_foreign.append(e)
+                        else:
+                            to_send.append(e)
+        
+                    queue: List[str] = []
+                    for e in to_send:
+                        if is_suppressed(e):
+                            blocked_invalid.append(e)
+                        else:
+                            queue.append(e)
+        
+                    to_send = []
+                    ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
+                    for e in queue:
+                        if not ignore_cooldown and was_emailed_recently(e, lookup_days):
+                            skipped_recent.append(e)
+                        else:
+                            to_send.append(e)
+        
+                    deduped: List[str] = []
+                    seen_norm: Set[str] = set()
+                    for e in to_send:
+                        norm = normalize_email(e)
+                        if norm in seen_norm:
+                            batch_duplicates.append(e)
+                            duplicates.append(e)
+                        else:
+                            seen_norm.add(norm)
+                            deduped.append(e)
+                    to_send = deduped
+        
+                    log_mass_filter_digest(
+                        {
+                            "input_total": len(emails),
+                            "after_suppress": len(queue),
+                            "foreign_blocked": len(blocked_foreign),
+                            "after_180d": len(to_send),
+                            "sent_planned": len(to_send),
+                            "skipped_by_dup_in_batch": len(batch_duplicates),
+                        }
+                    )
+        
+                    mass_state.save_chat_state(
+                        chat_id,
+                        {
+                            "group": group_code,
+                            "template": template_path,
+                            "pending": to_send,
+                            "sent_ok": sent_ok,
+                            "blocked_foreign": blocked_foreign,
+                            "blocked_invalid": blocked_invalid,
+                            "skipped_recent": skipped_recent,
+                            "skipped_duplicates": duplicates,
+                        },
+                    )
+        
         limited_from: int | None = None
 
         if not to_send:
@@ -3830,53 +3813,82 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         error_details: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
         aborted = False
-        with SmtpClient(
-            "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
-        ) as client:
-            while to_send:
-                if should_stop():
-                    aborted = True
-                    break
-                if cancel_event and cancel_event.is_set():
-                    aborted = True
-                    break
-                email_addr = to_send.pop(0)
-                try:
-                    outcome, token, log_key, content_hash = send_email_with_sessions(
-                        client,
-                        imap,
-                        sent_folder,
-                        email_addr,
-                        template_path,
-                        subject=messaging.DEFAULT_SUBJECT,
+        initial_count = len(to_send)
+        with PerfTimer("sending_bulk", extra={"count": initial_count}):
+            with SmtpClient(
+                "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
+            ) as client:
+                def on_sent(
+                    email_addr: str,
+                    token: str,
+                    log_key: str | None,
+                    content_hash: str | None,
+                ) -> None:
+                    sent_ok.append(email_addr)
+
+                def on_duplicate(email_addr: str) -> None:
+                    duplicates.append(email_addr)
+                    error_details.append("пропущено (дубль за 24 ч)")
+
+                def on_cooldown(email_addr: str) -> None:
+                    error_details.append("пропущено (кулдаун 180 дней)")
+                    if email_addr not in skipped_recent:
+                        skipped_recent.append(email_addr)
+
+                def on_blocked(email_addr: str) -> None:
+                    error_details.append("пропущено (блок-лист)")
+                    if email_addr not in blocked_invalid:
+                        blocked_invalid.append(email_addr)
+
+                def on_unknown(email_addr: str) -> None:
+                    error_details.append("ошибка отправки")
+
+                def on_error(
+                    email_addr: str,
+                    exc: Exception,
+                    code: Optional[int],
+                    msg: Optional[str],
+                ) -> None:
+                    error_details.append(str(exc))
+                    add_bounce(email_addr, code, str(msg or exc), phase="send")
+                    if is_hard_bounce(code, msg):
+                        suppress_add(email_addr, code, "hard bounce on send")
+
+                def after_each(email_addr: str) -> None:
+                    mass_state.save_chat_state(
+                        chat_id,
+                        {
+                            "group": group_code,
+                            "template": template_path,
+                            "pending": to_send,
+                            "sent_ok": sent_ok,
+                            "blocked_foreign": blocked_foreign,
+                            "blocked_invalid": blocked_invalid,
+                            "skipped_recent": skipped_recent,
+                            "skipped_duplicates": duplicates,
+                        },
                     )
-                    if outcome == messaging.SendOutcome.SENT:
-                        log_sent_email(
-                            email_addr,
-                            group_code,
-                            "ok",
-                            chat_id,
-                            template_path,
-                            unsubscribe_token=token,
-                            key=log_key,
-                            subject=messaging.DEFAULT_SUBJECT,
-                            content_hash=content_hash,
-                        )
-                        sent_ok.append(email_addr)
-                        await asyncio.sleep(1.5)
-                    elif outcome == messaging.SendOutcome.DUPLICATE:
-                        duplicates.append(email_addr)
-                        error_details.append("пропущено (дубль за 24 ч)")
-                    elif outcome == messaging.SendOutcome.COOLDOWN:
-                        error_details.append("пропущено (кулдаун 180 дней)")
-                        if email_addr not in skipped_recent:
-                            skipped_recent.append(email_addr)
-                    elif outcome == messaging.SendOutcome.BLOCKED:
-                        error_details.append("пропущено (блок-лист)")
-                        if email_addr not in blocked_invalid:
-                            blocked_invalid.append(email_addr)
-                    else:
-                        error_details.append("ошибка отправки")
+
+                try:
+                    sent_now, aborted_now = await run_smtp_send(
+                        client,
+                        to_send,
+                        template_path=template_path,
+                        group_code=group_code,
+                        imap=imap,
+                        sent_folder=sent_folder,
+                        chat_id=chat_id,
+                        sleep_between=1.5,
+                        cancel_event=cancel_event,
+                        should_stop_cb=should_stop,
+                        on_sent=on_sent,
+                        on_duplicate=on_duplicate,
+                        on_cooldown=on_cooldown,
+                        on_blocked=on_blocked,
+                        on_error=on_error,
+                        on_unknown=on_unknown,
+                        after_each=after_each,
+                    )
                 except messaging.TemplateRenderError as err:
                     missing = ", ".join(sorted(err.missing)) if err.missing else "—"
                     await context.bot.send_message(
@@ -3886,7 +3898,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"Файл: {err.path}\n"
                             f"Не заполнены: {missing}\n\n"
                             "Подставь значения или создай рядом файл с текстом письма:\n"
-                            "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{{BODY}}."
+                            "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{BODY}."
                         ),
                     )
                     try:
@@ -3894,41 +3906,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception:
                         pass
                     return
-                except Exception as e:
-                    error_details.append(str(e))
-                    code, msg = None, None
-                    if (
-                        hasattr(e, "recipients")
-                        and isinstance(e.recipients, dict)
-                        and email_addr in e.recipients
-                    ):
-                        code, msg = (
-                            e.recipients[email_addr][0],
-                            e.recipients[email_addr][1],
-                        )
-                    elif hasattr(e, "smtp_code"):
-                        code = getattr(e, "smtp_code", None)
-                        msg = getattr(e, "smtp_error", None)
-                    add_bounce(email_addr, code, str(msg or e), phase="send")
-                    if is_hard_bounce(code, msg):
-                        suppress_add(email_addr, code, "hard bounce on send")
-                    log_sent_email(
-                        email_addr, group_code, "error", chat_id, template_path, str(e)
-                    )
-                mass_state.save_chat_state(
-                    chat_id,
-                    {
-                        "group": group_code,
-                        "template": template_path,
-                        "pending": to_send,
-                        "sent_ok": sent_ok,
-                        "blocked_foreign": blocked_foreign,
-                        "blocked_invalid": blocked_invalid,
-                        "skipped_recent": skipped_recent,
-                        "skipped_duplicates": duplicates,
-                    },
-                )
-        imap.logout()
+                aborted = aborted or aborted_now
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
