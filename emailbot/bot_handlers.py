@@ -2807,6 +2807,8 @@ async def _send_batch_with_sessions(
     """Send e-mails using the resilient session-aware pipeline."""
 
     chat_id = query.message.chat.id
+    ignore_180d = bool(context.user_data.get("ignore_180d"))
+    status_text = "ВКЛ" if ignore_180d else "ВЫКЛ"
     to_send = list(dict.fromkeys(recipients))
     if not to_send:
         await query.message.reply_text(
@@ -2839,7 +2841,10 @@ async def _send_batch_with_sessions(
         )
 
     await query.message.reply_text(
-        f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+        (
+            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем...\n"
+            f"Правило 180 дней: {status_text}."
+        )
     )
 
     try:
@@ -2892,6 +2897,7 @@ async def _send_batch_with_sessions(
                             email_addr,
                             template_path,
                             subject=messaging.DEFAULT_SUBJECT,
+                            override_180d=ignore_180d,
                         )
                         if outcome == messaging.SendOutcome.SENT:
                             log_sent_email(
@@ -3014,8 +3020,12 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.chat_data["manual_group"] = group_code
 
+    ignore_180d = bool(context.user_data.get("ignore_180d"))
+    lookup_override = 0 if ignore_180d else None
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(list(emails))
+        messaging.prepare_mass_mailing(
+            list(emails), lookup_days_override=lookup_override
+        )
     )
     if digest.get("error"):
         logger.error(

@@ -1126,6 +1126,8 @@ def prepare_mass_mailing(
     emails: list[str],
     group: str | None = None,
     chat_id: int | None = None,
+    *,
+    lookup_days_override: int | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], dict[str, object]]:
     """Filter ``emails`` for manual/preview sends.
 
@@ -1177,11 +1179,18 @@ def prepare_mass_mailing(
                 logger.warning("foreign check failed for %s: %s", addr, exc)
             queue_after_foreign.append(addr)
 
-        raw_lookback = os.getenv("HALF_YEAR_DAYS", os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+        raw_lookback = os.getenv(
+            "HALF_YEAR_DAYS", os.getenv("EMAIL_LOOKBACK_DAYS", "180")
+        )
         try:
             lookback_days = int(raw_lookback)
         except (TypeError, ValueError):
             lookback_days = 180
+        if lookup_days_override is not None:
+            try:
+                lookback_days = int(lookup_days_override)
+            except (TypeError, ValueError):
+                lookback_days = 0
         if lookback_days < 0:
             lookback_days = 0
         recent = _load_recent_sent(lookback_days)
