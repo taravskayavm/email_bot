@@ -1699,7 +1699,7 @@ async def _send_combined_parse_response(
         f"{report}\n\n"
         "Дальнейшие действия:\n"
         "• Выберите направление рассылки\n"
-        "• Или отправьте правки одним сообщением в формате «старый -> новый»\n"
+        "• Или отправьте правки: «старый -> новый» и/или адреса для удаления\n"
         "• Excel-файл прикреплён к сообщению автоматически\n"
     )
 
@@ -1972,7 +1972,7 @@ async def bulk_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not ENABLE_INLINE_EMAIL_EDITOR:
         await query.message.reply_text(
             "Редактор в чате отключён. Используйте:\n"
-            "• ✏️ Отправить правки текстом (в одном сообщении: «старый -> новый» на строку)\n"
+            "• ✏️ Отправить правки текстом (замены «старый -> новый» и адреса для удаления)\n"
         )
         return
 
@@ -2171,17 +2171,19 @@ def _audit_append_correction(
         )
 
 
-def _parse_corrections(text: str) -> list[tuple[str, str]]:
-    """Parse pairs of corrections from free-form text."""
+def _parse_corrections(text: str) -> tuple[list[tuple[str, str]], set[str]]:
+    """Parse replacements and deletions from free-form text edits."""
 
     if not text:
-        return []
+        return [], set()
 
     cleaned = text.replace("→", "->").replace("=>", "->")
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     pairs: list[tuple[str, str]] = []
+    to_delete: set[str] = set()
 
     for line in lines:
+        # try different syntaxes for replacements first
         if "->" in line:
             parts = [part.strip() for part in line.split("->") if part.strip()]
             if len(parts) >= 2:
@@ -2207,7 +2209,8 @@ def _parse_corrections(text: str) -> list[tuple[str, str]]:
                 second = parts[idx + 1]
                 if first and second:
                     pairs.append((first, second))
-            continue
+            if len(parts) >= 2:
+                continue
 
         tokens = line.split()
         if len(tokens) >= 2:
@@ -2215,8 +2218,19 @@ def _parse_corrections(text: str) -> list[tuple[str, str]]:
             new = " ".join(tokens[1:]).strip()
             if old and new:
                 pairs.append((old, new))
+                continue
 
-    return pairs
+        # no replacement detected — treat as deletion request
+        for email in _extract_emails_loose(line):
+            to_delete.add(email)
+
+    # also extract emails from the whole text to catch space/comma separated lists
+    all_emails = set(_extract_emails_loose(cleaned))
+    old_emails = {old for old, _ in pairs}
+    new_emails = {new for _, new in pairs}
+    to_delete |= all_emails - old_emails - new_emails
+
+    return pairs, to_delete
 
 
 async def bulk_txt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2238,8 +2252,9 @@ async def bulk_txt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data["awaiting_corrections_text"] = True
     await query.message.reply_text(
-        "Режим правок включён. Пришлите одним сообщением пары «старый -> новый». "
-        "Несколько пар можно прислать в одном сообщении, по одной паре на строку."
+        "Режим правок включён. Пришлите одним сообщением адреса и/или замены.\n"
+        "• Замены: формат «старый -> новый», по одной паре в строке.\n"
+        "• Удаление: просто перечислите адреса (через пробелы, запятые или переносы)."
     )
 
 
@@ -2256,9 +2271,11 @@ async def corrections_text_handler(
         return
 
     text = (message.text or "").strip()
-    pairs = _parse_corrections(text)
-    if not pairs:
-        await message.reply_text("Не распознаны пары. Используйте формат: old -> new")
+    pairs, to_delete_raw = _parse_corrections(text)
+    if not pairs and not to_delete_raw:
+        await message.reply_text(
+            "Не распознаны правки. Используйте формат «старый -> новый» или перечислите адреса."
+        )
         return
 
     raw_last = context.user_data.get("last_parsed_emails") or []
@@ -2269,8 +2286,11 @@ async def corrections_text_handler(
     last_set = set(last_parsed)
 
     accepted_new: list[str] = []
-    removed = 0
+    removed_by_replace = 0
+    removed_direct = 0
     invalid_rows: list[tuple[str, str]] = []
+    invalid_deletions: list[str] = []
+    missing_deletions: list[str] = []
 
     user_id = update.effective_user.id if update.effective_user else 0
 
@@ -2289,7 +2309,7 @@ async def corrections_text_handler(
             try:
                 last_parsed.remove(old_clean)
                 last_set.remove(old_clean)
-                removed += 1
+                removed_by_replace += 1
             except ValueError:
                 pass
 
@@ -2301,6 +2321,22 @@ async def corrections_text_handler(
             new_clean,
             "mapped" if old_clean else "added",
         )
+
+    if to_delete_raw:
+        for raw_email in sorted(to_delete_raw):
+            clean_email, _ = sanitize_email(raw_email)
+            if not clean_email:
+                invalid_deletions.append(raw_email)
+                continue
+            if clean_email in last_set:
+                try:
+                    last_parsed.remove(clean_email)
+                    last_set.remove(clean_email)
+                    removed_direct += 1
+                except ValueError:
+                    pass
+            else:
+                missing_deletions.append(raw_email)
 
     final = sorted(set(last_parsed) | set(accepted_new))
 
@@ -2316,17 +2352,35 @@ async def corrections_text_handler(
     state.foreign = []
     state.blocked_after_parse = count_blocked(state.to_send)
 
+    total_removed = removed_by_replace + removed_direct
     summary_lines = [
-        f"Обработано пар: {len(pairs)}",
-        f"Добавлено новых адресов: {len(set(accepted_new))}",
-        f"Удалено старых адресов: {removed}",
-        f"Итоговый размер списка: {len(final)}",
+        f"🔁 Замен: {len(pairs)}",
+        f"➕ Добавлено новых адресов: {len(set(accepted_new))}",
+        f"🗑 Удалено адресов: {total_removed}",
+        f"📦 Итоговый размер списка: {len(final)}",
     ]
+
+    if to_delete_raw:
+        summary_lines.append(
+            f"   • Запрошено к удалению: {len(to_delete_raw)}, удалено: {removed_direct}"
+        )
 
     if invalid_rows:
         sample = ", ".join(f"{old}->{new}" for old, new in invalid_rows[:6])
         summary_lines.append(
             f"Невалидных пар: {len(invalid_rows)}. Примеры: {sample}"
+        )
+
+    if invalid_deletions:
+        sample = ", ".join(invalid_deletions[:6])
+        summary_lines.append(
+            f"Невалидных адресов для удаления: {len(invalid_deletions)}. Примеры: {sample}"
+        )
+
+    if missing_deletions:
+        sample = ", ".join(missing_deletions[:6])
+        summary_lines.append(
+            f"Не найдено в текущем списке: {len(missing_deletions)}. Примеры: {sample}"
         )
 
     await message.reply_text("\n".join(summary_lines))
