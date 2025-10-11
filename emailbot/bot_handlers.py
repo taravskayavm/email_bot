@@ -1718,12 +1718,6 @@ async def _send_combined_parse_response(
             caption=caption,
             reply_markup=markup,
         )
-    await _send_direction_prompt(
-        message,
-        context,
-        selected=getattr(state, "group", None),
-        prefix="dir:",
-    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1950,6 +1944,20 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Switch to the mailing group selection step."""
 
     query = update.callback_query
+    await query.answer()
+    state = context.chat_data.get(SESSION_KEY)
+    selected = getattr(state, "group", None) if state else None
+    await _send_direction_prompt(query.message, context, selected=selected)
+
+
+async def open_dirs_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Display the direction selection menu from an inline button."""
+
+    query = update.callback_query
+    if not query:
+        return
     await query.answer()
     state = context.chat_data.get(SESSION_KEY)
     selected = getattr(state, "group", None) if state else None
@@ -3911,6 +3919,7 @@ __all__ = [
     "handle_drop",
     "refresh_preview",
     "proceed_to_group",
+    "open_dirs_callback",
     "select_group",
     "prompt_manual_email",
     "manual_input_router",

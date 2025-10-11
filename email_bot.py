@@ -262,6 +262,9 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(bot_handlers.proceed_to_group, pattern="^proceed_group$")
     )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.open_dirs_callback, pattern="^open_dirs$")
+    )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
     app.add_handler(
