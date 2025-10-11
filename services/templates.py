@@ -90,26 +90,75 @@ def _iter_template_files(base: Path) -> Iterable[Path]:
     return files
 
 
+def _resolve_template_path(base: Path, slug: str, exts: Iterable[str]) -> Path | None:
+    """Return the first matching template path for ``slug`` within ``base``."""
+
+    slug = (slug or "").strip()
+    if not slug:
+        return None
+
+    base = base.resolve()
+    slug_path = Path(slug)
+    candidates: list[Path] = []
+
+    if slug_path.is_absolute():
+        root = slug_path
+    else:
+        root = base / slug_path
+
+    if root.suffix:
+        candidates.append(root)
+    else:
+        for ext in exts:
+            candidates.append(root.with_suffix(ext))
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def list_templates() -> list[dict[str, Any]]:
     base = _base_dir()
     labels = _load_labels(base)
+    exts = _allowed_exts()
     templates: list[dict[str, Any]] = []
-    for file_path in _iter_template_files(base):
-        code = file_path.stem
-        label_entry = labels.get(code)
-        extra: Dict[str, Any]
-        if isinstance(label_entry, dict):
-            label = str(label_entry.get("label") or _humanize(code))
-            extra = {k: v for k, v in label_entry.items() if k != "label"}
-        elif isinstance(label_entry, str):
-            label = label_entry
+
+    for slug, meta in labels.items():
+        slug_str = str(slug or "").strip()
+        if not slug_str:
+            continue
+
+        path = _resolve_template_path(base, slug_str, exts)
+        if path is None:
+            continue
+
+        if isinstance(meta, dict):
+            label = str(
+                meta.get("label")
+                or meta.get("title")
+                or _humanize(Path(slug_str).stem)
+            )
+            extra = {
+                k: v
+                for k, v in meta.items()
+                if k not in {"label", "title"}
+            }
+        elif isinstance(meta, str):
+            label = meta
             extra = {}
         else:
-            label = _humanize(code)
+            label = _humanize(Path(slug_str).stem)
             extra = {}
-        tpl: Dict[str, Any] = {"code": code, "label": label, "path": str(file_path)}
+
+        tpl: Dict[str, Any] = {
+            "code": slug_str,
+            "label": label,
+            "path": str(path),
+        }
         tpl.update(extra)
         templates.append(tpl)
+
     return sorted(templates, key=lambda x: x.get("label", ""))
 
 

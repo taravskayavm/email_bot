@@ -1669,6 +1669,29 @@ def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
     return path
 
 
+def _after_parse_extra_rows(state: SessionState | None) -> list[list[InlineKeyboardButton]]:
+    """Return additional action rows based on parsing ``state``."""
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if state and getattr(state, "repairs", None):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🧩 Применить исправления ({len(state.repairs)})",
+                    callback_data="apply_repairs",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🧩 Показать все исправления", callback_data="show_repairs"
+                )
+            ]
+        )
+    return rows
+
+
 async def _send_combined_parse_response(
     message: Message, context: ContextTypes.DEFAULT_TYPE, report: str, state: SessionState
 ) -> None:
@@ -1677,23 +1700,7 @@ async def _send_combined_parse_response(
         for sample in state.repairs_sample:
             report += f"\n{sample}"
 
-    extra_rows: list[list[InlineKeyboardButton]] = []
-    if state.repairs:
-        extra_rows.append(
-            [
-                InlineKeyboardButton(
-                    f"🧩 Применить исправления ({len(state.repairs)})",
-                    callback_data="apply_repairs",
-                )
-            ]
-        )
-        extra_rows.append(
-            [
-                InlineKeyboardButton(
-                    "🧩 Показать все исправления", callback_data="show_repairs"
-                )
-            ]
-        )
+    extra_rows = _after_parse_extra_rows(state)
 
     caption = (
         f"{report}\n\n"
@@ -1710,7 +1717,11 @@ async def _send_combined_parse_response(
 
     user = getattr(message, "from_user", None)
     is_admin = bool(user and user.id in ADMIN_IDS)
-    markup = build_after_parse_combined_kb(extra_rows=extra_rows, is_admin=is_admin)
+    markup = build_after_parse_combined_kb(
+        extra_rows=extra_rows,
+        is_admin=is_admin,
+        ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+    )
     with xlsx_path.open("rb") as fh:
         await message.reply_document(
             document=fh,
@@ -1948,6 +1959,42 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     state = context.chat_data.get(SESSION_KEY)
     selected = getattr(state, "group", None) if state else None
     await _send_direction_prompt(query.message, context, selected=selected)
+
+
+async def toggle_ignore_180(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Toggle the 180-day cooldown bypass for manual sends."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    current = bool(context.user_data.get("ignore_cooldown"))
+    context.user_data["ignore_cooldown"] = not current
+
+    state = context.chat_data.get(SESSION_KEY)
+    extra_rows = _after_parse_extra_rows(state)
+    user = getattr(query, "from_user", None)
+    is_admin = bool(user and user.id in ADMIN_IDS)
+    markup = build_after_parse_combined_kb(
+        extra_rows=extra_rows,
+        is_admin=is_admin,
+        ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+    )
+    try:
+        await query.edit_message_reply_markup(reply_markup=markup)
+    except BadRequest:
+        pass
+
+    status = "включён" if context.user_data.get("ignore_cooldown") else "выключен"
+    try:
+        await query.answer(f"Режим «Игнорировать 180 дней»: {status}")
+    except BadRequest:
+        # Fallback to posting a message if answering fails
+        await query.message.reply_text(
+            f"Режим «Игнорировать 180 дней (ручная)» теперь {status}."
+        )
 
 
 async def open_dirs_callback(
@@ -3641,8 +3688,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     queue.append(e)
 
             to_send = []
+            ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
             for e in queue:
-                if was_sent_within(e, days=lookup_days):
+                if not ignore_cooldown and was_sent_within(e, days=lookup_days):
                     skipped_recent.append(e)
                 else:
                     to_send.append(e)
@@ -3974,6 +4022,7 @@ __all__ = [
     "refresh_preview",
     "proceed_to_group",
     "open_dirs_callback",
+    "toggle_ignore_180",
     "select_group",
     "prompt_manual_email",
     "manual_input_router",
