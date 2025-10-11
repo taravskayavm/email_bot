@@ -502,6 +502,119 @@ def test_manual_input_keyboard_has_toggle():
     assert any("Игнорировать 180 дней" in text for text in labels)
 
 
+def test_manual_select_group_respects_ignore_toggle(monkeypatch, tmp_path):
+    update = DummyUpdate(callback_data="manual_group_demo")
+    ctx = DummyContext()
+    ctx.chat_data["manual_emails"] = ["recent@example.com"]
+    ctx.user_data["manual_emails"] = ["recent@example.com"]
+    ctx.user_data["ignore_180d"] = True
+
+    recorded: dict[str, object] = {}
+
+    def fake_prepare(
+        emails, group=None, chat_id=None, *, lookup_days_override=None
+    ):
+        recorded["override"] = lookup_days_override
+        return (
+            list(emails),
+            [],
+            [],
+            [],
+            {"total": len(emails), "input_total": len(emails)},
+        )
+
+    async def fake_send_batch(query, context, ready, template_path, group_code):
+        recorded["ready"] = list(ready)
+        recorded["group"] = group_code
+        recorded["template"] = template_path
+
+    template_path = tmp_path / "demo.html"
+    template_path.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing", fake_prepare)
+    monkeypatch.setitem(bh.messaging.TEMPLATE_MAP, "demo", str(template_path))
+    monkeypatch.setattr(bh, "save_last_summary", lambda chat_id, payload: None)
+    monkeypatch.setattr(bh, "_send_batch_with_sessions", fake_send_batch)
+
+    run(bh.manual_select_group(update, ctx))
+
+    assert recorded["override"] == 0
+    assert recorded["ready"] == ["recent@example.com"]
+    assert ctx.user_data.get("manual_emails") is None
+    assert ctx.chat_data.get("manual_emails") == []
+
+
+def test_send_batch_with_sessions_uses_ignore_toggle(monkeypatch):
+    update = DummyUpdate(callback_data="manual_group_demo")
+    query = update.callback_query
+    ctx = DummyContext()
+    ctx.user_data["ignore_180d"] = True
+
+    monkeypatch.setattr(bh, "get_sent_today", lambda: [])
+    monkeypatch.setattr(bh, "is_force_send", lambda chat_id: False)
+    monkeypatch.setattr(bh, "get_preferred_sent_folder", lambda imap: "Sent")
+    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
+    monkeypatch.setattr(bh, "should_stop", lambda: False)
+
+    class DummyIMAP:
+        def login(self, *a, **k):
+            return "OK", None
+
+        def select(self, *a, **k):
+            return "OK", None
+
+        def logout(self):
+            return None
+
+    monkeypatch.setattr(bh.imaplib, "IMAP4_SSL", lambda *a, **k: DummyIMAP())
+
+    class DummyClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(bh, "SmtpClient", lambda *a, **k: DummyClient())
+
+    overrides: list[bool] = []
+
+    def fake_send_email_with_sessions(
+        client,
+        imap,
+        sent_folder,
+        email_addr,
+        template_path,
+        subject=None,
+        *,
+        override_180d=False,
+    ):
+        overrides.append(override_180d)
+        return bh.messaging.SendOutcome.SENT, "token", None, None
+
+    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send_email_with_sessions)
+
+    async def fast_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(bh.asyncio, "sleep", fast_sleep)
+
+    run(
+        bh._send_batch_with_sessions(
+            query,
+            ctx,
+            ["recent@example.com"],
+            "template.html",
+            "demo",
+        )
+    )
+
+    assert overrides == [True]
+    assert any("Правило 180 дней" in text for text in query.message.replies)
+
+
 @pytest.mark.asyncio
 async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
     tpl_path = tmp_path / "tourism.html"
