@@ -2183,6 +2183,14 @@ def _parse_corrections(text: str) -> tuple[list[tuple[str, str]], set[str]]:
     to_delete: set[str] = set()
 
     for line in lines:
+        emails_in_line = _extract_emails_loose(line)
+        if emails_in_line:
+            raw_tokens = [token for token in re.split(r"[\s,;]+", line) if token]
+            if raw_tokens and all(EMAIL_ANYWHERE_RE.fullmatch(token) for token in raw_tokens):
+                for email in emails_in_line:
+                    to_delete.add(email)
+                continue
+
         # try different syntaxes for replacements first
         if "->" in line:
             parts = [part.strip() for part in line.split("->") if part.strip()]
