@@ -491,6 +491,17 @@ def test_manual_input_parsing_accepts_gmail(caplog):
     assert any("Manual input parsing" in r.message for r in caplog.records)
 
 
+def test_manual_input_keyboard_has_toggle():
+    update = DummyUpdate(text="user@example.com")
+    ctx = DummyContext()
+    ctx.user_data["awaiting_manual_email"] = True
+    run(handle_text(update, ctx))
+    markup = update.message.reply_markups[-1]
+    assert isinstance(markup, InlineKeyboardMarkup)
+    labels = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert any("Игнорировать 180 дней" in text for text in labels)
+
+
 @pytest.mark.asyncio
 async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
     tpl_path = tmp_path / "tourism.html"
@@ -510,6 +521,7 @@ async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
     update = DummyUpdate(callback_data="manual_tpl:tourism")
     ctx = DummyContext()
     ctx.chat_data["manual_all_emails"] = ["x@example.com"]
+    ctx.user_data["manual_emails"] = ["x@example.com"]
 
     monkeypatch.setattr(bh, "get_blocked_emails", lambda: {"x@example.com"})
     monkeypatch.setattr(bh, "get_sent_today", lambda: set())
@@ -539,8 +551,8 @@ async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
     await asyncio.sleep(0)
 
     text = "\n".join(update.callback_query.message.replies)
-    assert "блок" not in text
-    assert "180" not in text
+    assert "Правило 180 дней" in text
+    assert "❗ Все адреса уже есть" in text
 
 
 @pytest.mark.asyncio

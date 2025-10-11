@@ -803,7 +803,17 @@ def _group_keyboard(
 ) -> InlineKeyboardMarkup:
     """Return a simple inline keyboard for selecting a mailing group."""
 
-    return _build_group_markup(context, prefix=prefix, selected=selected)
+    markup = _build_group_markup(context, prefix=prefix, selected=selected)
+    if context and prefix.startswith("manual_group_"):
+        status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
+        toggle_button = InlineKeyboardButton(
+            f"⚠️ Игнорировать 180 дней: {status}",
+            callback_data="toggle_ignore_180d",
+        )
+        keyboard = list(markup.inline_keyboard or [])
+        keyboard.append([toggle_button])
+        markup = InlineKeyboardMarkup(keyboard)
+    return markup
 
 
 async def _send_direction_prompt(
@@ -2650,6 +2660,7 @@ async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.chat_data["manual_group"] = None
     context.user_data["awaiting_manual_email"] = True
     context.user_data.pop("manual_emails", None)
+    context.user_data["ignore_180d"] = False
     await query.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
     )
@@ -2705,13 +2716,86 @@ async def route_text_message(
     context.user_data["manual_emails"] = emails
     context.user_data["awaiting_manual_email"] = False
 
+    status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
     await message.reply_text(
-        f"Принято адресов: {len(emails)}\nТеперь выберите направление:",
+        (
+            f"Принято адресов: {len(emails)}\n"
+            "Теперь выберите направление.\n"
+            f"Правило 180 дней: {status}."
+        ),
         reply_markup=_group_keyboard(context, prefix="manual_group_"),
     )
 
     raise ApplicationHandlerStop
 
+
+async def toggle_ignore_180d(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Toggle manual send 180-day cooldown bypass."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    current = bool(context.user_data.get("ignore_180d"))
+    context.user_data["ignore_180d"] = not current
+    status = "ВКЛ" if context.user_data["ignore_180d"] else "ВЫКЛ"
+
+    manual_group = context.chat_data.get("manual_group")
+    manual_emails = (
+        context.chat_data.get("manual_emails")
+        or context.user_data.get("manual_emails")
+        or []
+    )
+
+    markup = _group_keyboard(
+        context,
+        prefix="manual_group_",
+        selected=manual_group,
+    )
+
+    message = query.message
+    updated = False
+    if message:
+        new_text: str | None = None
+        if manual_emails:
+            new_text = (
+                f"Принято адресов: {len(manual_emails)}\n"
+                "Теперь выберите направление.\n"
+                f"Правило 180 дней: {status}."
+            )
+        else:
+            text = message.text or ""
+            if "Правило 180 дней" in text:
+                prefix, _, suffix = text.partition("Правило 180 дней")
+                _, dot, tail = suffix.partition(".")
+                tail = tail.lstrip("\n") if dot else suffix.lstrip("\n")
+                new_text = f"{prefix}Правило 180 дней: {status}."
+                if tail:
+                    new_text += f"\n{tail}"
+        if new_text:
+            try:
+                await message.edit_text(new_text, reply_markup=markup)
+                updated = True
+            except BadRequest:
+                pass
+        if not updated:
+            try:
+                await query.edit_message_reply_markup(reply_markup=markup)
+                updated = True
+            except BadRequest:
+                pass
+
+    try:
+        await query.answer(f"Правило 180 дней: {status}")
+    except BadRequest:
+        if message:
+            await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
+        return
+
+    if not updated and message:
+        await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
 
 async def _send_batch_with_sessions(
     query: CallbackQuery,
@@ -3006,6 +3090,7 @@ async def prompt_manual_email(
     context.chat_data["manual_emails"] = []
     context.chat_data["manual_group"] = None
     context.chat_data["awaiting_manual_emails"] = True
+    context.user_data["ignore_180d"] = False
     await update.message.reply_text(
         (
             "Введите email или список email-адресов "
@@ -3433,7 +3518,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.message.reply_text("❗ Список email пуст.")
         return
 
-    await query.message.reply_text("Запущено — выполняю в фоне...")
+    ignore_180d = bool(context.user_data.get("ignore_180d"))
+    status_text = "ВКЛ" if ignore_180d else "ВЫКЛ"
+    await query.message.reply_text(
+        "Запущено — выполняю в фоне...\n"
+        f"Правило 180 дней: {status_text}."
+    )
 
     async def long_job() -> None:
         chat_id = query.message.chat.id
@@ -3472,6 +3562,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
         lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
+        effective_lookup = 0 if ignore_180d else lookup_days
 
         try:
             imap = imaplib.IMAP4_SSL("imap.mail.ru")
@@ -3489,7 +3580,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 emails,
                 blocked,
                 sent_today,
-                lookup_days=lookup_days,
+                lookup_days=effective_lookup,
             )
 
         if is_cancelled(chat_id):
@@ -3502,8 +3593,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         if not to_send:
+            reason = "блок-листе"
+            if not ignore_180d:
+                reason += ", истории за 6 месяцев"
+            reason += " или уже отправлены сегодня"
             await query.message.reply_text(
-                "❗ Все адреса уже есть в блок-листе, отправлены сегодня или есть в истории за 6 месяцев."
+                f"❗ Все адреса уже есть в {reason}."
             )
             context.user_data["manual_emails"] = []
             try:
@@ -3538,7 +3633,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
 
         await query.message.reply_text(
-            f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+            (
+                f"✉️ Рассылка начата. Отправляем {len(to_send)} писем...\n"
+                f"Правило 180 дней: {status_text}."
+            )
         )
 
         sent_count = 0
@@ -3605,6 +3703,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             on_blocked=on_blocked,
                             on_error=on_error,
                             on_unknown=on_unknown,
+                            override_180d=ignore_180d,
                         )
                         sent_count += sent_now
                         aborted = aborted or aborted_now
@@ -4106,6 +4205,7 @@ __all__ = [
     "manual_input_router",
     "manual_start",
     "manual_select_group",
+    "toggle_ignore_180d",
     "route_text_message",
     "handle_text",
     "ask_include_numeric",
