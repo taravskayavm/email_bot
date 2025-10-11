@@ -337,7 +337,6 @@ from .messaging_utils import (
     is_soft_bounce,
     is_suppressed,
     suppress_add,
-    was_sent_within,
     BOUNCE_LOG_PATH,
 )
 
@@ -3442,9 +3441,15 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         template_path = TEMPLATE_MAP[group_code]
 
+        await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, sync_log_with_imap)
+        clear_recent_sent_cache()
+
         # manual отправка не учитывает супресс-лист
-        get_blocked_emails()
+        blocked = get_blocked_emails()
         sent_today = get_sent_today()
+        lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
 
         try:
             imap = imaplib.IMAP4_SSL("imap.mail.ru")
@@ -3456,7 +3461,25 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        to_send = list(emails)
+        to_send: list[str] = []
+        for email_addr in emails:
+            if email_addr in blocked or email_addr in sent_today:
+                continue
+            if was_emailed_recently(email_addr, lookup_days):
+                continue
+            to_send.append(email_addr)
+
+        if not to_send:
+            await query.message.reply_text(
+                "❗ Все адреса уже есть в блок-листе, отправлены сегодня или есть в истории за 6 месяцев."
+            )
+            context.user_data["manual_emails"] = []
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            clear_recent_sent_cache()
+            return
 
         available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
         if available <= 0 and not is_force_send(chat_id):
@@ -3643,6 +3666,11 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.message.reply_text("Запущено — выполняю в фоне...")
 
     async def long_job() -> None:
+        await query.message.reply_text("🔄 Синхронизирую историю отправки (6 мес) с IMAP…")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, sync_log_with_imap)
+        clear_recent_sent_cache()
+
         lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
         blocked = get_blocked_emails()
         sent_today = get_sent_today()
@@ -3690,7 +3718,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             to_send = []
             ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
             for e in queue:
-                if not ignore_cooldown and was_sent_within(e, days=lookup_days):
+                if not ignore_cooldown and was_emailed_recently(e, lookup_days):
                     skipped_recent.append(e)
                 else:
                     to_send.append(e)
