@@ -44,7 +44,7 @@ from emailbot.reporting import log_mass_filter_digest
 from emailbot.ui.messages import format_dispatch_result, format_error_details
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
-from utils.smtp_client import RobustSMTP
+from emailbot.smtp_client import RobustSMTP
 
 import emailbot.bot_handlers as bot_handlers_module
 from .preview import (
