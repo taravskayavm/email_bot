@@ -1,9 +1,14 @@
-{
-  "bioinformatics": { "label": "Биоинформатика",       "signature": "new" },
-  "geography":      { "label": "География",            "signature": "new" },
-  "medicine":       { "label": "Медицина",             "signature": "old" },
-  "psychology":     { "label": "Психология",           "signature": "new" },
-  "sport":          { "label": "Спорт",                "signature": "old" },
-  "tourism":        { "label": "Туризм",               "signature": "old" },
-  "beauty":         { "label": "Индустрия красоты",     "signature": "new" }
+﻿{
+  "beauty": { "title": "Индустрия красоты", "signature": "old" },
+  "geography": { "title": "География", "signature": "old" },
+  "highmedicine": { "title": "Медицина ВО", "signature": "old" },
+  "medicalcybernetics": { "title": "Медицинская биохимия, биофизика и кибернетика", "signature": "old" },
+  "lowmedicine": { "title": "Медицина СПО", "signature": "old" },
+  "nursing": { "title": "Сестринское дело", "signature": "old" },
+  "pharmacy": { "title": "Фармация", "signature": "old" },
+  "preventiomed": { "title": "Медико-профилактическое дело", "signature": "old" },
+  "psychology": { "title": "Психология", "signature": "old" },
+  "sport": { "title": "Физкультура и спорт", "signature": "old" },
+  "stomatology": { "title": "Стоматология", "signature": "old" },
+  "tourism": { "title": "Туризм и гостиничное дело", "signature": "old" }
 }
