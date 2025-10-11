@@ -8,6 +8,7 @@ import email
 import hashlib
 import html
 import imaplib
+import json
 import logging
 import os
 import re
@@ -49,6 +50,8 @@ from .messaging_utils import (
 )
 from . import suppress_list
 from .run_control import register_task
+from .cancel import is_cancelled
+from .net_imap import imap_connect_ssl, get_imap_timeout
 
 _TASK_SEQ = count()
 
@@ -89,6 +92,20 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 BLOCKED_FILE = str(SCRIPT_DIR / "blocked_emails.txt")
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
+
+SYNC_STATE_PATH = str(expand_path(os.getenv("SYNC_STATE_PATH", "var/sync_state.json")))
+
+def _parse_int(value: str | None, default: int) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+EMAIL_SYNC_INTERVAL_HOURS = _parse_int(os.getenv("EMAIL_SYNC_INTERVAL_HOURS"), 24)
+EMAIL_LOOKBACK_DAYS = _parse_int(
+    os.getenv("EMAIL_LOOKBACK_DAYS", os.getenv("HALF_YEAR_DAYS")),
+    180,
+)
 
 suppress_list.init_blocked(BLOCKED_FILE)
 
@@ -216,6 +233,49 @@ def _load_recent_sent(days: int) -> set[str]:
     except Exception as exc:
         logger.warning("recent-sent load failed: %s", exc)
     return recent
+
+
+def _read_sync_state() -> dict:
+    try:
+        with open(SYNC_STATE_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_sync_state(state: dict) -> None:
+    try:
+        path = Path(SYNC_STATE_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("sync state write failed: %s", exc)
+
+
+def _need_sync_now(now: datetime) -> tuple[bool, Optional[datetime]]:
+    if EMAIL_SYNC_INTERVAL_HOURS <= 0:
+        return True, None
+    state = _read_sync_state()
+    last_iso = state.get("last_sync_iso") if isinstance(state, dict) else None
+    last_dt: Optional[datetime] = None
+    if isinstance(last_iso, str):
+        try:
+            parsed = datetime.fromisoformat(last_iso)
+            last_dt = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+        except Exception:
+            last_dt = None
+    if not last_dt:
+        return True, None
+    delta = now - last_dt
+    if delta.total_seconds() >= EMAIL_SYNC_INTERVAL_HOURS * 3600:
+        return True, last_dt
+    return False, last_dt
+
+
+def _mark_synced(now: datetime) -> None:
+    _write_sync_state({"last_sync_iso": now.isoformat()})
 
 
 def _validate_email_basic(email_value: str) -> bool:
@@ -762,7 +822,10 @@ def send_email_with_sessions(
 
 def process_unsubscribe_requests():
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        host = os.getenv("IMAP_HOST", "imap.mail.ru")
+        port = _parse_int(os.getenv("IMAP_PORT"), 993)
+        timeout = get_imap_timeout()
+        imap = imap_connect_ssl(host, port, timeout)
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         imap.select("INBOX")
         result, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
@@ -1183,17 +1246,25 @@ def prepare_mass_mailing(
         }
 
 
-def sync_log_with_imap() -> Dict[str, int]:
+def sync_log_with_imap(
+    since_dt: Optional[datetime] = None,
+    *,
+    chat_id: Optional[int] = None,
+) -> Dict[str, int]:
     imap = None
     stats = {
         "new_contacts": 0,
         "updated_contacts": 0,
         "skipped_events": 0,
         "total_rows_after": 0,
+        "cancelled": False,
     }
     ensure_sent_log_schema(LOG_FILE)
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        host = os.getenv("IMAP_HOST", "imap.mail.ru")
+        port = _parse_int(os.getenv("IMAP_PORT"), 993)
+        timeout = get_imap_timeout()
+        imap = imap_connect_ssl(host, port, timeout)
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         status, _ = imap.select(f'"{sent_folder}"')
@@ -1201,11 +1272,23 @@ def sync_log_with_imap() -> Dict[str, int]:
             logger.warning("select %s failed (%s), using Sent", sent_folder, status)
             sent_folder = "Sent"
             imap.select(f'"{sent_folder}"')
-        date_180 = (datetime.utcnow() - timedelta(days=180)).strftime("%d-%b-%Y")
-        result, data = imap.search(None, f"SINCE {date_180}")
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=max(EMAIL_LOOKBACK_DAYS, 0))
+        if since_dt:
+            if since_dt.tzinfo:
+                since_dt = since_dt.replace(tzinfo=None)
+            if since_dt > cutoff:
+                cutoff = since_dt
+        date_cutoff = cutoff.strftime("%d-%b-%Y")
+        result, data = imap.search(None, f"SINCE {date_cutoff}")
         seen_events = load_seen_events(SYNC_SEEN_EVENTS_PATH)
         changed_events = False
-        for num in data[0].split() if data and data[0] else []:
+        message_ids = data[0].split() if data and data[0] else []
+        cancelled = False
+        for num in message_ids:
+            if chat_id is not None and is_cancelled(chat_id):
+                cancelled = True
+                break
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
@@ -1224,7 +1307,7 @@ def sync_log_with_imap() -> Dict[str, int]:
                     dt = email.utils.parsedate_to_datetime(msg.get("Date"))
                     if dt and dt.tzinfo:
                         dt = dt.replace(tzinfo=None)
-                    if dt and dt < datetime.utcnow() - timedelta(days=180):
+                    if dt and dt < cutoff:
                         continue
                 except Exception:
                     dt = None
@@ -1245,6 +1328,9 @@ def sync_log_with_imap() -> Dict[str, int]:
                 if msgid:
                     seen_events.add((msgid, key))
                     changed_events = True
+        if cancelled:
+            stats["cancelled"] = True
+            return stats
         if changed_events:
             save_seen_events(SYNC_SEEN_EVENTS_PATH, seen_events)
         stats["total_rows_after"] = len(load_sent_log(Path(LOG_FILE)))
@@ -1258,6 +1344,39 @@ def sync_log_with_imap() -> Dict[str, int]:
                 imap.logout()
             except Exception as e:
                 log_error(f"sync_log_with_imap logout: {e}")
+
+
+def maybe_sync_before_send(
+    logger: Optional[logging.Logger] = None,
+    *,
+    chat_id: Optional[int] = None,
+) -> tuple[bool, int, int]:
+    """Perform IMAP sync if the cached state is stale."""
+
+    now = datetime.now()
+    need_sync, last_dt = _need_sync_now(now)
+    if not need_sync:
+        if logger:
+            logger.info(
+                "IMAP sync skipped (cached < %dh)",
+                EMAIL_SYNC_INTERVAL_HOURS,
+            )
+        return False, 0, EMAIL_LOOKBACK_DAYS
+
+    stats = sync_log_with_imap(since_dt=last_dt, chat_id=chat_id)
+    if stats.get("cancelled"):
+        if logger:
+            logger.info("IMAP sync cancelled")
+        return False, 0, EMAIL_LOOKBACK_DAYS
+
+    added = int(stats.get("new_contacts", 0)) + int(stats.get("updated_contacts", 0))
+    _mark_synced(now)
+    if logger:
+        window_label = (
+            f"since {last_dt.isoformat()}" if last_dt else f"last {EMAIL_LOOKBACK_DAYS}d"
+        )
+        logger.info("IMAP sync done: +%d, window=%s", added, window_label)
+    return True, added, EMAIL_LOOKBACK_DAYS
 
 
 def periodic_unsubscribe_check(stop_event):
@@ -1313,6 +1432,7 @@ __all__ = [
     "parse_emails_from_text",
     "prepare_mass_mailing",
     "sync_log_with_imap",
+    "maybe_sync_before_send",
     "periodic_unsubscribe_check",
     "check_env_vars",
     "was_sent_within",

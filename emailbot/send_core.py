@@ -8,6 +8,7 @@ from typing import Callable, Iterable, List, Optional, Sequence
 from . import messaging
 from .messaging import SendOutcome, log_sent_email, was_emailed_recently
 from .smtp_client import SmtpClient
+from .cancel import is_cancelled
 
 
 def build_send_list(
@@ -75,6 +76,9 @@ async def run_smtp_send(
             aborted = True
             break
         if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+            aborted = True
+            break
+        if is_cancelled(chat_id):
             aborted = True
             break
 

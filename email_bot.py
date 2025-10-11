@@ -268,6 +268,9 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(bot_handlers.toggle_ignore_180, pattern="^toggle_ignore_180$")
     )
+    app.add_handler(
+        CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$")
+    )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
     app.add_handler(
