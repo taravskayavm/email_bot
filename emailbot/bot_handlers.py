@@ -174,6 +174,7 @@ def extract_emails_loose(text):
 def extract_from_uploaded_file(path: str):
     """Return normalized and raw e-mail candidates from ``path``."""
 
+    logging.info("[FLOW] upload->text")
     hits, stats = _extraction.extract_any(path, _return_hits=True)
     stats = stats or {}
 
@@ -195,6 +196,7 @@ def extract_from_uploaded_file(path: str):
     loose_hits: set[str] = set()
     if context_chunks:
         try:
+            logging.info("[FLOW] email_regex")
             raw_candidates = _extraction.smart_extract_emails("\n".join(context_chunks))
         except Exception:
             raw_candidates = []
@@ -205,6 +207,7 @@ def extract_from_uploaded_file(path: str):
     else:
         loose_hits = set(allowed)
 
+    logging.info("[FLOW] classify")
     logger.info(
         "extraction complete",
         extra={"event": "extract", "source": path, "count": len(allowed)},
@@ -1456,6 +1459,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             file_path = await _download_file(update, DOWNLOAD_DIR)
@@ -1608,6 +1612,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ]
         )
 
+    logging.info("[FLOW] done")
     await _send_combined_parse_response(update.message, context, report, state)
 
 
