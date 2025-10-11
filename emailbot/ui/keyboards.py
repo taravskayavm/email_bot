@@ -113,6 +113,7 @@ def build_after_parse_combined_kb(
     extra_rows: Sequence[Sequence[InlineKeyboardButton]] | None = None,
     *,
     is_admin: bool = True,
+    ignore_cooldown: bool = False,
 ) -> InlineKeyboardMarkup:
     """Keyboard shown after parsing with follow-up actions."""
 
@@ -122,6 +123,15 @@ def build_after_parse_combined_kb(
             InlineKeyboardButton(
                 "🧭 Выбрать направление",
                 callback_data="open_dirs",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                (
+                    "⏱️ Игнорировать 180 дней (ручная)"
+                    + (" ✅" if ignore_cooldown else "")
+                ),
+                callback_data="toggle_ignore_180",
             )
         ],
         [
