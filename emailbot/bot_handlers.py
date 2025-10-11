@@ -62,6 +62,24 @@ URL_RE = re.compile(
     """
 )
 
+EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
+EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
+
+
+def _extract_emails_loose(text: str) -> list[str]:
+    """Return unique e-mail addresses extracted from ``text``."""
+
+    if not text:
+        return []
+    seen: set[str] = set()
+    found: list[str] = []
+    for match in EMAIL_ANYWHERE_RE.finditer(text):
+        email = match.group(0)
+        if email not in seen:
+            seen.add(email)
+            found.append(email)
+    return found
+
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -93,7 +111,7 @@ from . import extraction as _extraction
 from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .progress_watchdog import heartbeat, start_watchdog
-from .reporting import log_mass_filter_digest
+from .reporting import log_mass_filter_digest, count_blocked
 from . import settings
 from . import mass_state
 from .session_store import load_last_summary, save_last_summary
@@ -180,6 +198,59 @@ async def extract_emails_from_zip(path: str, *_, **__):
 
 def extract_emails_loose(text):
     return set(smart_extract_emails(text))
+
+
+async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove e-mail addresses from the current "to send" list."""
+
+    message = update.message
+    if not message:
+        return
+
+    state = context.chat_data.get(SESSION_KEY)
+    if not isinstance(state, SessionState) or not state.to_send:
+        await message.reply_text("Нет активного списка для редактирования.")
+        return
+
+    payload = (message.text or "")
+    if message.caption:
+        payload = f"{payload}\n{message.caption}"
+    emails_to_remove = _extract_emails_loose(payload)
+    if not emails_to_remove:
+        await message.reply_text(
+            "Не нашла адреса в сообщении. Пришлите /drop и список адресов через пробел/перенос."
+        )
+        return
+
+    drop_keys = {
+        normalize_email(email) or email.strip().lower()
+        for email in emails_to_remove
+        if email
+    }
+    if not drop_keys:
+        await message.reply_text("Не удалось распознать адреса для удаления.")
+        return
+
+    before = len(state.to_send)
+    kept: list[str] = []
+    for addr in state.to_send:
+        key = normalize_email(addr) or addr.strip().lower()
+        if key not in drop_keys:
+            kept.append(addr)
+    state.to_send = kept
+    context.user_data["last_parsed_emails"] = list(state.to_send)
+    if state.preview_allowed_all:
+        preview_kept: list[str] = []
+        for addr in state.preview_allowed_all:
+            key = normalize_email(addr) or addr.lower()
+            if key not in drop_keys:
+                preview_kept.append(addr)
+        state.preview_allowed_all = preview_kept
+    state.blocked_after_parse = count_blocked(state.to_send)
+    removed = before - len(state.to_send)
+    await message.reply_text(
+        f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}."
+    )
 
 
 def extract_from_uploaded_file(path: str):
@@ -388,6 +459,7 @@ class SessionState:
     group: Optional[str] = None
     template: Optional[str] = None
     footnote_dupes: int = 0
+    blocked_after_parse: int = 0
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -1366,6 +1438,8 @@ async def _compose_report_and_save(
     suspicious_numeric: List[str],
     foreign: List[str],
     footnote_dupes: int = 0,
+    *,
+    blocked_after_parse: int = 0,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
@@ -1374,6 +1448,7 @@ async def _compose_report_and_save(
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
+    state.blocked_after_parse = blocked_after_parse
 
     summary = format_parse_summary(
         {
@@ -1384,6 +1459,7 @@ async def _compose_report_and_save(
             "foreign_domain": len(foreign),
             "pages_skipped": 0,
             "footnote_dupes_removed": footnote_dupes,
+            "blocked_after_parse": blocked_after_parse,
         },
         examples=(),
     )
@@ -1608,6 +1684,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     foreign_total = set(state.foreign) | set(foreign)
     suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
     total_footnote = state.footnote_dupes + footnote_dupes
+    blocked_after_parse = count_blocked(state.to_send)
 
     try:
         await progress_msg.edit_text("✅ Готово. Формирую превью…")
@@ -1622,6 +1699,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         suspicious_total,
         sorted(foreign_total),
         total_footnote,
+        blocked_after_parse=blocked_after_parse,
     )
     await heartbeat()
 
@@ -1829,6 +1907,7 @@ async def bulk_edit_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         {email for email in unique if is_numeric_localpart(email)}
     )
     state.foreign = []
+    state.blocked_after_parse = count_blocked(state.to_send)
 
     context.user_data["last_parsed_emails"] = list(unique)
 
@@ -2035,6 +2114,7 @@ async def corrections_text_handler(
         {email for email in final if is_numeric_localpart(email)}
     )
     state.foreign = []
+    state.blocked_after_parse = count_blocked(state.to_send)
 
     summary_lines = [
         f"Обработано пар: {len(pairs)}",
@@ -2108,6 +2188,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         emails = list(emails)
     emails = [str(item).strip() for item in emails if str(item).strip()]
     state.to_send = emails
+    state.blocked_after_parse = count_blocked(state.to_send)
     if not emails:
         await query.answer(
             cache_time=0,
@@ -2167,6 +2248,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         }
     )
     state.to_send = ready
+    state.blocked_after_parse = count_blocked(state.to_send)
     mass_state.save_chat_state(
         chat_id,
         {
@@ -2804,6 +2886,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
             total_footnote = state.footnote_dupes + footnote_dupes
+            blocked_after_parse = count_blocked(state.to_send)
 
             report = await _compose_report_and_save(
                 context,
@@ -2812,6 +2895,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 suspicious_total,
                 sorted(foreign_total),
                 total_footnote,
+                blocked_after_parse=blocked_after_parse,
             )
             await _send_combined_parse_response(update.message, context, report, state)
             await heartbeat()
@@ -2894,8 +2978,9 @@ async def include_numeric_emails(
     await query.answer()
     current = set(state.to_send)
     added = [e for e in numeric if e not in current]
-    current.update(numeric)
-    state.to_send = sorted(current)
+   current.update(numeric)
+   state.to_send = sorted(current)
+    state.blocked_after_parse = count_blocked(state.to_send)
     await query.message.reply_text(
         (
             f"➕ Добавлено цифровых адресов: {len(added)}.\n"
@@ -2964,6 +3049,7 @@ async def apply_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 if applied <= 12:
                     changed.append(f"{bad} → {good}")
     state.to_send = sorted(current)
+    state.blocked_after_parse = count_blocked(state.to_send)
     txt = f"🧩 Применено исправлений: {applied}."
     if changed:
         txt += "\n" + "\n".join(changed)
@@ -3487,6 +3573,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
         if blocked_invalid:
             report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
+        report_text += f"\n🛑 Пропущено (стоп-лист): {len(blocked_invalid)}"
 
         await query.message.reply_text(report_text)
         if error_details:
@@ -3583,6 +3670,7 @@ __all__ = [
     "selfcheck_command",
     "dedupe_log_command",
     "handle_document",
+    "handle_drop",
     "refresh_preview",
     "proceed_to_group",
     "select_group",
