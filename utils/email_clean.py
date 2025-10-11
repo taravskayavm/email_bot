@@ -343,6 +343,17 @@ _TAIL_CUT = re.compile(
     rf"^(.+?\.(?:{_TLD_RE}))([{_TRAILING_GARBAGE_CHARS}].*)$"
 )
 
+_NOISE_SUFFIXES = (
+    "abstract",
+    "aboutauthor",
+    "обавторе",
+    "введение",
+    "заключение",
+    "орcid",
+    "orcid",
+    "рецензия",
+)
+
 _COMMON_TLDS = (
     "ru",
     "рф",
@@ -406,6 +417,24 @@ EMAIL_RE_STRICT = re.compile(
     ),
     re.VERBOSE,
 )
+
+
+def _strip_noise_tail(addr: str) -> str:
+    """Trim common glued suffixes that frequently follow e-mails in PDFs."""
+
+    match = EMAIL_RE_STRICT.search(addr)
+    if not match:
+        return addr
+    tail = addr[match.end() :]
+    if not tail:
+        return addr
+    # Treat only tails that continue immediately without whitespace.
+    if tail[0].isspace():
+        return addr
+    tail_lower = tail.lower()
+    if tail[0].isalpha() or tail_lower.startswith(_NOISE_SUFFIXES):
+        return match.group(0)
+    return addr
 
 def _trim_after_tld(addr: str) -> str:
     """
@@ -1353,7 +1382,10 @@ def sanitize_email(
     trimmed = _trim_after_tld(email)
     if trimmed != email:
         reason = reason or "trailing-garbage"
-    email = trimmed
+    trimmed_noise = _strip_noise_tail(trimmed)
+    if trimmed_noise != trimmed and reason is None:
+        reason = "trailing-garbage"
+    email = trimmed_noise
 
     email = _strip_footnotes_before_email(email)
 

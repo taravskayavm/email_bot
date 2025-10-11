@@ -21,6 +21,7 @@ def format_parse_summary(s: Mapping[str, int], examples: Iterable[str] = ()) -> 
     lines.append(f"🌍 Иностранные домены: {s.get('foreign_domain', 0)}")
     lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")
     lines.append(f"♻️ Возможные сносочные дубликаты удалены: {s.get('footnote_dupes_removed', 0)}")
+    lines.append(f"🛑 В стоп-листе (после парсинга): {s.get('blocked_after_parse', 0)}")
     lines.append("")
     return "\n".join(lines)
 
