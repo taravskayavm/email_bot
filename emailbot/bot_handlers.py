@@ -92,6 +92,7 @@ from . import messaging_utils as mu
 from . import extraction as _extraction
 from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
+from .progress_watchdog import heartbeat, start_watchdog
 from .reporting import log_mass_filter_digest
 from . import settings
 from . import mass_state
@@ -113,6 +114,14 @@ def apply_numeric_truncation_removal(allowed):
     return allowed, []
 
 
+def _watchdog_idle_seconds() -> float:
+    raw = (os.getenv("WD_IDLE_SECONDS", "") or "").strip()
+    try:
+        return float(raw) if raw else 30.0
+    except Exception:
+        return 30.0
+
+
 async def async_extract_emails_from_url(
     url: str, session, chat_id=None, batch_id: str | None = None
 ):
@@ -121,7 +130,9 @@ async def async_extract_emails_from_url(
     if batch_id is not None:
         _extraction_url.set_batch(batch_id)
 
+    await heartbeat()
     hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
+    await heartbeat()
     emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
     logger.info(
@@ -1451,18 +1462,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     clear_stop()
     job_name = _build_parse_task_name(update, "file")
     current_task = asyncio.current_task()
+    idle_seconds = _watchdog_idle_seconds()
     if current_task:
         register_task(job_name, current_task)
+        asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
 
     progress_msg = None
     file_path: str | None = None
 
     try:
+        await heartbeat()
         progress_msg = await update.message.reply_text("📥 Загружаю файл…")
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             file_path = await _download_file(update, DOWNLOAD_DIR)
+            await heartbeat()
         except Exception as e:
             try:
                 if progress_msg:
@@ -1499,6 +1514,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 allowed, extracted_files, loose, stats = await extract_emails_from_zip(
                     file_path
                 )
+                await heartbeat()
                 allowed_all.update(allowed)
                 loose_all.update(loose)
                 repairs = collect_repairs_from_files(extracted_files)
@@ -1508,6 +1524,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     extract_from_uploaded_file,
                     file_path,
                 )
+                await heartbeat()
                 allowed_all.update(allowed)
                 loose_all.update(loose)
                 if file_path:
@@ -1535,22 +1552,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         if file_path:
             try:
                 os.remove(file_path)
             except OSError:
                 pass
         notified = False
+        cancelled_text = (
+            "⛔️ Задача прервана из-за отсутствия прогресса. Лог зависания сохранён в var/hang_dump.txt"
+            if exc.args and exc.args[0] == "watchdog"
+            else "🛑 Процесс был остановлен."
+        )
         if progress_msg:
             try:
-                await progress_msg.edit_text("🛑 Процесс был остановлен.")
+                await progress_msg.edit_text(cancelled_text)
                 notified = True
             except Exception:
                 pass
         if not notified:
             try:
-                await update.message.reply_text("🛑 Процесс был остановлен.")
+                await update.message.reply_text(cancelled_text)
             except Exception:
                 pass
         return
@@ -1591,6 +1613,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_msg.edit_text("✅ Готово. Формирую превью…")
     except Exception:
         pass
+    await heartbeat()
 
     report = await _compose_report_and_save(
         context,
@@ -1600,6 +1623,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
     )
+    await heartbeat()
 
     filename = (doc.file_name or "").lower()
     if filename.endswith(".pdf"):
@@ -1614,6 +1638,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     logging.info("[FLOW] done")
     await _send_combined_parse_response(update.message, context, report, state)
+    await heartbeat()
 
 
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2721,8 +2746,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         clear_stop()
         job_name = _build_parse_task_name(update, "url")
         current_task = asyncio.current_task()
+        idle_seconds = _watchdog_idle_seconds()
         if current_task:
             register_task(job_name, current_task)
+            asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
 
         status_msg = None
         batch_id = secrets.token_hex(8)
@@ -2735,6 +2762,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _extraction_url.set_batch(batch_id)
             context.chat_data["entry_url"] = urls[0]
             status_msg = await update.message.reply_text("🌐 Загружаем страницы...")
+            await heartbeat()
             results = []
             async with lock:
                 async with aiohttp.ClientSession() as session:
@@ -2743,6 +2771,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         for url in sorted(urls)
                     ]
                     results = await asyncio.gather(*tasks)
+                    await heartbeat()
             if batch_id != context.chat_data.get("batch_id"):
                 return
             allowed_all: Set[str] = set()
@@ -2785,18 +2814,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 total_footnote,
             )
             await _send_combined_parse_response(update.message, context, report, state)
+            await heartbeat()
             return
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             notified = False
+            cancelled_text = (
+                "⛔️ Задача прервана из-за отсутствия прогресса. Лог зависания сохранён в var/hang_dump.txt"
+                if exc.args and exc.args[0] == "watchdog"
+                else "🛑 Процесс был остановлен."
+            )
             if status_msg:
                 try:
-                    await status_msg.edit_text("🛑 Процесс был остановлен.")
+                    await status_msg.edit_text(cancelled_text)
                     notified = True
                 except Exception:
                     pass
             if not notified:
                 try:
-                    await update.message.reply_text("🛑 Процесс был остановлен.")
+                    await update.message.reply_text(cancelled_text)
                 except Exception:
                     pass
             return

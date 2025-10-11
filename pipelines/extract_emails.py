@@ -523,6 +523,9 @@ async def extract_from_url_async(
     starts with one of the prefixes.
     """
 
+    if os.getenv("CRAWLER_DISABLED", "0") == "1":
+        deep = False
+
     prefixes_list: list[str] = []
     if path_prefixes:
         seen: list[str] = []

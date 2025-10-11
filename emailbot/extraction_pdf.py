@@ -41,6 +41,7 @@ from emailbot import settings
 from emailbot.settings_store import get
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
+from .progress_watchdog import heartbeat_now
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -424,6 +425,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     ocr_pages = 0
     ocr_start = time.time()
     for page_idx, page in enumerate(doc, start=1):
+        heartbeat_now()
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
