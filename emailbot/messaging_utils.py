@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 import uuid
+from threading import RLock
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -76,11 +77,14 @@ SOFT_BOUNCE_MAX_RETRIES = _parse_int(os.getenv("SOFT_BOUNCE_MAX_RETRIES"), 2)
 
 logger = logging.getLogger(__name__)
 
+_SOFT_BOUNCE_LOCK = RLock()
+
 
 def _append_jsonl(path: Path, row: dict) -> None:
     ensure_parent(path)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with _SOFT_BOUNCE_LOCK:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def prepare_recipients_for_send(
@@ -977,25 +981,28 @@ def mark_soft_bounce_success(email: str) -> None:
     """Remove pending soft-bounce retries once delivery succeeds."""
 
     key = _normalize_key(email)
-    if not key or not SOFT_BOUNCE_PATH.exists():
+    if not key:
         return
     path = SOFT_BOUNCE_PATH
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        with path.open("r", encoding="utf-8") as src, tmp.open("w", encoding="utf-8") as dst:
-            for line in src:
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    dst.write(line)
-                    continue
-                if _normalize_key(row.get("email", "")) == key and row.get("status") == "soft_bounce":
-                    continue
-                dst.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except FileNotFoundError:
-        return
-    else:
-        tmp.replace(path)
+    with _SOFT_BOUNCE_LOCK:
+        if not path.exists():
+            return
+        try:
+            preserved: list[str] = []
+            with path.open("r", encoding="utf-8") as src:
+                for line in src:
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        preserved.append(line)
+                        continue
+                    if _normalize_key(row.get("email", "")) == key and row.get("status") == "soft_bounce":
+                        continue
+                    preserved.append(json.dumps(row, ensure_ascii=False) + "\n")
+        except FileNotFoundError:
+            return
+        with path.open("w", encoding="utf-8") as dst:
+            dst.writelines(preserved)
 
 
 def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
