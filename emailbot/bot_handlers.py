@@ -4260,6 +4260,49 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+# --- Совместимость: обёртки под старые имена хендлеров ---
+_LEGACY_MASS_SENDER = globals().get("send_all")
+
+
+async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Совместимый вход для старой кнопки «Начать рассылку».
+
+    При наличии ручных адресов отдаёт управление ``send_manual_email``.
+    В противном случае делегирует массовой рассылке.
+    """
+
+    try:
+        manual = context.user_data.get("manual_emails")
+    except Exception:
+        manual = None
+
+    if manual:
+        return await send_manual_email(update, context)
+
+    mass_handler = globals().get("send_selected")
+    if mass_handler is None:
+        mass_handler = _LEGACY_MASS_SENDER
+
+    if mass_handler is None:
+        logger.warning("start_sending: no bulk handler available")
+        return
+
+    return await mass_handler(update, context)
+
+
+async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Совместимая обёртка для старого имени массовой отправки."""
+
+    mass_handler = globals().get("send_selected")
+    if mass_handler is None:
+        mass_handler = _LEGACY_MASS_SENDER
+
+    if mass_handler is None or mass_handler is send_all:
+        return await start_sending(update, context)
+
+    return await mass_handler(update, context)
+
+
 def _chunk_list(items: List[str], size: int = 60) -> List[List[str]]:
     """Split ``items`` into chunks of ``size`` elements."""
 
@@ -4302,6 +4345,7 @@ __all__ = [
     "show_foreign_list",
     "apply_repairs",
     "show_repairs",
+    "start_sending",  # совместимость для старых точек входа
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",
