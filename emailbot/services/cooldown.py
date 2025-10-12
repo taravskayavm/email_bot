@@ -290,10 +290,8 @@ def should_skip_by_cooldown(
     threshold = timedelta(days=window)
     grace = timedelta(days=1)
     delta = now - last
-    should_block = False
-    if delta < threshold - grace:
-        should_block = True
-    elif threshold <= delta < threshold + grace:
+    should_block = delta < threshold
+    if not should_block and threshold <= delta < threshold + grace:
         should_block = True
 
     if should_block:
