@@ -253,8 +253,12 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         blk = 0
     await message.reply_text(
-        f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}.\n"
-        f"🚫 В блок-листе (по результатам парсинга): {blk}"
+        "\n".join(
+            [
+                f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}.",
+                f"🚫 В блок-листе (по результатам парсинга): {blk}",
+            ]
+        )
     )
 
 
@@ -990,8 +994,12 @@ async def _apply_manual_text_corrections(
             except Exception:
                 blocked_cnt = 0
             await message.reply_text(
-                f"🗑 Удалено: {removed}. Осталось: {len(stored)}.\n"
-                f"🚫 В блок-листе (по текущему списку): {blocked_cnt}"
+                "\n".join(
+                    [
+                        f"🗑 Удалено: {removed}. Осталось: {len(stored)}.",
+                        f"🚫 В блок-листе (по текущему списку): {blocked_cnt}",
+                    ]
+                )
             )
             return True
 
