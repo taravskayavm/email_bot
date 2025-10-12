@@ -248,8 +248,13 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state.preview_allowed_all = preview_kept
     state.blocked_after_parse = count_blocked(state.to_send)
     removed = before - len(state.to_send)
+    try:
+        blk = state.blocked_after_parse
+    except Exception:
+        blk = 0
     await message.reply_text(
-        f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}."
+        f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}.\n"
+        f"🚫 В блок-листе (по результатам парсинга): {blk}"
     )
 
 
@@ -899,7 +904,7 @@ async def _send_manual_summary(
     if not message:
         return
 
-    status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
+    status = _cooldown_status(context)
     summary_lines = [
         "✅ Адреса получены.",
         f"К отправке: {len(stored)}.",
@@ -980,8 +985,13 @@ async def _apply_manual_text_corrections(
             context.chat_data["manual_drop_reasons"] = []
             context.user_data["awaiting_manual_email"] = False
             context.user_data.pop("text_corrections", None)
+            try:
+                blocked_cnt = count_blocked(stored)
+            except Exception:
+                blocked_cnt = 0
             await message.reply_text(
-                f"🗑 Удалено: {removed}. Осталось: {len(stored)}."
+                f"🗑 Удалено: {removed}. Осталось: {len(stored)}.\n"
+                f"🚫 В блок-листе (по текущему списку): {blocked_cnt}"
             )
             return True
 
@@ -1053,17 +1063,40 @@ def _clamp_bulk_edit_page(context: ContextTypes.DEFAULT_TYPE) -> int:
     return page
 
 
+def _cooldown_status(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Return a compact toggle label for the 180-day rule."""
+
+    try:
+        return "ВЫКЛ" if context.user_data.get("ignore_180d") else "ВКЛ"
+    except Exception:
+        return "ВКЛ"
+
+
 def _bulk_edit_status_text(
     context: ContextTypes.DEFAULT_TYPE, extra: str | None = None
 ) -> str:
     page = _clamp_bulk_edit_page(context)
     working = list(context.user_data.get("bulk_edit_working", []))
     total = len(working)
+    state = context.chat_data.get(SESSION_KEY)
     lines: list[str] = []
     if extra:
         lines.append(extra)
     lines.append("Режим редактирования списка адресов.")
     lines.append(f"Всего адресов: {total}.")
+    try:
+        lines.append(f"Правило 180 дней: {_cooldown_status(context)}")
+    except Exception:
+        pass
+    try:
+        blocked_cnt = (
+            count_blocked(state.to_send)
+            if state and getattr(state, "to_send", None)
+            else 0
+        )
+        lines.append(f"🚫 В блок-листе (сейчас): {blocked_cnt}")
+    except Exception:
+        pass
     if total:
         start = page * BULK_EDIT_PAGE_SIZE + 1
         end = min(start + BULK_EDIT_PAGE_SIZE - 1, total)
@@ -2958,7 +2991,7 @@ async def route_text_message(
     context.user_data["awaiting_manual_email"] = False
     context.chat_data["manual_drop_reasons"] = []
 
-    status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
+    status = _cooldown_status(context)
     await message.reply_text(
         (
             f"Принято адресов: {len(emails)}\n"
@@ -3016,7 +3049,7 @@ async def toggle_ignore_180d(
 
     current = bool(context.user_data.get("ignore_180d"))
     context.user_data["ignore_180d"] = not current
-    status = "ВКЛ" if context.user_data["ignore_180d"] else "ВЫКЛ"
+    status = _cooldown_status(context)
 
     manual_group = context.chat_data.get("manual_group")
     manual_emails = (
@@ -3067,11 +3100,22 @@ async def toggle_ignore_180d(
         await query.answer(f"Правило 180 дней: {status}")
     except BadRequest:
         if message:
-            await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
+            try:
+                await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
+            except Exception:
+                pass
         return
 
     if not updated and message:
-        await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
+        try:
+            await message.reply_text(f"⚠️ Правило 180 дней: {status}.")
+        except Exception:
+            pass
+
+    try:
+        await _update_bulk_edit_message(context)
+    except Exception:
+        pass
 
 async def _send_batch_with_sessions(
     query: CallbackQuery,
@@ -3840,7 +3884,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     ignore_180d = bool(context.user_data.get("ignore_180d"))
-    status_text = "ВКЛ" if ignore_180d else "ВЫКЛ"
+    status_text = _cooldown_status(context)
     await query.message.reply_text(
         "Запущено — выполняю в фоне...\n"
         f"Правило 180 дней: {status_text}."
