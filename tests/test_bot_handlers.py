@@ -371,7 +371,7 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
         else None,
     )
 
-    def fake_prepare(emails, group, chat_id=None):
+    def fake_prepare(emails, group, chat_id=None, **kwargs):
         return emails, ["blocked-foreign@example.com"], ["blocked@example.com"], [
             "recent@example.com"
         ], {}

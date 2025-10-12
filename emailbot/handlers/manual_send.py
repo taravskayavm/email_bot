@@ -185,7 +185,12 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     async with chat_lock:
         context.chat_data["preview_source_emails"] = list(emails)
         ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-            messaging.prepare_mass_mailing(emails, group_code, chat_id=chat_id)
+            messaging.prepare_mass_mailing(
+                emails,
+                group_code,
+                chat_id=chat_id,
+                ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+            )
         )
         log_mass_filter_digest(
             {

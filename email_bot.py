@@ -274,6 +274,12 @@ def main() -> None:
         )
     )
     app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.enable_text_corrections,
+            pattern="^enable_text_corrections$",
+        )
+    )
+    app.add_handler(
         CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$")
     )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
