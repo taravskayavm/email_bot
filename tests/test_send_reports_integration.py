@@ -30,7 +30,9 @@ def _env_tmp_stats(tmp_path, monkeypatch):
     fake = _FakeSMTP
     monkeypatch.setattr(m, "RobustSMTP", lambda *a, **k: fake(), raising=True)
     monkeypatch.setattr(
-        m, "send_with_retry", lambda smtp, msg, retries=3, backoff=1.0: smtp.send(msg)
+        m,
+        "send_with_retry",
+        lambda smtp, msg, *, retries=2, backoff=1.0: smtp.send(msg),
     )
     yield
 

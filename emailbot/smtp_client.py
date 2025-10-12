@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import smtplib
 import ssl
 import time
@@ -30,6 +31,27 @@ BASE_DOMAIN_DELAY = _env_float("SMTP_BASE_DOMAIN_DELAY", 0.0)
 BACKOFF_STEP_SECONDS = _env_float("SMTP_BACKOFF_STEP_SECONDS", 1.0)
 BACKOFF_MAX_SECONDS = _env_float("SMTP_BACKOFF_MAX_SECONDS", 30.0)
 BACKOFF_DECAY_SUCCESS = _env_float("SMTP_BACKOFF_DECAY_SUCCESS", 1.0)
+
+# Дополнительный мягкий «джиттер» между отправками, чтобы не раздражать антиспам-эвристики.
+# По умолчанию 0 — поведение не меняется. Значения в миллисекундах.
+_JITTER_MIN_MS = _env_float("SMTP_JITTER_MIN_MS", 0.0)
+_JITTER_MAX_MS = _env_float("SMTP_JITTER_MAX_MS", 0.0)
+
+
+def _maybe_jitter_sleep() -> None:
+    try:
+        jmin = max(0.0, _JITTER_MIN_MS)
+        jmax = max(0.0, _JITTER_MAX_MS)
+        if jmax <= 0.0 and jmin <= 0.0:
+            return
+        if jmax < jmin:
+            jmax = jmin
+        delay = random.uniform(jmin, jmax) / 1000.0
+        if delay > 0:
+            time.sleep(delay)
+    except Exception:
+        # джиттер не должен ломать отправку
+        pass
 
 
 class SmtpClient:
@@ -274,13 +296,19 @@ class RobustSMTP:
 
 
 def send_with_retry(
-    smtp: RobustSMTP, msg: EmailMessage, retries: int = 3, backoff: float = 1.0
+    smtp: RobustSMTP,
+    msg: EmailMessage,
+    *,
+    retries: int = 2,
+    backoff: float = 1.0,
 ):
     domains = _extract_domains(msg)
     for attempt in range(1, retries + 1):
         try:
             _sleep_for_domains(domains)
             _throttle_block()
+            # Перед фактической отправкой делаем мягкую случайную паузу (если включена).
+            _maybe_jitter_sleep()
             result = smtp.send(msg)
             _backoff_success(domains)
             return result

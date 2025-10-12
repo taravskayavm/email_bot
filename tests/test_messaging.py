@@ -37,7 +37,7 @@ def fake_smtp(monkeypatch):
     monkeypatch.setattr(
         messaging,
         "send_with_retry",
-        lambda smtp, msg, retries=3, backoff=1.0: smtp.send(msg),
+        lambda smtp, msg, *, retries=2, backoff=1.0: smtp.send(msg),
     )
 
 
