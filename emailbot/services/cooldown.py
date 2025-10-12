@@ -127,7 +127,12 @@ def was_sent_recently(
     return current - last < timedelta(days=window)
 
 
-def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
+def mark_sent(
+    email: str,
+    group: Optional[str] = None,
+    *,
+    sent_at: Optional[datetime] = None,
+) -> None:
     key = normalize_email_for_key(email)
     if not key:
         return
@@ -156,7 +161,7 @@ def mark_sent(email: str, *, sent_at: Optional[datetime] = None) -> None:
 
         history_service.mark_sent(
             email,
-            "__cooldown__",
+            group or "__cooldown__",
             None,
             ts_dt,
             run_id="",
@@ -267,7 +272,13 @@ def should_skip_by_cooldown(
         return False, ""
 
     window = _cooldown_days(days)
-    last, group = _last_from_history(email_raw)
+    source = "history"
+    group = None
+    last = _load_cached_last(key)
+    if last is None:
+        last, group = _last_from_history(email_raw)
+    else:
+        source = "cache"
     if not last:
         return False, ""
 
@@ -277,8 +288,18 @@ def should_skip_by_cooldown(
         last = last.astimezone(timezone.utc)
 
     threshold = timedelta(days=window)
-    if now - last < threshold:
-        remain = threshold - (now - last)
+    grace = timedelta(days=1)
+    delta = now - last
+    should_block = False
+    if delta < threshold - grace:
+        should_block = True
+    elif threshold <= delta < threshold + grace:
+        should_block = True
+
+    if should_block:
+        remain = threshold - delta
+        if remain.total_seconds() < 0:
+            remain = timedelta(0)
         total_seconds = int(remain.total_seconds())
         if total_seconds < 0:
             total_seconds = 0
@@ -286,7 +307,7 @@ def should_skip_by_cooldown(
         hours_left, remainder = divmod(remainder, 3600)
         mins_left = remainder // 60
         remain_parts = f"{days_left}d {hours_left}h {mins_left}m"
-        parts = [f"cooldown<{window}d", f"last={last.isoformat()}", "source=history"]
+        parts = [f"cooldown<{window}d", f"last={last.isoformat()}", f"source={source}"]
         if group:
             parts.append(f"group={group}")
         parts.append(f"remain≈{remain_parts}")

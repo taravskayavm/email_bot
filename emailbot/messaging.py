@@ -1232,12 +1232,22 @@ def prepare_mass_mailing(
         if ignore_cooldown:
             lookback_days = 0
         recent = _load_recent_sent(lookback_days)
+        now_utc = datetime.now(timezone.utc)
 
         ready: list[str] = []
         for addr in queue_after_foreign:
             blocked_recent = False
             try:
-                if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
+                if lookback_days > 0:
+                    skip_cooldown, _ = should_skip_by_cooldown(
+                        addr, now=now_utc, days=lookback_days
+                    )
+                    if skip_cooldown:
+                        skipped_recent.append(addr)
+                        blocked_recent = True
+                if not blocked_recent and lookback_days > 0 and was_sent_within(
+                    addr, days=lookback_days
+                ):
                     skipped_recent.append(addr)
                     blocked_recent = True
                 elif (
