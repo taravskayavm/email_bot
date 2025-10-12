@@ -1021,6 +1021,25 @@ def _extract_code(code: int | None, msg: str | bytes | None) -> int | None:
     return None
 
 
+def classify_smtp_error(err: str | bytes | None) -> Literal["soft", "hard", "unknown"]:
+    """Classify SMTP error responses when only textual data is available."""
+
+    if not err:
+        return "unknown"
+
+    if isinstance(err, (bytes, bytearray)):
+        message = err.decode("utf-8", "ignore")
+    else:
+        message = str(err)
+
+    code = _extract_code(None, message)
+    if is_hard_bounce(code, message):
+        return "hard"
+    if is_soft_bounce(code, message):
+        return "soft"
+    return "unknown"
+
+
 def is_hard_bounce(code: int | None, msg: str | bytes | None) -> bool:
     """Return True for permanent delivery failures."""
 
@@ -1177,6 +1196,7 @@ __all__ = [
     "upsert_sent_log",
     "dedupe_sent_log_inplace",
     "add_bounce",
+    "classify_smtp_error",
     "log_soft_bounce",
     "mark_soft_bounce_success",
     "is_hard_bounce",

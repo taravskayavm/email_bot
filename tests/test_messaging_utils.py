@@ -51,6 +51,12 @@ def test_bounce_code_parsing():
     assert mu.is_hard_bounce(None, "550 user unknown")
 
 
+def test_classify_smtp_error():
+    assert mu.classify_smtp_error("550 5.1.1 User unknown") == "hard"
+    assert mu.classify_smtp_error("451 4.4.0 Temporary failure, please try again") == "soft"
+    assert mu.classify_smtp_error("some random failure") == "unknown"
+
+
 def test_gmail_canonicalization_for_180_days(tmp_path, monkeypatch):
     log = tmp_path / "log.csv"
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
