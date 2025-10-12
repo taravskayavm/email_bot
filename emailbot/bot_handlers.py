@@ -120,6 +120,7 @@ from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_by
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
 from utils.email_clean import sanitize_email
+from emailbot.services.cooldown import should_skip_by_cooldown
 from services.templates import get_template, get_template_label, list_templates
 
 
@@ -808,14 +809,199 @@ def _group_keyboard(
     markup = _build_group_markup(context, prefix=prefix, selected=selected)
     if context and prefix.startswith("manual_group_"):
         status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
-        toggle_button = InlineKeyboardButton(
-            f"⚠️ Игнорировать 180 дней: {status}",
-            callback_data="toggle_ignore_180d",
+        keyboard: list[list[InlineKeyboardButton]] = [
+            list(row) for row in (markup.inline_keyboard or [])
+        ]
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Отправить правки текстом",
+                    callback_data="enable_text_corrections",
+                )
+            ]
         )
-        keyboard = list(markup.inline_keyboard or [])
-        keyboard.append([toggle_button])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"⚠️ Игнорировать 180 дней: {status}",
+                    callback_data="toggle_ignore_180d",
+                )
+            ]
+        )
         markup = InlineKeyboardMarkup(keyboard)
     return markup
+
+
+def _update_manual_storage(
+    context: ContextTypes.DEFAULT_TYPE, emails: Iterable[str]
+) -> list[str]:
+    """Store the manual mailing list in both user and chat data."""
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in emails:
+        email = (raw or "").strip().lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        cleaned.append(email)
+
+    context.user_data["manual_emails"] = list(cleaned)
+    context.chat_data["manual_emails"] = list(cleaned)
+    context.chat_data["manual_all_emails"] = list(cleaned)
+    return cleaned
+
+
+_ROLE_PREFIXES = {
+    "admin",
+    "info",
+    "sales",
+    "support",
+    "office",
+    "contact",
+    "mail",
+    "service",
+    "hr",
+}
+
+
+def _classify_manual_email(email: str) -> tuple[str, str | None]:
+    """Return the normalized address and optional drop reason."""
+
+    cleaned, reason = sanitize_email(email)
+    cleaned = (cleaned or "").strip().lower()
+    if not cleaned:
+        if reason and "role-like" in reason:
+            return "", "role-like"
+        if reason:
+            return "", reason
+        return "", "invalid"
+
+    local = cleaned.split("@", 1)[0]
+    if not local:
+        return "", "invalid"
+    local_low = local.lower()
+    if local_low[0].isdigit():
+        return "", "role-like"
+    for prefix in _ROLE_PREFIXES:
+        if local_low.startswith(prefix):
+            return "", "role-like"
+    return cleaned, None
+
+
+async def _send_manual_summary(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    stored: list[str],
+    dropped: list[tuple[str, str]],
+) -> None:
+    message = update.message
+    if not message:
+        return
+
+    status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
+    summary_lines = [
+        "✅ Адреса получены.",
+        f"К отправке: {len(stored)}.",
+    ]
+    if dropped:
+        summary_lines.append(f"Исключено: {len(dropped)}.")
+    summary_lines.append(f"Правило 180 дней: {status}.")
+    summary_lines.append("")
+    summary_lines.append("⬇️ Выберите направление письма:")
+
+    await message.reply_text(
+        "\n".join(summary_lines),
+        reply_markup=_group_keyboard(context, prefix="manual_group_"),
+    )
+
+    if dropped:
+        drop_lines = [
+            "🚫 Исключены адреса:",
+            *(f"{addr} — {reason}" for addr, reason in dropped),
+        ]
+        await message.reply_text("\n".join(drop_lines))
+
+
+async def _apply_manual_text_corrections(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str
+) -> bool:
+    """Handle manual list text corrections (replace/delete/reset)."""
+
+    if not context.user_data.get("text_corrections"):
+        return False
+
+    message = update.message
+    if not message:
+        return False
+
+    text = (raw or "").strip()
+    if not text:
+        await message.reply_text(
+            "Не распознаны правки. Используйте формат «старый -> новый» или перечислите адреса."
+        )
+        return True
+
+    current = list(context.user_data.get("manual_emails") or [])
+    if not current:
+        current = list(context.chat_data.get("manual_emails") or [])
+    before = set(current)
+
+    # (1) Replacements in the form "old -> new"
+    changed = False
+    replacements = [ln for ln in text.splitlines() if "->" in ln]
+    if replacements:
+        updated = list(current)
+        for ln in replacements:
+            old_raw, new_raw = [part.strip().lower() for part in ln.split("->", 1)]
+            if not old_raw or not new_raw:
+                continue
+            if old_raw not in updated:
+                continue
+            updated = [new_raw if item == old_raw else item for item in updated]
+            changed = True
+        if changed:
+            deduped = list(dict.fromkeys(updated))
+            stored = _update_manual_storage(context, deduped)
+            context.chat_data["manual_drop_reasons"] = []
+            context.user_data["awaiting_manual_email"] = False
+            context.user_data.pop("text_corrections", None)
+            await message.reply_text("✏️ Применены замены адресов.")
+            return True
+
+    # (2) Deletions prefixed with "-"/"—"/"удалить:"
+    lowered = text.lower()
+    if lowered.startswith("- ") or lowered.startswith("— ") or lowered.startswith("удалить:"):
+        to_drop = {addr.lower() for addr in _extract_emails_loose(text)}
+        if to_drop:
+            updated = [addr for addr in current if addr not in to_drop]
+            stored = _update_manual_storage(context, updated)
+            removed = len(before - set(stored))
+            context.chat_data["manual_drop_reasons"] = []
+            context.user_data["awaiting_manual_email"] = False
+            context.user_data.pop("text_corrections", None)
+            await message.reply_text(
+                f"🗑 Удалено: {removed}. Осталось: {len(stored)}."
+            )
+            return True
+
+    # (3) Provide a full list to replace the current one
+    extracted = [addr.lower() for addr in _extract_emails_loose(text)]
+    if extracted:
+        deduped = list(dict.fromkeys(extracted))
+        stored = _update_manual_storage(context, deduped)
+        context.chat_data["manual_drop_reasons"] = []
+        context.user_data["awaiting_manual_email"] = False
+        context.user_data.pop("text_corrections", None)
+        await message.reply_text(
+            f"🧹 Список обновлён. Теперь адресов: {len(stored)}."
+        )
+        return True
+
+    await message.reply_text(
+        "Не распознаны правки. Используйте формат «старый -> новый» или перечислите адреса."
+    )
+    return True
 
 
 async def _send_direction_prompt(
@@ -2245,6 +2431,11 @@ def _parse_corrections(text: str) -> tuple[list[tuple[str, str]], set[str]]:
     to_delete: set[str] = set()
 
     for line in lines:
+        lowered = line.lower()
+        if lowered.startswith("- ") or lowered.startswith("— ") or lowered.startswith("удалить:"):
+            for email in _extract_emails_loose(line):
+                to_delete.add(email)
+            continue
         # try different syntaxes for replacements first
         if "->" in line:
             parts = [part.strip() for part in line.split("->") if part.strip()]
@@ -2316,7 +2507,7 @@ async def bulk_txt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.message.reply_text(
         "Режим правок включён. Пришлите одним сообщением адреса и/или замены.\n"
         "• Замены: формат «старый -> новый», по одной паре в строке.\n"
-        "• Удаление: просто перечислите адреса (через пробелы, запятые или переносы)."
+        "• Удаление: строка вида «- addr1, addr2» или «Удалить: addr1; addr2»."
     )
 
 
@@ -2583,7 +2774,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Гарантированно не роняемся на неожиданных проблемах подготовки очереди
     try:
         ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-            messaging.prepare_mass_mailing(emails)
+            messaging.prepare_mass_mailing(
+                emails,
+                group_code_norm,
+                ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+            )
         )
     except Exception as exc:
         logger.exception(
@@ -2662,6 +2857,7 @@ async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.chat_data["manual_group"] = None
     context.user_data["awaiting_manual_email"] = True
     context.user_data.pop("manual_emails", None)
+    context.user_data.pop("text_corrections", None)
     context.user_data["ignore_180d"] = False
     await query.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
@@ -2675,11 +2871,52 @@ async def manual_input_router(
 
     if context.user_data.get("state") != MANUAL_WAIT_INPUT:
         return
-    try:
-        await handle_text(update, context)
-    finally:
+
+    message = update.message
+    if not message:
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        raise ApplicationHandlerStop
+
+    raw_emails = messaging.parse_emails_from_text(text)
+    if not raw_emails:
+        await message.reply_text(
+            "Не нашла корректных адресов. Пришлите ещё раз (допустимы запятая/пробел/новая строка)."
+        )
         context.user_data.pop("state", None)
         context.user_data["awaiting_manual_email"] = False
+        raise ApplicationHandlerStop
+
+    allowed: list[str] = []
+    dropped: list[tuple[str, str]] = []
+    for email in raw_emails:
+        normalized, drop_reason = _classify_manual_email(email)
+        if drop_reason:
+            dropped.append((email, drop_reason))
+            continue
+        if normalized:
+            allowed.append(normalized)
+
+    stored = _update_manual_storage(context, allowed)
+    context.chat_data["manual_drop_reasons"] = dropped
+    context.chat_data["manual_group"] = None
+    context.chat_data["awaiting_manual_emails"] = False
+    context.user_data["manual_emails"] = stored
+    context.user_data["awaiting_manual_email"] = False
+    context.user_data.pop("state", None)
+
+    preview_lines = [
+        "✅ Ручная отправка — предпросмотр",
+        f"Всего получено: {len(raw_emails)}",
+        f"К отправке: {len(stored)}",
+    ]
+    if dropped:
+        preview_lines.append(f"Исключено: {len(dropped)}")
+    await message.reply_text("\n".join(preview_lines))
+
+    await _send_manual_summary(update, context, stored, dropped)
     raise ApplicationHandlerStop
 
 
@@ -2695,6 +2932,8 @@ async def route_text_message(
         "awaiting_manual_email"
     )
     if not awaiting:
+        return
+    if context.user_data.get("text_corrections"):
         return
 
     text = (message.text or "").strip()
@@ -2717,6 +2956,7 @@ async def route_text_message(
     context.chat_data["awaiting_manual_emails"] = False
     context.user_data["manual_emails"] = emails
     context.user_data["awaiting_manual_email"] = False
+    context.chat_data["manual_drop_reasons"] = []
 
     status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
     await message.reply_text(
@@ -2729,6 +2969,40 @@ async def route_text_message(
     )
 
     raise ApplicationHandlerStop
+
+
+async def enable_text_corrections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enable manual list text corrections mode."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    manual_emails = (
+        context.user_data.get("manual_emails")
+        or context.chat_data.get("manual_emails")
+        or []
+    )
+    if not manual_emails:
+        await query.answer(show_alert=True, text="Сначала введите адреса для ручной рассылки.")
+        return
+
+    await query.answer()
+    message = query.message
+    if not message:
+        return
+    context.user_data["text_corrections"] = True
+    context.user_data["awaiting_manual_email"] = True
+    context.user_data["state"] = MANUAL_WAIT_INPUT
+
+    await message.reply_text(
+        (
+            "✏️ Режим текстовых правок включён.\n"
+            "• Замены: формат «старый -> новый», по одному на строку.\n"
+            "• Удаление: строка вида «- addr1, addr2» или «Удалить: addr1; addr2».\n"
+            "• Перечислите адреса, чтобы заменить список целиком."
+        )
+    )
 
 
 async def toggle_ignore_180d(
@@ -3041,8 +3315,13 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.chat_data["manual_group"] = group_code
 
+    ignore_180d = bool(context.user_data.get("ignore_180d"))
     ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
-        messaging.prepare_mass_mailing(list(emails))
+        messaging.prepare_mass_mailing(
+            list(emails),
+            group_code,
+            ignore_cooldown=ignore_180d,
+        )
     )
     if digest.get("error"):
         logger.error(
@@ -3073,7 +3352,10 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         extra={"event": "manual_prepare", "code": group_code, **digest},
     )
 
-    summary_lines = [f"Будет отправлено: {len(ready)}"]
+    summary_lines = []
+    if ignore_180d:
+        summary_lines.append("⚠️ Игнорировать правило 180 дней: ВКЛ")
+    summary_lines.append(f"Будет отправлено: {len(ready)}")
     if blocked_foreign:
         summary_lines.append(f"🌍 Исключено иностранных доменов: {len(blocked_foreign)}")
     if blocked_invalid:
@@ -3103,6 +3385,7 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.chat_data["manual_group"] = None
     context.user_data.pop("manual_emails", None)
     context.user_data["awaiting_manual_email"] = False
+    context.user_data.pop("text_corrections", None)
 
 
 async def prompt_manual_email(
@@ -3118,6 +3401,7 @@ async def prompt_manual_email(
     context.chat_data["manual_group"] = None
     context.chat_data["awaiting_manual_emails"] = True
     context.user_data["ignore_180d"] = False
+    context.user_data.pop("text_corrections", None)
     await update.message.reply_text(
         (
             "Введите email или список email-адресов "
@@ -3255,17 +3539,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             found,
             filtered,
         )
+        if context.user_data.get("text_corrections"):
+            handled = await _apply_manual_text_corrections(update, context, text)
+            if handled:
+                return
         if filtered:
-            context.user_data["manual_emails"] = sorted(filtered)
+            allowed: list[str] = []
+            dropped: list[tuple[str, str]] = []
+            for item in filtered:
+                normalized, drop_reason = _classify_manual_email(item)
+                if drop_reason:
+                    dropped.append((item, drop_reason))
+                    continue
+                if normalized:
+                    allowed.append(normalized)
+
+            stored = _update_manual_storage(context, allowed)
+            context.chat_data["manual_drop_reasons"] = dropped
             context.user_data["awaiting_manual_email"] = False
             context.user_data.pop("state", None)
-            await update.message.reply_text(
-                (
-                    f"К отправке: {', '.join(context.user_data['manual_emails'])}\n\n"
-                    "⬇️ Выберите направление письма:"
-                ),
-                reply_markup=_group_keyboard(context, prefix="manual_group_"),
-            )
+            context.user_data.pop("text_corrections", None)
+            await _send_manual_summary(update, context, stored, dropped)
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")
         return
@@ -4335,6 +4629,7 @@ __all__ = [
     "manual_input_router",
     "manual_start",
     "manual_select_group",
+    "enable_text_corrections",
     "toggle_ignore_180d",
     "route_text_message",
     "handle_text",

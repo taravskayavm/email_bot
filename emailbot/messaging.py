@@ -27,6 +27,8 @@ from itertools import count
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
+from emailbot import history_service
+from utils import rules
 from .smtp_client import SmtpClient
 from .utils import log_error
 from .settings import REPORT_TZ
@@ -233,6 +235,41 @@ def _load_recent_sent(days: int) -> set[str]:
     except Exception as exc:
         logger.warning("recent-sent load failed: %s", exc)
     return recent
+
+
+def _seen_in_local_history(addr: str, days: int) -> bool:
+    if days <= 0:
+        return False
+    path = rules.HISTORY_PATH
+    if not path.exists():
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                email = str(rec.get("email", "")).strip().lower()
+                if email != addr:
+                    continue
+                raw_ts = rec.get("ts")
+                if not isinstance(raw_ts, str) or not raw_ts.strip():
+                    continue
+                try:
+                    ts = datetime.fromisoformat(raw_ts)
+                except Exception:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
+                if ts >= cutoff:
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 def _read_sync_state() -> dict:
@@ -1126,6 +1163,8 @@ def prepare_mass_mailing(
     emails: list[str],
     group: str | None = None,
     chat_id: int | None = None,
+    *,
+    ignore_cooldown: bool = False,
 ) -> tuple[list[str], list[str], list[str], list[str], dict[str, object]]:
     """Filter ``emails`` for manual/preview sends.
 
@@ -1158,6 +1197,9 @@ def prepare_mass_mailing(
             if blocked_set and norm in blocked_set:
                 blocked_invalid.append(addr)
                 continue
+            if rules.is_blocked(norm):
+                blocked_invalid.append(addr)
+                continue
             try:
                 if is_suppressed(addr):
                     blocked_invalid.append(addr)
@@ -1184,6 +1226,8 @@ def prepare_mass_mailing(
             lookback_days = 180
         if lookback_days < 0:
             lookback_days = 0
+        if ignore_cooldown:
+            lookback_days = 0
         recent = _load_recent_sent(lookback_days)
 
         ready: list[str] = []
@@ -1191,6 +1235,12 @@ def prepare_mass_mailing(
             blocked_recent = False
             try:
                 if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
+                    skipped_recent.append(addr)
+                    blocked_recent = True
+                elif (
+                    lookback_days > 0
+                    and history_service.was_sent_within_days(addr, group or "", lookback_days)
+                ):
                     skipped_recent.append(addr)
                     blocked_recent = True
             except Exception as exc:
@@ -1205,6 +1255,12 @@ def prepare_mass_mailing(
             else:
                 canon = addr
             if lookback_days > 0 and canon in recent:
+                skipped_recent.append(addr)
+                continue
+            if lookback_days > 0 and _seen_in_local_history(canon, lookback_days):
+                skipped_recent.append(addr)
+                continue
+            if lookback_days > 0 and rules.seen_within_window(canon):
                 skipped_recent.append(addr)
                 continue
             ready.append(addr)

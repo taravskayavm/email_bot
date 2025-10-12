@@ -621,7 +621,12 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.chat_data["preview_source_emails"] = list(updated_source)
 
     ready, blocked_foreign, blocked_invalid, skipped_recent, _ = (
-        messaging.prepare_mass_mailing(updated_source, group_code, chat_id=chat_id)
+        messaging.prepare_mass_mailing(
+            updated_source,
+            group_code,
+            chat_id=chat_id,
+            ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+        )
     )
 
     if state:
