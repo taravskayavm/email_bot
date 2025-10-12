@@ -1,5 +1,8 @@
 # локальная конфигурация/секреты
 .env
+# Pytest caches
+.pytest_cache/
+**/__pycache__/
 *.env
 
 # Ignore real email templates (keep only examples)

@@ -87,6 +87,11 @@ EMAIL_STRICT_RE = re.compile(
     rf"(?<![A-Za-z0-9._%+\-])({EMAIL_CORE})(?![A-Za-z0-9\-])"
 )
 
+_FOOTNOTE_TAG_RE = re.compile(r"\[(?:\s*(?:\d+|[ivxlcdm]+)\s*)\]", re.IGNORECASE)
+_BREAK_AFTER_AT_RE = re.compile(r"@\s*\n+\s*")
+_BREAK_AFTER_DOT_RE = re.compile(r"\.\s*\n+\s*")
+_HYPHEN_BREAK_RE = re.compile(r"-\s*\n+\s*")
+
 
 logger = logging.getLogger(__name__)
 
@@ -531,8 +536,20 @@ def _multi_prefix_mode(text: str) -> bool:
 
 # ====================== ОСНОВНАЯ ФУНКЦИЯ ======================
 
+def _normalize_email_fragments(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _FOOTNOTE_TAG_RE.sub("", text)
+    cleaned = _HYPHEN_BREAK_RE.sub("", cleaned)
+    cleaned = _BREAK_AFTER_AT_RE.sub("@", cleaned)
+    cleaned = _BREAK_AFTER_DOT_RE.sub(".", cleaned)
+    cleaned = cleaned.replace(".@", "@")
+    return cleaned
+
+
 def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
-    hits = EMAIL_RE.findall(text) if text else []
+    normalized = _normalize_email_fragments(text)
+    hits = EMAIL_RE.findall(normalized) if normalized else []
     deduped = list(dict.fromkeys(hits))
     if stats is not None:
         stats["total_found"] = stats.get("total_found", 0) + len(deduped)
