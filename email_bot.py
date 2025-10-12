@@ -24,6 +24,7 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
+from emailbot.services import cooldown as _cooldown
 from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
@@ -164,6 +165,24 @@ def main() -> None:
         )
     except Exception:
         logging.getLogger(__name__).warning("Stoplist init failed", exc_info=True)
+
+    logger = logging.getLogger(__name__)
+    try:
+        # Логируем критичные пути и версии модулей — это НЕ меняет поведение, но помогает быстро поймать рассинхрон.
+        logger.info(
+            "[BOOT] Paths: BLOCKED_FILE=%s; SENT_LOG_PATH=%s; SYNC_STATE_PATH=%s; HISTORY_DB=%s",
+            getattr(messaging, "BLOCKED_FILE", "?"),
+            getattr(messaging, "LOG_FILE", "?"),
+            getattr(messaging, "SYNC_STATE_PATH", "?"),
+            _cooldown._send_history_path(),
+        )
+        logger.info(
+            "[BOOT] bot_handlers at %s; has start_sending=%s",
+            getattr(bot_handlers, "__file__", "?"),
+            hasattr(bot_handlers, "start_sending"),
+        )
+    except Exception as _e:
+        logger.warning("[BOOT] path diagnostics failed: %s", _e)
 
     app = ApplicationBuilder().token(token).build()
     app.add_error_handler(error_handler)
