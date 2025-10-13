@@ -499,6 +499,49 @@ FORCE_SEND_CHAT_IDS: set[int] = set()
 SESSION_KEY = "state"
 
 
+def _store_bulk_queue(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    group: str | None,
+    emails: Iterable[str],
+    chat_id: int | None,
+    digest: dict[str, object] | None = None,
+) -> None:
+    """Persist prepared bulk queue in chat data keyed by ``group``.
+
+    The helper keeps a defensive stance: any unexpected issue during storage is
+    logged but never propagated to the caller.
+    """
+
+    if not group:
+        return
+    try:
+        ready_list = [str(addr) for addr in emails if addr]
+        qmap = context.chat_data.setdefault("bulk_queue_by_group", {})
+        qmap[group] = {
+            "emails": ready_list,
+            "group": group,
+            "chat_id": chat_id,
+            "digest": dict(digest or {}),
+        }
+        context.chat_data["bulk_queue_by_group"] = qmap
+        logger.info("bulk_queue: stored queue group=%s size=%d", group, len(ready_list))
+    except Exception as exc:  # pragma: no cover - defensive branch
+        logger.warning("bulk_queue: failed to store queue for group=%s: %s", group, exc)
+
+
+def _is_ignore_cooldown_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return ``True`` when the user bypass flag for cooldown is set."""
+
+    try:
+        return bool(
+            context.user_data.get("ignore_cooldown")
+            or context.user_data.get("ignore_180d")
+        )
+    except Exception:  # pragma: no cover - defensive branch
+        return False
+
+
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
     """Initialize session state for the current chat."""
     state = SessionState()
@@ -2232,6 +2275,28 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     query = update.callback_query
     state = context.chat_data.get(SESSION_KEY)
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    if state and getattr(state, "to_send", None) and getattr(state, "group", None):
+        ignore_cooldown = _is_ignore_cooldown_enabled(context)
+        try:
+            ready, _, _, _, digest = messaging.prepare_mass_mailing(
+                list(state.to_send),
+                state.group,
+                chat_id=chat_id,
+                ignore_cooldown=ignore_cooldown,
+            )
+        except Exception as exc:  # pragma: no cover - defensive branch
+            logger.warning("refresh_preview: prepare_mass_mailing failed: %s", exc)
+            ready = list(getattr(state, "to_send", []) or [])
+            digest = {"error": str(exc)}
+        _store_bulk_queue(
+            context,
+            group=state.group,
+            emails=ready,
+            chat_id=chat_id,
+            digest=digest,
+        )
     allowed_all = state.preview_allowed_all if state else []
     numeric = state.suspect_numeric if state else []
     foreign = state.foreign if state else []
@@ -3020,11 +3085,12 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = query.message.chat.id
     # Гарантированно не роняемся на неожиданных проблемах подготовки очереди
     try:
+        ignore_cooldown = _is_ignore_cooldown_enabled(context)
         ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
             messaging.prepare_mass_mailing(
                 emails,
                 group_code_norm,
-                ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
+                ignore_cooldown=ignore_cooldown,
             )
         )
     except Exception as exc:
@@ -3073,6 +3139,13 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "template": template_path_str,
         "digest": digest,
     }
+    _store_bulk_queue(
+        context,
+        group=group_code_norm,
+        emails=ready,
+        chat_id=chat_id,
+        digest=digest,
+    )
     summary_payload = _store_mass_summary(
         chat_id,
         group=group_code_norm,
@@ -4882,6 +4955,28 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 bulk_handler["digest"] = digest
             context.chat_data["bulk_handler"] = bulk_handler
             logger.info("start_sending: bulk_handler re-created, emails=%d", len(ready))
+
+    if isinstance(bulk_handler, dict):
+        emails_in_queue = bulk_handler.get("emails")
+        if not emails_in_queue:
+            logger.warning(
+                "start_sending: empty queue for group=%s",
+                bulk_handler.get("group"),
+            )
+            message = "Очередь пуста. Нажмите «Показать примеры» или выберите направление заново."
+            query = getattr(update, "callback_query", None)
+            if query:
+                try:
+                    await query.edit_message_text(message)
+                except Exception:  # pragma: no cover - defensive branch
+                    chat = update.effective_chat
+                    if chat:
+                        await chat.send_message(message)
+            else:
+                chat = update.effective_chat
+                if chat:
+                    await chat.send_message(message)
+            return
 
     mass_handler = globals().get("send_selected")
     if mass_handler is None:
