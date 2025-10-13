@@ -140,6 +140,12 @@ def build_after_parse_combined_kb(
                 callback_data="bulk:txt:start",
             )
         ],
+        [
+            InlineKeyboardButton(
+                "🧹 Удалить отдельные адреса",
+                callback_data="bulk:delete:start",
+            )
+        ],
     ]
     if ENABLE_INLINE_EMAIL_EDITOR and is_admin:
         rows.append(

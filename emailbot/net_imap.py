@@ -52,7 +52,29 @@ def imap_connect_ssl(
                 sock.settimeout(timeout)
             wrapped = context.wrap_socket(sock, server_hostname=host)
             wrapped.connect(sockaddr)
-            return imaplib.IMAP4_SSL(host=None, port=None, ssl_context=context, sock=wrapped)
+            try:
+                return imaplib.IMAP4_SSL(
+                    host=None, port=None, ssl_context=context, sock=wrapped
+                )
+            except TypeError:
+                # Совместимость: старые версии imaplib не принимают параметр sock
+                try:
+                    wrapped.close()
+                except Exception:
+                    pass
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                sock = None
+                wrapped = None
+                client = imaplib.IMAP4_SSL(host=host, port=port)
+                if timeout is not None:
+                    try:
+                        client.sock.settimeout(timeout)
+                    except Exception:
+                        pass
+                return client
         except Exception as exc:  # pragma: no cover - network errors
             last_error = exc
             if wrapped is not None:
