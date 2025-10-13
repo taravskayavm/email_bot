@@ -58,9 +58,9 @@ def test_cooldown_should_skip_and_ignore(monkeypatch, tmp_path):
     assert digest2.get("skipped_180d", 0) == 0
 
 
-def test_180_days_including_today_window(monkeypatch, tmp_path):
+def test_180_days_requires_full_window(monkeypatch, tmp_path):
     """
-    Явно проверяем, что окно считает «включая сегодняшний день».
+    Проверяем, что правило требует выждать полные «дней в окне».
     """
     from emailbot.services import cooldown
 
@@ -73,10 +73,11 @@ def test_180_days_including_today_window(monkeypatch, tmp_path):
     now = datetime(2025, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
     addr = "sample@example.com"
 
-    # отметили отправку 179 дней назад → не скипаем
+    # отметили отправку 179 дней назад → еще скипаем
     cooldown.mark_sent(addr, sent_at=now - timedelta(days=179))
-    skip, _ = cooldown.should_skip_by_cooldown(addr, now=now, days=180)
-    assert skip is False
+    skip, reason = cooldown.should_skip_by_cooldown(addr, now=now, days=180)
+    assert skip is True
+    assert "cooldown" in reason
 
     # отметили отправку ровно 180 дней назад → считаем "в пределах окна" → скипаем
     cooldown.mark_sent(addr, sent_at=now - timedelta(days=180))
