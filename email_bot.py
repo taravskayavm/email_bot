@@ -19,6 +19,7 @@ from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
     CommandHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -253,6 +254,26 @@ def main() -> None:
     )
 
     app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
+
+    bulk_delete_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                bot_handlers.bulk_delete_start, pattern="^bulk:delete:start$"
+            )
+        ],
+        states={
+            bot_handlers.BULK_DELETE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    bot_handlers.bulk_delete_text,
+                )
+            ]
+        },
+        fallbacks=[],
+        per_chat=True,
+        per_user=True,
+    )
+    app.add_handler(bulk_delete_conv, group=-1)
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
