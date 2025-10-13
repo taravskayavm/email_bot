@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import functools
 import imaplib
 import io
 import logging
@@ -5226,7 +5227,23 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.chat_data["bulk_handler"] = handler_queue
 
         try:
-            await handler(update, context)
+            def _is_async_callable(func) -> bool:
+                if asyncio.iscoroutinefunction(func):
+                    return True
+                if isinstance(func, functools.partial):
+                    return _is_async_callable(func.func)
+                call_method = getattr(func, "__call__", None)
+                return bool(
+                    call_method is not None
+                    and asyncio.iscoroutinefunction(call_method)
+                )
+
+            if _is_async_callable(handler):
+                await handler(update, context)
+            else:
+                # Выполняем синхронную рассылку в пуле потоков,
+                # чтобы не блокировать event loop Telegram-бота
+                await asyncio.to_thread(handler, update, context)
         except Exception as exc:
             logger.exception("start_sending: background bulk error: %s", exc)
             if queue_group:
