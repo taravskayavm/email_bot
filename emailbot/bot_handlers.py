@@ -5264,17 +5264,8 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
             is_async_handler = _is_async_callable(handler)
 
-            async def _run_async_handler() -> None:
-                await handler(update, context)
-
-            def _run_handler_in_thread() -> None:
-                if is_async_handler:
-                    asyncio.run(_run_async_handler())
-                else:
-                    handler(update, context)
-
             if is_async_handler:
-                await asyncio.to_thread(_run_handler_in_thread)
+                await handler(update, context)
             else:
                 await asyncio.to_thread(handler, update, context)
         except Exception as exc:
