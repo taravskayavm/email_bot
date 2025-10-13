@@ -355,6 +355,25 @@ from .cancel import start_cancel, request_cancel, is_cancelled, clear_cancel
 logger = logging.getLogger(__name__)
 
 
+def _diag_bulk_line(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Return human-readable status of the prepared bulk handler."""
+
+    try:
+        handler = context.chat_data.get("bulk_handler")
+    except Exception:
+        handler = None
+
+    if not handler:
+        return "BULK: handler = missing"
+
+    emails = handler.get("emails") if isinstance(handler, dict) else None
+    try:
+        total = len(emails) if emails is not None else 0
+    except Exception:
+        total = 0
+    return f"BULK: handler = ok, emails = {total}"
+
+
 def _format_stop_message(status: dict) -> str:
     running = status.get("running") or {}
     if not running:
@@ -1457,6 +1476,54 @@ async def dedupe_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "⚠️ Это действие перезапишет sent_log.csv. Запустите /dedupe_log yes для подтверждения."
         )
+
+
+async def on_diagnostics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show quick diagnostics with bulk-handler status."""
+
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+
+    lines: list[str] = []
+
+    try:
+        from . import diag as diag_utils
+
+        diag_text = diag_utils.build_diag_text()
+        if diag_text:
+            lines.extend(str(diag_text).splitlines())
+    except Exception as exc:
+        lines.append(f"⚠️ diag error: {exc}")
+
+    try:
+        lines.append(_diag_bulk_line(context))
+    except Exception:
+        lines.append("BULK: handler = n/a")
+
+    if not lines:
+        lines.append("(нет данных)")
+
+    body = "🔎 Диагностика:\n" + "\n".join(lines)
+
+    reply_markup = None
+    try:  # pragma: no cover - optional legacy UI dependency
+        from emailbot import telegram_ui  # type: ignore
+
+        build_keyboard = getattr(telegram_ui, "build_main_menu_keyboard", None)
+        if callable(build_keyboard):
+            reply_markup = build_keyboard()
+    except Exception:
+        reply_markup = None
+
+    try:
+        await query.edit_message_text(body, reply_markup=reply_markup)
+    except Exception:
+        message = query.message
+        if message is not None:
+            await message.reply_text(body, reply_markup=reply_markup)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4767,6 +4834,51 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if manual:
         return await send_manual_email(update, context)
 
+    try:
+        bulk_handler = context.chat_data.get("bulk_handler")
+    except Exception:
+        bulk_handler = None
+
+    logger.info("start_sending: bulk_handler present=%s", bool(bulk_handler))
+
+    if not bulk_handler:
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        ready: list[str] = []
+        group_code: str | None = None
+        digest = None
+        template_path: str | None = None
+        if chat_id is not None:
+            saved = mass_state.load_chat_state(chat_id) or {}
+            pending = saved.get("pending")
+            if isinstance(pending, list):
+                ready = [str(item) for item in pending if item]
+            group_raw = saved.get("group")
+            if isinstance(group_raw, str):
+                group_code = group_raw
+            template_raw = saved.get("template")
+            if isinstance(template_raw, str):
+                template_path = template_raw
+            digest = saved.get("digest") if isinstance(saved, dict) else None
+        if not ready:
+            state = get_state(context)
+            ready = list(getattr(state, "to_send", []) or [])
+            group_from_state = getattr(state, "group", None)
+            if group_from_state:
+                group_code = group_from_state
+        if ready and chat_id is not None:
+            bulk_handler = {
+                "emails": ready,
+                "group": group_code,
+                "chat_id": chat_id,
+            }
+            if template_path:
+                bulk_handler["template"] = template_path
+            if digest is not None:
+                bulk_handler["digest"] = digest
+            context.chat_data["bulk_handler"] = bulk_handler
+            logger.info("start_sending: bulk_handler re-created, emails=%d", len(ready))
+
     mass_handler = globals().get("send_selected")
     if mass_handler is None:
         mass_handler = _LEGACY_MASS_SENDER
@@ -4807,6 +4919,7 @@ __all__ = [
     "force_send_command",
     "report_command",
     "report_callback",
+    "on_diagnostics",
     "sync_imap_command",
     "reset_email_list",
     "diag",
