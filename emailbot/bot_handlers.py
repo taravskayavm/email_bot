@@ -2654,6 +2654,9 @@ async def corrections_text_handler(
     if not message:
         return
 
+    # Signal to the generic handler that this update was fully processed here.
+    context.chat_data["skip_handle_text"] = True
+
     text = (message.text or "").strip()
 
     if is_delete_mode:
@@ -3774,6 +3777,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
+    if context.chat_data.pop("skip_handle_text", False):
+        return
     if await _handle_bulk_edit_text(update, context, text):
         return
     if context.user_data.get("awaiting_block_email"):
