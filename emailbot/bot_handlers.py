@@ -1179,9 +1179,9 @@ def clear_all_awaiting(context: ContextTypes.DEFAULT_TYPE) -> None:
         "awaiting_block_email",
         "awaiting_manual_email",
         "awaiting_corrections_text",
-        "awaiting_bulk_delete",
     ]:
         context.user_data[key] = False
+    context.user_data.pop("bulk_delete_mode", None)
     context.chat_data["awaiting_manual_emails"] = False
 
 
@@ -1917,6 +1917,7 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "bulk_edit_replace_old",
     ):
         context.user_data.pop(key, None)
+    context.user_data.pop("bulk_delete_mode", None)
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
@@ -2605,6 +2606,7 @@ async def bulk_txt_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     context.user_data["awaiting_corrections_text"] = True
+    context.user_data.pop("bulk_delete_mode", None)
     await query.message.reply_text(
         "Режим правок включён. Пришлите одним сообщением адреса и/или замены.\n"
         "• Замены: формат «старый -> новый», по одной паре в строке.\n"
@@ -2629,8 +2631,10 @@ async def bulk_delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.message.reply_text("Список пуст — сначала выполните парсинг.")
         return
 
-    context.user_data["awaiting_bulk_delete"] = True
-    context.user_data.pop("awaiting_corrections_text", None)
+    user_id = update.effective_user.id if update.effective_user else "?"
+    logger.info("bulk_delete: entered by user %s", user_id)
+    context.user_data["bulk_delete_mode"] = True
+    context.user_data["awaiting_corrections_text"] = False
     await query.message.reply_text(
         "Вставьте адреса для удаления (через пробел, запятую, точку с запятой или с новой строки)."
     )
@@ -2641,7 +2645,9 @@ async def corrections_text_handler(
 ) -> None:
     """Принять текстовые правки адресов от пользователя."""
 
-    if not context.user_data.get("awaiting_corrections_text"):
+    is_delete_mode = bool(context.user_data.get("bulk_delete_mode"))
+    awaiting_corrections = bool(context.user_data.get("awaiting_corrections_text"))
+    if not awaiting_corrections and not is_delete_mode:
         return
 
     message = update.message
@@ -2649,6 +2655,112 @@ async def corrections_text_handler(
         return
 
     text = (message.text or "").strip()
+
+    if is_delete_mode:
+        logger.info("bulk_delete: processing text input (len=%d)", len(text))
+        if not text:
+            await message.reply_text(
+                "Не нашла корректных адресов. Пришлите ещё раз (через пробелы, запятые или строки)."
+            )
+            context.user_data.pop("bulk_delete_mode", None)
+            return
+
+        tokens = [part.strip() for part in re.split(r"[,;\s]+", text) if part.strip()]
+        normalized: list[str] = []
+        invalid: list[str] = []
+        seen_norm: set[str] = set()
+        for token in tokens:
+            normalized_email = normalize_email(token)
+            if normalized_email:
+                key = normalized_email.lower()
+                if key not in seen_norm:
+                    normalized.append(normalized_email)
+                    seen_norm.add(key)
+            else:
+                invalid.append(token)
+
+        if not normalized:
+            if invalid:
+                await message.reply_text(
+                    "Не удалось распознать адреса. Проверьте формат и попробуйте ещё раз."
+                )
+            else:
+                await message.reply_text("Не нашла корректных адресов. Попробуйте ещё раз.")
+            context.user_data.pop("bulk_delete_mode", None)
+            return
+
+        state = get_state(context)
+        current = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
+        if not current:
+            await message.reply_text("Список пуст — удалять нечего.")
+            context.user_data.pop("bulk_delete_mode", None)
+            return
+
+        current_lower = [item.lower() for item in current]
+        to_remove = {email.lower() for email in normalized if email.lower() in current_lower}
+        missing = [email for email in normalized if email.lower() not in to_remove]
+
+        if not to_remove:
+            reply_parts = ["Не нашла указанные адреса в текущем списке."]
+            if missing:
+                sample = ", ".join(missing[:6])
+                reply_parts.append(f"Примеры: {sample}")
+            if invalid:
+                sample_invalid = ", ".join(invalid[:6])
+                reply_parts.append(f"Некорректные записи: {sample_invalid}")
+            await message.reply_text("\n".join(reply_parts))
+            context.user_data.pop("bulk_delete_mode", None)
+            return
+
+        updated = [item for item in current if item.lower() not in to_remove]
+        removed = len(current) - len(updated)
+
+        context.user_data["last_parsed_emails"] = list(updated)
+        context.user_data["bulk_edit_working"] = list(updated)
+        context.user_data["awaiting_corrections_text"] = False
+        context.user_data.pop("bulk_delete_mode", None)
+        _clamp_bulk_edit_page(context)
+
+        state.to_send = list(updated)
+        state.preview_allowed_all = list(updated)
+        state.suspect_numeric = sorted(
+            {email for email in updated if is_numeric_localpart(email)}
+        )
+        state.foreign = []
+        state.blocked_after_parse = count_blocked(state.to_send)
+
+        blocked_now = state.blocked_after_parse
+
+        context.chat_data.pop("bulk_handler", None)
+
+        reply_lines = [
+            f"🗑 Удалено: {removed}. Осталось: {len(updated)}.",
+            f"🚫 В блок-листе (по текущему списку): {blocked_now}",
+        ]
+
+        if missing:
+            reply_lines.append(
+                f"Не нашла в текущем списке: {len(missing)}. Примеры: {', '.join(missing[:6])}"
+            )
+        if invalid:
+            reply_lines.append(
+                f"Некорректных записей: {len(invalid)}. Примеры: {', '.join(invalid[:6])}"
+            )
+
+        await message.reply_text("\n".join(reply_lines))
+
+        try:
+            await _update_bulk_edit_message(context, "Список обновлён.")
+        except Exception:
+            pass
+
+        try:
+            await prompt_change_group(update, context)
+        except Exception:
+            pass
+
+        return
+
     pairs, to_delete_raw = _parse_corrections(text)
     if not pairs and not to_delete_raw:
         await message.reply_text(
@@ -2720,6 +2832,7 @@ async def corrections_text_handler(
 
     context.user_data["last_parsed_emails"] = final
     context.user_data["awaiting_corrections_text"] = False
+    context.user_data.pop("bulk_delete_mode", None)
 
     state = get_state(context)
     state.to_send = final
@@ -2768,120 +2881,6 @@ async def corrections_text_handler(
         await prompt_change_group(update, context)
     except Exception:
         await message.reply_text("Готово. Теперь выберите направление рассылки.")
-
-
-async def _handle_bulk_delete_text(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
-) -> bool:
-    """Удалить адреса из списка массовой рассылки по текстовому вводу."""
-
-    if not context.user_data.get("awaiting_bulk_delete"):
-        return False
-
-    message = update.message
-    if not message:
-        return True
-
-    cleaned = (text or "").strip()
-    if not cleaned:
-        await message.reply_text(
-            "Не нашла корректных адресов. Пришлите ещё раз (через пробелы, запятые или строки)."
-        )
-        return True
-
-    tokens = [part.strip() for part in re.split(r"[,;\s]+", cleaned) if part.strip()]
-    normalized: list[str] = []
-    invalid: list[str] = []
-    seen_norm: set[str] = set()
-    for token in tokens:
-        normalized_email = normalize_email(token)
-        if normalized_email:
-            key = normalized_email.lower()
-            if key not in seen_norm:
-                normalized.append(normalized_email)
-                seen_norm.add(key)
-        else:
-            invalid.append(token)
-
-    if not normalized:
-        if invalid:
-            await message.reply_text(
-                "Не удалось распознать адреса. Проверьте формат и попробуйте ещё раз."
-            )
-        else:
-            await message.reply_text("Не нашла корректных адресов. Попробуйте ещё раз.")
-        return True
-
-    state = get_state(context)
-    current = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
-    if not current:
-        context.user_data.pop("awaiting_bulk_delete", None)
-        await message.reply_text("Список пуст — удалять нечего.")
-        return True
-
-    current_lower = [item.lower() for item in current]
-    to_remove = {email.lower() for email in normalized if email.lower() in current_lower}
-    missing = [email for email in normalized if email.lower() not in to_remove]
-
-    if not to_remove:
-        context.user_data.pop("awaiting_bulk_delete", None)
-        reply_parts = ["Не нашла указанные адреса в текущем списке."]
-        if missing:
-            sample = ", ".join(missing[:6])
-            reply_parts.append(f"Примеры: {sample}")
-        if invalid:
-            sample_invalid = ", ".join(invalid[:6])
-            reply_parts.append(f"Некорректные записи: {sample_invalid}")
-        await message.reply_text("\n".join(reply_parts))
-        return True
-
-    updated = [item for item in current if item.lower() not in to_remove]
-    removed = len(current) - len(updated)
-
-    context.user_data.pop("awaiting_bulk_delete", None)
-    context.user_data["last_parsed_emails"] = list(updated)
-    context.user_data["bulk_edit_working"] = list(updated)
-    _clamp_bulk_edit_page(context)
-
-    state.to_send = list(updated)
-    state.preview_allowed_all = list(updated)
-    state.suspect_numeric = sorted(
-        {email for email in updated if is_numeric_localpart(email)}
-    )
-    state.foreign = []
-    state.blocked_after_parse = count_blocked(state.to_send)
-
-    blocked_now = state.blocked_after_parse
-
-    context.chat_data.pop("bulk_handler", None)
-
-    reply_lines = [
-        f"🗑 Удалено: {removed}. Осталось: {len(updated)}.",
-        f"🚫 В блок-листе (по текущему списку): {blocked_now}",
-    ]
-
-    if missing:
-        reply_lines.append(
-            f"Не нашла в текущем списке: {len(missing)}. Примеры: {', '.join(missing[:6])}"
-        )
-    if invalid:
-        reply_lines.append(
-            f"Некорректных записей: {len(invalid)}. Примеры: {', '.join(invalid[:6])}"
-        )
-
-    await message.reply_text("\n".join(reply_lines))
-
-    try:
-        await _update_bulk_edit_message(context, "Список обновлён.")
-    except Exception:
-        pass
-
-    try:
-        await prompt_change_group(update, context)
-    except Exception:
-        pass
-
-    return True
 
 
 async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3775,8 +3774,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     chat_id = update.effective_chat.id
     text = update.message.text or ""
-    if await _handle_bulk_delete_text(update, context, text):
-        return
     if await _handle_bulk_edit_text(update, context, text):
         return
     if context.user_data.get("awaiting_block_email"):
