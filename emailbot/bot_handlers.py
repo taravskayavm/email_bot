@@ -4969,6 +4969,20 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception:  # pragma: no cover - defensive branch
             pass
 
+        # Один и тот же callback не обрабатываем дважды: Telegram иногда ретраит
+        # доставку на клиенте, и мы рискуем запустить рассылку повторно.
+        cbid = getattr(query, "id", None)
+        if cbid:
+            cbmap = context.bot_data.setdefault("seen_callback_ids", {})
+            now_m = time.monotonic()
+            for old_id, ts in list(cbmap.items()):
+                if now_m - ts > 90:
+                    cbmap.pop(old_id, None)
+            if cbmap.get(cbid):
+                return
+            cbmap[cbid] = now_m
+            context.bot_data["seen_callback_ids"] = cbmap
+
     state = context.chat_data.get(SESSION_KEY)
     if state is None:
         state = get_state(context)
@@ -4980,6 +4994,7 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     qmap = context.chat_data.get("bulk_queue_by_group") or {}
     smap = context.chat_data.setdefault("bulk_status_by_group", {})
+    dmap = context.chat_data.setdefault("bulk_debounce_by_group", {})
 
     group_code = getattr(state, "group", None)
     chat = update.effective_chat
@@ -5141,8 +5156,14 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         queue_group,
         queue_size,
     )
+    debounce_key = queue_group or "__global__"
+    now = time.monotonic()
+    try:
+        last_start = float(dmap.get(debounce_key, 0.0))
+    except Exception:
+        last_start = 0.0
     current_status = smap.get(queue_group or "") if queue_group else None
-    if current_status in {"starting", "running"}:
+    if (now - last_start) < 8.0 or current_status in {"starting", "running"}:
         logger.info(
             "start_sending: debounce triggered for group=%s status=%s",
             queue_group,
@@ -5169,6 +5190,9 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception:
                 pass
         return
+
+    dmap[debounce_key] = now
+    context.chat_data["bulk_debounce_by_group"] = dmap
 
     if queue_group:
         smap[queue_group] = "starting"
@@ -5238,11 +5262,20 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     and asyncio.iscoroutinefunction(call_method)
                 )
 
-            if _is_async_callable(handler):
+            is_async_handler = _is_async_callable(handler)
+
+            async def _run_async_handler() -> None:
                 await handler(update, context)
+
+            def _run_handler_in_thread() -> None:
+                if is_async_handler:
+                    asyncio.run(_run_async_handler())
+                else:
+                    handler(update, context)
+
+            if is_async_handler:
+                await asyncio.to_thread(_run_handler_in_thread)
             else:
-                # Выполняем синхронную рассылку в пуле потоков,
-                # чтобы не блокировать event loop Telegram-бота
                 await asyncio.to_thread(handler, update, context)
         except Exception as exc:
             logger.exception("start_sending: background bulk error: %s", exc)
