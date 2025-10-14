@@ -324,6 +324,7 @@ def main() -> None:
     )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
+    # единственный валидный старт — по batch_id
     app.add_handler(
         CallbackQueryHandler(bot_handlers.start_sending, pattern="^bulk_start:")
     )
