@@ -23,6 +23,10 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+# Кэш массового отправителя. Инициализируем лениво, чтобы не ловить циклический импорт.
+_LEGACY_MASS_SENDER: Optional[Callable] = None
+_LEGACY_MASS_SENDER_ERR: Optional[str] = None
+
 
 def _import_mass_sender() -> Optional[Callable]:
     """
@@ -5270,9 +5274,6 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # --- Совместимость: обёртки под старые имена хендлеров ---
-# Кэш «легаси»-хендлера. Не инициализируем при импорте — чтобы избежать циклических импортов.
-_LEGACY_MASS_SENDER: Optional[Callable] = None
-_LEGACY_MASS_SENDER_ERR: Optional[str] = None
 
 
 async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
