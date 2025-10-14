@@ -8,6 +8,23 @@ import os
 
 from . import settings_store as _store
 
+# [EBOT-075] Backward-compat: некоторые модули (напр. handlers.manual_send)
+# всё ещё импортируют PARSE_MAX_WORKERS. После рефакторинга эта переменная
+# могла быть удалена. Вернём безопасный дефолт, чтобы не падал импорт.
+# Если в окружении задан SEND_MAX_WORKERS/MAX_WORKERS — используем их.
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+# дефолт 4 потока — безопасно для I/O
+PARSE_MAX_WORKERS = _int_env(
+    "PARSE_MAX_WORKERS", _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
+)
+
+
 # Default values
 STRICT_OBFUSCATION: bool = True
 FOOTNOTE_RADIUS_PAGES: int = 1
@@ -150,6 +167,7 @@ __all__ = [
     "CRAWL_TIME_BUDGET_SECONDS",
     "ROBOTS_CACHE_PATH",
     "ROBOTS_CACHE_TTL_SECONDS",
+    "PARSE_MAX_WORKERS",
     "load",
     "save",
     "list_available_directions",

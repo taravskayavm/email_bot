@@ -23,6 +23,7 @@ from bot.keyboards import build_templates_kb
 
 from emailbot import config as C
 from emailbot import mass_state, messaging
+from emailbot import settings as _settings
 from emailbot.messaging import (
     MAX_EMAILS_PER_DAY,
     SendOutcome,
@@ -65,6 +66,16 @@ def _bot_handlers() -> "bot_handlers_module":  # type: ignore[name-defined]
 
         _BOT_HANDLERS_MODULE = _module
     return _BOT_HANDLERS_MODULE  # type: ignore[return-value]
+
+try:
+    _SEND_WORKERS = getattr(_settings, "SEND_MAX_WORKERS", None)
+except Exception:
+    _SEND_WORKERS = None
+try:
+    _PARSE_WORKERS = getattr(_settings, "PARSE_MAX_WORKERS", None)
+except Exception:
+    _PARSE_WORKERS = None
+WORKERS = _SEND_WORKERS or _PARSE_WORKERS or 4
 
 logger = logging.getLogger(__name__)
 
