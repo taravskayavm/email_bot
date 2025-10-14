@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Callable, Iterable, List, Optional, Set
+
+# ЯВНО импортируем реальную функцию массовой рассылки
+try:
+    # основной путь
+    from .handlers.manual_send import send_all as _MANUAL_SEND_ALL  # async def
+except Exception:  # pragma: no cover — защитная ветка
+    _MANUAL_SEND_ALL = None  # type: ignore[assignment]
 
 import aiohttp
 import pandas as pd
@@ -4986,7 +4993,8 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # --- Совместимость: обёртки под старые имена хендлеров ---
-_LEGACY_MASS_SENDER = globals().get("send_all")
+# Жёстко фиксируем «легаси»-хендлер на реальный manual_send.send_all (если импорт удался)
+_LEGACY_MASS_SENDER: Optional[Callable] = _MANUAL_SEND_ALL
 
 
 async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5191,11 +5199,22 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lmap[batch_id] = lock
         context.bot_data["bulk_locks_by_batch"] = lmap
 
-    def _resolve_mass_handler():
-        handler = globals().get("send_selected")
-        if handler is None:
-            handler = _LEGACY_MASS_SENDER
-        return handler
+    def _resolve_mass_handler() -> Optional[Callable]:
+        """
+        Возвращает callable массовой отправки.
+        Сначала пытаемся взять современный send_selected (если где-то подмешан),
+        затем — зафиксированный manual_send.send_all.
+        """
+
+        handler = globals().get("send_selected")  # опциональная «новая» точка
+        if callable(handler):
+            logger.info("start_sending: using handler=send_selected (globals)")
+            return handler
+        if callable(_LEGACY_MASS_SENDER):
+            logger.info("start_sending: using handler=manual_send.send_all")
+            return _LEGACY_MASS_SENDER
+        logger.error("start_sending: no available mass sender (both paths missing)")
+        return None
 
     async def _runner() -> None:
         handler = _resolve_mass_handler()
@@ -5245,9 +5264,13 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         handler(update, context)
 
                 if is_async_handler:
-                    await asyncio.to_thread(_run_handler_in_thread)
+                    await asyncio.to_thread(
+                        _run_handler_in_thread
+                    )  # async в отдельном loop внутри thread
                 else:
-                    await asyncio.to_thread(handler, update, context)
+                    await asyncio.to_thread(
+                        handler, update, context
+                    )  # sync → thread
             except Exception as exc:
                 logger.exception("start_sending: background bulk error: %s", exc)
                 smap[batch_id] = "error"
