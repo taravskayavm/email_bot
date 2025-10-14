@@ -154,11 +154,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def main() -> None:
+    load_env(SCRIPT_DIR)
+
     errs = startup_selfcheck()
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
-
-    load_env(SCRIPT_DIR)
 
     try:
         history_service.ensure_initialized()
