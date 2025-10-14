@@ -24,7 +24,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
 from itertools import count
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
 from emailbot import history_service
@@ -63,6 +63,60 @@ logger = logging.getLogger(__name__)
 # [EBOT-087] Запуск корутины Telegram строго в PTB-лупе из любого потока
 def run_in_app_loop(application, coro):
     return asyncio.run_coroutine_threadsafe(coro, application.loop)
+
+# [EBOT-088] Backward-compat shim:
+# Ранее части кода вызывали messaging._normalize_key(...) для унификации chat_id/ключей.
+# Восстанавливаем утилиту, чтобы не падали старые вызовы.
+def _normalize_key(val: Any) -> Optional[int | str]:
+    """
+    Нормализует вход (context/update/chat/message/chat_id/строку) в int chat_id или строковый ключ.
+    Возвращает:
+      - int (если ушёл chat_id),
+      - str (если не удалось привести к int),
+      - None (если val пустой).
+    Поведение максимально безопасное и «толерантное» к типу входа.
+    """
+
+    if val is None:
+        return None
+
+    try:
+        # Частые случаи: сам chat_id, Update/Message/Chat, объект с .chat_id/.chat.id/.id
+        # 1) Прямо int
+        if isinstance(val, int):
+            return val
+
+        # 2) У объекта есть .chat_id
+        chat_id = getattr(val, "chat_id", None)
+        if isinstance(chat_id, int):
+            return chat_id
+
+        # 3) У объекта есть .chat.id
+        chat = getattr(val, "chat", None)
+        if chat is not None:
+            cid = getattr(chat, "id", None)
+            if isinstance(cid, int):
+                return cid
+
+        # 4) У объекта есть .id (и это int)
+        obj_id = getattr(val, "id", None)
+        if isinstance(obj_id, int):
+            return obj_id
+
+        # 5) Строки/прочее: попробуем привести к int, иначе вернём строку
+        s = str(val).strip()
+        if s.isdigit():
+            try:
+                return int(s)
+            except Exception:
+                pass
+        return s
+    except Exception:
+        # Никогда не падаем из-за утилиты
+        try:
+            return int(str(val).strip())
+        except Exception:
+            return str(val).strip()
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
