@@ -20,11 +20,11 @@ def main() -> None:
                 rec = json.loads(line)
             except Exception:
                 continue
-            raw_time = rec.get("time")
+            raw_time = rec.get("ts")
             if not isinstance(raw_time, str):
                 continue
             try:
-                ts = datetime.fromisoformat(raw_time)
+                ts = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
             except Exception:
                 continue
             if ts >= cutoff:
