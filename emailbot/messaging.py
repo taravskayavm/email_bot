@@ -59,6 +59,11 @@ _TASK_SEQ = count()
 
 logger = logging.getLogger(__name__)
 
+
+# [EBOT-087] Запуск корутины Telegram строго в PTB-лупе из любого потока
+def run_in_app_loop(application, coro):
+    return asyncio.run_coroutine_threadsafe(coro, application.loop)
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
