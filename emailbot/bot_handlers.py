@@ -6,6 +6,7 @@ import asyncio
 import csv
 import imaplib
 import importlib
+import inspect
 import io
 import json
 import logging
@@ -5542,15 +5543,100 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     pass
             return
 
+        app = getattr(context, "application", None)
+        chat_id_local = handler_payload.get("chat_id")
+        callback_map: dict[str, Callable[[str], None]] = {}
+        if app is not None and chat_id_local is not None:
+            def _send_with_prefix(prefix: str, text: str) -> None:
+                if not text:
+                    return
+                try:
+                    messaging.run_in_app_loop(
+                        app,
+                        messaging.reply(
+                            chat_id_local,
+                            f"{prefix}{text}" if prefix else text,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            def _wrap(prefix: str) -> Callable[[str], None]:
+                def _cb(text: str) -> None:
+                    try:
+                        _send_with_prefix(prefix, text)
+                    except Exception:
+                        pass
+
+                return _cb
+
+            callback_map = {
+                "on_info": _wrap("ℹ️ "),
+                "on_progress": _wrap(""),
+                "on_error": _wrap("❌ "),
+            }
+
         async with lock:
             smap[batch_id] = "running"
             context.bot_data["bulk_status_by_batch"] = smap
             context.chat_data["bulk_handler"] = handler_payload
 
             try:
-                result = handler(update, context)
-                if asyncio.iscoroutine(result):
-                    await result
+                signature: inspect.Signature | None
+                try:
+                    signature = inspect.signature(handler)
+                except (TypeError, ValueError):
+                    signature = None
+
+                accepts_kwargs = False
+                positional_names: list[str] = []
+                if signature is not None:
+                    params = list(signature.parameters.values())
+                    accepts_kwargs = any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD for param in params
+                    )
+                    positional_names = [
+                        param.name
+                        for param in params
+                        if param.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        )
+                    ]
+
+                handler_kwargs: dict[str, Callable[[str], None]] = {}
+                if callback_map:
+                    for name, cb in callback_map.items():
+                        if signature is None or accepts_kwargs or (
+                            signature and name in signature.parameters
+                        ):
+                            handler_kwargs[name] = cb
+
+                call_args: tuple[object, ...] = (update, context)
+                if positional_names:
+                    first_name = positional_names[0]
+                    if first_name in {"context", "ctx"}:
+                        call_args = (context,)
+                    elif tuple(positional_names[:2]) in (
+                        ("update", "context"),
+                        ("update", "ctx"),
+                    ):
+                        call_args = (update, context)
+                    elif positional_names == ["update"]:
+                        call_args = (update,)
+
+                async def _invoke(args: tuple[object, ...]) -> None:
+                    if asyncio.iscoroutinefunction(handler):
+                        await handler(*args, **handler_kwargs)
+                        return
+                    result_obj = await asyncio.to_thread(
+                        handler, *args, **handler_kwargs
+                    )
+                    if inspect.isawaitable(result_obj):
+                        await result_obj
+
+                await _invoke(call_args)
             except Exception as exc:
                 logger.exception("start_sending: background bulk error: %s", exc)
                 smap[batch_id] = "error"
@@ -5600,12 +5686,13 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         bh_copy = dict(handler_queue)
 
-        async def _do_async() -> None:
-            await _run_bulk_send(bh_copy, update, context)
+        await _run_bulk_send(bh_copy, update, context)
 
-        await asyncio.to_thread(lambda: asyncio.run(_do_async()))
-
-    asyncio.create_task(_runner())
+    app_for_tasks = getattr(context, "application", None)
+    if app_for_tasks is not None:
+        app_for_tasks.create_task(_runner())
+    else:
+        asyncio.create_task(_runner())
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
