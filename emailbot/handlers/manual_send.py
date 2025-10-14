@@ -200,6 +200,18 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "entry_url": context.chat_data.get("entry_url"),
             }
         )
+        snapshot = bot_handlers_module._snapshot_mass_digest(
+            digest,
+            ready_after_cooldown=(
+                int(digest.get("ready_after_cooldown"))
+                if isinstance(digest, dict)
+                and digest.get("ready_after_cooldown") is not None
+                else None
+            ),
+            ready_final=len(ready),
+        )
+        state.last_digest = snapshot
+        state.override_cooldown = bool(context.user_data.get("ignore_cooldown"))
         state.to_send = ready
         mass_state.save_chat_state(
             chat_id,

@@ -67,9 +67,9 @@ def test_mass_filter_digest_logging(caplog):
         "input_total": 5,
         "after_suppress": 4,
         "foreign_blocked": 1,
-        "after_180d": 3,
+        "ready_after_cooldown": 3,
         "sent_planned": 2,
-        "skipped_by_dup_in_batch": 1,
+        "removed_duplicates_in_batch": 1,
     }
     with caplog.at_level(logging.INFO, logger="emailbot.digest"):
         log_mass_filter_digest(ctx)

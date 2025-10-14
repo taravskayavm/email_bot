@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Awaitable, Callable, Iterable, List, Optional, Sequence
 
 from . import messaging
 from .messaging import SendOutcome, log_sent_email, was_emailed_recently
@@ -66,11 +66,17 @@ async def run_smtp_send(
     subject: str = messaging.DEFAULT_SUBJECT,
     batch_id: str | None = None,
     override_180d: bool = False,
+    on_heartbeat: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> tuple[int, bool]:
     """Send e-mails sequentially and dispatch callbacks for outcomes."""
 
     sent_count = 0
     aborted = False
+    if on_heartbeat:
+        try:
+            await on_heartbeat()
+        except Exception:
+            pass
     while to_send:
         if should_stop_cb and should_stop_cb():
             aborted = True

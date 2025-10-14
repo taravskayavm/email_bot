@@ -7,6 +7,7 @@ import csv
 import imaplib
 import importlib
 import io
+import json
 import logging
 import os
 import re
@@ -173,6 +174,105 @@ def _watchdog_idle_seconds() -> float:
         return float(raw) if raw else 30.0
     except Exception:
         return 30.0
+
+
+def _snapshot_mass_digest(
+    digest: dict[str, object] | None,
+    *,
+    ready_after_cooldown: int | None = None,
+    ready_final: int | None = None,
+) -> dict[str, int]:
+    base = dict(digest or {})
+
+    def _as_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    ready_after = (
+        ready_after_cooldown
+        if ready_after_cooldown is not None
+        else _as_int(
+            base.get("ready_after_cooldown")
+            or base.get("after_180d")
+            or base.get("ready")
+            or base.get("sent_planned")
+            or base.get("unique_ready_to_send"),
+            0,
+        )
+    )
+    ready_final_value = (
+        ready_final
+        if ready_final is not None
+        else _as_int(
+            base.get("ready_final")
+            or base.get("sent_planned")
+            or base.get("unique_ready_to_send"),
+            ready_after,
+        )
+    )
+
+    snapshot = {
+        "ready_after_cooldown": ready_after,
+        "removed_recent_180d": _as_int(
+            base.get("removed_recent_180d")
+            or base.get("skipped_recent")
+            or base.get("skipped_180d"),
+            0,
+        ),
+        "removed_today": _as_int(base.get("removed_today"), 0),
+        "removed_invalid": _as_int(
+            base.get("removed_invalid")
+            or base.get("blocked_invalid")
+            or base.get("skipped_suppress"),
+            0,
+        ),
+        "removed_foreign": _as_int(
+            base.get("removed_foreign")
+            or base.get("blocked_foreign")
+            or base.get("skipped_foreign"),
+            0,
+        ),
+        "removed_duplicates_in_batch": _as_int(
+            base.get("removed_duplicates_in_batch")
+            or base.get("skipped_by_dup_in_batch"),
+            0,
+        ),
+    }
+    snapshot["set_planned"] = _as_int(base.get("set_planned"), ready_final_value)
+    snapshot["ready_final"] = ready_final_value
+    return snapshot
+
+
+def _format_empty_send_explanation(digest: dict[str, object]) -> str:
+    lines = [
+        "<b>Все адреса сняты фильтрами — рассылать нечего.</b>",
+        "",
+        "Последний срез:",
+        (
+            "• 180-дневный период: снято {removed}, допущено {ready}".format(
+                removed=int(digest.get("removed_recent_180d", 0)),
+                ready=int(digest.get("ready_after_cooldown", 0)),
+            )
+        ),
+        "• «Отправлены сегодня/24ч»: снято {count}".format(
+            count=int(digest.get("removed_today", 0))
+        ),
+        "• Невалидные адреса: снято {count}".format(
+            count=int(digest.get("removed_invalid", 0))
+        ),
+        "• Иностранные домены: снято {count}".format(
+            count=int(digest.get("removed_foreign", 0))
+        ),
+        "• Дубликаты в батче: снято {count}".format(
+            count=int(digest.get("removed_duplicates_in_batch", 0))
+        ),
+        "",
+        "Откройте диагностические отчёты: <code>var/last_batch_digest.json</code> и <code>var/last_batch_examples.json</code>.",
+        "Если хотите отправить несмотря на ограничение 180 дней — включите режим «Игнорировать лимит 180д».",
+    ]
+    return "\n".join(lines)
 
 
 async def async_extract_emails_from_url(
@@ -575,6 +675,8 @@ class SessionState:
     template: Optional[str] = None
     footnote_dupes: int = 0
     blocked_after_parse: int = 0
+    override_cooldown: bool = False
+    last_digest: dict[str, object] | None = None
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -3218,6 +3320,16 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     state.to_send = ready
     state.blocked_after_parse = count_blocked(state.to_send)
+    state.override_cooldown = _is_ignore_cooldown_enabled(context)
+    state.last_digest = _snapshot_mass_digest(
+        digest,
+        ready_after_cooldown=(
+            int(digest.get("ready_after_cooldown"))
+            if isinstance(digest, dict) and digest.get("ready_after_cooldown") is not None
+            else None
+        ),
+        ready_final=len(ready),
+    )
     mass_state.save_chat_state(
         chat_id,
         {
@@ -3467,8 +3579,12 @@ async def toggle_ignore_180d(
     if not query:
         return
 
+    state = get_state(context)
     current = bool(context.user_data.get("ignore_180d"))
-    context.user_data["ignore_180d"] = not current
+    new_value = not current
+    context.user_data["ignore_180d"] = new_value
+    context.user_data["ignore_cooldown"] = new_value
+    state.override_cooldown = new_value
     status = _cooldown_status(context)
 
     manual_group = context.chat_data.get("manual_group")
@@ -3536,6 +3652,30 @@ async def toggle_ignore_180d(
         await _update_bulk_edit_message(context)
     except Exception:
         pass
+
+    digest_snapshot = _snapshot_mass_digest(
+        state.last_digest,
+        ready_after_cooldown=len(state.to_send),
+        ready_final=len(state.to_send),
+    )
+    if new_value:
+        planned = digest_snapshot.get("ready_final", 0)
+    else:
+        planned = digest_snapshot.get("ready_after_cooldown", 0)
+    summary_text = (
+        f"🚀 Режим игнора лимита 180 дней {'включен' if new_value else 'выключен'}. "
+        f"Ожидаемых отправок с учётом фильтров: ~{planned}."
+    )
+    if message:
+        try:
+            await message.reply_text(summary_text)
+        except Exception:
+            pass
+    else:
+        try:
+            await query.message.reply_text(summary_text)
+        except Exception:
+            pass
 
 async def _send_batch_with_sessions(
     query: CallbackQuery,
@@ -4607,6 +4747,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     [[InlineKeyboardButton("⏹️ Стоп", callback_data="stop_job")]]
                 ),
             )
+            state = get_state(context)
             with PerfTimer("imap_sync_gate_bulk"):
                 loop = asyncio.get_running_loop()
                 did_sync, _, _ = await loop.run_in_executor(
@@ -4636,6 +4777,17 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 saved_state = mass_state.load_chat_state(chat_id)
                 duplicates: List[str]
                 batch_duplicates: List[str]
+                recent_180d_examples: set[str] = set()
+                today_examples: set[str] = set()
+                invalid_examples: set[str] = set()
+                foreign_examples: set[str] = set()
+                dup_examples: set[str] = set()
+                removed_today: list[str] = []
+                ready_after_cooldown: list[str] = []
+                digest: dict[str, object] = {}
+
+                state.override_cooldown = bool(context.user_data.get("ignore_cooldown"))
+
                 if saved_state and saved_state.get("pending"):
                     blocked_foreign = list(saved_state.get("blocked_foreign", []))
                     blocked_invalid = list(saved_state.get("blocked_invalid", []))
@@ -4644,6 +4796,30 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     to_send = list(saved_state.get("pending", []))
                     duplicates = list(saved_state.get("skipped_duplicates", []))
                     batch_duplicates = []
+                    dup_examples.update(duplicates)
+                    recent_180d_examples.update(skipped_recent[:10])
+                    foreign_examples.update(blocked_foreign[:10])
+                    invalid_examples.update(blocked_invalid[:10])
+                    snapshot = state.last_digest or _snapshot_mass_digest(
+                        {
+                            "ready_after_cooldown": len(to_send),
+                            "removed_recent_180d": len(skipped_recent),
+                            "removed_invalid": len(blocked_invalid),
+                            "removed_foreign": len(blocked_foreign),
+                            "removed_duplicates_in_batch": len(duplicates),
+                            "set_planned": len(to_send),
+                            "ready_final": len(to_send),
+                        },
+                        ready_after_cooldown=len(to_send),
+                        ready_final=len(to_send),
+                    )
+                    state.last_digest = snapshot
+                    context.chat_data["last_filter_digest"] = snapshot
+                    logger.info(
+                        "bulk_filter_digest",
+                        extra={"digest": snapshot, "chat_id": chat_id},
+                    )
+                    digest = dict(snapshot)
                 else:
                     blocked_foreign = []
                     blocked_invalid = []
@@ -4652,29 +4828,43 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     sent_ok = []
                     duplicates = []
                     batch_duplicates = []
-        
-                    initial = [e for e in emails if e not in blocked and e not in sent_today]
-                    for e in initial:
+
+                    filtered_initial: list[str] = []
+                    for e in emails:
+                        if e in blocked:
+                            blocked_invalid.append(e)
+                            invalid_examples.add(e)
+                            continue
+                        if e in sent_today:
+                            removed_today.append(e)
+                            today_examples.add(e)
+                            continue
                         if is_foreign(e):
                             blocked_foreign.append(e)
-                        else:
-                            to_send.append(e)
-        
+                            foreign_examples.add(e)
+                            continue
+                        filtered_initial.append(e)
+
                     queue: List[str] = []
-                    for e in to_send:
+                    for e in filtered_initial:
                         if is_suppressed(e):
                             blocked_invalid.append(e)
+                            invalid_examples.add(e)
                         else:
                             queue.append(e)
-        
+
                     to_send = []
                     ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
+                    state.override_cooldown = ignore_cooldown
                     for e in queue:
                         if not ignore_cooldown and was_emailed_recently(e, lookup_days):
                             skipped_recent.append(e)
+                            recent_180d_examples.add(e)
                         else:
                             to_send.append(e)
-        
+
+                    ready_after_cooldown = list(to_send)
+
                     deduped: List[str] = []
                     seen_norm: Set[str] = set()
                     for e in to_send:
@@ -4682,22 +4872,63 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         if norm in seen_norm:
                             batch_duplicates.append(e)
                             duplicates.append(e)
+                            dup_examples.add(e)
                         else:
                             seen_norm.add(norm)
                             deduped.append(e)
                     to_send = deduped
-        
-                    log_mass_filter_digest(
-                        {
-                            "input_total": len(emails),
-                            "after_suppress": len(queue),
-                            "foreign_blocked": len(blocked_foreign),
-                            "after_180d": len(to_send),
-                            "sent_planned": len(to_send),
-                            "skipped_by_dup_in_batch": len(batch_duplicates),
-                        }
+
+                    digest = {
+                        "input_total": len(emails),
+                        "after_suppress": len(queue),
+                        "foreign_blocked": len(blocked_foreign),
+                        "ready_after_cooldown": len(ready_after_cooldown),
+                        "removed_recent_180d": len(skipped_recent),
+                        "removed_today": len(removed_today),
+                        "removed_invalid": len(blocked_invalid),
+                        "removed_foreign": len(blocked_foreign),
+                        "removed_duplicates_in_batch": len(batch_duplicates),
+                        "set_planned": len(to_send),
+                        "ready_final": len(to_send),
+                        "sent_planned": len(to_send),
+                    }
+
+                    snapshot = _snapshot_mass_digest(
+                        digest,
+                        ready_after_cooldown=len(ready_after_cooldown),
+                        ready_final=len(to_send),
                     )
-        
+                    state.last_digest = snapshot
+                    context.chat_data["last_filter_digest"] = snapshot
+
+                    try:
+                        var_dir = Path("var")
+                        var_dir.mkdir(parents=True, exist_ok=True)
+                        (var_dir / "last_batch_digest.json").write_text(
+                            json.dumps(snapshot, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        examples = {
+                            "recent_180d": sorted(recent_180d_examples)[:10],
+                            "today": sorted(today_examples)[:10],
+                            "invalid": sorted(invalid_examples)[:10],
+                            "foreign": sorted(foreign_examples)[:10],
+                            "duplicates_in_batch": sorted(dup_examples)[:10],
+                        }
+                        (var_dir / "last_batch_examples.json").write_text(
+                            json.dumps(examples, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        logger.exception("failed_to_write_last_batch_digest")
+
+                    logger.info(
+                        "bulk_filter_digest",
+                        extra={"digest": snapshot, "chat_id": chat_id},
+                    )
+
+                    log_mass_filter_digest({**digest, "chat_id": chat_id})
+
                     mass_state.save_chat_state(
                         chat_id,
                         {
@@ -4712,6 +4943,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         },
                     )
 
+                digest_snapshot = state.last_digest or _snapshot_mass_digest(
+                    digest,
+                    ready_after_cooldown=len(to_send),
+                    ready_final=len(to_send),
+                )
+
             if is_cancelled(chat_id):
                 clear_cancel(chat_id)
                 await query.message.reply_text("⛔ Остановлено (после фильтрации).")
@@ -4720,8 +4957,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             limited_from: int | None = None
 
             if not to_send:
+                explanation = _format_empty_send_explanation(digest_snapshot)
                 await query.message.reply_text(
-                    "❗ Все адреса уже есть в истории отправок или в блок-листах."
+                    explanation,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
                 clear_cancel(chat_id)
                 return
