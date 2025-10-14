@@ -5518,6 +5518,31 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
+        app = getattr(context, "application", None)
+        chat_id_local = handler_payload.get("chat_id")
+
+        async def _notify_chat(text: str) -> None:
+            if chat_id_local is None or not text:
+                return
+            try:
+                if app is not None:
+                    await asyncio.wrap_future(
+                        messaging.run_in_app_loop(
+                            app,
+                            context.bot.send_message(
+                                chat_id=chat_id_local,
+                                text=text,
+                            ),
+                        )
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id_local,
+                        text=text,
+                    )
+            except Exception:
+                pass
+
         handler = _resolve_mass_handler()
         if not callable(handler):
             # [EBOT-073] Показываем подробную причину, собранную при импорте
@@ -5527,24 +5552,14 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             smap[batch_id] = "error"
             context.bot_data["bulk_status_by_batch"] = smap
-            chat_id_local = handler_payload.get("chat_id")
-            if chat_id_local is not None:
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id_local,
-                        text=(
-                            "🚫 Не удалось запустить рассылку: не найден обработчик массовой отправки.\n"
-                            f"Причина: {err_hint}\n"
-                            "Если вы только что обновили код — перезапустите бота. "
-                            "Также убедитесь, что модуль emailbot.handlers.manual_send доступен."
-                        ),
-                    )
-                except Exception:  # pragma: no cover - best-effort уведомление
-                    pass
+            await _notify_chat(
+                "🚫 Не удалось запустить рассылку: не найден обработчик массовой отправки.\n"
+                f"Причина: {err_hint}\n"
+                "Если вы только что обновили код — перезапустите бота. "
+                "Также убедитесь, что модуль emailbot.handlers.manual_send доступен."
+            )
             return
 
-        app = getattr(context, "application", None)
-        chat_id_local = handler_payload.get("chat_id")
         callback_map: dict[str, Callable[[str], None]] = {}
         if app is not None and chat_id_local is not None:
             def _send_with_prefix(prefix: str, text: str) -> None:
@@ -5642,15 +5657,10 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 smap[batch_id] = "error"
                 context.bot_data["bulk_status_by_batch"] = smap
                 try:
-                    chat_id_local = handler_payload.get("chat_id")
-                    if chat_id_local is not None:
-                        await context.bot.send_message(
-                            chat_id=chat_id_local,
-                            text=(
-                                "❌ Ошибка при запуске/выполнении рассылки. "
-                                "Откройте «Диагностика» и пришлите лог."
-                            ),
-                        )
+                    await _notify_chat(
+                        "❌ Ошибка при запуске/выполнении рассылки. "
+                        "Откройте «Диагностика» и пришлите лог."
+                    )
                 except Exception:  # pragma: no cover - best-effort notification
                     pass
                 return
@@ -5686,7 +5696,10 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         bh_copy = dict(handler_queue)
 
-        await _run_bulk_send(bh_copy, update, context)
+        def _run_worker() -> None:
+            asyncio.run(_run_bulk_send(bh_copy, update, context))
+
+        await asyncio.to_thread(_run_worker)
 
     app_for_tasks = getattr(context, "application", None)
     if app_for_tasks is not None:
