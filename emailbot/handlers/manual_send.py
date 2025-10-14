@@ -9,7 +9,7 @@ import os
 import smtplib
 import time
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Set
 
 from asyncio import Lock
 
@@ -46,12 +46,25 @@ from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
 from emailbot.smtp_client import RobustSMTP
 
-import emailbot.bot_handlers as bot_handlers_module
 from .preview import (
     go_back as preview_go_back,
     request_edit as preview_request_edit,
     send_preview_report,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
+    import emailbot.bot_handlers as bot_handlers_module
+
+_BOT_HANDLERS_MODULE: Any | None = None
+
+
+def _bot_handlers() -> "bot_handlers_module":  # type: ignore[name-defined]
+    global _BOT_HANDLERS_MODULE
+    if _BOT_HANDLERS_MODULE is None:
+        from emailbot import bot_handlers as _module
+
+        _BOT_HANDLERS_MODULE = _module
+    return _BOT_HANDLERS_MODULE  # type: ignore[return-value]
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +85,8 @@ def _get_chat_lock(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Lock:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the main menu and initialize state."""
 
-    bot_handlers_module.init_state(context)
+    bot_handlers = _bot_handlers()
+    bot_handlers.init_state(context)
     keyboard = [
         ["📤 Массовая", "🛑 Стоп", "✉️ Ручная"],
         ["🧹 Очистить список", "📄 Показать исключения"],
@@ -112,7 +126,9 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await safe_answer(query)
     current = context.chat_data.get("current_template_code")
     if not current:
-        state = context.chat_data.get(bot_handlers_module.SESSION_KEY)
+        bot_handlers = _bot_handlers()
+        session_key = getattr(bot_handlers, "SESSION_KEY", "state")
+        state = context.chat_data.get(session_key)
         if state and getattr(state, "group", None):
             current = state.group
     await query.message.reply_text(
@@ -128,6 +144,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = update.callback_query
     await safe_answer(query)
+    bot_handlers = _bot_handlers()
     data = query.data or ""
     if ":" not in data:
         await query.message.reply_text(
@@ -136,32 +153,32 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     prefix_raw, group_raw = data.split(":", 1)
     prefix = f"{prefix_raw}:"
-    template_info = bot_handlers_module.get_template_from_map(
+    template_info = bot_handlers.get_template_from_map(
         context, prefix, group_raw
     )
     template_path_obj = (
-        bot_handlers_module._template_path(template_info)
+        bot_handlers._template_path(template_info)
         if template_info
         else None
     )
     if not template_info or not template_path_obj or not template_path_obj.exists():
-        group_code_fallback = bot_handlers_module._normalize_template_code(group_raw)
-        template_info = bot_handlers_module.get_template(group_code_fallback)
-        template_path_obj = bot_handlers_module._template_path(template_info)
+        group_code_fallback = bot_handlers._normalize_template_code(group_raw)
+        template_info = bot_handlers.get_template(group_code_fallback)
+        template_path_obj = bot_handlers._template_path(template_info)
         if not template_info or not template_path_obj or not template_path_obj.exists():
             await query.message.reply_text(
                 "⚠️ Шаблон не найден или файл отсутствует. Обновите список и попробуйте снова."
             )
             return
         group_raw = template_info.get("code") or group_code_fallback
-    group_code = bot_handlers_module._normalize_template_code(group_raw)
+    group_code = bot_handlers._normalize_template_code(group_raw)
     template_path = str(template_path_obj)
-    template_label = bot_handlers_module._template_label(template_info)
+    template_label = bot_handlers._template_label(template_info)
     if not template_label and group_code:
         template_label = get_template_label(group_code)
     if not template_label:
         template_label = group_code
-    state = bot_handlers_module.get_state(context)
+    state = bot_handlers.get_state(context)
     emails = state.to_send
     state.group = group_code
     state.template = template_path
@@ -200,7 +217,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "entry_url": context.chat_data.get("entry_url"),
             }
         )
-        snapshot = bot_handlers_module._snapshot_mass_digest(
+        snapshot = bot_handlers._snapshot_mass_digest(
             digest,
             ready_after_cooldown=(
                 int(digest.get("ready_after_cooldown"))
@@ -250,6 +267,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     query = update.callback_query
     chat_id = query.message.chat.id
+    bot_handlers = _bot_handlers()
     saved = mass_state.load_chat_state(chat_id)
     if saved and saved.get("pending"):
         emails = saved.get("pending", [])
@@ -257,7 +275,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         template_path = saved.get("template")
         template_label = saved.get("template_label") or ""
     else:
-        state = bot_handlers_module.get_state(context)
+        state = bot_handlers.get_state(context)
         emails = state.to_send
         group_code = state.group
         template_path = state.template
@@ -325,7 +343,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 sent_ok = list(saved_state.get("sent_ok", []))
                 base_candidates = list(saved_state.get("pending", []))
             else:
-                state_obj = bot_handlers_module.get_state(context)
+                state_obj = bot_handlers.get_state(context)
                 blocked_foreign = list(state_obj.foreign or [])
                 blocked_invalid = []
                 skipped_recent = list(state_obj.cooldown_blocked or [])
@@ -371,7 +389,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     if addr not in blocked_invalid:
                         blocked_invalid.append(addr)
                     continue
-                if norm in sent_today_norm and not bot_handlers_module.is_force_send(chat_id):
+                if norm in sent_today_norm and not bot_handlers.is_force_send(chat_id):
                     continue
                 if is_foreign(addr):
                     if addr not in blocked_foreign:
@@ -427,7 +445,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
 
             available = max(0, MAX_EMAILS_PER_DAY - len(sent_today_norm))
-            if available <= 0 and not bot_handlers_module.is_force_send(chat_id):
+            if available <= 0 and not bot_handlers.is_force_send(chat_id):
                 logger.info(
                     "Daily limit reached: %s emails sent today (source=sent_log)",
                     len(sent_today_norm),
@@ -440,10 +458,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                 )
                 return
-            if (
-                not bot_handlers_module.is_force_send(chat_id)
-                and len(to_send) > available
-            ):
+            if not bot_handlers.is_force_send(chat_id) and len(to_send) > available:
                 to_send = to_send[:available]
                 await query.message.reply_text(
                     (
@@ -674,7 +689,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await notify(query.message, error_report, event="error")
 
         clear_recent_sent_cache()
-        bot_handlers_module.disable_force_send(chat_id)
+        bot_handlers.disable_force_send(chat_id)
 
     clear_stop()
     messaging.create_task_with_logging(

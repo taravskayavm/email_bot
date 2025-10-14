@@ -30,13 +30,18 @@ def _import_mass_sender() -> Optional[Callable]:
     Делаем несколько надёжных попыток, чтобы не зависеть от способа запуска.
     """
 
+    global _LEGACY_MASS_SENDER_ERR
+    _LEGACY_MASS_SENDER_ERR = None
+
     # 1) относительный импорт (если bot_handlers внутри пакета emailbot)
     try:
         from .handlers.manual_send import send_all as _fn  # type: ignore
 
+        _LEGACY_MASS_SENDER_ERR = None
         return _fn
     except Exception as e1:  # pragma: no cover - defensive
         logger.debug("mass_sender import (relative) failed: %r", e1)
+        _LEGACY_MASS_SENDER_ERR = f"relative import failed: {e1!r}"
 
     # 2) абсолютный импорт по полному пути пакета
     for mod in ("emailbot.handlers.manual_send", "handlers.manual_send"):
@@ -44,9 +49,11 @@ def _import_mass_sender() -> Optional[Callable]:
             module = importlib.import_module(mod)
             function = getattr(module, "send_all", None)
             if callable(function):
+                _LEGACY_MASS_SENDER_ERR = None
                 return function
         except Exception as e2:  # pragma: no cover - defensive
             logger.debug("mass_sender import (%s) failed: %r", mod, e2)
+            _LEGACY_MASS_SENDER_ERR = f"{mod} import failed: {e2!r}"
 
     return None
 
@@ -5263,8 +5270,9 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # --- Совместимость: обёртки под старые имена хендлеров ---
-# Жёстко фиксируем «легаси»-хендлер на реальный manual_send.send_all (если импорт удался)
-_LEGACY_MASS_SENDER: Optional[Callable] = _import_mass_sender()
+# Кэш «легаси»-хендлера. Не инициализируем при импорте — чтобы избежать циклических импортов.
+_LEGACY_MASS_SENDER: Optional[Callable] = None
+_LEGACY_MASS_SENDER_ERR: Optional[str] = None
 
 
 async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5480,8 +5488,11 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if callable(handler):
             logger.info("start_sending: using handler=send_selected (globals)")
             return handler
+        global _LEGACY_MASS_SENDER
+        if _LEGACY_MASS_SENDER is None:
+            _LEGACY_MASS_SENDER = _import_mass_sender()
         if callable(_LEGACY_MASS_SENDER):
-            logger.info("start_sending: using handler=manual_send.send_all")
+            logger.info("start_sending: using handler=manual_send.send_all (lazy)")
             return _LEGACY_MASS_SENDER
         logger.error(
             "start_sending: no available mass sender (both paths missing) — "
@@ -5496,7 +5507,10 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ) -> None:
         handler = _resolve_mass_handler()
         if not callable(handler):
-            logger.warning("start_sending: no bulk handler available")
+            err = _LEGACY_MASS_SENDER_ERR or "unknown"
+            logger.warning(
+                "start_sending: no bulk handler available (reason: %s)", err
+            )
             smap[batch_id] = "error"
             context.bot_data["bulk_status_by_batch"] = smap
             return
@@ -5572,6 +5586,9 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     mass_handler = globals().get("send_selected")
     if mass_handler is None:
+        global _LEGACY_MASS_SENDER
+        if _LEGACY_MASS_SENDER is None:
+            _LEGACY_MASS_SENDER = _import_mass_sender()
         mass_handler = _LEGACY_MASS_SENDER
 
     if mass_handler is None or mass_handler is send_all:
