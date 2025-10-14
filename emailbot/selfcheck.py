@@ -6,6 +6,7 @@ import importlib
 import logging
 import os
 import socket
+from pathlib import Path
 from dataclasses import dataclass
 from typing import List
 from zoneinfo import ZoneInfo
@@ -55,7 +56,14 @@ def startup_selfcheck() -> List[str]:
     # 2) Ключевые переменные окружения
     for var in CRITICAL_ENV_VARS:
         if not os.getenv(var):
-            errors.append(f"ENV missing: {var}")
+            hint = ""
+            try:
+                cwd_env = Path.cwd() / ".env"
+                if cwd_env.exists():
+                    hint = f" (.env: {cwd_env})"
+            except Exception:
+                pass
+            errors.append(f"ENV missing: {var}{hint}")
 
     # 3) Воркеры
     try:

@@ -11,6 +11,14 @@ from . import settings_store as _store
 
 logger = logging.getLogger(__name__)
 
+# [EBOT-083] Загружаем .env как можно раньше, чтобы переменные окружения были доступны
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 # [EBOT-078] Унификация числа воркеров и обратная совместимость
 def _int_env(name: str, default: int) -> int:
     try:
@@ -35,12 +43,19 @@ except Exception:
 # Экспортируем для старых модулей (и нового кода тоже безопасно)
 PARSE_MAX_WORKERS = _legacy_parse
 
+# [EBOT-083] Канонический таймаут для файловых операций при отправке
+SEND_FILE_TIMEOUT = _int_env("SEND_FILE_TIMEOUT", _int_env("FILE_TIMEOUT", 20))
+# Backward-compat: некоторые модули могут импортировать PARSE_FILE_TIMEOUT
+PARSE_FILE_TIMEOUT = _int_env("PARSE_FILE_TIMEOUT", SEND_FILE_TIMEOUT)
+
 # Информативный лог итоговых значений (1 раз на импорт)
 try:
     logger.info(
-        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s",
+        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s; SEND_FILE_TIMEOUT=%s; PARSE_FILE_TIMEOUT=%s",
         SEND_MAX_WORKERS,
         PARSE_MAX_WORKERS,
+        SEND_FILE_TIMEOUT,
+        PARSE_FILE_TIMEOUT,
     )
 except Exception:
     pass
@@ -190,6 +205,8 @@ __all__ = [
     "ROBOTS_CACHE_TTL_SECONDS",
     "SEND_MAX_WORKERS",
     "PARSE_MAX_WORKERS",
+    "SEND_FILE_TIMEOUT",
+    "PARSE_FILE_TIMEOUT",
     "load",
     "save",
     "list_available_directions",
