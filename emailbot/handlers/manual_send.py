@@ -67,6 +67,8 @@ def _bot_handlers() -> "bot_handlers_module":  # type: ignore[name-defined]
         _BOT_HANDLERS_MODULE = _module
     return _BOT_HANDLERS_MODULE  # type: ignore[return-value]
 
+# [EBOT-076/084] Устойчивая конфигурация
+# Воркеры: SEND_MAX_WORKERS -> PARSE_MAX_WORKERS -> 4
 try:
     _SEND_WORKERS = getattr(_settings, "SEND_MAX_WORKERS", None)
 except Exception:
@@ -75,7 +77,23 @@ try:
     _PARSE_WORKERS = getattr(_settings, "PARSE_MAX_WORKERS", None)
 except Exception:
     _PARSE_WORKERS = None
-WORKERS = _SEND_WORKERS or _PARSE_WORKERS or 4
+WORKERS = (_SEND_WORKERS or _PARSE_WORKERS or 4)
+
+
+# Таймаут файловых операций/подготовки писем:
+# SEND_FILE_TIMEOUT -> PARSE_FILE_TIMEOUT -> FILE_TIMEOUT -> 20
+def _pick_timeout() -> int:
+    for name in ("SEND_FILE_TIMEOUT", "PARSE_FILE_TIMEOUT", "FILE_TIMEOUT"):
+        try:
+            val = getattr(_settings, name, None)
+            if isinstance(val, int) and val > 0:
+                return val
+        except Exception:
+            pass
+    return 20
+
+
+FILE_TIMEOUT = _pick_timeout()
 
 logger = logging.getLogger(__name__)
 
