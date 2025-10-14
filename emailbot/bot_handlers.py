@@ -13,6 +13,7 @@ import re
 import secrets
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -381,28 +382,31 @@ def _diag_bulk_line(context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append("BULK: handler = missing")
 
     try:
-        qmap = context.chat_data.get("bulk_queue_by_group") or {}
-        if qmap:
-            lines.append("BULK queues:")
-            for group, data in qmap.items():
-                count = 0
+        batches = context.bot_data.get("bulk_batches") or {}
+        if batches:
+            lines.append("BULK batches:")
+            for batch_id, data in batches.items():
                 emails = data.get("emails") if isinstance(data, dict) else None
                 try:
                     count = len(emails) if emails is not None else 0
                 except Exception:
                     count = 0
-                lines.append(f"  - {group}: {count} адресов")
+                group = data.get("group") if isinstance(data, dict) else None
+                lines.append(
+                    f"  - {batch_id}: {count} адресов"
+                    + (f" (группа {group})" if group else "")
+                )
         else:
-            lines.append("BULK queues: none")
+            lines.append("BULK batches: none")
     except Exception:
-        lines.append("BULK queues: n/a")
+        lines.append("BULK batches: n/a")
 
     try:
-        smap = context.chat_data.get("bulk_status_by_group") or {}
+        smap = context.bot_data.get("bulk_status_by_batch") or {}
         if smap:
             lines.append("BULK status:")
-            for group, status in smap.items():
-                lines.append(f"  - {group}: {status}")
+            for batch_id, status in smap.items():
+                lines.append(f"  - {batch_id}: {status}")
     except Exception:
         pass
 
@@ -557,28 +561,41 @@ def _store_bulk_queue(
     emails: Iterable[str],
     chat_id: int | None,
     digest: dict[str, object] | None = None,
-) -> None:
-    """Persist prepared bulk queue in chat data keyed by ``group``.
-
-    The helper keeps a defensive stance: any unexpected issue during storage is
-    logged but never propagated to the caller.
-    """
+    template: str | None = None,
+) -> str | None:
+    """Persist prepared bulk queue globally and return its ``batch_id``."""
 
     if not group:
-        return
+        return None
+
     try:
         ready_list = [str(addr) for addr in emails if addr]
-        qmap = context.chat_data.setdefault("bulk_queue_by_group", {})
-        qmap[group] = {
+        if not ready_list:
+            return None
+        batch_id = uuid.uuid4().hex
+        entry: dict[str, object] = {
             "emails": ready_list,
             "group": group,
             "chat_id": chat_id,
             "digest": dict(digest or {}),
+            "created_at": time.time(),
+            "batch_id": batch_id,
         }
-        context.chat_data["bulk_queue_by_group"] = qmap
-        logger.info("bulk_queue: stored queue group=%s size=%d", group, len(ready_list))
+        if template is not None:
+            entry["template"] = template
+        batches = context.bot_data.setdefault("bulk_batches", {})
+        batches[batch_id] = entry
+        context.bot_data["bulk_batches"] = batches
+        logger.info(
+            "bulk_queue: stored batch=%s group=%s size=%d",
+            batch_id,
+            group,
+            len(ready_list),
+        )
+        return batch_id
     except Exception as exc:  # pragma: no cover - defensive branch
         logger.warning("bulk_queue: failed to store queue for group=%s: %s", group, exc)
+        return None
 
 
 def _is_ignore_cooldown_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2341,13 +2358,17 @@ async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.warning("refresh_preview: prepare_mass_mailing failed: %s", exc)
             ready = list(getattr(state, "to_send", []) or [])
             digest = {"error": str(exc)}
-        _store_bulk_queue(
+        batch_id = _store_bulk_queue(
             context,
             group=state.group,
             emails=ready,
             chat_id=chat_id,
             digest=digest,
         )
+        if batch_id:
+            handler_payload = context.chat_data.get("bulk_handler")
+            if isinstance(handler_payload, dict):
+                handler_payload["batch_id"] = batch_id
     allowed_all = state.preview_allowed_all if state else []
     numeric = state.suspect_numeric if state else []
     foreign = state.foreign if state else []
@@ -3183,20 +3204,24 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "batch_id": context.chat_data.get("batch_id"),
         },
     )
-    context.chat_data["bulk_handler"] = {
+    handler_payload = {
         "emails": list(ready),
         "group": group_code_norm,
         "chat_id": chat_id,
         "template": template_path_str,
         "digest": digest,
     }
-    _store_bulk_queue(
+    context.chat_data["bulk_handler"] = handler_payload
+    batch_id = _store_bulk_queue(
         context,
         group=group_code_norm,
         emails=ready,
         chat_id=chat_id,
         digest=digest,
+        template=template_path_str,
     )
+    if batch_id:
+        handler_payload["batch_id"] = batch_id
     summary_payload = _store_mass_summary(
         chat_id,
         group=group_code_norm,
@@ -3214,14 +3239,31 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=None,
         )
         return
+    if batch_id:
+        keyboard = None
+        try:  # pragma: no cover - optional legacy dependency
+            from emailbot import telegram_ui  # type: ignore
+
+            build_keyboard = getattr(telegram_ui, "build_mass_preview_keyboard", None)
+            if callable(build_keyboard):
+                keyboard = build_keyboard(batch_id)
+        except Exception:
+            keyboard = None
+    else:
+        keyboard = None
+
+    if keyboard is None:
+        callback = f"bulk_start:{batch_id}" if batch_id else "bulk_start"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🚀 Начать рассылку", callback_data=callback)]]
+        )
+
     await query.message.reply_text(
         (
             f"✉️ Готово к отправке {len(ready)} писем.\n"
             "Для запуска рассылки нажмите кнопку ниже."
         ),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✉️ Начать рассылку", callback_data="start_sending")]]
-        ),
+        reply_markup=keyboard,
     )
 
 
@@ -4948,11 +4990,7 @@ _LEGACY_MASS_SENDER = globals().get("send_all")
 
 
 async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Совместимый вход для старой кнопки «Начать рассылку».
-
-    При наличии ручных адресов отдаёт управление ``send_manual_email``.
-    В противном случае делегирует массовой рассылке.
-    """
+    """Запуск массовой рассылки по подготовленному ``batch_id``."""
 
     try:
         manual = context.user_data.get("manual_emails")
@@ -4963,211 +5001,138 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return await send_manual_email(update, context)
 
     query = getattr(update, "callback_query", None)
-    if query:
+    if query is not None:
         try:
             await query.answer()
         except Exception:  # pragma: no cover - defensive branch
             pass
 
-        # Один и тот же callback не обрабатываем дважды: Telegram иногда ретраит
-        # доставку на клиенте, и мы рискуем запустить рассылку повторно.
         cbid = getattr(query, "id", None)
         if cbid:
-            cbmap = context.bot_data.setdefault("seen_callback_ids", {})
+            cbmap_raw = context.bot_data.setdefault("seen_callback_ids", {})
+            try:
+                cbmap = dict(cbmap_raw)
+            except Exception:
+                cbmap = {}
             now_m = time.monotonic()
             for old_id, ts in list(cbmap.items()):
-                if now_m - ts > 90:
+                try:
+                    ts_float = float(ts)
+                except Exception:
+                    cbmap.pop(old_id, None)
+                    continue
+                if now_m - ts_float > 90.0:
                     cbmap.pop(old_id, None)
             if cbmap.get(cbid):
                 return
             cbmap[cbid] = now_m
             context.bot_data["seen_callback_ids"] = cbmap
 
-    state = context.chat_data.get(SESSION_KEY)
-    if state is None:
-        state = get_state(context)
-
     try:
         bulk_handler = context.chat_data.get("bulk_handler")
     except Exception:
         bulk_handler = None
 
-    qmap = context.chat_data.get("bulk_queue_by_group") or {}
-    smap = context.chat_data.setdefault("bulk_status_by_group", {})
-    dmap = context.chat_data.setdefault("bulk_debounce_by_group", {})
+    data = query.data if query is not None else None
+    batch_id = ""
+    if data:
+        if ":" in data:
+            batch_id = data.split(":", 1)[1]
+        else:
+            batch_id = data
 
-    group_code = getattr(state, "group", None)
-    chat = update.effective_chat
-    chat_id = chat.id if chat else None
+    if not batch_id and isinstance(bulk_handler, dict):
+        raw_batch = bulk_handler.get("batch_id")
+        if isinstance(raw_batch, str) and raw_batch:
+            batch_id = raw_batch
 
-    if isinstance(bulk_handler, dict) and not group_code:
-        raw_group = bulk_handler.get("group")
-        if isinstance(raw_group, str) and raw_group:
-            group_code = raw_group
+    if not batch_id:
+        message = "Не найден batch_id. Нажмите «Показать примеры» заново."
+        if query is not None:
+            try:
+                await _safe_edit_message(query, text=message)
+                return
+            except Exception:
+                pass
+        message_obj = update.effective_message
+        if message_obj is not None:
+            try:
+                await message_obj.reply_text(message)
+            except Exception:
+                pass
+        return
 
-    queue = qmap.get(group_code) if group_code else None
-
-    def _persist_queue(
-        group: str | None,
-        emails: Iterable[str],
-        *,
-        chat_id_value: int | None,
-        digest: dict | None = None,
-        template: str | None = None,
-    ) -> dict | None:
-        if not group or chat_id_value is None:
-            return None
-        ready_list = [str(item) for item in emails if item]
-        if not ready_list:
-            return None
-        entry = {
-            "emails": ready_list,
-            "group": group,
-            "chat_id": chat_id_value,
-            "digest": dict(digest or {}),
-        }
-        qmap[group] = entry
-        context.chat_data["bulk_queue_by_group"] = qmap
-        handler_payload: dict[str, object] = {}
-        if isinstance(bulk_handler, dict):
-            handler_payload.update(bulk_handler)
-        handler_payload.update(entry)
-        if template is not None:
-            handler_payload["template"] = template
-        context.chat_data["bulk_handler"] = handler_payload
-        return entry
-
-    if queue is None and isinstance(bulk_handler, dict):
-        queue = _persist_queue(
-            bulk_handler.get("group"),
-            bulk_handler.get("emails") or [],
-            chat_id_value=bulk_handler.get("chat_id"),
-            digest=bulk_handler.get("digest"),
-            template=bulk_handler.get("template"),
+    batches = context.bot_data.get("bulk_batches") or {}
+    queue = batches.get(batch_id)
+    if not isinstance(queue, dict):
+        logger.warning("start_sending: batch not found: %s", batch_id)
+        message = (
+            "Не удалось найти подготовленный список (batch). "
+            "Нажмите «Показать примеры» заново."
         )
-        if queue is not None and not group_code:
-            group_code = queue.get("group")
+        if query is not None:
+            try:
+                await _safe_edit_message(query, text=message)
+                return
+            except Exception:
+                pass
+        message_obj = update.effective_message
+        if message_obj is not None:
+            try:
+                await message_obj.reply_text(message)
+            except Exception:
+                pass
+        return
 
-    if queue is None:
-        if chat_id is not None:
-            saved = mass_state.load_chat_state(chat_id) or {}
-            pending = saved.get("pending")
-            if isinstance(pending, list) and pending:
-                queue = _persist_queue(
-                    saved.get("group"),
-                    pending,
-                    chat_id_value=chat_id,
-                    digest=saved.get("digest"),
-                    template=saved.get("template"),
-                )
-                if queue is not None:
-                    group_code = queue.get("group") or group_code
-        if queue is None and state and getattr(state, "to_send", None):
-            fallback_group = group_code or getattr(state, "group", None)
-            if not fallback_group and isinstance(bulk_handler, dict):
-                raw_group = bulk_handler.get("group")
-                if isinstance(raw_group, str) and raw_group:
-                    fallback_group = raw_group
-            chat_id_for_prepare = chat_id
-            if chat_id_for_prepare is None and query and query.message:
-                chat_id_for_prepare = query.message.chat.id
-            if fallback_group and chat_id_for_prepare is not None:
-                try:
-                    ready, *_rest, digest = messaging.prepare_mass_mailing(
-                        emails=state.to_send,
-                        group=fallback_group,
-                        chat_id=chat_id_for_prepare,
-                        ignore_cooldown=_is_ignore_cooldown_enabled(context),
-                    )
-                    queue = _persist_queue(
-                        fallback_group,
-                        ready,
-                        chat_id_value=chat_id_for_prepare,
-                        digest=digest,
-                        template=getattr(state, "template", None),
-                    )
-                    if queue is not None:
-                        group_code = fallback_group
-                        logger.info(
-                            "start_sending: queue re-created via state, emails=%d, group=%s",
-                            len(ready),
-                            fallback_group,
-                        )
-                except Exception as exc:
-                    logger.exception("start_sending: prepare_mass_mailing failed: %s", exc)
-
-        if queue is None:
-            logger.warning("start_sending: no bulk queue available")
-            message = (
-                "Не удалось найти подготовленный список. Нажмите «Показать примеры» заново."
-            )
-
-            async def _notify_failure() -> None:
-                if query is not None:
-                    try:
-                        await _safe_edit_message(query, text=message)
-                        return
-                    except Exception:
-                        pass
-                message_obj = update.effective_message
-                if message_obj is not None:
-                    try:
-                        await message_obj.reply_text(message)
-                    except Exception:
-                        pass
-
-            await _notify_failure()
-            return
-
-    emails_in_queue = queue.get("emails") if isinstance(queue, dict) else None
+    emails_in_queue = queue.get("emails")
     if not emails_in_queue:
-        logger.warning(
-            "start_sending: empty queue for group=%s",
-            queue.get("group") if isinstance(queue, dict) else None,
-        )
+        logger.warning("start_sending: empty batch=%s", batch_id)
         empty_message = (
             "Очередь пуста. Нажмите «Показать примеры» или выберите направление заново."
         )
-
-        async def _notify_empty() -> None:
-            if query is not None:
-                try:
-                    await _safe_edit_message(query, text=empty_message)
-                    return
-                except Exception:
-                    pass
-            message_obj = update.effective_message
-            if message_obj is not None:
-                try:
-                    await message_obj.reply_text(empty_message)
-                except Exception:
-                    pass
-
-        await _notify_empty()
+        if query is not None:
+            try:
+                await _safe_edit_message(query, text=empty_message)
+                return
+            except Exception:
+                pass
+        message_obj = update.effective_message
+        if message_obj is not None:
+            try:
+                await message_obj.reply_text(empty_message)
+            except Exception:
+                pass
         return
 
-    queue_group = queue.get("group") if isinstance(queue, dict) else group_code
     try:
-        queue_size = len(emails_in_queue) if emails_in_queue is not None else 0
+        queue_size = len(emails_in_queue)
     except Exception:
         queue_size = 0
+
+    group_code = queue.get("group")
     logger.info(
-        "start_sending: using bulk queue group=%s emails=%d",
-        queue_group,
+        "start_sending: using batch=%s group=%s emails=%d",
+        batch_id,
+        group_code,
         queue_size,
     )
-    debounce_key = queue_group or "__global__"
+
+    smap = context.bot_data.setdefault("bulk_status_by_batch", {})
+    dmap = context.bot_data.setdefault("bulk_debounce_by_batch", {})
+    lmap = context.bot_data.setdefault("bulk_locks_by_batch", {})
+
     now = time.monotonic()
     try:
-        last_start = float(dmap.get(debounce_key, 0.0))
+        last_start = float(dmap.get(batch_id, 0.0))
     except Exception:
         last_start = 0.0
-    current_status = smap.get(queue_group or "") if queue_group else None
+    current_status = smap.get(batch_id)
     if (now - last_start) < 8.0 or current_status in {"starting", "running"}:
         logger.info(
-            "start_sending: debounce triggered for group=%s status=%s",
-            queue_group,
+            "start_sending: debounce — status=%s, batch=%s (last=%.2fs)",
             current_status,
+            batch_id,
+            now - last_start,
         )
         warning_markup = _build_stop_markup()
         warning_text = (
@@ -5191,12 +5156,11 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 pass
         return
 
-    dmap[debounce_key] = now
-    context.chat_data["bulk_debounce_by_group"] = dmap
+    dmap[batch_id] = now
+    context.bot_data["bulk_debounce_by_batch"] = dmap
 
-    if queue_group:
-        smap[queue_group] = "starting"
-    context.chat_data["bulk_status_by_group"] = smap
+    smap[batch_id] = "starting"
+    context.bot_data["bulk_status_by_batch"] = smap
 
     start_markup = _build_stop_markup()
     start_text = (
@@ -5221,6 +5185,12 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except Exception:
                 pass
 
+    lock = lmap.get(batch_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        lmap[batch_id] = lock
+        context.bot_data["bulk_locks_by_batch"] = lmap
+
     def _resolve_mass_handler():
         handler = globals().get("send_selected")
         if handler is None:
@@ -5231,83 +5201,87 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         handler = _resolve_mass_handler()
         if not callable(handler):
             logger.warning("start_sending: no bulk handler available")
-            if queue_group:
-                smap[queue_group] = "error"
-                context.chat_data["bulk_status_by_group"] = smap
+            smap[batch_id] = "error"
+            context.bot_data["bulk_status_by_batch"] = smap
             return
 
-        if queue_group:
-            smap[queue_group] = "running"
-            context.chat_data["bulk_status_by_group"] = smap
+        async with lock:
+            smap[batch_id] = "running"
+            context.bot_data["bulk_status_by_batch"] = smap
 
-        handler_queue = {
-            "emails": list(queue.get("emails") or []),
-            "group": queue_group,
-            "chat_id": queue.get("chat_id"),
-            "digest": dict(queue.get("digest") or {}),
-        }
-        if isinstance(bulk_handler, dict) and bulk_handler.get("template"):
-            handler_queue["template"] = bulk_handler.get("template")
-        context.chat_data["bulk_handler"] = handler_queue
+            handler_queue = {
+                "emails": list(queue.get("emails") or []),
+                "group": queue.get("group"),
+                "chat_id": queue.get("chat_id"),
+                "digest": dict(queue.get("digest") or {}),
+                "batch_id": batch_id,
+            }
+            template_value = queue.get("template")
+            if isinstance(template_value, str) and template_value:
+                handler_queue["template"] = template_value
+            context.chat_data["bulk_handler"] = handler_queue
 
-        try:
-            def _is_async_callable(func) -> bool:
-                if asyncio.iscoroutinefunction(func):
-                    return True
-                if isinstance(func, functools.partial):
-                    return _is_async_callable(func.func)
-                call_method = getattr(func, "__call__", None)
-                return bool(
-                    call_method is not None
-                    and asyncio.iscoroutinefunction(call_method)
-                )
-
-            is_async_handler = _is_async_callable(handler)
-
-            async def _run_async_handler() -> None:
-                await handler(update, context)
-
-            def _run_handler_in_thread() -> None:
-                if is_async_handler:
-                    asyncio.run(_run_async_handler())
-                else:
-                    handler(update, context)
-
-            if is_async_handler:
-                await asyncio.to_thread(_run_handler_in_thread)
-            else:
-                await asyncio.to_thread(handler, update, context)
-        except Exception as exc:
-            logger.exception("start_sending: background bulk error: %s", exc)
-            if queue_group:
-                smap[queue_group] = "error"
-                context.chat_data["bulk_status_by_group"] = smap
             try:
-                chat_id_local = queue.get("chat_id") if isinstance(queue, dict) else None
-                if chat_id_local is not None:
-                    await context.bot.send_message(
-                        chat_id=chat_id_local,
-                        text=(
-                            "❌ Ошибка при запуске/выполнении рассылки. "
-                            "Откройте «Диагностика» и пришлите лог."
-                        ),
+                def _is_async_callable(func) -> bool:
+                    if asyncio.iscoroutinefunction(func):
+                        return True
+                    if isinstance(func, functools.partial):
+                        return _is_async_callable(func.func)
+                    call_method = getattr(func, "__call__", None)
+                    return bool(
+                        call_method is not None
+                        and asyncio.iscoroutinefunction(call_method)
                     )
-            except Exception:  # pragma: no cover - best-effort notification
-                pass
-            return
 
-        if queue_group:
-            try:
-                qmap.pop(queue_group, None)
-                context.chat_data["bulk_queue_by_group"] = qmap
-            except Exception:
-                pass
-            smap[queue_group] = "done"
-            context.chat_data["bulk_status_by_group"] = smap
+                is_async_handler = _is_async_callable(handler)
+
+                async def _run_async_handler() -> None:
+                    await handler(update, context)
+
+                def _run_handler_in_thread() -> None:
+                    if is_async_handler:
+                        asyncio.run(_run_async_handler())
+                    else:
+                        handler(update, context)
+
+                if is_async_handler:
+                    await asyncio.to_thread(_run_handler_in_thread)
+                else:
+                    await asyncio.to_thread(handler, update, context)
+            except Exception as exc:
+                logger.exception("start_sending: background bulk error: %s", exc)
+                smap[batch_id] = "error"
+                context.bot_data["bulk_status_by_batch"] = smap
+                try:
+                    chat_id_local = queue.get("chat_id")
+                    if chat_id_local is not None:
+                        await context.bot.send_message(
+                            chat_id=chat_id_local,
+                            text=(
+                                "❌ Ошибка при запуске/выполнении рассылки. "
+                                "Откройте «Диагностика» и пришлите лог."
+                            ),
+                        )
+                except Exception:  # pragma: no cover - best-effort notification
+                    pass
+                return
+
+            batches_map = context.bot_data.setdefault("bulk_batches", {})
+            batches_map.pop(batch_id, None)
+            context.bot_data["bulk_batches"] = batches_map
+
+            smap[batch_id] = "done"
+            context.bot_data["bulk_status_by_batch"] = smap
+
             stored_handler = context.chat_data.get("bulk_handler")
-            if isinstance(stored_handler, dict) and stored_handler.get("group") == queue_group:
+            if isinstance(stored_handler, dict) and stored_handler.get("batch_id") == batch_id:
                 context.chat_data.pop("bulk_handler", None)
-            logger.info("start_sending: finished, group=%s", queue_group)
+
+            logger.info(
+                "start_sending: finished, batch=%s, group=%s",
+                batch_id,
+                handler_queue.get("group"),
+            )
 
     asyncio.create_task(_runner())
 

@@ -325,7 +325,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.start_sending, pattern="^start_sending")
+        CallbackQueryHandler(bot_handlers.start_sending, pattern="^bulk_start:")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
