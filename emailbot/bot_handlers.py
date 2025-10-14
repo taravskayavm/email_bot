@@ -25,40 +25,81 @@ logger = logging.getLogger(__name__)
 
 # Кэш массового отправителя. Инициализируем лениво, чтобы не ловить циклический импорт.
 _LEGACY_MASS_SENDER: Optional[Callable] = None
+# [EBOT-073] Копим описание ошибок импорта, чтобы показать пользователю первопричину.
 _LEGACY_MASS_SENDER_ERR: Optional[str] = None
 
 
+def _resolve_mass_handler() -> Optional[Callable]:
+    """Вернуть обработчик массовой рассылки, если он доступен."""
+
+    handler = globals().get("send_selected")
+    if callable(handler):
+        global _LEGACY_MASS_SENDER_ERR
+        _LEGACY_MASS_SENDER_ERR = None
+        logger.info("start_sending: using handler=send_selected (globals)")
+        return handler
+
+    global _LEGACY_MASS_SENDER
+    if _LEGACY_MASS_SENDER is None:
+        _LEGACY_MASS_SENDER = _import_mass_sender()
+
+    if callable(_LEGACY_MASS_SENDER):
+        logger.info("start_sending: using handler=manual_send.send_all (lazy)")
+        return _LEGACY_MASS_SENDER
+
+    return None
+
+
 def _import_mass_sender() -> Optional[Callable]:
-    """
-    Пытаемся найти функцию массовой отправки send_all в manual_send.
-    Делаем несколько надёжных попыток, чтобы не зависеть от способа запуска.
-    """
+    """Попробовать импортировать manual_send.send_all несколькими путями."""
 
-    global _LEGACY_MASS_SENDER_ERR
-    _LEGACY_MASS_SENDER_ERR = None
+    global _LEGACY_MASS_SENDER, _LEGACY_MASS_SENDER_ERR
+    errors: list[str] = []
 
-    # 1) относительный импорт (если bot_handlers внутри пакета emailbot)
+    # 1) Относительный импорт внутри пакета
     try:
         from .handlers.manual_send import send_all as _fn  # type: ignore
 
+        _LEGACY_MASS_SENDER = _fn
         _LEGACY_MASS_SENDER_ERR = None
+        logger.info("start_sending: using handler=.handlers.manual_send.send_all")
         return _fn
     except Exception as e1:  # pragma: no cover - defensive
         logger.debug("mass_sender import (relative) failed: %r", e1)
-        _LEGACY_MASS_SENDER_ERR = f"relative import failed: {e1!r}"
+        errors.append(f"relative: {e1!r}")
 
-    # 2) абсолютный импорт по полному пути пакета
-    for mod in ("emailbot.handlers.manual_send", "handlers.manual_send"):
-        try:
-            module = importlib.import_module(mod)
-            function = getattr(module, "send_all", None)
-            if callable(function):
-                _LEGACY_MASS_SENDER_ERR = None
-                return function
-        except Exception as e2:  # pragma: no cover - defensive
-            logger.debug("mass_sender import (%s) failed: %r", mod, e2)
-            _LEGACY_MASS_SENDER_ERR = f"{mod} import failed: {e2!r}"
+    # 2) Абсолютный импорт пакетного модуля
+    try:
+        module = importlib.import_module("emailbot.handlers.manual_send")
+        fn = getattr(module, "send_all", None)
+        if callable(fn):
+            _LEGACY_MASS_SENDER = fn
+            _LEGACY_MASS_SENDER_ERR = None
+            logger.info(
+                "start_sending: using handler=emailbot.handlers.manual_send.send_all"
+            )
+            return fn
+        errors.append("emailbot.handlers.manual_send: send_all not callable/absent")
+    except Exception as e2:  # pragma: no cover - defensive
+        logger.debug("mass_sender import (emailbot.*) failed: %r", e2)
+        errors.append(f"emailbot.handlers.manual_send: {e2!r}")
 
+    # 3) «Голый» импорт (для запусков вне пакета)
+    try:
+        module = importlib.import_module("handlers.manual_send")
+        fn = getattr(module, "send_all", None)
+        if callable(fn):
+            _LEGACY_MASS_SENDER = fn
+            _LEGACY_MASS_SENDER_ERR = None
+            logger.info("start_sending: using handler=handlers.manual_send.send_all")
+            return fn
+        errors.append("handlers.manual_send: send_all not callable/absent")
+    except Exception as e3:  # pragma: no cover - defensive
+        logger.debug("mass_sender import (handlers.*) failed: %r", e3)
+        errors.append(f"handlers.manual_send: {e3!r}")
+
+    _LEGACY_MASS_SENDER = None
+    _LEGACY_MASS_SENDER_ERR = " | ".join(errors) if errors else "unknown"
     return None
 
 import aiohttp
@@ -5478,29 +5519,6 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lmap[batch_id] = lock
         context.bot_data["bulk_locks_by_batch"] = lmap
 
-    def _resolve_mass_handler() -> Optional[Callable]:
-        """
-        Возвращает callable массовой отправки.
-        Сначала пытаемся взять современный send_selected (если где-то подмешан),
-        затем — зафиксированный manual_send.send_all.
-        """
-
-        handler = globals().get("send_selected")  # опциональная «новая» точка
-        if callable(handler):
-            logger.info("start_sending: using handler=send_selected (globals)")
-            return handler
-        global _LEGACY_MASS_SENDER
-        if _LEGACY_MASS_SENDER is None:
-            _LEGACY_MASS_SENDER = _import_mass_sender()
-        if callable(_LEGACY_MASS_SENDER):
-            logger.info("start_sending: using handler=manual_send.send_all (lazy)")
-            return _LEGACY_MASS_SENDER
-        logger.error(
-            "start_sending: no available mass sender (both paths missing) — "
-            "check emailbot/handlers/__init__.py and manual_send.send_all",
-        )
-        return None
-
     async def _run_bulk_send(
         handler_payload: dict[str, object],
         update: Update,
@@ -5508,12 +5526,27 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ) -> None:
         handler = _resolve_mass_handler()
         if not callable(handler):
-            err = _LEGACY_MASS_SENDER_ERR or "unknown"
-            logger.warning(
-                "start_sending: no bulk handler available (reason: %s)", err
+            # [EBOT-073] Показываем подробную причину, собранную при импорте
+            err_hint = _LEGACY_MASS_SENDER_ERR or "handler unresolved"
+            logger.error(
+                "start_sending: no bulk handler available (reason: %s)", err_hint
             )
             smap[batch_id] = "error"
             context.bot_data["bulk_status_by_batch"] = smap
+            chat_id_local = handler_payload.get("chat_id")
+            if chat_id_local is not None:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id_local,
+                        text=(
+                            "🚫 Не удалось запустить рассылку: не найден обработчик массовой отправки.\n"
+                            f"Причина: {err_hint}\n"
+                            "Если вы только что обновили код — перезапустите бота. "
+                            "Также убедитесь, что модуль emailbot.handlers.manual_send доступен."
+                        ),
+                    )
+                except Exception:  # pragma: no cover - best-effort уведомление
+                    pass
             return
 
         async with lock:
@@ -5586,11 +5619,10 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Совместимая обёртка для старого имени массовой отправки."""
 
     mass_handler = globals().get("send_selected")
+    if mass_handler is send_all:
+        mass_handler = None
     if mass_handler is None:
-        global _LEGACY_MASS_SENDER
-        if _LEGACY_MASS_SENDER is None:
-            _LEGACY_MASS_SENDER = _import_mass_sender()
-        mass_handler = _LEGACY_MASS_SENDER
+        mass_handler = _resolve_mass_handler()
 
     if mass_handler is None or mass_handler is send_all:
         return await start_sending(update, context)
