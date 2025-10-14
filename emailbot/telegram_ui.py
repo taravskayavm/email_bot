@@ -8,7 +8,7 @@ import sys
 from typing import Dict, List
 
 import requests
-from telegram import ParseMode
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.error import Conflict, NetworkError, TelegramError
 from telegram.ext import CommandHandler, Filters, MessageHandler, Updater
 from telegram.utils.request import Request
@@ -166,6 +166,21 @@ def handle_document(update, context):
         ack.edit_text(f"Не удалось обработать файл: {exc}")
     except Exception:  # pragma: no cover - defensive
         ack.edit_text("Произошла ошибка при разборе файла.")
+
+
+def build_mass_preview_keyboard(batch_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура предпросмотра рассылки с кнопкой запуска."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🚀 Начать рассылку",
+                    callback_data=f"bulk_start:{batch_id}",
+                )
+            ],
+        ]
+    )
 
 
 def _parse_timeout(name: str, default: int) -> int:
