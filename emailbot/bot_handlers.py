@@ -3321,6 +3321,10 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     state.to_send = ready
     state.blocked_after_parse = count_blocked(state.to_send)
     state.override_cooldown = _is_ignore_cooldown_enabled(context)
+    if isinstance(digest, dict):
+        context.chat_data["last_digest"] = dict(digest)
+    else:
+        context.chat_data["last_digest"] = {}
     state.last_digest = _snapshot_mass_digest(
         digest,
         ready_after_cooldown=(

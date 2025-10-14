@@ -1409,6 +1409,17 @@ def sync_log_with_imap(
         if changed_events:
             save_seen_events(SYNC_SEEN_EVENTS_PATH, seen_events)
         stats["total_rows_after"] = len(load_sent_log(Path(LOG_FILE)))
+        added_count = int(stats.get("new_contacts", 0)) + int(
+            stats.get("updated_contacts", 0)
+        )
+        logger.info(
+            "imap_sent_sync",
+            extra={
+                "folder": sent_folder,
+                "added": added_count,
+                "lookback_days": EMAIL_LOOKBACK_DAYS,
+            },
+        )
         return stats
     except Exception as e:
         log_error(f"sync_log_with_imap: {e}")
