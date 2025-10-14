@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import inspect
 import imaplib
 import importlib
 import io
@@ -5262,44 +5263,55 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             context.bot_data["bulk_status_by_batch"] = smap
             context.chat_data["bulk_handler"] = handler_payload
 
-            try:
-                result = handler(update, context)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as exc:
-                logger.exception("start_sending: background bulk error: %s", exc)
-                smap[batch_id] = "error"
-                context.bot_data["bulk_status_by_batch"] = smap
-                try:
-                    chat_id_local = handler_payload.get("chat_id")
-                    if chat_id_local is not None:
-                        await context.bot.send_message(
-                            chat_id=chat_id_local,
-                            text=(
-                                "❌ Ошибка при запуске/выполнении рассылки. "
-                                "Откройте «Диагностика» и пришлите лог."
-                            ),
-                        )
-                except Exception:  # pragma: no cover - best-effort notification
-                    pass
-                return
+        def _run_handler_sync() -> None:
+            result_sync = handler(update, context)
+            if inspect.isawaitable(result_sync):
+                asyncio.run(result_sync)
 
-            batches_map = context.bot_data.setdefault("bulk_batches", {})
-            batches_map.pop(batch_id, None)
-            context.bot_data["bulk_batches"] = batches_map
+        async def _run_handler_async() -> None:
+            result_async = handler(update, context)
+            if asyncio.iscoroutine(result_async):
+                await result_async
 
-            smap[batch_id] = "done"
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                await _run_handler_async()
+            else:
+                await asyncio.to_thread(_run_handler_sync)
+        except Exception as exc:
+            logger.exception("start_sending: background bulk error: %s", exc)
+            smap[batch_id] = "error"
             context.bot_data["bulk_status_by_batch"] = smap
+            try:
+                chat_id_local = handler_payload.get("chat_id")
+                if chat_id_local is not None:
+                    await context.bot.send_message(
+                        chat_id=chat_id_local,
+                        text=(
+                            "❌ Ошибка при запуске/выполнении рассылки. "
+                            "Откройте «Диагностика» и пришлите лог."
+                        ),
+                    )
+            except Exception:  # pragma: no cover - best-effort notification
+                pass
+            return
 
-            stored_handler = context.chat_data.get("bulk_handler")
-            if isinstance(stored_handler, dict) and stored_handler.get("batch_id") == batch_id:
-                context.chat_data.pop("bulk_handler", None)
+        batches_map = context.bot_data.setdefault("bulk_batches", {})
+        batches_map.pop(batch_id, None)
+        context.bot_data["bulk_batches"] = batches_map
 
-            logger.info(
-                "start_sending: finished, batch=%s, group=%s",
-                batch_id,
-                handler_payload.get("group"),
-            )
+        smap[batch_id] = "done"
+        context.bot_data["bulk_status_by_batch"] = smap
+
+        stored_handler = context.chat_data.get("bulk_handler")
+        if isinstance(stored_handler, dict) and stored_handler.get("batch_id") == batch_id:
+            context.chat_data.pop("bulk_handler", None)
+
+        logger.info(
+            "start_sending: finished, batch=%s, group=%s",
+            batch_id,
+            handler_payload.get("group"),
+        )
 
     async def _runner() -> None:
         handler_queue: dict[str, object] = {
@@ -5315,10 +5327,7 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         bh_copy = dict(handler_queue)
 
-        async def _do_async() -> None:
-            await _run_bulk_send(bh_copy, update, context)
-
-        await asyncio.to_thread(lambda: asyncio.run(_do_async()))
+        await _run_bulk_send(bh_copy, update, context)
 
     asyncio.create_task(_runner())
 
