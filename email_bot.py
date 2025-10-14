@@ -25,6 +25,18 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
+
+# [EBOT-072] Привязка массового отправителя: жёстко связываем
+# штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
+# сразу получил корректный обработчик без хрупких динамических импортов.
+try:
+    from emailbot.handlers.manual_send import send_all as _manual_send_all
+
+    setattr(bot_handlers, "send_selected", _manual_send_all)
+except Exception as _e:  # pragma: no cover - диагностический путь
+    logging.getLogger(__name__).warning(
+        "[EBOT-072] Failed to bind mass sender early: %r", _e
+    )
 from emailbot.services import cooldown as _cooldown
 from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
