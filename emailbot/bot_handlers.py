@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import functools
 import imaplib
+import importlib
 import io
 import logging
 import os
@@ -16,16 +16,38 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Set
+from zoneinfo import ZoneInfo
 
-# ЯВНО импортируем реальную функцию массовой рассылки
-try:
-    # основной путь
-    from .handlers.manual_send import send_all as _MANUAL_SEND_ALL  # async def
-except Exception:  # pragma: no cover — защитная ветка
-    _MANUAL_SEND_ALL = None  # type: ignore[assignment]
+logger = logging.getLogger(__name__)
+
+
+def _import_mass_sender() -> Optional[Callable]:
+    """
+    Пытаемся найти функцию массовой отправки send_all в manual_send.
+    Делаем несколько надёжных попыток, чтобы не зависеть от способа запуска.
+    """
+
+    # 1) относительный импорт (если bot_handlers внутри пакета emailbot)
+    try:
+        from .handlers.manual_send import send_all as _fn  # type: ignore
+
+        return _fn
+    except Exception as e1:  # pragma: no cover - defensive
+        logger.debug("mass_sender import (relative) failed: %r", e1)
+
+    # 2) абсолютный импорт по полному пути пакета
+    for mod in ("emailbot.handlers.manual_send", "handlers.manual_send"):
+        try:
+            module = importlib.import_module(mod)
+            function = getattr(module, "send_all", None)
+            if callable(function):
+                return function
+        except Exception as e2:  # pragma: no cover - defensive
+            logger.debug("mass_sender import (%s) failed: %r", mod, e2)
+
+    return None
 
 import aiohttp
 import pandas as pd
@@ -364,8 +386,6 @@ from .messaging_utils import (
     BOUNCE_LOG_PATH,
 )
 from .cancel import start_cancel, request_cancel, is_cancelled, clear_cancel
-
-logger = logging.getLogger(__name__)
 
 
 def _diag_bulk_line(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -3259,10 +3279,16 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         keyboard = None
 
-    if keyboard is None:
-        callback = f"bulk_start:{batch_id}" if batch_id else "bulk_start"
+    if keyboard is None and batch_id:
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Начать рассылку", callback_data=callback)]]
+            [
+                [
+                    InlineKeyboardButton(
+                        "🚀 Начать рассылку",
+                        callback_data=f"bulk_start:{batch_id}",
+                    )
+                ]
+            ]
         )
 
     await query.message.reply_text(
@@ -4994,7 +5020,7 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # --- Совместимость: обёртки под старые имена хендлеров ---
 # Жёстко фиксируем «легаси»-хендлер на реальный manual_send.send_all (если импорт удался)
-_LEGACY_MASS_SENDER: Optional[Callable] = _MANUAL_SEND_ALL
+_LEGACY_MASS_SENDER: Optional[Callable] = _import_mass_sender()
 
 
 async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5213,10 +5239,17 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if callable(_LEGACY_MASS_SENDER):
             logger.info("start_sending: using handler=manual_send.send_all")
             return _LEGACY_MASS_SENDER
-        logger.error("start_sending: no available mass sender (both paths missing)")
+        logger.error(
+            "start_sending: no available mass sender (both paths missing) — "
+            "check emailbot/handlers/__init__.py and manual_send.send_all",
+        )
         return None
 
-    async def _runner() -> None:
+    async def _run_bulk_send(
+        handler_payload: dict[str, object],
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
         handler = _resolve_mass_handler()
         if not callable(handler):
             logger.warning("start_sending: no bulk handler available")
@@ -5227,56 +5260,18 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         async with lock:
             smap[batch_id] = "running"
             context.bot_data["bulk_status_by_batch"] = smap
-
-            handler_queue = {
-                "emails": list(queue.get("emails") or []),
-                "group": queue.get("group"),
-                "chat_id": queue.get("chat_id"),
-                "digest": dict(queue.get("digest") or {}),
-                "batch_id": batch_id,
-            }
-            template_value = queue.get("template")
-            if isinstance(template_value, str) and template_value:
-                handler_queue["template"] = template_value
-            context.chat_data["bulk_handler"] = handler_queue
+            context.chat_data["bulk_handler"] = handler_payload
 
             try:
-                def _is_async_callable(func) -> bool:
-                    if asyncio.iscoroutinefunction(func):
-                        return True
-                    if isinstance(func, functools.partial):
-                        return _is_async_callable(func.func)
-                    call_method = getattr(func, "__call__", None)
-                    return bool(
-                        call_method is not None
-                        and asyncio.iscoroutinefunction(call_method)
-                    )
-
-                is_async_handler = _is_async_callable(handler)
-
-                async def _run_async_handler() -> None:
-                    await handler(update, context)
-
-                def _run_handler_in_thread() -> None:
-                    if is_async_handler:
-                        asyncio.run(_run_async_handler())
-                    else:
-                        handler(update, context)
-
-                if is_async_handler:
-                    await asyncio.to_thread(
-                        _run_handler_in_thread
-                    )  # async в отдельном loop внутри thread
-                else:
-                    await asyncio.to_thread(
-                        handler, update, context
-                    )  # sync → thread
+                result = handler(update, context)
+                if asyncio.iscoroutine(result):
+                    await result
             except Exception as exc:
                 logger.exception("start_sending: background bulk error: %s", exc)
                 smap[batch_id] = "error"
                 context.bot_data["bulk_status_by_batch"] = smap
                 try:
-                    chat_id_local = queue.get("chat_id")
+                    chat_id_local = handler_payload.get("chat_id")
                     if chat_id_local is not None:
                         await context.bot.send_message(
                             chat_id=chat_id_local,
@@ -5303,8 +5298,27 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.info(
                 "start_sending: finished, batch=%s, group=%s",
                 batch_id,
-                handler_queue.get("group"),
+                handler_payload.get("group"),
             )
+
+    async def _runner() -> None:
+        handler_queue: dict[str, object] = {
+            "emails": list(queue.get("emails") or []),
+            "group": queue.get("group"),
+            "chat_id": queue.get("chat_id"),
+            "digest": dict(queue.get("digest") or {}),
+            "batch_id": batch_id,
+        }
+        template_value = queue.get("template")
+        if isinstance(template_value, str) and template_value:
+            handler_queue["template"] = template_value
+
+        bh_copy = dict(handler_queue)
+
+        async def _do_async() -> None:
+            await _run_bulk_send(bh_copy, update, context)
+
+        await asyncio.to_thread(lambda: asyncio.run(_do_async()))
 
     asyncio.create_task(_runner())
 
