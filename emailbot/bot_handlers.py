@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Set
+
+from . import send_selected as _pkg_send_selected
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -32,14 +34,19 @@ _LEGACY_MASS_SENDER_ERR: Optional[str] = None
 def _resolve_mass_handler() -> Optional[Callable]:
     """Вернуть обработчик массовой рассылки, если он доступен."""
 
+    global _LEGACY_MASS_SENDER, _LEGACY_MASS_SENDER_ERR
+
     handler = globals().get("send_selected")
     if callable(handler):
-        global _LEGACY_MASS_SENDER_ERR
         _LEGACY_MASS_SENDER_ERR = None
         logger.info("start_sending: using handler=send_selected (globals)")
         return handler
 
-    global _LEGACY_MASS_SENDER
+    if callable(_pkg_send_selected):
+        _LEGACY_MASS_SENDER_ERR = None
+        logger.info("start_sending: using handler=send_selected (package export)")
+        return _pkg_send_selected
+
     if _LEGACY_MASS_SENDER is None:
         _LEGACY_MASS_SENDER = _import_mass_sender()
 
@@ -83,20 +90,6 @@ def _import_mass_sender() -> Optional[Callable]:
     except Exception as e2:  # pragma: no cover - defensive
         logger.debug("mass_sender import (emailbot.*) failed: %r", e2)
         errors.append(f"emailbot.handlers.manual_send: {e2!r}")
-
-    # 3) «Голый» импорт (для запусков вне пакета)
-    try:
-        module = importlib.import_module("handlers.manual_send")
-        fn = getattr(module, "send_all", None)
-        if callable(fn):
-            _LEGACY_MASS_SENDER = fn
-            _LEGACY_MASS_SENDER_ERR = None
-            logger.info("start_sending: using handler=handlers.manual_send.send_all")
-            return fn
-        errors.append("handlers.manual_send: send_all not callable/absent")
-    except Exception as e3:  # pragma: no cover - defensive
-        logger.debug("mass_sender import (handlers.*) failed: %r", e3)
-        errors.append(f"handlers.manual_send: {e3!r}")
 
     _LEGACY_MASS_SENDER = None
     _LEGACY_MASS_SENDER_ERR = " | ".join(errors) if errors else "unknown"

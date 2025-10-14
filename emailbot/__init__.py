@@ -4,6 +4,12 @@ import importlib
 
 from .utils import load_env, log_error, setup_logging
 
+# [EBOT-077] Export mass-send handler for stable package-level access.
+try:  # pragma: no cover - optional dependency
+    from .handlers.manual_send import send_all as send_selected  # type: ignore
+except Exception:  # pragma: no cover - allow startup without handler
+    send_selected = None  # type: ignore[assignment]
+
 extraction = importlib.import_module(".extraction", __name__)
 reporting = importlib.import_module(".reporting", __name__)
 try:  # pragma: no cover - optional dependency
@@ -36,6 +42,7 @@ __all__ = [
     "LegacySMTPClient",
     "send_mail",
     "send_batch",
+    "send_selected",
     "extraction",
     "messaging",
     "unsubscribe",

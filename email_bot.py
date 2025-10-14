@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import traceback
 from datetime import datetime
@@ -25,6 +26,7 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
+from emailbot.selfcheck import startup_selfcheck
 
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
 # штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
@@ -44,6 +46,14 @@ from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def _die(msg: str, code: int = 2) -> None:
+    try:
+        logging.getLogger(__name__).error(msg)
+    finally:
+        sys.stderr.write(msg + "\n")
+        sys.exit(code)
 
 
 class JsonFormatter(logging.Formatter):
@@ -144,6 +154,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def main() -> None:
+    errs = startup_selfcheck()
+    if errs:
+        _die("Selfcheck failed:\n - " + "\n - ".join(errs))
+
     load_env(SCRIPT_DIR)
 
     try:

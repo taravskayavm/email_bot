@@ -5,24 +5,45 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
+import logging
 
 from . import settings_store as _store
 
-# [EBOT-075] Backward-compat: некоторые модули (напр. handlers.manual_send)
-# всё ещё импортируют PARSE_MAX_WORKERS. После рефакторинга эта переменная
-# могла быть удалена. Вернём безопасный дефолт, чтобы не падал импорт.
-# Если в окружении задан SEND_MAX_WORKERS/MAX_WORKERS — используем их.
+logger = logging.getLogger(__name__)
+
+# [EBOT-078] Унификация числа воркеров и обратная совместимость
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
 
+# Новый «канонический» параметр для рассылки
+SEND_MAX_WORKERS = _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
+if SEND_MAX_WORKERS < 1:
+    logger.warning("settings: SEND_MAX_WORKERS=%r looks invalid; forcing to 1", SEND_MAX_WORKERS)
+    SEND_MAX_WORKERS = 1
 
-# дефолт 4 потока — безопасно для I/O
-PARSE_MAX_WORKERS = _int_env(
-    "PARSE_MAX_WORKERS", _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
-)
+# Deprecated, но оставляем для обратной совместимости (см. EBOT-075)
+try:
+    _legacy_parse = _int_env("PARSE_MAX_WORKERS", SEND_MAX_WORKERS)
+    if "PARSE_MAX_WORKERS" in os.environ:
+        logger.warning("settings: PARSE_MAX_WORKERS is deprecated; use SEND_MAX_WORKERS instead")
+except Exception:
+    _legacy_parse = SEND_MAX_WORKERS
+
+# Экспортируем для старых модулей (и нового кода тоже безопасно)
+PARSE_MAX_WORKERS = _legacy_parse
+
+# Информативный лог итоговых значений (1 раз на импорт)
+try:
+    logger.info(
+        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s",
+        SEND_MAX_WORKERS,
+        PARSE_MAX_WORKERS,
+    )
+except Exception:
+    pass
 
 
 # Default values
@@ -167,6 +188,7 @@ __all__ = [
     "CRAWL_TIME_BUDGET_SECONDS",
     "ROBOTS_CACHE_PATH",
     "ROBOTS_CACHE_TTL_SECONDS",
+    "SEND_MAX_WORKERS",
     "PARSE_MAX_WORKERS",
     "load",
     "save",

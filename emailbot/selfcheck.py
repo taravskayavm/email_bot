@@ -1,7 +1,9 @@
-"""Runtime self-diagnostic helpers."""
+"""Runtime self-diagnostic helpers and startup pre-flight checks."""
 
 from __future__ import annotations
 
+import importlib
+import logging
 import os
 import socket
 from dataclasses import dataclass
@@ -10,6 +12,13 @@ from zoneinfo import ZoneInfo
 
 from emailbot.settings import REPORT_TZ
 from emailbot.suppress_list import get_blocked_count
+
+logger = logging.getLogger(__name__)
+
+CRITICAL_ENV_VARS = [
+    "EMAIL_ADDRESS",
+    "EMAIL_PASSWORD",
+]
 
 
 @dataclass
@@ -27,6 +36,43 @@ def _tcp_ping(host: str, port: int, timeout: float = 5.0) -> bool:
             return True
     except Exception:
         return False
+
+
+def startup_selfcheck() -> List[str]:
+    """Run basic startup diagnostics and return a list of errors."""
+
+    errors: List[str] = []
+
+    # 1) Проверка импорта хендлера рассылки
+    try:
+        mod = importlib.import_module("emailbot.handlers.manual_send")
+        fn = getattr(mod, "send_all", None)
+        if not callable(fn):
+            errors.append("emailbot.handlers.manual_send.send_all not found/callable")
+    except Exception as exc:  # pragma: no cover - defensive diagnostics
+        errors.append(f"manual_send import failed: {exc!r}")
+
+    # 2) Ключевые переменные окружения
+    for var in CRITICAL_ENV_VARS:
+        if not os.getenv(var):
+            errors.append(f"ENV missing: {var}")
+
+    # 3) Воркеры
+    try:
+        from emailbot import settings as _settings
+
+        workers = getattr(_settings, "SEND_MAX_WORKERS", None) or getattr(
+            _settings, "PARSE_MAX_WORKERS", None
+        )
+        if not isinstance(workers, int) or workers <= 0:
+            errors.append(f"Bad workers value: {workers!r}")
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        errors.append(f"settings import failed: {exc!r}")
+
+    if errors:
+        logger.error("startup_selfcheck failed", extra={"errors": errors})
+
+    return errors
 
 
 def run_selfcheck() -> List[Check]:
@@ -51,7 +97,13 @@ def run_selfcheck() -> List[Check]:
             continue
         readable = os.access(path, os.R_OK)
         writable = os.access(path, os.W_OK)
-        checks.append(Check(f"FS:{path}", readable and writable, "rw ok" if readable and writable else "нет прав rw"))
+        checks.append(
+            Check(
+                f"FS:{path}",
+                readable and writable,
+                "rw ok" if readable and writable else "нет прав rw",
+            )
+        )
 
     imap_host = os.getenv("IMAP_HOST", "")
     imap_port = int(os.getenv("IMAP_PORT", "993") or 0)
