@@ -5686,7 +5686,10 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         bh_copy = dict(handler_queue)
 
-        await _run_bulk_send(bh_copy, update, context)
+        def _run_worker() -> None:
+            asyncio.run(_run_bulk_send(bh_copy, update, context))
+
+        await asyncio.to_thread(_run_worker)
 
     app_for_tasks = getattr(context, "application", None)
     if app_for_tasks is not None:
