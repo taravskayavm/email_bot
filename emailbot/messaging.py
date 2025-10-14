@@ -1297,13 +1297,19 @@ def prepare_mass_mailing(
             "input_total": len(normalized),
             "after_suppress": len(queue_after_block),
             "foreign_blocked": len(blocked_foreign),
-            "after_180d": len(queue_after_foreign),
+            "ready_after_cooldown": len(queue_after_foreign),
+            "ready_final": len(ready),
+            "set_planned": len(ready),
             "sent_planned": len(ready),
-            "skipped_by_dup_in_batch": dup_skipped,
+            "removed_duplicates_in_batch": dup_skipped,
             "unique_ready_to_send": len(ready),
             "skipped_suppress": len(blocked_invalid),
             "skipped_180d": len(skipped_recent),
             "skipped_foreign": len(blocked_foreign),
+            "removed_recent_180d": len(skipped_recent),
+            "removed_invalid": len(blocked_invalid),
+            "removed_foreign": len(blocked_foreign),
+            "removed_today": 0,
         }
         return ready, blocked_foreign, blocked_invalid, skipped_recent, digest
     except Exception as exc:
