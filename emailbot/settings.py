@@ -11,7 +11,7 @@ from . import settings_store as _store
 
 logger = logging.getLogger(__name__)
 
-# [EBOT-083] Загружаем .env как можно раньше, чтобы переменные окружения были доступны
+# [EBOT-101] Загружаем .env максимально рано, чтобы переменные окружения уже были доступны
 try:
     from dotenv import load_dotenv
 
@@ -19,43 +19,62 @@ try:
 except Exception:
     pass
 
-# [EBOT-078] Унификация числа воркеров и обратная совместимость
+
+def __getattr__(name: str):
+    """Provide compatibility values for legacy settings names."""
+
+    if name.startswith("PARSE_"):
+        suffix = name[6:]
+        target = f"SEND_{suffix}"
+        if target in globals():
+            value = globals()[target]
+            globals()[name] = value
+            return value
+
+    alias_targets = {
+        "MAX_WORKERS": "SEND_MAX_WORKERS",
+        "FILE_TIMEOUT": "SEND_FILE_TIMEOUT",
+        "COOLDOWN_DAYS": "SEND_COOLDOWN_DAYS",
+    }
+    target = alias_targets.get(name)
+    if target and target in globals():
+        value = globals()[target]
+        globals()[name] = value
+        return value
+
+    raise AttributeError(name)
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
 
-# Новый «канонический» параметр для рассылки
+
+# Канонические параметры отправки
 SEND_MAX_WORKERS = _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
 if SEND_MAX_WORKERS < 1:
     logger.warning("settings: SEND_MAX_WORKERS=%r looks invalid; forcing to 1", SEND_MAX_WORKERS)
     SEND_MAX_WORKERS = 1
 
-# Deprecated, но оставляем для обратной совместимости (см. EBOT-075)
-try:
-    _legacy_parse = _int_env("PARSE_MAX_WORKERS", SEND_MAX_WORKERS)
-    if "PARSE_MAX_WORKERS" in os.environ:
-        logger.warning("settings: PARSE_MAX_WORKERS is deprecated; use SEND_MAX_WORKERS instead")
-except Exception:
-    _legacy_parse = SEND_MAX_WORKERS
-
-# Экспортируем для старых модулей (и нового кода тоже безопасно)
-PARSE_MAX_WORKERS = _legacy_parse
-
-# [EBOT-083] Канонический таймаут для файловых операций при отправке
 SEND_FILE_TIMEOUT = _int_env("SEND_FILE_TIMEOUT", _int_env("FILE_TIMEOUT", 20))
-# Backward-compat: некоторые модули могут импортировать PARSE_FILE_TIMEOUT
+SEND_COOLDOWN_DAYS = _int_env("SEND_COOLDOWN_DAYS", 180)
+
+
+# Совместимые экспортируемые значения (чтобы прямые импорты продолжали работать)
+PARSE_MAX_WORKERS = _int_env("PARSE_MAX_WORKERS", SEND_MAX_WORKERS)
 PARSE_FILE_TIMEOUT = _int_env("PARSE_FILE_TIMEOUT", SEND_FILE_TIMEOUT)
 
-# Информативный лог итоговых значений (1 раз на импорт)
+
 try:
     logger.info(
-        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s; SEND_FILE_TIMEOUT=%s; PARSE_FILE_TIMEOUT=%s",
+        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s; SEND_FILE_TIMEOUT=%s; PARSE_FILE_TIMEOUT=%s; SEND_COOLDOWN_DAYS=%s",
         SEND_MAX_WORKERS,
         PARSE_MAX_WORKERS,
         SEND_FILE_TIMEOUT,
         PARSE_FILE_TIMEOUT,
+        SEND_COOLDOWN_DAYS,
     )
 except Exception:
     pass
@@ -207,6 +226,7 @@ __all__ = [
     "PARSE_MAX_WORKERS",
     "SEND_FILE_TIMEOUT",
     "PARSE_FILE_TIMEOUT",
+    "SEND_COOLDOWN_DAYS",
     "load",
     "save",
     "list_available_directions",

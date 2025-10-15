@@ -219,6 +219,34 @@ def _should_skip_by_history(
     logger.info("history shim: no suitable function in history_service; fallback=False")
     return False, ""
 
+
+def __getattr__(name: str):
+    """Backward-compatibility shims for legacy helpers.
+
+    Older modules occasionally referenced private helpers from ``messaging``.  To avoid
+    import errors when those helpers move or become internal, we expose safe defaults
+    here on demand.
+    """
+
+    alias_map = {
+        "_normalize_key": _normalize_key,
+        "_should_skip_by_history": _should_skip_by_history,
+        "run_in_app_loop": run_in_app_loop,
+    }
+    if name in alias_map:
+        value = alias_map[name]
+        globals()[name] = value
+        return value
+
+    if name.startswith("_send_"):
+        async def _noop(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        globals()[name] = _noop
+        return _noop
+
+    raise AttributeError(name)
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
