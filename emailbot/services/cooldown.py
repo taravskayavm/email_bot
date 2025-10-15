@@ -7,7 +7,6 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +29,25 @@ def _env_int(name: str, default: int) -> int:
 
 
 COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", _env_int("SEND_COOLDOWN_DAYS", 180))
+
+
+def _default_cooldown_window() -> int:
+    """Return the effective cooldown window used across the application."""
+
+    raw = os.getenv("HALF_YEAR_DAYS")
+    if raw is None:
+        raw = os.getenv("EMAIL_LOOKBACK_DAYS")
+    if raw is not None:
+        try:
+            value = int(str(raw).strip())
+        except Exception:
+            value = COOLDOWN_DAYS
+    else:
+        value = COOLDOWN_DAYS
+    return max(value, 0)
+
+
+COOLDOWN_WINDOW_DAYS = _default_cooldown_window()
 REPORT_TZ = os.getenv("REPORT_TZ", "Europe/Moscow")
 _DEFAULT_SEND_STATS_PATH = expand_path("var/send_stats.jsonl")
 SEND_STATS_PATH = os.getenv("SEND_STATS_PATH", str(_DEFAULT_SEND_STATS_PATH))
@@ -312,3 +330,27 @@ def should_skip_by_cooldown(
         reason = "; ".join(parts)
         return True, reason
     return False, ""
+
+
+def check_email(
+    email_raw: str,
+    group: Optional[str] = None,
+    *,
+    window: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Return whether ``email_raw`` falls under the cooldown window."""
+
+    if window is None:
+        days = COOLDOWN_WINDOW_DAYS
+    else:
+        try:
+            days = int(window)
+        except Exception:
+            days = COOLDOWN_WINDOW_DAYS
+    days = max(days, 0)
+    if days <= 0 or not email_raw:
+        return False, ""
+    skip, reason = should_skip_by_cooldown(email_raw, days=days)
+    if skip and not reason:
+        reason = f"cooldown<{days}d"
+    return skip, reason

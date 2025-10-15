@@ -70,6 +70,14 @@ _TASK_SEQ = count()
 logger = logging.getLogger(__name__)
 
 _BULK_COOLDOWN_SERVICE: "CooldownService" | None = None
+_HISTORY_SHIM_WARNED_ONCE = False
+
+
+def _reset_history_shim_warning() -> None:
+    """Allow the history shim warning to be logged again."""
+
+    global _HISTORY_SHIM_WARNED_ONCE
+    _HISTORY_SHIM_WARNED_ONCE = False
 
 
 def _get_bulk_cooldown_service():
@@ -100,6 +108,8 @@ async def send_bulk(emails: Iterable[str], template_key: str) -> Tuple[int, int,
     candidates = list(emails)
     if not candidates:
         return 0, 0, 0
+
+    _reset_history_shim_warning()
 
     try:
         service = _get_bulk_cooldown_service()
@@ -338,7 +348,10 @@ def _should_skip_by_history(
             if isinstance(result, tuple):
                 return result
 
-    logger.info("history shim: no suitable function in history_service; fallback=False")
+    global _HISTORY_SHIM_WARNED_ONCE
+    if not _HISTORY_SHIM_WARNED_ONCE:
+        logger.info("history shim: no suitable function in history_service; fallback=False")
+        _HISTORY_SHIM_WARNED_ONCE = True
     return False, ""
 
 
@@ -1469,6 +1482,8 @@ def prepare_mass_mailing(
     results along with a digest containing an ``"error"`` key when something goes
     wrong. The caller is expected to present a friendly message to the user.
     """
+
+    _reset_history_shim_warning()
 
     try:
         batch = sanitize_batch(emails)
