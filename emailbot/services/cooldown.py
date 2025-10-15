@@ -272,13 +272,23 @@ def should_skip_by_cooldown(
         return False, ""
 
     window = _cooldown_days(days)
+    cache_last = _load_cached_last(key)
+    history_last, group = _last_from_history(email_raw)
     source = "history"
-    group = None
-    last = _load_cached_last(key)
-    if last is None:
-        last, group = _last_from_history(email_raw)
+    if history_last and cache_last:
+        if cache_last > history_last:
+            last = cache_last
+            source = "cache"
+            group = None
+        else:
+            last = history_last
+    elif history_last:
+        last = history_last
     else:
-        source = "cache"
+        last = cache_last
+        if last is not None:
+            source = "cache"
+            group = None
     if not last:
         return False, ""
 

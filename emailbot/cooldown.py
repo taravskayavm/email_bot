@@ -242,11 +242,54 @@ def _load_history_from_csv(path) -> dict[str, datetime]:
     return result
 
 
+def _history_db_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path_like) -> None:
+        if not path_like:
+            return
+        try:
+            path_obj = Path(path_like)
+        except Exception:
+            return
+        try:
+            normalized = path_obj.expanduser().resolve(strict=False)
+        except Exception:
+            normalized = path_obj
+        key = str(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(normalized)
+
+    try:
+        from emailbot import history_service  # local import to avoid startup cycles
+
+        try:
+            resolved = history_service.get_db_path()
+        except AttributeError:  # pragma: no cover - legacy fallback
+            resolved = getattr(history_service, "_resolve_path", None)
+            if callable(resolved):
+                try:
+                    resolved = resolved()
+                except Exception:
+                    resolved = None
+        except Exception:
+            resolved = None
+        _add(resolved)
+    except Exception:
+        pass
+
+    _add(settings.HISTORY_DB)
+    return candidates
+
+
 def _merged_history_map() -> dict[str, datetime]:
     cache: dict[str, datetime] = {}
-    db_map = _load_history_from_db(settings.HISTORY_DB)
+    db_maps = [_load_history_from_db(path) for path in _history_db_candidates()]
     csv_map = _load_history_from_csv(settings.SENT_LOG_PATH)
-    for mapping in (db_map, csv_map):
+    for mapping in (*db_maps, csv_map):
         for email, dt in mapping.items():
             current = cache.get(email)
             if current is None or dt > current:

@@ -34,6 +34,12 @@ def _resolve_path() -> Path:
     return _default_db_path()
 
 
+def get_db_path() -> Path:
+    """Return the configured SQLite database path for send history."""
+
+    return _resolve_path()
+
+
 def ensure_initialized() -> None:
     """Initialise the underlying SQLite database if needed."""
 
