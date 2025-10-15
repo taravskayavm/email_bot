@@ -12,7 +12,7 @@ DEFAULTS = {
     "STRICT_OBFUSCATION": True,
     "FOOTNOTE_RADIUS_PAGES": 1,
     "PDF_LAYOUT_AWARE": False,
-    "ENABLE_OCR": False,
+    "ENABLE_OCR": True,
     "MAX_ASSETS": 8,
     "MAX_SITEMAP_URLS": 200,
     "MAX_DOCS": 30,
