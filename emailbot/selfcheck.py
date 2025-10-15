@@ -138,6 +138,21 @@ def run_selfcheck() -> List[Check]:
     checks.append(Check("TCP:IMAP", _tcp_ping(imap_host, imap_port), f"{imap_host}:{imap_port}"))
     checks.append(Check("TCP:SMTP", _tcp_ping(smtp_host, smtp_port), f"{smtp_host}:{smtp_port}"))
 
+    try:
+        import pdfminer  # type: ignore  # noqa: F401
+
+        checks.append(Check("PDF:pdfminer", True, "available"))
+    except Exception as exc:
+        checks.append(Check("PDF:pdfminer", False, f"missing: {exc.__class__.__name__}"))
+
+    try:
+        import fitz  # type: ignore  # noqa: F401
+
+        checks.append(Check("PDF:fitz", True, "available"))
+    except Exception:
+        warnings.append("PyMuPDF (fitz) not available; pdfminer-only mode")
+        checks.append(Check("PDF:fitz", True, "pdfminer-only"))
+
     if warnings:
         checks.append(Check("WARN", True, " | ".join(warnings)))
 

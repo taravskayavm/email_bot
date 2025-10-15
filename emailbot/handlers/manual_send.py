@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import imaplib
-import json
 import logging
 import os
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Set
 
 from asyncio import Lock
 
@@ -67,6 +67,44 @@ def _bot_handlers() -> "bot_handlers_module":  # type: ignore[name-defined]
 
         _BOT_HANDLERS_MODULE = _module
     return _BOT_HANDLERS_MODULE  # type: ignore[return-value]
+
+
+def _cooldown_api() -> dict[str, Callable[..., object] | None]:
+    try:
+        from emailbot.cooldown import (
+            _merged_history_map as _cooldown_cache_builder,
+            is_under_cooldown,
+            normalize_email as cooldown_normalize,
+        )
+    except Exception:
+        try:
+            from emailbot.cooldown import (
+                is_under_cooldown,  # type: ignore
+                normalize_email as cooldown_normalize,
+            )
+        except Exception:
+            logger.debug("cooldown API import failed", exc_info=True)
+            return {}
+        return {
+            "is_under_cooldown": is_under_cooldown,
+            "normalize_email": cooldown_normalize,
+            "build_cache": None,
+        }
+    return {
+        "is_under_cooldown": is_under_cooldown,
+        "normalize_email": cooldown_normalize,
+        "build_cache": _cooldown_cache_builder,
+    }
+
+
+def _bulk_audit_api() -> Callable[[str], object] | None:
+    try:
+        from emailbot.audit import start_audit
+    except Exception:
+        logger.debug("bulk audit API import failed", exc_info=True)
+        return None
+    return start_audit
+
 
 def _workers() -> int:
     """Return configured worker count with defensive fallbacks."""
@@ -356,7 +394,133 @@ async def send_all(
     chat_lock = _get_chat_lock(context, chat_id)
 
     async def long_job() -> None:
+        audit_start = _bulk_audit_api()
+        audit_writer = None
+        audit_path: Path | None = None
+        cooldown_tools = _cooldown_api()
+        build_cache_fn = (
+            cooldown_tools.get("build_cache") if cooldown_tools else None
+        )
+        cooldown_cache = None
+        if callable(build_cache_fn):
+            try:
+                cooldown_cache = build_cache_fn()
+            except Exception:
+                logger.debug("cooldown cache build failed", exc_info=True)
+                cooldown_cache = None
+
+        try:
+            cooldown_days = int(getattr(_settings, "SEND_COOLDOWN_DAYS", 180))
+        except Exception:
+            cooldown_days = 180
+        if cooldown_days < 0:
+            cooldown_days = 0
+
+        cooldown_meta_cache: Dict[str, str] = {}
+
+        def _cooldown_last_iso(email: str) -> str | None:
+            if not cooldown_tools:
+                return None
+            normalize_fn = cooldown_tools.get("normalize_email")
+            lookup_fn = cooldown_tools.get("is_under_cooldown")
+            if not callable(lookup_fn):
+                return None
+            key = email
+            if callable(normalize_fn):
+                try:
+                    key = normalize_fn(email) or email
+                except Exception:
+                    key = email
+            cached = cooldown_meta_cache.get(key)
+            if cached is not None:
+                return cached or None
+            kwargs: Dict[str, object] = {"days": cooldown_days}
+            if cooldown_cache is not None:
+                kwargs["_cache"] = cooldown_cache
+            try:
+                _, last_dt = lookup_fn(email, **kwargs)
+            except TypeError:
+                try:
+                    _, last_dt = lookup_fn(email, days=cooldown_days)
+                except Exception:
+                    last_dt = None
+            except Exception:
+                logger.debug("cooldown lookup failed for %s", email, exc_info=True)
+                last_dt = None
+            iso_value = None
+            if last_dt:
+                try:
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    iso_value = last_dt.astimezone(timezone.utc).isoformat()
+                except Exception:
+                    iso_value = None
+            cooldown_meta_cache[key] = iso_value or ""
+            return iso_value
+
+        audit_logged_skip: set[tuple[str, str]] = set()
+        batch_id = context.chat_data.get("batch_id")
+
+        def audit_sent(email: str) -> None:
+            if not audit_writer:
+                return
+            try:
+                audit_writer.log_sent(email)
+            except Exception:
+                logger.debug("bulk audit log_sent failed", exc_info=True)
+
+        def audit_skip(
+            email: str,
+            reason: str,
+            meta: Mapping[str, Any] | None = None,
+        ) -> None:
+            if not email:
+                return
+            signature = (email, reason)
+            if signature in audit_logged_skip:
+                return
+            audit_logged_skip.add(signature)
+            if not audit_writer:
+                return
+            try:
+                audit_writer.log_skip(email, reason, meta=meta)
+            except Exception:
+                logger.debug("bulk audit log_skip failed", exc_info=True)
+
+        def audit_error(
+            email: str,
+            reason: str,
+            meta: Mapping[str, Any] | None = None,
+        ) -> None:
+            if not audit_writer:
+                return
+            try:
+                audit_writer.log_error(email, reason, meta=meta)
+            except Exception:
+                logger.debug("bulk audit log_error failed", exc_info=True)
+
+        def mark_cooldown_skip(email: str) -> None:
+            iso_value = _cooldown_last_iso(email)
+            meta: Mapping[str, Any] | None = None
+            if iso_value:
+                meta = {"last_contact": iso_value}
+            audit_skip(email, "cooldown_180d", meta)
+
         async with chat_lock:
+            if callable(audit_start):
+                label_parts = [display_label or group_code or "manual"]
+                if batch_id:
+                    label_parts.append(f"batch:{batch_id}")
+                label = " | ".join(part for part in label_parts if part)
+                try:
+                    writer_candidate = audit_start(label)
+                except Exception:
+                    logger.debug("bulk audit start failed", exc_info=True)
+                    writer_candidate = None
+                if writer_candidate is not None:
+                    audit_writer = writer_candidate
+                    audit_path = getattr(writer_candidate, "path", None)
+
             blocked = get_blocked_emails()
             blocked_norm = {
                 messaging._normalize_key(addr)
@@ -401,15 +565,26 @@ async def send_all(
                 sent_ok: List[str] = []
                 base_candidates = list(state_obj.to_send or emails)
 
+            for addr in blocked_foreign:
+                audit_skip(addr, "foreign_domain")
+            for addr in blocked_invalid:
+                audit_skip(addr, "stop_list")
+            for addr in skipped_recent:
+                mark_cooldown_skip(addr)
+            for addr in skipped_duplicates:
+                audit_skip(addr, "duplicate")
+
             def _order_by_snapshot(candidates: List[str]) -> List[str]:
                 if not frozen_norms:
                     return [c for c in candidates if c]
+
                 mapping: Dict[str, List[str]] = {}
                 for addr in candidates:
                     norm = messaging._normalize_key(addr)
                     if not norm:
                         continue
                     mapping.setdefault(norm, []).append(addr)
+
                 ordered: List[str] = []
                 for norm in frozen_norms:
                     pool = mapping.get(norm)
@@ -425,7 +600,12 @@ async def send_all(
             seen_norm: Set[str] = set()
             for addr in _order_by_snapshot(base_candidates):
                 norm = messaging._normalize_key(addr)
-                if not norm or norm in seen_norm:
+                if not norm:
+                    continue
+                if norm in seen_norm:
+                    if addr not in skipped_duplicates:
+                        skipped_duplicates.append(addr)
+                    audit_skip(addr, "duplicate")
                     continue
                 seen_norm.add(norm)
                 ordered_candidates.append(addr)
@@ -438,16 +618,20 @@ async def send_all(
                 if norm in blocked_norm:
                     if addr not in blocked_invalid:
                         blocked_invalid.append(addr)
+                    audit_skip(addr, "stop_list")
                     continue
                 if norm in sent_today_norm and not bot_handlers.is_force_send(chat_id):
+                    audit_skip(addr, "daily_limit")
                     continue
                 if is_foreign(addr):
                     if addr not in blocked_foreign:
                         blocked_foreign.append(addr)
+                    audit_skip(addr, "foreign_domain")
                     continue
                 if is_suppressed(addr):
                     if addr not in blocked_invalid:
                         blocked_invalid.append(addr)
+                    audit_skip(addr, "stop_list")
                     continue
                 to_send.append(addr)
 
@@ -470,6 +654,15 @@ async def send_all(
                         target = blocked_invalid
                     if actual not in target:
                         target.append(actual)
+                    reason_name = category or "history"
+                    if reason_name == "cooldown":
+                        reason_name = "cooldown_180d"
+                    elif reason_name == "foreign":
+                        reason_name = "foreign_domain"
+                    if reason_name == "cooldown_180d":
+                        mark_cooldown_skip(actual)
+                    else:
+                        audit_skip(actual, reason_name)
                 else:
                     ready_after_history.append(addr)
 
@@ -553,30 +746,6 @@ async def send_all(
             await query.message.reply_text(f"❌ IMAP ошибка: {e}")
             return
 
-        batch_id = context.chat_data.get("batch_id")
-        audit_path = Path("var") / f"bulk_audit_{batch_id or int(time.time())}.jsonl"
-        try:
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            logger.debug("bulk audit mkdir failed", exc_info=True)
-
-        def _audit(email: str, status: str, detail: str = "") -> None:
-            try:
-                with audit_path.open("a", encoding="utf-8") as f:
-                    f.write(
-                        json.dumps(
-                            {
-                                "email": email,
-                                "status": status,
-                                "detail": detail,
-                                "ts": time.time(),
-                            }
-                        )
-                        + "\n"
-                    )
-            except Exception:
-                logger.debug("bulk audit append failed", exc_info=True)
-
         error_details: list[str] = []
         error_addresses: list[str] = []
         cancel_event = context.chat_data.get("cancel_event")
@@ -617,32 +786,32 @@ async def send_all(
                             content_hash=content_hash,
                         )
                         sent_ok.append(email_addr)
-                        _audit(email_addr, "sent")
+                        audit_sent(email_addr)
                         await asyncio.sleep(1.5)
                     elif outcome == SendOutcome.DUPLICATE:
                         if email_addr not in skipped_duplicates:
                             skipped_duplicates.append(email_addr)
-                        _audit(email_addr, "duplicate")
+                        audit_skip(email_addr, "duplicate")
                     elif outcome == SendOutcome.COOLDOWN:
                         if email_addr not in skipped_recent:
                             skipped_recent.append(email_addr)
-                        _audit(email_addr, "cooldown")
+                        mark_cooldown_skip(email_addr)
                     elif outcome == SendOutcome.BLOCKED:
                         if email_addr not in blocked_invalid:
                             blocked_invalid.append(email_addr)
-                        _audit(email_addr, "blocked")
+                        audit_skip(email_addr, "stop_list")
                     elif outcome == SendOutcome.ERROR:
                         if email_addr not in error_addresses:
                             error_addresses.append(email_addr)
                         detail = "ошибка при отправке"
                         error_details.append(detail)
-                        _audit(email_addr, "error", detail)
+                        audit_error(email_addr, "send_error", {"detail": detail})
                     else:
                         if email_addr not in error_addresses:
                             error_addresses.append(email_addr)
                         detail = f"непредвиденный исход: {outcome}"
                         error_details.append(detail)
-                        _audit(email_addr, "error", detail)
+                        audit_error(email_addr, "unexpected_outcome", {"detail": detail})
                 except smtplib.SMTPResponseException as e:
                     code = int(getattr(e, "smtp_code", 0) or 0)
                     raw = getattr(e, "smtp_error", b"") or b""
@@ -661,7 +830,12 @@ async def send_all(
                     )
                     if email_addr not in target_list:
                         target_list.append(email_addr)
-                    _audit(email_addr, "error", detail)
+                    reason = f"smtp_error:{code}" if code else "smtp_error"
+                    audit_error(
+                        email_addr,
+                        reason,
+                        {"code": code, "message": msg},
+                    )
                 except Exception as e:
                     error_details.append(str(e))
                     code = None
@@ -683,7 +857,12 @@ async def send_all(
                         suppress_add(email_addr, code, "hard bounce on send")
                     if email_addr not in error_addresses:
                         error_addresses.append(email_addr)
-                    _audit(email_addr, "error", str(e))
+                    reason = f"smtp_error:{code}" if code else "smtp_error"
+                    audit_error(
+                        email_addr,
+                        reason,
+                        {"code": code, "message": msg or str(e)},
+                    )
                 mass_state.save_chat_state(
                     chat_id,
                     {
@@ -735,7 +914,7 @@ async def send_all(
                 if report_text
                 else f"❌ Ошибок при отправке: {len(error_addresses)}"
             )
-        if audit_path:
+        if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
             report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"
 
         # Безопасная отправка: notify сам разрежет текст на куски < 4096
