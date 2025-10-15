@@ -25,6 +25,8 @@ from bot.keyboards import build_templates_kb
 from emailbot import config as C
 from emailbot import mass_state, messaging
 from emailbot import settings as _settings
+from emailbot.dedupe_global import build_hits_with_sources, dedupe_across_sources
+from emailbot.extraction import normalize_email
 from emailbot.messaging import (
     MAX_EMAILS_PER_DAY,
     SendOutcome,
@@ -355,6 +357,37 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 ignore_cooldown=bool(context.user_data.get("ignore_cooldown")),
             )
         )
+        source_map = {}
+        if getattr(state, "source_map", None):
+            try:
+                source_map = {
+                    str(k): list(v) if isinstance(v, (list, tuple)) else [v]
+                    for k, v in state.source_map.items()
+                    if k
+                }
+            except Exception:
+                source_map = {}
+        hits = build_hits_with_sources(ready, source_map)
+        unique_hits, dup_map = dedupe_across_sources(hits)
+        ready = [item.get("email", "") for item in unique_hits if item.get("email")]
+        active_norms: set[str] = set()
+        for addr in ready:
+            norm = normalize_email(addr) or addr.strip().lower()
+            if norm:
+                active_norms.add(norm)
+        active_norms.update(dup_map.keys())
+        filtered_sources = {k: source_map.get(k, []) for k in active_norms if k}
+        context.chat_data["preview_source_map"] = filtered_sources
+        context.chat_data["preview_duplicates_global"] = dup_map
+        dedup_skipped = sorted(
+            {
+                str(item.get("email"))
+                for items in dup_map.values()
+                for item in items
+                if item.get("email")
+            }
+        )
+        state.source_map = source_map
         log_mass_filter_digest(
             {
                 **digest,
@@ -386,8 +419,9 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "blocked_foreign": blocked_foreign,
                 "blocked_invalid": blocked_invalid,
                 "skipped_recent": skipped_recent,
-                "skipped_duplicates": [],
+                "skipped_duplicates": dedup_skipped,
                 "batch_id": context.chat_data.get("batch_id"),
+                "source_map": filtered_sources,
             },
         )
         if not ready:
@@ -611,6 +645,7 @@ async def send_all(
                 frozen_originals = {}
 
             saved_state = mass_state.load_chat_state(chat_id)
+            state_obj = None
             if saved_state and saved_state.get("pending"):
                 blocked_foreign = list(saved_state.get("blocked_foreign", []))
                 blocked_invalid = list(saved_state.get("blocked_invalid", []))
@@ -730,6 +765,42 @@ async def send_all(
 
             to_send = ready_after_history
 
+            raw_source_map = None
+            if saved_state and isinstance(saved_state.get("source_map"), dict):
+                raw_source_map = saved_state.get("source_map")
+            elif state_obj and getattr(state_obj, "source_map", None):
+                raw_source_map = state_obj.source_map
+            source_map: Dict[str, List[str]] = {}
+            if isinstance(raw_source_map, dict):
+                try:
+                    source_map = {
+                        str(k): list(v) if isinstance(v, (list, tuple)) else [v]
+                        for k, v in raw_source_map.items()
+                        if k
+                    }
+                except Exception:
+                    source_map = {}
+            hits = build_hits_with_sources(to_send, source_map)
+            unique_hits, dup_map = dedupe_across_sources(hits)
+            deduped_list = [item.get("email", "") for item in unique_hits if item.get("email")]
+            if deduped_list:
+                to_send = deduped_list
+            active_norms: set[str] = set()
+            for addr in to_send:
+                norm = normalize_email(addr) or addr.strip().lower()
+                if norm:
+                    active_norms.add(norm)
+            active_norms.update(dup_map.keys())
+            filtered_sources = {k: source_map.get(k, []) for k in active_norms if k}
+            for items in dup_map.values():
+                for item in items:
+                    email_dup = item.get("email")
+                    if not email_dup:
+                        continue
+                    if email_dup not in skipped_duplicates:
+                        skipped_duplicates.append(email_dup)
+                        audit_skip(email_dup, "duplicate")
+
             if dropped_now:
                 summary: Dict[str, int] = {}
                 for cat in dropped_now.values():
@@ -791,6 +862,7 @@ async def send_all(
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
                     "skipped_duplicates": skipped_duplicates,
+                    "source_map": filtered_sources,
                 },
             )
 
@@ -937,6 +1009,7 @@ async def send_all(
                         "blocked_invalid": blocked_invalid,
                         "skipped_recent": skipped_recent,
                         "skipped_duplicates": skipped_duplicates,
+                        "source_map": filtered_sources,
                     },
                 )
         finally:

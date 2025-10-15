@@ -11,6 +11,7 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
                 "email": "user@example.com",
                 "last_sent_at": "2024-01-01T00:00:00+00:00",
                 "reason": "new",
+                "source": "file.pdf",
             }
         ],
         rejected_180d=[
@@ -43,6 +44,7 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
         "suspicious",
         "blocked",
         "duplicates",
+        "duplicates_meta",
     }
     assert expected_sheets.issubset(set(wb.sheetnames))
 
@@ -51,6 +53,7 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
         "email",
         "last_sent_at",
         "reason",
+        "source",
     ]
     summary = wb["summary"]
     summary_values = {(row[0].value, row[1].value) for row in summary.iter_rows(min_row=2, max_row=7)}

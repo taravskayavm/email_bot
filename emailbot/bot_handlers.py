@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import send_selected as _pkg_send_selected
 from zoneinfo import ZoneInfo
@@ -398,6 +398,23 @@ def extract_emails_loose(text):
     return set(smart_extract_emails(text))
 
 
+def _register_sources(state: SessionState | None, emails: Iterable[str], source: str | None) -> None:
+    if not state or not emails:
+        return
+    source_text = str(source or "").strip()
+    if not source_text:
+        return
+    for addr in emails:
+        if not addr:
+            continue
+        key = normalize_email(addr) or str(addr).strip().lower()
+        if not key:
+            continue
+        bucket = state.source_map.setdefault(key, [])
+        if source_text not in bucket:
+            bucket.append(source_text)
+
+
 async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove e-mail addresses from the current "to send" list."""
 
@@ -728,6 +745,7 @@ class SessionState:
     all_emails: Set[str] = field(default_factory=set)
     all_files: List[str] = field(default_factory=list)
     to_send: List[str] = field(default_factory=list)
+    source_map: Dict[str, List[str]] = field(default_factory=dict)
     suspect_numeric: List[str] = field(default_factory=list)
     foreign: List[str] = field(default_factory=list)
     preview_allowed_all: List[str] = field(default_factory=list)
@@ -2504,6 +2522,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         repairs: List[tuple[str, str]] = []
         footnote_dupes = 0
         stats: dict = {}
+        state = get_state(context)
 
         try:
             try:
@@ -2518,6 +2537,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await heartbeat()
                 allowed_all.update(allowed)
                 loose_all.update(loose)
+                _register_sources(state, allowed, file_path)
                 repairs = collect_repairs_from_files(extracted_files)
                 footnote_dupes += stats.get("footnote_pairs_merged", 0)
             else:
@@ -2528,6 +2548,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await heartbeat()
                 allowed_all.update(allowed)
                 loose_all.update(loose)
+                _register_sources(state, allowed, file_path)
                 if file_path:
                     extracted_files.append(file_path)
                     repairs = collect_repairs_from_files([file_path])
@@ -2594,7 +2615,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
-    state = get_state(context)
     state.all_emails.update(allowed_all)
     state.all_files.extend(extracted_files)
     if extracted_files:
@@ -3511,6 +3531,23 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ),
         ready_final=len(ready),
     )
+    active_norms: set[str] = set()
+    if ready:
+        for addr in ready:
+            norm = normalize_email(addr) or str(addr).strip().lower()
+            if norm:
+                active_norms.add(norm)
+    filtered_sources = {}
+    if getattr(state, "source_map", None):
+        try:
+            filtered_sources = {
+                norm: list(state.source_map.get(norm, []))
+                for norm in active_norms
+                if norm in state.source_map
+            }
+        except Exception:
+            filtered_sources = {}
+
     mass_state.save_chat_state(
         chat_id,
         {
@@ -3522,6 +3559,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "blocked_invalid": blocked_invalid,
             "skipped_recent": skipped_recent,
             "batch_id": context.chat_data.get("batch_id"),
+            "source_map": filtered_sources,
         },
     )
     handler_payload = {
@@ -5110,6 +5148,22 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
                     log_mass_filter_digest({**digest, "chat_id": chat_id})
 
+                    active_norms = set()
+                    for addr in to_send + duplicates:
+                        norm = normalize_email(addr) or str(addr).strip().lower()
+                        if norm:
+                            active_norms.add(norm)
+                    filtered_sources = {}
+                    if getattr(state, "source_map", None):
+                        try:
+                            filtered_sources = {
+                                norm: list(state.source_map.get(norm, []))
+                                for norm in active_norms
+                                if norm in state.source_map
+                            }
+                        except Exception:
+                            filtered_sources = {}
+
                     mass_state.save_chat_state(
                         chat_id,
                         {
@@ -5121,6 +5175,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             "blocked_invalid": blocked_invalid,
                             "skipped_recent": skipped_recent,
                             "skipped_duplicates": duplicates,
+                            "source_map": filtered_sources,
                         },
                     )
 
@@ -5171,6 +5226,21 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     f"{available} адресов из списка."
                 )
             )
+            limited_norms = set()
+            for addr in to_send + duplicates:
+                norm = normalize_email(addr) or str(addr).strip().lower()
+                if norm:
+                    limited_norms.add(norm)
+            limited_sources = {}
+            if getattr(state, "source_map", None):
+                try:
+                    limited_sources = {
+                        norm: list(state.source_map.get(norm, []))
+                        for norm in limited_norms
+                        if norm in state.source_map
+                    }
+                except Exception:
+                    limited_sources = {}
             mass_state.save_chat_state(
                 chat_id,
                 {
@@ -5182,6 +5252,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     "blocked_invalid": blocked_invalid,
                     "skipped_recent": skipped_recent,
                     "skipped_duplicates": duplicates,
+                    "source_map": limited_sources,
                 },
             )
 
@@ -5278,6 +5349,21 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             pass
 
                 def after_each(email_addr: str) -> None:
+                    current_norms = set()
+                    for addr in to_send + duplicates:
+                        norm = normalize_email(addr) or str(addr).strip().lower()
+                        if norm:
+                            current_norms.add(norm)
+                    current_sources = {}
+                    if getattr(state, "source_map", None):
+                        try:
+                            current_sources = {
+                                norm: list(state.source_map.get(norm, []))
+                                for norm in current_norms
+                                if norm in state.source_map
+                            }
+                        except Exception:
+                            current_sources = {}
                     mass_state.save_chat_state(
                         chat_id,
                         {
@@ -5289,6 +5375,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             "blocked_invalid": blocked_invalid,
                             "skipped_recent": skipped_recent,
                             "skipped_duplicates": duplicates,
+                            "source_map": current_sources,
                         },
                     )
 

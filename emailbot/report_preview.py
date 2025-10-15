@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Iterable
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from .dedupe_global import dedupe_across_sources
 
 
 @dataclass
 class PreviewData:
     group: str
-    valid: list[dict]            # dict: {"email":..., "last_sent_at":..., "reason":...}
+    valid: list[dict]            # dict: {"email":..., "last_sent_at":..., "reason":..., "source":...}
     rejected_180d: list[dict]    # {"email":..., "last_sent_at":..., "days_left":...}
     suspicious: list[dict]       # {"email":..., "reason":...}
     blocked: list[dict]          # {"email":..., "source":...}
@@ -41,17 +42,27 @@ def build_preview_workbook(data: PreviewData, path: Path) -> Path:
     ws = wb.active
     ws.title = "summary"
 
-    total = sum(len(getattr(data, x)) for x in ["valid", "rejected_180d", "suspicious", "blocked", "duplicates"])
+    unique_valid, dup_map = dedupe_across_sources(data.valid)
+    dup_count = sum(len(v) for v in dup_map.values())
+    total = (
+        len(unique_valid)
+        + len(data.rejected_180d)
+        + len(data.suspicious)
+        + len(data.blocked)
+        + len(data.duplicates)
+    )
     ws.append(["group", data.group])
     ws.append(["total_found", total])
-    ws.append(["valid", len(data.valid)])
+    ws.append(["valid", len(unique_valid)])
     ws.append(["rejected_180d", len(data.rejected_180d)])
     ws.append(["suspicious", len(data.suspicious)])
     ws.append(["blocked", len(data.blocked)])
     ws.append(["duplicates", len(data.duplicates)])
+    if dup_count:
+        ws.append(["duplicates_global", dup_count])
     ws.append([])
     ws.append(["top_domains(valid)"])
-    for d, cnt in _top_domains([x["email"] for x in data.valid]):
+    for d, cnt in _top_domains([x["email"] for x in unique_valid]):
         ws.append([d, cnt])
     _autosize(ws)
 
@@ -62,11 +73,29 @@ def build_preview_workbook(data: PreviewData, path: Path) -> Path:
             wsx.append([r.get(col) for col in columns])
         _autosize(wsx)
 
-    add_sheet("valid", data.valid, ["email", "last_sent_at", "reason"])
+    add_sheet("valid", unique_valid, ["email", "last_sent_at", "reason", "source"])
     add_sheet("rejected_180d", data.rejected_180d, ["email", "last_sent_at", "days_left"])
     add_sheet("suspicious", data.suspicious, ["email", "reason"])
     add_sheet("blocked", data.blocked, ["email", "source"])
-    add_sheet("duplicates", data.duplicates, ["email", "occurrences", "source_files"])
+    add_sheet("duplicates_meta", data.duplicates, ["email", "occurrences", "source_files"])
+
+    if dup_map:
+        rows = []
+        for norm_email, dup_items in dup_map.items():
+            for item in dup_items:
+                rows.append(
+                    {
+                        "email_norm": norm_email,
+                        "email": item.get("email"),
+                        "source": item.get("source"),
+                    }
+                )
+        if rows:
+            wsx = wb.create_sheet("duplicates")
+            wsx.append(["email_norm", "email", "source"])
+            for row in rows:
+                wsx.append([row.get("email_norm"), row.get("email"), row.get("source")])
+            _autosize(wsx)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
