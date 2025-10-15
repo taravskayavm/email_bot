@@ -27,6 +27,7 @@ from itertools import count
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
+from .cooldown import audit_emails, normalize_email as cooldown_normalize_email
 from emailbot import history_service
 from utils import rules
 from .smtp_client import SmtpClient, RobustSMTP, send_with_retry
@@ -1421,40 +1422,41 @@ def prepare_mass_mailing(
             lookback_days = 0
         recent = _load_recent_sent(lookback_days)
         now_utc = datetime.now(timezone.utc)
+        cooldown_result = (
+            audit_emails(queue_after_foreign, days=lookback_days, now=now_utc)
+            if lookback_days > 0
+            else None
+        )
+        cooldown_under = (
+            set(cooldown_result.get("under", set())) if cooldown_result else set()
+        )
 
         ready: list[str] = []
         for addr in queue_after_foreign:
             blocked_recent = False
-            try:
-                if lookback_days > 0:
-                    skip_cooldown, _ = should_skip_by_cooldown(
-                        addr, now=now_utc, days=lookback_days
-                    )
-                    if skip_cooldown:
+            norm = cooldown_normalize_email(addr) if lookback_days > 0 else addr
+            norm_key = norm or addr
+            if lookback_days > 0 and norm_key in cooldown_under:
+                skipped_recent.append(addr)
+                blocked_recent = True
+            if not blocked_recent:
+                try:
+                    if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
                         skipped_recent.append(addr)
                         blocked_recent = True
-                if not blocked_recent and lookback_days > 0 and was_sent_within(
-                    addr, days=lookback_days
-                ):
-                    skipped_recent.append(addr)
-                    blocked_recent = True
-                elif (
-                    lookback_days > 0
-                    and history_service.was_sent_within_days(addr, group or "", lookback_days)
-                ):
-                    skipped_recent.append(addr)
-                    blocked_recent = True
-            except Exception as exc:
-                logger.warning("history lookup failed for %s: %s", addr, exc)
+                    elif (
+                        lookback_days > 0
+                        and history_service.was_sent_within_days(
+                            addr, group or "", lookback_days
+                        )
+                    ):
+                        skipped_recent.append(addr)
+                        blocked_recent = True
+                except Exception as exc:
+                    logger.warning("history lookup failed for %s: %s", addr, exc)
             if blocked_recent:
                 continue
-            if lookback_days > 0:
-                try:
-                    canon = normalize_email(addr)
-                except Exception:
-                    canon = addr
-            else:
-                canon = addr
+            canon = norm_key if lookback_days > 0 else addr
             if lookback_days > 0 and canon in recent:
                 skipped_recent.append(addr)
                 continue
@@ -1485,7 +1487,9 @@ def prepare_mass_mailing(
             "input_total": len(normalized),
             "after_suppress": len(queue_after_block),
             "foreign_blocked": len(blocked_foreign),
-            "ready_after_cooldown": len(queue_after_foreign),
+            "ready_after_cooldown": max(
+                len(queue_after_foreign) - len(skipped_recent), 0
+            ),
             "ready_final": len(ready),
             "set_planned": len(ready),
             "sent_planned": len(ready),

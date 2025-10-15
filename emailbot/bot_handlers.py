@@ -198,6 +198,11 @@ from . import mass_state
 from .session_store import load_last_summary, save_last_summary
 from .settings import REPORT_TZ, SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
+from emailbot.cooldown import (
+    audit_emails as cooldown_audit_emails,
+    normalize_email as cooldown_normalize_email,
+)
+from emailbot.web_extract import fetch_and_extract
 from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
@@ -324,21 +329,18 @@ def _format_empty_send_explanation(digest: dict[str, object]) -> str:
 async def async_extract_emails_from_url(
     url: str, session, chat_id=None, batch_id: str | None = None
 ):
-    from . import extraction_url as _extraction_url  # noqa: E402
-
-    if batch_id is not None:
-        _extraction_url.set_batch(batch_id)
+    if not settings.ENABLE_WEB:
+        return url, set(), set(), [], {}
 
     await heartbeat()
-    hits, stats = await asyncio.to_thread(_extraction.extract_from_url, url)
+    final_url, emails = await asyncio.to_thread(fetch_and_extract, url)
     await heartbeat()
-    emails = set(h.email.lower().strip() for h in hits)
     foreign = {e for e in emails if not is_allowed_tld(e)}
     logger.info(
-        "extraction complete",
-        extra={"event": "extract", "source": url, "count": len(emails)},
+        "web extract complete",
+        extra={"event": "web_extract", "source": final_url, "count": len(emails)},
     )
-    return url, emails, foreign, [], stats
+    return final_url, emails, foreign, [], {}
 
 
 def collapse_footnote_variants(emails):
@@ -901,23 +903,73 @@ async def _maybe_send_skipped_summary(
         return
 
     counts: list[tuple[str, int]] = []
+    cooldown_examples: list[str] = []
+    cooldown_audit: dict | None = None
+    cooldown_display: dict[str, str] = {}
+
     for reason in _SKIPPED_REASON_ORDER:
         entries = skipped_raw.get(reason) or []
         if not isinstance(entries, list):
             continue
-        unique = _unique_preserve_order(str(item) for item in entries)
-        if not unique:
+        normalized: dict[str, str] = {}
+        for item in entries:
+            text = str(item).strip()
+            if not text:
+                continue
+            norm = cooldown_normalize_email(text) or text.lower()
+            if norm not in normalized:
+                normalized[norm] = text
+        if not normalized:
+            skipped_raw[reason] = []
             continue
-        counts.append((reason, len(unique)))
-        skipped_raw[reason] = unique
+        if reason == "180d":
+            audit = cooldown_audit_emails(
+                normalized.values(), days=settings.SEND_COOLDOWN_DAYS
+            )
+            cooldown_audit = audit
+            under_norms = set(audit.get("under", set()))
+            skipped_raw[reason] = [
+                normalized[norm]
+                for norm in normalized
+                if norm in under_norms
+            ]
+            cooldown_display = {
+                norm: normalized[norm]
+                for norm in normalized
+                if norm in under_norms
+            }
+            count = len(under_norms)
+        else:
+            unique = list(normalized.values())
+            skipped_raw[reason] = unique
+            count = len(unique)
+        if count:
+            counts.append((reason, count))
 
     if not counts:
         return
+
+    if cooldown_audit and cooldown_audit.get("under"):
+        last_map = cooldown_audit.get("last_contact", {})
+        tz = ZoneInfo(REPORT_TZ)
+        samples = sorted(cooldown_audit["under"])[:3]
+        for norm in samples:
+            label = cooldown_display.get(norm, norm)
+            last_dt = last_map.get(norm)
+            if isinstance(last_dt, datetime):
+                seen = last_dt.astimezone(tz).strftime("%Y-%m-%d")
+                cooldown_examples.append(f"{label} — {seen}")
+            else:
+                cooldown_examples.append(label)
 
     lines = ["👀 Отфильтрованные адреса:"]
     for reason, count in counts:
         label = _SKIPPED_REASON_LABELS.get(reason, reason)
         lines.append(f"• {label}: {count}")
+    if cooldown_examples:
+        lines.append("")
+        lines.append("Примеры 180 дней:")
+        lines.extend(f"• {item}" for item in cooldown_examples)
 
     await query.message.reply_text(
         "\n".join(lines), reply_markup=build_skipped_preview_entry_kb()
