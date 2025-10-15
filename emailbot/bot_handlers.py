@@ -210,7 +210,11 @@ from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_by
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
 from utils.email_clean import sanitize_email
-from emailbot.services.cooldown import should_skip_by_cooldown
+from emailbot.services.cooldown import (
+    COOLDOWN_WINDOW_DAYS,
+    check_email,
+    should_skip_by_cooldown,
+)
 from services.templates import get_template, get_template_label, list_templates
 
 
@@ -736,6 +740,9 @@ class SessionState:
     blocked_after_parse: int = 0
     override_cooldown: bool = False
     last_digest: dict[str, object] | None = None
+    cooldown_preview_total: int = 0
+    cooldown_preview_examples: List[tuple[str, str]] = field(default_factory=list)
+    cooldown_preview_window: int = 0
 
 
 FORCE_SEND_CHAT_IDS: set[int] = set()
@@ -2308,13 +2315,44 @@ async def _compose_report_and_save(
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
     state.blocked_after_parse = blocked_after_parse
+    state.cooldown_preview_total = 0
+    state.cooldown_preview_examples = []
+    state.cooldown_preview_window = 0
+
+    cooldown_blocked = 0
+    cooldown_examples: list[tuple[str, str]] = []
+    ignore_cooldown = _is_ignore_cooldown_enabled(context)
+    cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
+    if cooldown_window > 0 and filtered:
+        seen_norm: set[str] = set()
+        group = getattr(state, "group", None)
+        for addr in filtered:
+            norm = normalize_email(addr) or addr.strip().lower()
+            if not norm or norm in seen_norm:
+                continue
+            seen_norm.add(norm)
+            try:
+                blocked, reason = check_email(addr, group=group, window=cooldown_window)
+            except Exception as exc:  # pragma: no cover - defensive log
+                logger.debug("cooldown preview check failed for %s: %s", addr, exc)
+                blocked, reason = False, ""
+            if blocked:
+                cooldown_blocked += 1
+                if len(cooldown_examples) < 3:
+                    match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
+                    last_seen = match.group(1)[:10] if match else ""
+                    cooldown_examples.append((addr, last_seen))
+
+    state.cooldown_preview_total = cooldown_blocked
+    state.cooldown_preview_examples = cooldown_examples
+    state.cooldown_preview_window = cooldown_window
 
     summary = format_parse_summary(
         {
             "total_found": len(allowed_all),
-            "to_send": len(filtered),
+            "to_send": max(len(filtered) - cooldown_blocked, 0),
             "suspicious": len(suspicious_numeric),
-            "cooldown_180d": 0,
+            "cooldown_180d": cooldown_blocked,
             "foreign_domain": len(foreign),
             "pages_skipped": 0,
             "footnote_dupes_removed": footnote_dupes,
@@ -2396,6 +2434,23 @@ async def _send_combined_parse_response(
             caption=caption,
             reply_markup=markup,
         )
+
+    cooldown_total = getattr(state, "cooldown_preview_total", 0)
+    cooldown_window = getattr(state, "cooldown_preview_window", 0)
+    if cooldown_total > 0 and cooldown_window > 0:
+        examples = list(getattr(state, "cooldown_preview_examples", []))
+        lines = [f"• За {cooldown_window} дней: {cooldown_total}"]
+        if examples:
+            lines.append("")
+            lines.append(f"Примеры {cooldown_window} дней:")
+            for email, last in examples:
+                if last:
+                    lines.append(f"• {email} — {last}")
+                else:
+                    lines.append(f"• {email} — дата неизвестна")
+        await message.reply_text("👀 Отфильтрованные адреса:\n" + "\n".join(lines))
+        state.cooldown_preview_total = 0
+        state.cooldown_preview_examples = []
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
