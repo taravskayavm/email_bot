@@ -119,11 +119,16 @@ def _join_email_linebreaks(txt: str) -> str:
         r"\1.\2",
         txt,
     )
-    txt = re.sub(
-        r"([A-Za-z0-9._+\-])@\s*(?:\r?\n|\r)\s*([A-Za-z0-9.-])",
-        r"\1@\2",
-        txt,
-    )
+    # Уже есть базовая склейка в preprocess_text(), но для PDF полезно добить
+    # частые артефакты, встречающиеся в выгрузках/конвертациях:
+    # 1) пробелы вокруг '@'
+    txt = re.sub(r"(\S)\s*@\s*(\S)", r"\1@\2", txt)
+    # 2) переносы строки в доменной части: "name@\nmail.ru"
+    txt = re.sub(r"@\s*(?:\r?\n|\r)\s*", "@", txt)
+    # 3) невидимые символы прямо вокруг '@' (ZWSP и т.п.)
+    txt = re.sub(r"@\u200B+", "@", txt)
+    # 4) дефис в "e-mail" мешает склейке — нормализуем
+    txt = txt.replace("e-mail", "email").replace("E-mail", "Email")
     txt = re.sub(
         r"([A-Za-z0-9-])\s*(?:\r?\n|\r)\s*\.",
         r"\1.",
