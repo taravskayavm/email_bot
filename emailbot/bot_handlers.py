@@ -5384,6 +5384,33 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def start_sending_quick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, group: str
+) -> None:
+    """Упрощённый запуск массовой рассылки из последнего предпросмотра."""
+
+    emails = list(context.user_data.get("last_ready_emails") or [])
+    if not emails:
+        query = getattr(update, "callback_query", None)
+        if query is not None:
+            try:
+                await query.answer()
+            except Exception:  # pragma: no cover - best effort acknowledgement
+                pass
+        await update.effective_chat.send_message(
+            "Список пуст — сначала загрузите данные."
+        )
+        return
+
+    await update.effective_chat.send_message(
+        f"✉️ Рассылка начата. Отправляем {len(emails)} писем..."
+    )
+
+    from .handlers.manual_send import queue_and_send
+
+    await queue_and_send(update, context, template_key=group)
+
+
 # --- Совместимость: обёртки под старые имена хендлеров ---
 
 
@@ -5834,6 +5861,7 @@ __all__ = [
     "apply_repairs",
     "show_repairs",
     "start_sending",  # совместимость для старых точек входа
+    "start_sending_quick",
     "send_manual_email",
     "send_all",
     "autosync_imap_with_message",

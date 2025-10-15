@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
+import sys
 import logging
 
 from . import settings_store as _store
@@ -144,6 +145,11 @@ REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/
 
 # ---- Reconcile (IMAP vs CSV) ----
 RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
+
+# ``build_cooldown_service`` and other helpers expect a settings-like object with
+# attribute access.  Expose the module itself as ``SETTINGS`` to provide a stable
+# reference for callers that treat settings as a namespace.
+SETTINGS = sys.modules[__name__]
 
 # Краулер: бюджеты и кэш
 CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
