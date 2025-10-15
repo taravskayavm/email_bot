@@ -24,10 +24,18 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
 from itertools import count
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .extraction import normalize_email, strip_html
-from .cooldown import audit_emails, normalize_email as cooldown_normalize_email
+from .cooldown import (
+    audit_emails,
+    build_cooldown_service,
+    normalize_email as cooldown_normalize_email,
+)
+from . import settings as settings_module
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from .cooldown import CooldownService
 from .sanitizer import sanitize_batch
 from emailbot import history_service
 from utils import rules
@@ -61,10 +69,122 @@ _TASK_SEQ = count()
 
 logger = logging.getLogger(__name__)
 
+_BULK_COOLDOWN_SERVICE: "CooldownService" | None = None
+
+
+def _get_bulk_cooldown_service():
+    """Return a cached :class:`CooldownService` instance for bulk sends."""
+
+    global _BULK_COOLDOWN_SERVICE
+    if _BULK_COOLDOWN_SERVICE is None:
+        try:
+            _BULK_COOLDOWN_SERVICE = build_cooldown_service(settings_module.SETTINGS)
+        except AttributeError:
+            # ``SETTINGS`` may be absent in environments that import the module
+            # directly; fall back to passing the module itself.
+            _BULK_COOLDOWN_SERVICE = build_cooldown_service(settings_module)
+        except Exception:  # pragma: no cover - defensive initialisation
+            logger.debug("bulk cooldown init failed", exc_info=True)
+            _BULK_COOLDOWN_SERVICE = build_cooldown_service(settings_module)
+    return _BULK_COOLDOWN_SERVICE
+
 
 # [EBOT-087] Запуск корутины Telegram строго в PTB-лупе из любого потока
 def run_in_app_loop(application, coro):
     return asyncio.run_coroutine_threadsafe(coro, application.loop)
+
+
+async def send_bulk(emails: Iterable[str], template_key: str) -> Tuple[int, int, int]:
+    """Send e-mails in bulk using the same cooldown service as the preview step."""
+
+    candidates = list(emails)
+    if not candidates:
+        return 0, 0, 0
+
+    try:
+        service = _get_bulk_cooldown_service()
+        ready, hits = service.filter_ready(candidates)
+    except Exception:  # pragma: no cover - defensive logging
+        logger.debug("bulk send: cooldown filter failed", exc_info=True)
+        ready = candidates
+        hits = []
+
+    skipped_180 = len(hits)
+    ready_list = list(ready)
+    if not ready_list:
+        return 0, skipped_180, 0
+
+    def _send_ready() -> Tuple[int, int, int]:
+        template_path = TEMPLATE_MAP.get(template_key) or template_key
+        template_label = template_key or Path(template_path).stem
+
+        smtp_client = RobustSMTP()
+        imap_client = None
+        sent_folder = ""
+        sent_count = 0
+        extra_cooldown = 0
+        errors = 0
+
+        try:
+            host = os.getenv("IMAP_HOST", "imap.mail.ru")
+            port = _parse_int(os.getenv("IMAP_PORT"), 993)
+            timeout = get_imap_timeout()
+            imap_client = imap_connect_ssl(host, port, timeout)
+            imap_client.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            sent_folder = get_preferred_sent_folder(imap_client)
+            imap_client.select(f'"{sent_folder}"')
+        except Exception:
+            logger.exception("bulk send: IMAP initialisation failed")
+            try:
+                smtp_client.close()
+            except Exception:
+                pass
+            if imap_client is not None:
+                try:
+                    imap_client.logout()
+                except Exception:
+                    pass
+            return 0, 0, len(ready_list)
+
+        try:
+            for email_addr in ready_list:
+                try:
+                    outcome, _, _, _ = send_email_with_sessions(
+                        smtp_client,
+                        imap_client,
+                        sent_folder,
+                        email_addr,
+                        template_path,
+                        subject=DEFAULT_SUBJECT,
+                        group_title=template_label,
+                        group_key=template_key,
+                    )
+                except Exception:
+                    errors += 1
+                    logger.exception("bulk send: SMTP failure for %s", email_addr)
+                    continue
+
+                if outcome == SendOutcome.SENT:
+                    sent_count += 1
+                elif outcome == SendOutcome.COOLDOWN:
+                    extra_cooldown += 1
+                elif outcome == SendOutcome.ERROR:
+                    errors += 1
+        finally:
+            try:
+                smtp_client.close()
+            except Exception:
+                pass
+            if imap_client is not None:
+                try:
+                    imap_client.logout()
+                except Exception:
+                    pass
+
+        return sent_count, extra_cooldown, errors
+
+    sent, extra_skipped, errors = await asyncio.to_thread(_send_ready)
+    return sent, skipped_180 + extra_skipped, errors
 
 
 # --------------------------------------------------------------------------------------
@@ -1682,6 +1802,7 @@ __all__ = [
     "async_send_email",
     "create_task_with_logging",
     "send_email_with_sessions",
+    "send_bulk",
     "process_unsubscribe_requests",
     "get_blocked_emails",
     "add_blocked_email",

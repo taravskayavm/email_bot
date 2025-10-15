@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Set
 
 from asyncio import Lock
 
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from emailbot.handlers.common import safe_answer
 
@@ -33,6 +33,7 @@ from emailbot.messaging import (
     get_preferred_sent_folder,
     get_sent_today,
     log_sent_email,
+    send_bulk,
     send_email_with_sessions,
 )
 from emailbot.messaging_utils import (
@@ -47,6 +48,7 @@ from emailbot.ui.messages import format_dispatch_result, format_error_details
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
 from emailbot.smtp_client import RobustSMTP
+from emailbot.cooldown import build_cooldown_service
 
 from .preview import (
     go_back as preview_go_back,
@@ -164,6 +166,66 @@ def _get_chat_lock(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Lock:
         lock = Lock()
         locks[chat_id] = lock
     return lock
+
+
+async def queue_and_send(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    template_key: str,
+) -> None:
+    """Отправить ранее подготовленный список адресов, повторно применив кулдаун."""
+
+    try:
+        raw_emails = list(context.user_data.get("last_ready_emails") or [])
+    except Exception:
+        raw_emails = []
+
+    settings_obj = getattr(_settings, "SETTINGS", _settings)
+    try:
+        service = build_cooldown_service(settings_obj)
+        ready, hits = service.filter_ready(raw_emails)
+    except Exception:
+        logger.debug("queue_and_send: fallback to original list", exc_info=True)
+        ready = raw_emails
+        hits = []
+
+    ready_list = list(ready)
+    context.user_data["last_ready_emails"] = ready_list
+    planned = len(ready_list)
+
+    if not ready_list:
+        await update.effective_chat.send_message(
+            "Нечего отправлять — все адреса попали под правило 180 дней или список пуст."
+        )
+        return
+
+    try:
+        await update.effective_chat.send_message(
+            f"✉️ Рассылка начата. Отправляем {planned} писем...",
+            reply_markup=InlineKeyboardMarkup([]),
+        )
+    except Exception:
+        await update.effective_chat.send_message(
+            f"✉️ Рассылка начата. Отправляем {planned} писем..."
+        )
+
+    skipped_initial = len(hits)
+    try:
+        sent, skipped_cooldown, errors = await send_bulk(ready_list, template_key)
+    except Exception:
+        logger.exception("queue_and_send: bulk send failed")
+        sent, skipped_cooldown, errors = 0, skipped_initial, len(ready_list)
+
+    total_skipped = max(skipped_cooldown, skipped_initial)
+    queue_info = (
+        "📨 Рассылка завершена.\n"
+        f"📊 В очереди было: {planned}\n"
+        f"✅ Отправлено: {sent}\n"
+        f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
+        "ℹ️ Осталось без изменений: 0\n"
+        f"❌ Ошибок при отправке: {errors}"
+    )
+    await update.effective_chat.send_message(queue_info)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
