@@ -13,6 +13,8 @@ from .cancel import is_cancelled
 from .cooldown import _merged_history_map, is_under_cooldown
 from .messaging import SendOutcome, log_sent_email, was_emailed_recently
 from .smtp_client import SmtpClient
+from .messaging_utils import append_to_sent
+from .services import APPEND_TO_SENT, SENT_MAILBOX, mark_sent
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +123,9 @@ async def run_smtp_send(
                 if after_each:
                     after_each(email_addr)
                 continue
+        raw_payload = None
         try:
-            outcome, token, log_key, content_hash = messaging.send_email_with_sessions(
+            send_result = messaging.send_email_with_sessions(
                 client,
                 imap,
                 sent_folder,
@@ -131,7 +134,14 @@ async def run_smtp_send(
                 subject=subject,
                 batch_id=batch_id,
                 override_180d=override_180d,
+                append_message=False,
+                return_raw=APPEND_TO_SENT,
             )
+            if APPEND_TO_SENT:
+                outcome, token, log_key, content_hash, *extra = send_result
+                raw_payload = extra[0] if extra else None
+            else:
+                outcome, token, log_key, content_hash = send_result
         except messaging.TemplateRenderError:
             # Let caller handle template errors.
             to_send.insert(0, email_addr)
@@ -164,6 +174,7 @@ async def run_smtp_send(
             continue
 
         if outcome == SendOutcome.SENT:
+            sent_at = datetime.now(timezone.utc)
             log_sent_email(
                 email_addr,
                 group_code,
@@ -174,7 +185,32 @@ async def run_smtp_send(
                 key=log_key,
                 subject=subject,
                 content_hash=content_hash,
+                ts=sent_at,
             )
+            try:
+                mark_sent(
+                    email_addr,
+                    group_code,
+                    sent_at=sent_at,
+                    message_id=log_key,
+                    run_id=(batch_id or str(chat_id)),
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("mark_sent failed for %s", email_addr)
+            if APPEND_TO_SENT and raw_payload and imap is not None:
+                try:
+                    mailbox = SENT_MAILBOX or sent_folder or "Sent"
+                    if isinstance(raw_payload, bytes):
+                        msg_bytes = raw_payload
+                    else:
+                        msg_bytes = str(raw_payload).encode("utf-8")
+                    status, _ = append_to_sent(imap, mailbox, msg_bytes)
+                    if status != "OK":
+                        logger.warning(
+                            "append_to_sent returned %s for %s", status, email_addr
+                        )
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("append to 'Sent' failed for %s", email_addr)
             sent_count += 1
             if on_sent:
                 on_sent(email_addr, token, log_key, content_hash)

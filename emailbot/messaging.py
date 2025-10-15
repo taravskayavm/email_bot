@@ -1085,6 +1085,8 @@ def send_email_with_sessions(
     group_title: str | None = None,
     group_key: str | None = None,
     override_180d: bool = False,
+    append_message: bool = True,
+    return_raw: bool = False,
 ) -> tuple[SendOutcome, str, str | None, str | None]:
     # 0) Проверка кулдауна (если не запросили явный override)
     if not override_180d:
@@ -1131,8 +1133,10 @@ def send_email_with_sessions(
     # 2) Отправка
     try:
         raw = msg.as_string()
+        raw_bytes = msg.as_bytes()
         client.send(EMAIL_ADDRESS, recipient, raw)
-        save_to_sent_folder(raw, imap=imap, folder=sent_folder)
+        if append_message:
+            save_to_sent_folder(raw_bytes, imap=imap, folder=sent_folder)
     except Exception:
         logger.exception("SMTP send failed for %s", recipient)
         return SendOutcome.ERROR, "", None, None
@@ -1164,6 +1168,8 @@ def send_email_with_sessions(
         content_hash=content_hash,
     )
 
+    if return_raw:
+        return SendOutcome.SENT, token, log_key, content_hash, raw_bytes
     return SendOutcome.SENT, token, log_key, content_hash
 
 
