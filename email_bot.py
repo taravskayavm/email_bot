@@ -26,9 +26,9 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
-from emailbot import compat  # EBOT-089
+from emailbot import compat  # EBOT-105
 
-compat.apply()  # применяем швы совместимости максимально рано
+compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
 
