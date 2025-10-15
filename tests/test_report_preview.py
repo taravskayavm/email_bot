@@ -6,11 +6,14 @@ from emailbot.report_preview import PreviewData, build_preview_workbook
 def test_build_preview_workbook_creates_expected_sheets(tmp_path):
     data = PreviewData(
         group="demo",
+        group_code="grp",
+        run_id="run-preview",
         valid=[
             {
                 "email": "user@example.com",
                 "last_sent_at": "2024-01-01T00:00:00+00:00",
-                "reason": "new",
+                "reason": "valid",
+                "details": "new",
                 "source": "file.pdf",
             }
         ],
@@ -19,14 +22,40 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
                 "email": "recent@example.com",
                 "last_sent_at": "2024-05-20T00:00:00+00:00",
                 "days_left": 42,
+                "reason": "cooldown_180d",
+                "source": "file.pdf",
             }
         ],
-        suspicious=[{"email": "suspect@example.com", "reason": "typo"}],
-        blocked=[{"email": "blocked@example.com", "source": "suppress-list"}],
+        suspicious=[
+            {
+                "email": "suspect@example.com",
+                "reason": "suspect",
+                "details": "typo",
+                "source": "page 1",
+            }
+        ],
+        blocked=[
+            {
+                "email": "blocked@example.com",
+                "reason": "blocked",
+                "details": "",
+                "source": "system:suppress",
+            }
+        ],
+        foreign=[
+            {
+                "email": "foreign@example.de",
+                "reason": "foreign",
+                "details": "",
+                "source": "system:foreign",
+            }
+        ],
         duplicates=[
             {
                 "email": "dup@example.com",
                 "occurrences": 2,
+                "reason": "duplicate",
+                "source": "file1.xlsx",
                 "source_files": "file1.xlsx",
             }
         ],
@@ -41,9 +70,9 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
         "summary",
         "valid",
         "rejected_180d",
-        "suspicious",
-        "blocked",
-        "duplicates",
+        "suspects",
+        "rejected_blocked",
+        "foreign",
         "duplicates_meta",
     }
     assert expected_sheets.issubset(set(wb.sheetnames))
@@ -53,10 +82,19 @@ def test_build_preview_workbook_creates_expected_sheets(tmp_path):
         "email",
         "last_sent_at",
         "reason",
+        "details",
         "source",
     ]
+    suspects_sheet = wb["suspects"]
+    header = [cell.value for cell in next(suspects_sheet.iter_rows(max_row=1))]
+    assert header[-1] == "source"
     summary = wb["summary"]
-    summary_values = {(row[0].value, row[1].value) for row in summary.iter_rows(min_row=2, max_row=7)}
+    summary_values = {
+        (row[0].value, row[1].value)
+        for row in summary.iter_rows(min_row=2, max_row=8)
+    }
     assert ("valid", 1) in summary_values
     assert ("rejected_180d", 1) in summary_values
+    assert ("rejected_blocked", 1) in summary_values
+    assert ("foreign", 1) in summary_values
     wb.close()
