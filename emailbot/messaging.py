@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 def run_in_app_loop(application, coro):
     return asyncio.run_coroutine_threadsafe(coro, application.loop)
 
+
+# --------------------------------------------------------------------------------------
+# Совместимость/утилиты
+# --------------------------------------------------------------------------------------
 # [EBOT-088] Backward-compat shim:
 # Ранее части кода вызывали messaging._normalize_key(...) для унификации chat_id/ключей.
 # Восстанавливаем утилиту, чтобы не падали старые вызовы.
@@ -117,6 +121,103 @@ def _normalize_key(val: Any) -> Optional[int | str]:
             return int(str(val).strip())
         except Exception:
             return str(val).strip()
+
+
+# [EBOT-090] Backward-compat shim:
+# Обёртка над history_service для правила «1 письмо на 1 адрес раз в N дней».
+# Поддерживает старые вызовы с разными сигнатурами и названиями функций.
+def _should_skip_by_history(
+    email: str,
+    days: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    **kwargs,
+) -> tuple[bool, str]:
+    """
+    Возвращает пару (skip, reason), где skip == True означает, что по истории отправок адрес
+    нужно пропустить (кулдаун не прошёл).
+    Аргументы:
+      email: адрес получателя
+      days: период в днях (если не задан — берём из settings, по умолчанию 180)
+      chat_id: игнорируется (для совместимости со старыми вызовами)
+      **kwargs: игнорируются, но не ломают вызов
+    """
+
+    try:
+        # Ленивая загрузка, чтобы не создавать циклические импорты на старте
+        from . import history_service as _hist, settings as _settings
+    except Exception as exc:  # pragma: no cover - логирование важнее возврата
+        logger.warning(
+            "history shim: cannot import settings/history_service: %r",
+            exc,
+        )
+        # безопасная деградация: не скипаем (правило 180д должно отработать дальше в пайплайне)
+        return False, ""
+
+    try:
+        cooldown = int(days) if days is not None else int(
+            getattr(_settings, "SEND_COOLDOWN_DAYS", 180)
+        )
+    except Exception:
+        cooldown = 180
+
+    def _normalize_result(result: Any) -> Optional[tuple[bool, str]]:
+        if result is None:
+            return None
+        if isinstance(result, tuple):
+            if not result:
+                return False, ""
+            skip = bool(result[0])
+            reason = ""
+            if len(result) > 1:
+                try:
+                    reason = str(result[1])
+                except Exception:
+                    reason = ""
+            if skip and not reason:
+                reason = "cooldown"
+            return skip, reason
+        try:
+            skip = bool(result)
+        except Exception:
+            return None
+        reason = "cooldown" if skip else ""
+        return skip, reason
+
+    def _try(fn: Callable, *args, **kwargs_inner) -> Optional[tuple[bool, str]]:
+        try:
+            return _normalize_result(fn(*args, **kwargs_inner))
+        except TypeError:
+            variants = (
+                {"email": email, "cooldown_days": cooldown},
+                {"email": email, "days": cooldown},
+                {"email": email, "cutoff_days": cooldown},
+                {"email": email},
+            )
+            for variant in variants:
+                try:
+                    return _normalize_result(fn(**variant))
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
+
+    candidates = (
+        "was_sent_within",
+        "was_sent_recent",
+        "check_recent",
+        "should_skip_by_history",
+        "skip_if_recent",
+    )
+    for name in candidates:
+        fn = getattr(_hist, name, None)
+        if callable(fn):
+            result = _try(fn, email, cooldown)
+            if isinstance(result, tuple):
+                return result
+
+    logger.info("history shim: no suitable function in history_service; fallback=False")
+    return False, ""
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
