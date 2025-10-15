@@ -10,7 +10,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import settings
-from .cooldown import normalize_email
+from .sanitizer import dedup_emails, normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
 
     headers = {"User-Agent": settings.WEB_USER_AGENT}
     final_url = url
-    found: Set[str] = set()
+    candidates: list[str] = []
     try:
         with httpx.Client(
             follow_redirects=True,
@@ -64,7 +64,7 @@ def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
             data = response.content
     except Exception as exc:  # pragma: no cover - defensive
         logger.info("web extract failed for %s: %s", url, exc)
-        return final_url, found
+        return final_url, set()
 
     max_bytes = getattr(settings, "WEB_MAX_BYTES", 0) or 0
     if max_bytes and len(data) > max_bytes:
@@ -83,16 +83,17 @@ def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
         candidate = _clean(candidate)
         norm = normalize_email(candidate)
         if norm:
-            found.add(norm)
+            candidates.append(norm)
 
     text_block = _clean(soup.get_text(" "))
     for match in MAIL_RE.finditer(text_block):
         candidate = _clean(match.group(0))
         norm = normalize_email(candidate)
         if norm:
-            found.add(norm)
+            candidates.append(norm)
 
-    return final_url, found
+    unique = dedup_emails(candidates)
+    return final_url, set(unique)
 
 
 __all__ = ["MAIL_RE", "ZWSP_CHARS", "fetch_and_extract"]

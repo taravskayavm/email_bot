@@ -1,10 +1,76 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, List
 
-from .cooldown import normalize_email
+_ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
+_WS_PUNCT_TRIM = re.compile(r"^[\s<>\[\]\(\)\.,;:\"']+|[\s<>\[\]\(\)\.,;:\"']+$")
+_EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
+
+
+def normalize_unicode(value: str) -> str:
+    """Return ``value`` normalised with Unicode NFKC and without ZW chars."""
+
+    if not isinstance(value, str):
+        value = str(value)
+    text = unicodedata.normalize("NFKC", value)
+    return _ZW_RE.sub("", text)
+
+
+def normalize_email(raw: str) -> str:
+    """Normalise an address for deterministic comparisons and storage."""
+
+    if not raw:
+        return ""
+    s = normalize_unicode(str(raw))
+    s = _WS_PUNCT_TRIM.sub("", s)
+    s = s.strip()
+    if not s:
+        return ""
+    if "@" not in s:
+        return s.lower()
+    local_raw, _, domain_raw = s.partition("@")
+    local = "".join(local_raw.split())
+    domain = "".join(domain_raw.split())
+    try:
+        domain_ascii = domain.encode("idna").decode("ascii")
+    except Exception:
+        domain_ascii = domain
+    if not domain_ascii:
+        return local.lower()
+    if not local:
+        return f"@{domain_ascii.lower()}"
+    return f"{local.lower()}@{domain_ascii.lower()}"
+
+
+def email_key(raw: str) -> str:
+    """Return a key used for deduplication / cooldown checks."""
+
+    return normalize_email(raw)
+
+
+def looks_like_email(raw: str) -> bool:
+    """Best-effort heuristic detecting whether ``raw`` resembles an e-mail."""
+
+    candidate = normalize_email(raw)
+    return bool(candidate and _EMAIL_RE.match(candidate))
+
+
+def dedup_emails(items: Iterable[str]) -> list[str]:
+    """Return ``items`` without duplicates, keeping the first occurrence."""
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        key = email_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
 
 # Characters that should be removed before any filtering steps.
 _HIDDEN_CHARS = [
@@ -35,7 +101,7 @@ def _clean_display(value: str) -> str:
 
     if value is None:
         return ""
-    text = unicodedata.normalize("NFKC", str(value))
+    text = normalize_unicode(str(value))
     text = text.translate(_REMOVE_TRANSLATION)
     text = text.strip().strip(",;")
     if not text:
@@ -68,7 +134,7 @@ def sanitize_batch(emails: Iterable[str]) -> SanitizedBatch:
         if not display:
             continue
         norm = normalize_email(display)
-        key = norm or display.lower()
+        key = email_key(display) or display.lower()
         if key in seen_norms:
             duplicates += 1
             duplicate_items.append(display)
@@ -80,4 +146,12 @@ def sanitize_batch(emails: Iterable[str]) -> SanitizedBatch:
     return SanitizedBatch(cleaned, normalized_map, duplicates, duplicate_items)
 
 
-__all__ = ["SanitizedBatch", "sanitize_batch"]
+__all__ = [
+    "SanitizedBatch",
+    "sanitize_batch",
+    "normalize_unicode",
+    "normalize_email",
+    "email_key",
+    "looks_like_email",
+    "dedup_emails",
+]
