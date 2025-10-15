@@ -15,7 +15,7 @@ from services.templates import get_template_label
 
 from emailbot import config as C
 from emailbot import extraction as extraction_module
-from emailbot import history_service, mass_state, messaging
+from emailbot import history_service, mass_state, messaging, reporting
 from emailbot.dedupe_global import build_hits_with_sources, dedupe_across_sources
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
@@ -168,12 +168,51 @@ def _fixed_map(chat_preview: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
+def _resolve_sources(
+    email: str,
+    primary: Mapping[str, Sequence[str]] | None,
+    fallback: Mapping[str, Sequence[str]] | None,
+) -> list[str]:
+    norm = normalize_email(email) or email.strip().lower()
+    if not norm:
+        return []
+    collected: list[str] = []
+    for mapping in (primary, fallback):
+        if not mapping:
+            continue
+        try:
+            raw = mapping.get(norm)
+        except Exception:
+            raw = None
+        if not raw:
+            continue
+        if isinstance(raw, (list, tuple, set)):
+            items = list(raw)
+        else:
+            items = [raw]
+        for item in items:
+            text = str(item).strip()
+            if text and text not in collected:
+                collected.append(text)
+    return collected
+
+
+def _source_text(
+    email: str,
+    primary: Mapping[str, Sequence[str]] | None,
+    fallback: Mapping[str, Sequence[str]] | None,
+) -> str:
+    sources = _resolve_sources(email, primary, fallback)
+    return ", ".join(sources)
+
+
 def _collect_valid(
     emails: Sequence[str],
     group: str,
     fixed_map: dict[str, str],
     rule_days: int,
     source_map: Mapping[str, Sequence[str]] | None = None,
+    fallback_sources: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
@@ -193,18 +232,13 @@ def _collect_valid(
                 reason_parts.append(f"override:{left}d")
             else:
                 reason_parts.append("ok")
-        norm = normalize_email(email) or email.strip().lower()
-        sources = []
-        if source_map and norm:
-            raw_sources = source_map.get(norm)
-            if raw_sources:
-                sources = [str(item) for item in raw_sources if item]
         rows.append(
             {
                 "email": email,
                 "last_sent_at": _format_dt(last),
-                "reason": ", ".join(reason_parts),
-                "source": sources[0] if sources else "",
+                "reason": "valid",
+                "details": ", ".join(reason_parts),
+                "source": _source_text(email, source_map, fallback_sources),
             }
         )
     rows.sort(key=lambda row: row.get("email", ""))
@@ -212,7 +246,11 @@ def _collect_valid(
 
 
 def _collect_rejected(
-    emails: Iterable[str], group: str, rule_days: int
+    emails: Iterable[str],
+    group: str,
+    rule_days: int,
+    source_map: Mapping[str, Sequence[str]] | None = None,
+    fallback_sources: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -226,13 +264,19 @@ def _collect_rejected(
                 "email": email,
                 "last_sent_at": _format_dt(last),
                 "days_left": _days_left(last, rule_days),
+                "reason": "cooldown_180d",
+                "source": _source_text(email, source_map, fallback_sources),
             }
         )
     rows.sort(key=lambda row: row.get("email", ""))
     return rows
 
 
-def _collect_suspicious(state: SessionState | None) -> list[dict[str, Any]]:
+def _collect_suspicious(
+    state: SessionState | None,
+    source_map: Mapping[str, Sequence[str]] | None = None,
+    fallback_sources: Mapping[str, Sequence[str]] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not state:
         return rows
@@ -246,28 +290,65 @@ def _collect_suspicious(state: SessionState | None) -> list[dict[str, Any]]:
         if email in seen:
             continue
         seen.add(email)
-        rows.append({"email": email, "reason": reason})
+        rows.append(
+            {
+                "email": email,
+                "reason": "suspect",
+                "details": reason,
+                "source": _source_text(email, source_map, fallback_sources),
+            }
+        )
     rows.sort(key=lambda row: row.get("email", ""))
     return rows
+
+
+def _is_basic_invalid(email: str) -> bool:
+    try:
+        return not bool(messaging.EMAIL_RE.fullmatch(email or ""))
+    except Exception:
+        return "@" not in (email or "")
 
 
 def _collect_blocked(
-    blocked_foreign: Sequence[str], blocked_invalid: Sequence[str]
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    blocked_foreign: Sequence[str],
+    blocked_invalid: Sequence[str],
+    source_map: Mapping[str, Sequence[str]] | None = None,
+    fallback_sources: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blocked_rows: list[dict[str, Any]] = []
+    foreign_rows: list[dict[str, Any]] = []
+    seen_blocked: set[str] = set()
     for email in blocked_invalid:
-        if email in seen:
+        if email in seen_blocked:
             continue
-        seen.add(email)
-        rows.append({"email": email, "source": "suppress-list"})
+        seen_blocked.add(email)
+        reason = "invalid" if _is_basic_invalid(email) else "blocked"
+        blocked_rows.append(
+            {
+                "email": email,
+                "reason": reason,
+                "details": "",
+                "source": _source_text(email, source_map, fallback_sources)
+                or "system:suppress",
+            }
+        )
+    seen_foreign: set[str] = set()
     for email in blocked_foreign:
-        if email in seen:
+        if email in seen_foreign:
             continue
-        seen.add(email)
-        rows.append({"email": email, "source": "foreign-domain"})
-    rows.sort(key=lambda row: row.get("email", ""))
-    return rows
+        seen_foreign.add(email)
+        foreign_rows.append(
+            {
+                "email": email,
+                "reason": "foreign",
+                "details": "",
+                "source": _source_text(email, source_map, fallback_sources)
+                or "system:foreign",
+            }
+        )
+    blocked_rows.sort(key=lambda row: row.get("email", ""))
+    foreign_rows.sort(key=lambda row: row.get("email", ""))
+    return blocked_rows, foreign_rows
 
 
 def _normalise_sources(value: Any) -> Any:
@@ -297,6 +378,8 @@ def _collect_duplicates(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, An
             {
                 "email": email,
                 "occurrences": item.get("occurrences"),
+                "reason": "duplicate",
+                "source": _normalise_sources(item.get("source_files")),
                 "source_files": _normalise_sources(item.get("source_files")),
             }
         )
@@ -328,13 +411,60 @@ def _build_preview_data(
     raw_sources = context.chat_data.get("preview_source_map")
     source_map: Mapping[str, Sequence[str]] | None = None
     if isinstance(raw_sources, dict):
-        source_map = {str(k): list(v) if isinstance(v, (list, tuple)) else [v] for k, v in raw_sources.items()}
-    valid_rows = _collect_valid(ready, group_code, fixed_map, rule_days, source_map)
-    rejected_rows = _collect_rejected(skipped_recent, group_code, rule_days)
-    suspicious_rows = _collect_suspicious(state)
-    blocked_rows = _collect_blocked(blocked_foreign, blocked_invalid)
+        source_map = {
+            str(k): [
+                str(item)
+                for item in (
+                    list(v)
+                    if isinstance(v, (list, tuple, set))
+                    else [v]
+                )
+                if item
+            ]
+            for k, v in raw_sources.items()
+            if k
+        }
+    state_sources: Mapping[str, Sequence[str]] | None = None
+    if state and getattr(state, "source_map", None):
+        try:
+            state_sources = {
+                str(k): [
+                    str(item)
+                    for item in (
+                        list(v)
+                        if isinstance(v, (list, tuple, set))
+                        else [v]
+                    )
+                    if item
+                ]
+                for k, v in state.source_map.items()
+                if k
+            }
+        except Exception:
+            state_sources = None
+
+    valid_rows = _collect_valid(
+        ready, group_code, fixed_map, rule_days, source_map, state_sources
+    )
+    rejected_rows = _collect_rejected(
+        skipped_recent, group_code, rule_days, source_map, state_sources
+    )
+    suspicious_rows = _collect_suspicious(state, source_map, state_sources)
+    blocked_rows, foreign_rows = _collect_blocked(
+        blocked_foreign, blocked_invalid, source_map, state_sources
+    )
     duplicates_rows = _collect_duplicates(context)
     group_name = group_label or group_code or getattr(state, "group", "") or ""
+    run_id = ""
+    try:
+        run_id = str(
+            context.user_data.get("run_id")
+            or context.chat_data.get("run_id")
+            or getattr(state, "run_id", "")
+            or ""
+        )
+    except Exception:
+        run_id = ""
     return PreviewData(
         group=group_name,
         valid=valid_rows,
@@ -342,6 +472,9 @@ def _build_preview_data(
         suspicious=suspicious_rows,
         blocked=blocked_rows,
         duplicates=duplicates_rows,
+        foreign=foreign_rows,
+        run_id=run_id,
+        group_code=group_code or "",
     )
 
 
@@ -389,6 +522,10 @@ async def send_preview_report(
         skipped_recent,
         rule_days,
     )
+    try:
+        reporting.write_preview_stats(data)
+    except Exception:
+        logger.debug("write_preview_stats failed", exc_info=True)
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     path = PREVIEW_DIR / f"preview_{chat_id}.xlsx"

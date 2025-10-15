@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Iterable, List, Optional, TYPE_CHECKING
 
 from emailbot.suppress_list import is_blocked
+from emailbot.utils.fs import append_jsonl_atomic
+
+if TYPE_CHECKING:  # pragma: no cover - typing hints only
+    from emailbot.report_preview import PreviewData
 
 
 def _now_ts() -> str:
@@ -113,3 +119,69 @@ def count_blocked(emails: Iterable[str]) -> int:
     """Return how many addresses are present in the block list."""
 
     return sum(1 for email in emails if is_blocked(email))
+
+
+def _stats_path(path_override: str | None = None) -> Path:
+    raw = path_override or os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")
+    expanded = os.path.expanduser(os.path.expandvars(str(raw)))
+    path = Path(expanded)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _preview_group_value(data: "PreviewData") -> str:
+    group_code = getattr(data, "group_code", "") or ""
+    group_label = getattr(data, "group", "") or ""
+    candidate = group_code.strip() or group_label.strip()
+    return candidate
+
+
+def _collect_preview_rows(data: "PreviewData") -> tuple[str, str, list[dict[str, str]]]:
+    run_id = (getattr(data, "run_id", "") or "").strip()
+    if not run_id:
+        return "", "", []
+    group_value = _preview_group_value(data)
+    sections = [
+        list(getattr(data, "valid", []) or []),
+        list(getattr(data, "rejected_180d", []) or []),
+        list(getattr(data, "blocked", []) or []),
+        list(getattr(data, "foreign", []) or []),
+        list(getattr(data, "suspicious", []) or []),
+        list(getattr(data, "duplicates", []) or []),
+    ]
+    rows: list[dict[str, str]] = []
+    for section in sections:
+        for row in section:
+            if not isinstance(row, dict):
+                continue
+            email = str(row.get("email") or "").strip()
+            if not email:
+                continue
+            reason = str(row.get("reason") or "").strip()
+            if not reason:
+                continue
+            source_value = row.get("source") or row.get("source_files") or ""
+            source = str(source_value).strip()
+            rows.append({"email": email, "reason": reason, "source": source})
+    return run_id, group_value, rows
+
+
+def write_preview_stats(data: "PreviewData", *, stats_path: str | None = None) -> None:
+    """Append preview classification rows to ``SEND_STATS_PATH``."""
+
+    if data is None:
+        return
+    run_id, group_value, rows = _collect_preview_rows(data)
+    if not run_id or not rows:
+        return
+    path = _stats_path(stats_path)
+    for row in rows:
+        payload = {
+            "ts": _now_ts(),
+            "email": row["email"],
+            "reason": row["reason"],
+            "source": row["source"],
+            "group": group_value,
+            "run_id": run_id,
+        }
+        append_jsonl_atomic(path, payload)
