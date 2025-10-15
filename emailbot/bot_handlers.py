@@ -220,11 +220,19 @@ def apply_numeric_truncation_removal(allowed):
 
 
 def _watchdog_idle_seconds() -> float:
+    stalled_raw = (os.getenv("WATCHDOG_STALLED_MS", "") or "").strip()
+    if stalled_raw:
+        try:
+            value = float(stalled_raw)
+            if value > 0:
+                return value / 1000.0
+        except Exception:
+            pass
     raw = (os.getenv("WD_IDLE_SECONDS", "") or "").strip()
     try:
-        return float(raw) if raw else 30.0
+        return float(raw) if raw else 90.0
     except Exception:
-        return 30.0
+        return 90.0
 
 
 def _snapshot_mass_digest(

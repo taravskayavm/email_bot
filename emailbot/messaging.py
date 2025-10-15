@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from .extraction import normalize_email, strip_html
 from .cooldown import audit_emails, normalize_email as cooldown_normalize_email
+from .sanitizer import sanitize_batch
 from emailbot import history_service
 from utils import rules
 from .smtp_client import SmtpClient, RobustSMTP, send_with_retry
@@ -509,22 +510,6 @@ def _mark_synced(now: datetime) -> None:
 
 def _validate_email_basic(email_value: str) -> bool:
     return bool(EMAIL_RE.fullmatch(email_value))
-
-
-def _sanitize_batch(emails: Iterable[str]) -> tuple[list[str], int]:
-    sanitized: list[str] = []
-    seen: set[str] = set()
-    dup_skipped = 0
-    for raw in emails or []:
-        em = (str(raw) or "").strip().strip(",;").lower()
-        if not em:
-            continue
-        if em in seen:
-            dup_skipped += 1
-            continue
-        seen.add(em)
-        sanitized.append(em)
-    return sanitized, dup_skipped
 
 
 def _render_placeholders(text: str, ctx: dict[str, object]) -> str:
@@ -1366,16 +1351,19 @@ def prepare_mass_mailing(
     """
 
     try:
-        normalized, dup_skipped = _sanitize_batch(emails)
-        if not normalized:
+        batch = sanitize_batch(emails)
+        cleaned = batch.emails
+        dup_skipped = batch.duplicates
+        norm_map = batch.normalized
+        if not cleaned:
             return [], [], [], [], {"total": 0, "input_total": 0}
 
         blocked_invalid: list[str] = []
         blocked_foreign: list[str] = []
         skipped_recent: list[str] = []
 
-        invalid_basic = [addr for addr in normalized if not _validate_email_basic(addr)]
-        candidates = [addr for addr in normalized if addr not in invalid_basic]
+        invalid_basic = [addr for addr in cleaned if not _validate_email_basic(addr)]
+        candidates = [addr for addr in cleaned if addr not in invalid_basic]
 
         blocked_set: set[str] = set()
         try:
@@ -1385,7 +1373,7 @@ def prepare_mass_mailing(
 
         queue_after_block: list[str] = []
         for addr in candidates:
-            norm = normalize_email(addr)
+            norm = norm_map.get(addr) or normalize_email(addr)
             if blocked_set and norm in blocked_set:
                 blocked_invalid.append(addr)
                 continue
@@ -1478,13 +1466,13 @@ def prepare_mass_mailing(
         blocked_invalid = combined_invalid
 
         digest = {
-            "total": len(normalized),
+            "total": len(cleaned),
             "ready": len(ready),
             "invalid": len(invalid_basic),
             "blocked_foreign": len(blocked_foreign),
             "blocked_invalid": len(blocked_invalid),
             "skipped_recent": len(skipped_recent),
-            "input_total": len(normalized),
+            "input_total": len(cleaned),
             "after_suppress": len(queue_after_block),
             "foreign_blocked": len(blocked_foreign),
             "ready_after_cooldown": max(

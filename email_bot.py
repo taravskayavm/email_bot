@@ -32,6 +32,10 @@ compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
 
+# Default watchdog stall timeout in milliseconds (configurable via env).
+WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
+os.environ.setdefault("WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS))
+
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
 # штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
 # сразу получил корректный обработчик без хрупких динамических импортов.

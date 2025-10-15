@@ -26,6 +26,15 @@ try:  # pragma: no cover - доступность зависит от окруж
 except Exception:  # pragma: no cover
     _PDFMINER_AVAILABLE = False
 
+# Опциональный backend PyMuPDF (fitz)
+try:  # pragma: no cover - PyMuPDF может отсутствовать в среде
+    import fitz  # type: ignore
+
+    FITZ_OK = True
+except Exception:  # pragma: no cover - тихая деградация до pdfminer
+    fitz = None  # type: ignore
+    FITZ_OK = False
+
 # Заглушка: когда появится OCR, заменить на фактическую проверку.
 _OCR_AVAILABLE = False
 
@@ -34,6 +43,7 @@ def backend_status() -> Dict[str, bool]:
     """Return availability flags for PDF extraction backends."""
 
     return {
+        "fitz": FITZ_OK,
         "pdfminer": _PDFMINER_AVAILABLE,
         "ocr": _OCR_AVAILABLE,
     }
@@ -221,12 +231,8 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
 
 
 def _fitz_extract_with_stats(path: Path | str, budget: TimeBudget | None = None) -> Tuple[str, int]:
-    try:
-        import fitz  # type: ignore
-    except Exception:
-        logger.warning("PyMuPDF (fitz) is not installed; PDF text extraction disabled")
+    if not FITZ_OK or fitz is None:
         return "", 0
-
     doc = None
     try:
         doc = fitz.open(str(path))
@@ -338,10 +344,12 @@ def _backend_order() -> tuple[str, ...]:
     if LEGACY_MODE and backend != "pdfminer":
         backend = "fitz"
     if backend == "auto":
-        return ("fitz", "pdfminer")
+        return ("fitz", "pdfminer") if FITZ_OK else ("pdfminer",)
     if backend == "pdfminer":
         return ("pdfminer",)
-    return ("fitz", "pdfminer")
+    if backend == "fitz":
+        return ("fitz",) if FITZ_OK else ("pdfminer",)
+    return ("fitz", "pdfminer") if FITZ_OK else ("pdfminer",)
 
 
 def _extract_with_backend(path: Path, backend: str) -> str:
@@ -383,12 +391,7 @@ def extract_text_from_pdf_bytes(
     pages_with_text = 0
     text = ""
 
-    try:
-        import fitz  # type: ignore
-    except Exception:
-        fitz = None  # type: ignore
-
-    if fitz is not None:
+    if FITZ_OK and fitz is not None:
         doc = None
         try:
             doc = fitz.open(stream=data, filetype="pdf")
@@ -496,10 +499,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     stats: Dict[str, int] = {"pages": 0}
 
-    try:
-        import fitz as _fitz  # type: ignore
-    except Exception:
-        _fitz = None
+    _fitz = fitz if FITZ_OK else None
 
     def _finalize_hits(emails: List[str], source_ref: str) -> List[EmailHit]:
         raw_hits = [
@@ -695,10 +695,7 @@ def extract_from_pdf_stream(
 
     stats: Dict[str, int] = {"pages": 0}
 
-    try:
-        import fitz  # type: ignore
-    except Exception:
-        fitz = None
+    fitz_local = fitz if FITZ_OK else None
 
     def _finalize_hits(emails: List[str], ref: str) -> List[EmailHit]:
         raw_hits = [
@@ -729,10 +726,10 @@ def extract_from_pdf_stream(
     text = ""
     pages_with_text = 0
 
-    if fitz is not None:
+    if fitz_local is not None:
         doc_for_text = None
         try:
-            doc_for_text = fitz.open(stream=data, filetype="pdf")
+            doc_for_text = fitz_local.open(stream=data, filetype="pdf")
         except Exception:
             doc_for_text = None
         if doc_for_text is not None:
@@ -760,7 +757,7 @@ def extract_from_pdf_stream(
         )
         return hits, stats
 
-    if fitz is None:
+    if fitz_local is None:
         try:
             text = data.decode("utf-8", "ignore")
         except Exception:
@@ -773,7 +770,7 @@ def extract_from_pdf_stream(
         return hits, stats
 
     hits: List[EmailHit] = []
-    doc = fitz.open(stream=data, filetype="pdf")
+    doc = fitz_local.open(stream=data, filetype="pdf")
     ocr_pages = 0
     ocr_start = time.time()
     ocr_marked = False
