@@ -80,6 +80,13 @@ def _load_dotenv() -> None:
     else:
         load_dotenv()
 
+    # Ensure SMTP credentials are initialized for the aiogram entrypoint.
+    from emailbot import messaging
+
+    messaging.EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
+    messaging.EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+    messaging.check_env_vars()
+
 
 def _setup_logging() -> None:
     logging.basicConfig(

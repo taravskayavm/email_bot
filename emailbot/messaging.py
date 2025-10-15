@@ -859,16 +859,20 @@ def save_to_sent_folder(
     try:
         close = False
         if imap is None:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            host = os.getenv("IMAP_HOST", "imap.mail.ru")
+            port = int(os.getenv("IMAP_PORT", "993"))
+            imap = imaplib.IMAP4_SSL(host, port)
             imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             close = True
         if folder is None:
             folder = get_preferred_sent_folder(imap)
-        status, _ = imap.select(folder)
-        if status != "OK":
-            logger.warning("select %s failed (%s), using Sent", folder, status)
-            folder = "Sent"
-            imap.select(folder)
+        status = "OK"
+        if hasattr(imap, "select"):
+            status, _ = imap.select(folder)
+            if status != "OK":
+                logger.warning("select %s failed (%s), using Sent", folder, status)
+                folder = "Sent"
+                imap.select(folder)
 
         if isinstance(raw_message, EmailMessage):
             msg_bytes = raw_message.as_bytes()
@@ -879,7 +883,7 @@ def save_to_sent_folder(
 
         res = imap.append(
             folder,
-            "\\Seen",
+            "(\\Seen)",
             imaplib.Time2Internaldate(time.time()),
             msg_bytes,
         )
