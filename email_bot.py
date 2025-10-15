@@ -26,6 +26,10 @@ from telegram.ext import (
 )
 
 from emailbot import bot_handlers, messaging, history_service
+from emailbot import compat  # EBOT-089
+
+compat.apply()  # применяем швы совместимости максимально рано
+
 from emailbot.selfcheck import startup_selfcheck
 
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
