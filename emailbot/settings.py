@@ -84,7 +84,7 @@ except Exception:
 STRICT_OBFUSCATION: bool = True
 FOOTNOTE_RADIUS_PAGES: int = 1
 PDF_LAYOUT_AWARE: bool = False
-ENABLE_OCR: bool = False
+ENABLE_OCR: bool = True
 ENABLE_PROVIDER_CANON: bool = os.getenv("ENABLE_PROVIDER_CANON", "1") == "1"
 CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") == "1"
 CANON_GMAIL_PLUS: bool = os.getenv("CANON_GMAIL_PLUS", "1") == "1"
