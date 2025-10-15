@@ -74,6 +74,10 @@ def render_summary(stats: dict) -> str:
     if missed_pages:
         lines.append(f"📄 Не распознаны страницы PDF: {missed_pages}")
 
+    needs_ocr = stats.get("needs_ocr")
+    if needs_ocr:
+        lines.append("💡 Включите OCR для лучшего извлечения")
+
     invalid_tld = stats.get("invalid_tld")
     if invalid_tld:
         lines.append(f"❗ Некорректные домены: {invalid_tld}")
@@ -104,7 +108,7 @@ def build_mass_report_text(
 
     lines = [
         "✉️ Рассылка завершена.",
-        f"📦 В очереди было: {total}",
+        f"📦 К отправке обработано (с учётом правила «180 дней»): {total}",
         f"✅ Успешно отправлено: {sent_cnt}",
         f"⏳ Пропущены (по правилу «180 дней»): {skipped_cnt}",
         f"🚫 В блок-листе/недоступны: {blocked_cnt}",
