@@ -115,6 +115,34 @@ _SIMPLE_EMAIL_RE = re.compile(
 )
 
 
+def _decode_bytes(data: bytes, encoding: str | None) -> str:
+    """Decode ``data`` trying a few reasonable fallbacks for Cyrillic pages."""
+
+    candidates = []
+    if encoding:
+        candidates.append(encoding)
+    candidates.extend(["cp1251", "windows-1251", "utf-8", "latin-1"])
+    tried: set[str] = set()
+    for enc in candidates:
+        if not enc:
+            continue
+        key = enc.lower()
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            return data.decode(enc, errors="strict")
+        except UnicodeDecodeError:
+            continue
+        except LookupError:
+            continue
+    fallback = encoding or "utf-8"
+    try:
+        return data.decode(fallback, errors="ignore")
+    except Exception:
+        return data.decode("utf-8", errors="ignore")
+
+
 def _is_allowed_content_type(value: str) -> bool:
     if not value:
         return True
@@ -237,7 +265,7 @@ def fetch_url(
                 if total >= max_size:
                     break
             data = b"".join(chunks)
-            text_out = data.decode(encoding, "ignore")
+            text_out = _decode_bytes(data, encoding)
     except TimeoutError:
         return None
     except Exception:
@@ -278,7 +306,7 @@ def fetch_url(
                     if total >= max_size:
                         break
                 data = b"".join(chunks)
-                text_out = data.decode(encoding, "ignore")
+                text_out = _decode_bytes(data, encoding)
         except Exception:  # pragma: no cover - network errors
             return None
     _CACHE[url] = (now + ttl, text_out)
