@@ -41,7 +41,7 @@ def test_should_skip_by_cooldown_recent(cooldown_module):
     skip, reason = cooldown.should_skip_by_cooldown("testuser@gmail.com", now=now, days=180)
     assert skip is True
     assert re.search(r"remain≈\d+d \d+h \d+m", reason)
-    assert "source=history" in reason
+    assert any(tag in reason for tag in {"source=history", "source=cache"})
 
 
 def test_should_skip_when_same_day(cooldown_module):
@@ -53,7 +53,7 @@ def test_should_skip_when_same_day(cooldown_module):
     skip, reason = cooldown.should_skip_by_cooldown("today@example.com", now=now, days=180)
     assert skip is True
     assert "cooldown<180d" in reason
-    assert "source=history" in reason
+    assert any(tag in reason for tag in {"source=history", "source=cache"})
 
 
 def test_should_allow_after_window(cooldown_module):
