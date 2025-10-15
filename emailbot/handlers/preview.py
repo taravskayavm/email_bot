@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, Sequence, TYPE_CHECKING
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -16,6 +16,7 @@ from services.templates import get_template_label
 from emailbot import config as C
 from emailbot import extraction as extraction_module
 from emailbot import history_service, mass_state, messaging
+from emailbot.dedupe_global import build_hits_with_sources, dedupe_across_sources
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
     clear_edits as clear_saved_edits,
@@ -26,6 +27,7 @@ from emailbot.report_preview import PreviewData, build_preview_workbook
 from emailbot.utils_preview_export import build_preview_excel
 from bot.keyboards import send_flow_keyboard
 from emailbot.ui.messages import format_dispatch_preview
+from emailbot.extraction import normalize_email
 from utils.email_clean import (
     dedupe_keep_original,
     drop_leading_char_twins,
@@ -171,6 +173,7 @@ def _collect_valid(
     group: str,
     fixed_map: dict[str, str],
     rule_days: int,
+    source_map: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
@@ -190,11 +193,18 @@ def _collect_valid(
                 reason_parts.append(f"override:{left}d")
             else:
                 reason_parts.append("ok")
+        norm = normalize_email(email) or email.strip().lower()
+        sources = []
+        if source_map and norm:
+            raw_sources = source_map.get(norm)
+            if raw_sources:
+                sources = [str(item) for item in raw_sources if item]
         rows.append(
             {
                 "email": email,
                 "last_sent_at": _format_dt(last),
                 "reason": ", ".join(reason_parts),
+                "source": sources[0] if sources else "",
             }
         )
     rows.sort(key=lambda row: row.get("email", ""))
@@ -315,7 +325,11 @@ def _build_preview_data(
     state = _get_state(context)
     preview_chat = context.chat_data.get("send_preview") or {}
     fixed_map = _fixed_map(preview_chat if isinstance(preview_chat, dict) else {})
-    valid_rows = _collect_valid(ready, group_code, fixed_map, rule_days)
+    raw_sources = context.chat_data.get("preview_source_map")
+    source_map: Mapping[str, Sequence[str]] | None = None
+    if isinstance(raw_sources, dict):
+        source_map = {str(k): list(v) if isinstance(v, (list, tuple)) else [v] for k, v in raw_sources.items()}
+    valid_rows = _collect_valid(ready, group_code, fixed_map, rule_days, source_map)
     rejected_rows = _collect_rejected(skipped_recent, group_code, rule_days)
     suspicious_rows = _collect_suspicious(state)
     blocked_rows = _collect_blocked(blocked_foreign, blocked_invalid)
@@ -629,11 +643,50 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     )
 
+    state_source_map = {}
+    if state and getattr(state, "source_map", None):
+        try:
+            state_source_map = {
+                str(k): list(v) if isinstance(v, (list, tuple)) else [v]
+                for k, v in state.source_map.items()
+                if k
+            }
+        except Exception:
+            state_source_map = {}
+
+    preview_meta = context.chat_data.get("send_preview")
+    if isinstance(preview_meta, dict):
+        for item in preview_meta.get("fixed", []) or []:
+            if not isinstance(item, dict):
+                continue
+            new_email = item.get("to")
+            norm_new = normalize_email(str(new_email or "")) if new_email else ""
+            if not norm_new:
+                continue
+            sources = state_source_map.setdefault(norm_new, [])
+            if "manual_edit" not in sources:
+                sources.append("manual_edit")
+
+    hits = build_hits_with_sources(ready, state_source_map)
+    unique_hits, dup_map = dedupe_across_sources(hits)
+    ready = [item.get("email", "") for item in unique_hits if item.get("email")]
+
+    active_norms: set[str] = set()
+    for email in ready:
+        norm = normalize_email(email) or email.strip().lower()
+        if norm:
+            active_norms.add(norm)
+    active_norms.update(dup_map.keys())
+    filtered_sources = {k: state_source_map.get(k, []) for k in active_norms if k}
+    context.chat_data["preview_source_map"] = filtered_sources
+    context.chat_data["preview_duplicates_global"] = dup_map
+
     if state:
         state.to_send = ready
         state.group = group_code
         state.template = template_path
         state.template_label = label or state.template_label
+        state.source_map = state_source_map
 
     mass_state.save_chat_state(
         chat_id,
@@ -646,12 +699,14 @@ async def _regenerate_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
             "blocked_invalid": blocked_invalid,
             "skipped_recent": skipped_recent,
             "batch_id": context.chat_data.get("batch_id"),
+            "source_map": filtered_sources,
         },
     )
 
     preview = context.chat_data.get("send_preview")
     if isinstance(preview, dict):
         preview["final"] = list(dict.fromkeys(ready))
+        preview["global_duplicates"] = dup_map
         context.chat_data["send_preview"] = preview
 
     await send_preview_report(
