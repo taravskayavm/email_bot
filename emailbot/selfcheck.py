@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from emailbot.settings import REPORT_TZ
 from emailbot.suppress_list import get_blocked_count
+from . import settings as _s
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +66,30 @@ def startup_selfcheck() -> List[str]:
                 pass
             errors.append(f"ENV missing: {var}{hint}")
 
-    # 3) Воркеры
+    # 3) Воркеры/таймауты/кулдаун — принудительно триггерим __getattr__
     try:
-        from emailbot import settings as _settings
-
-        workers = getattr(_settings, "SEND_MAX_WORKERS", None) or getattr(
-            _settings, "PARSE_MAX_WORKERS", None
-        )
+        workers = getattr(_s, "SEND_MAX_WORKERS")
+        timeout = getattr(_s, "SEND_FILE_TIMEOUT")
+        cooldown = getattr(_s, "SEND_COOLDOWN_DAYS")
+        _ = getattr(_s, "PARSE_MAX_WORKERS")
+        _ = getattr(_s, "PARSE_FILE_TIMEOUT")
         if not isinstance(workers, int) or workers <= 0:
             errors.append(f"Bad workers value: {workers!r}")
+        if not isinstance(timeout, int) or timeout <= 0:
+            errors.append(f"Bad SEND_FILE_TIMEOUT: {timeout!r}")
+        if not isinstance(cooldown, int) or cooldown <= 0:
+            errors.append(f"Bad SEND_COOLDOWN_DAYS: {cooldown!r}")
     except Exception as exc:  # pragma: no cover - diagnostic path
-        errors.append(f"settings import failed: {exc!r}")
+        errors.append(f"settings validation failed: {exc!r}")
+
+    # 4) messaging швы — принудительно проверим наличие (вызовет __getattr__)
+    try:
+        from . import messaging as _m
+
+        assert callable(getattr(_m, "_normalize_key"))
+        assert callable(getattr(_m, "_should_skip_by_history"))
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        errors.append(f"messaging compat failed: {exc!r}")
 
     if errors:
         logger.error("startup_selfcheck failed", extra={"errors": errors})

@@ -8,8 +8,9 @@ import logging
 import os
 import smtplib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Set
 
 from asyncio import Lock
 
@@ -67,29 +68,45 @@ def _bot_handlers() -> "bot_handlers_module":  # type: ignore[name-defined]
         _BOT_HANDLERS_MODULE = _module
     return _BOT_HANDLERS_MODULE  # type: ignore[return-value]
 
-# [EBOT-076/084] Устойчивая конфигурация
-# Воркеры: SEND_MAX_WORKERS -> PARSE_MAX_WORKERS -> 4
-try:
-    _SEND_WORKERS = getattr(_settings, "SEND_MAX_WORKERS", None)
-except Exception:
-    _SEND_WORKERS = None
-try:
-    _PARSE_WORKERS = getattr(_settings, "PARSE_MAX_WORKERS", None)
-except Exception:
-    _PARSE_WORKERS = None
-WORKERS = (_SEND_WORKERS or _PARSE_WORKERS or 4)
+def _workers() -> int:
+    """Return configured worker count with defensive fallbacks."""
+
+    try:
+        value = getattr(_settings, "SEND_MAX_WORKERS", 4)
+    except Exception:
+        return 4
+
+    try:
+        workers = int(value)
+        if workers > 0:
+            return workers
+    except Exception:
+        pass
+
+    return 4
 
 
-# Таймаут файловых операций/подготовки писем:
-# SEND_FILE_TIMEOUT -> PARSE_FILE_TIMEOUT -> FILE_TIMEOUT -> 20
+def _make_pool() -> ThreadPoolExecutor:
+    """Create a thread pool for background tasks with safe defaults."""
+
+    return ThreadPoolExecutor(max_workers=_workers())
+
+
 def _pick_timeout() -> int:
-    for name in ("SEND_FILE_TIMEOUT", "PARSE_FILE_TIMEOUT", "FILE_TIMEOUT"):
-        try:
-            val = getattr(_settings, name, None)
-            if isinstance(val, int) and val > 0:
-                return val
-        except Exception:
-            pass
+    """Return SEND_FILE_TIMEOUT value with a sane fallback."""
+
+    try:
+        value = getattr(_settings, "SEND_FILE_TIMEOUT", 20)
+    except Exception:
+        return 20
+
+    try:
+        timeout = int(value)
+        if timeout > 0:
+            return timeout
+    except Exception:
+        pass
+
     return 20
 
 
@@ -291,7 +308,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
-async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def send_all(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    **callbacks: Callable[[str], None],
+) -> None:
     """Send all prepared e-mails respecting limits."""
 
     query = update.callback_query
@@ -462,10 +483,17 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"• {reason}: {count}" for reason, count in sorted(summary.items())
                 )
                 info_text = "ℹ️ Часть адресов была исключена перед отправкой:\n" + details
-                try:
-                    await context.bot.send_message(chat_id, info_text)
-                except Exception:
-                    pass
+                notifier = callbacks.get("on_info") if callbacks else None
+                if callable(notifier):
+                    try:
+                        notifier(info_text)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await context.bot.send_message(chat_id, info_text)
+                    except Exception:
+                        pass
 
             if not to_send:
                 await query.message.reply_text(
