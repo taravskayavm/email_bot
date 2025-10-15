@@ -52,6 +52,23 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _tuple_env(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    if raw is None:
+        raw = default
+    items = []
+    for item in str(raw).split(","):
+        cleaned = item.strip()
+        if cleaned:
+            items.append(cleaned)
+    if not items and default:
+        for item in default.split(","):
+            cleaned = item.strip()
+            if cleaned:
+                items.append(cleaned)
+    return tuple(items)
+
+
 # Канонические параметры отправки
 SEND_MAX_WORKERS = _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
 if SEND_MAX_WORKERS < 1:
@@ -60,6 +77,7 @@ if SEND_MAX_WORKERS < 1:
 
 SEND_FILE_TIMEOUT = _int_env("SEND_FILE_TIMEOUT", _int_env("FILE_TIMEOUT", 20))
 SEND_COOLDOWN_DAYS = _int_env("SEND_COOLDOWN_DAYS", 180)
+COOLDOWN_SOURCES = _tuple_env("COOLDOWN_SOURCES", "csv,db")
 HISTORY_DB = os.getenv("HISTORY_DB", "var/send_history.db")
 SENT_LOG_PATH = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"

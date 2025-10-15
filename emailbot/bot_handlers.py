@@ -199,7 +199,10 @@ from .session_store import load_last_summary, save_last_summary
 from .settings import REPORT_TZ, SKIPPED_PREVIEW_LIMIT
 from .settings_store import DEFAULTS
 from emailbot.cooldown import (
+    CooldownHit,
+    CooldownService,
     audit_emails as cooldown_audit_emails,
+    build_cooldown_service,
     normalize_email as cooldown_normalize_email,
 )
 from emailbot.web_extract import fetch_and_extract
@@ -912,8 +915,9 @@ async def _maybe_send_skipped_summary(
 
     counts: list[tuple[str, int]] = []
     cooldown_examples: list[str] = []
-    cooldown_audit: dict | None = None
     cooldown_display: dict[str, str] = {}
+    cooldown_hits: list[CooldownHit] = []
+    cooldown_service: CooldownService | None = None
 
     for reason in _SKIPPED_REASON_ORDER:
         entries = skipped_raw.get(reason) or []
@@ -931,21 +935,36 @@ async def _maybe_send_skipped_summary(
             skipped_raw[reason] = []
             continue
         if reason == "180d":
-            audit = cooldown_audit_emails(
-                normalized.values(), days=settings.SEND_COOLDOWN_DAYS
-            )
-            cooldown_audit = audit
-            under_norms = set(audit.get("under", set()))
+            if cooldown_service is None:
+                cooldown_service = build_cooldown_service(settings)
+            try:
+                _, hits = cooldown_service.filter_ready(normalized.values())
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("cooldown filter failed: %s", exc)
+                hits = []
+
+            hit_by_norm: dict[str, CooldownHit] = {}
+            for hit in hits:
+                norm = cooldown_normalize_email(hit.email) or hit.email.lower()
+                if norm and norm in normalized and norm not in hit_by_norm:
+                    hit_by_norm[norm] = hit
+
+            under_norms = set(hit_by_norm)
             skipped_raw[reason] = [
                 normalized[norm]
                 for norm in normalized
-                if norm in under_norms
+                if norm in hit_by_norm
             ]
             cooldown_display = {
                 norm: normalized[norm]
                 for norm in normalized
-                if norm in under_norms
+                if norm in hit_by_norm
             }
+            cooldown_hits = [
+                hit_by_norm[norm]
+                for norm in normalized
+                if norm in hit_by_norm
+            ]
             count = len(under_norms)
         else:
             unique = list(normalized.values())
@@ -957,18 +976,15 @@ async def _maybe_send_skipped_summary(
     if not counts:
         return
 
-    if cooldown_audit and cooldown_audit.get("under"):
-        last_map = cooldown_audit.get("last_contact", {})
+    if cooldown_hits:
         tz = ZoneInfo(REPORT_TZ)
-        samples = sorted(cooldown_audit["under"])[:3]
-        for norm in samples:
-            label = cooldown_display.get(norm, norm)
-            last_dt = last_map.get(norm)
-            if isinstance(last_dt, datetime):
-                seen = last_dt.astimezone(tz).strftime("%Y-%m-%d")
-                cooldown_examples.append(f"{label} — {seen}")
-            else:
-                cooldown_examples.append(label)
+        samples = cooldown_hits[:3]
+        for hit in samples:
+            norm = cooldown_normalize_email(hit.email) or hit.email.lower()
+            label = cooldown_display.get(norm, hit.email)
+            seen = hit.last_sent.astimezone(tz).strftime("%Y-%m-%d")
+            source = "история" if hit.source == "db" else "журнал"
+            cooldown_examples.append(f"{label} — {seen} ({source})")
 
     lines = ["👀 Отфильтрованные адреса:"]
     for reason, count in counts:

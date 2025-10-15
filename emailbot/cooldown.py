@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -29,6 +30,118 @@ _REMOVE_TRANSLATION = {ord(ch): None for ch in _ZWSP_CHARS + [_SOFT_HYPHEN]}
 
 _EMAIL_HINTS = ("email", "addr")
 _DATE_HINTS = ("date", "time", "sent", "ts", "created", "updated", "last")
+
+
+@dataclass(frozen=True)
+class CooldownHit:
+    """Cooldown match for an e-mail address."""
+
+    email: str
+    last_sent: datetime
+    source: str
+
+
+@dataclass
+class CooldownService:
+    """Service that filters e-mails according to the cooldown policy."""
+
+    csv_path: Path
+    db_path: Path
+    days: int
+    use_csv: bool
+    use_db: bool
+    tz: timezone = timezone.utc
+
+    def _normalize_dt(self, value: datetime | None) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(self.tz)
+
+    def _load_csv(self) -> dict[str, datetime]:
+        if not self.use_csv:
+            return {}
+        history = _load_history_from_csv(self.csv_path)
+        normalized: dict[str, datetime] = {}
+        for email, dt in history.items():
+            fixed = self._normalize_dt(dt)
+            if fixed is None:
+                continue
+            normalized[email] = fixed
+        return normalized
+
+    def _load_db(self) -> dict[str, datetime]:
+        if not self.use_db:
+            return {}
+        history = _load_history_from_db(self.db_path)
+        normalized: dict[str, datetime] = {}
+        for email, dt in history.items():
+            fixed = self._normalize_dt(dt)
+            if fixed is None:
+                continue
+            normalized[email] = fixed
+        return normalized
+
+    def _merged_history(self) -> tuple[dict[str, datetime], dict[str, str]]:
+        combined: dict[str, datetime] = {}
+        sources: dict[str, str] = {}
+        if self.use_csv:
+            csv_map = self._load_csv()
+            for email, dt in csv_map.items():
+                combined[email] = dt
+                sources[email] = "csv"
+        if self.use_db:
+            db_map = self._load_db()
+            for email, dt in db_map.items():
+                current = combined.get(email)
+                if current is None or dt > current:
+                    combined[email] = dt
+                    sources[email] = "db"
+                elif current == dt and sources.get(email) != "db":
+                    sources[email] = "db"
+        return combined, sources
+
+    def filter_ready(
+        self, emails: Iterable[str], *, now: datetime | None = None
+    ) -> tuple[list[str], list[CooldownHit]]:
+        window = timedelta(days=max(0, self.days))
+        if now is None:
+            now = datetime.now(self.tz)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self.tz)
+        else:
+            now = now.astimezone(self.tz)
+
+        history, sources = self._merged_history()
+
+        ready: list[str] = []
+        hits: list[CooldownHit] = []
+        seen: set[str] = set()
+
+        for email in emails:
+            norm = normalize_email(email)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+
+            last = history.get(norm)
+            if not last or window == timedelta(0):
+                ready.append(email)
+                continue
+
+            last_checked = last.astimezone(self.tz)
+            delta = now - last_checked
+            if delta >= window:
+                ready.append(email)
+                continue
+
+            source = sources.get(norm, "")
+            hits.append(
+                CooldownHit(email=email, last_sent=last_checked, source=source or "")
+            )
+
+        return ready, hits
 
 
 def normalize_email(email: str) -> str:
@@ -243,15 +356,9 @@ def _load_history_from_csv(path) -> dict[str, datetime]:
 
 
 def _merged_history_map() -> dict[str, datetime]:
-    cache: dict[str, datetime] = {}
-    db_map = _load_history_from_db(settings.HISTORY_DB)
-    csv_map = _load_history_from_csv(settings.SENT_LOG_PATH)
-    for mapping in (db_map, csv_map):
-        for email, dt in mapping.items():
-            current = cache.get(email)
-            if current is None or dt > current:
-                cache[email] = dt
-    return cache
+    service = build_cooldown_service(settings)
+    history, _ = service._merged_history()
+    return history
 
 
 def is_under_cooldown(
@@ -332,11 +439,51 @@ def audit_emails(
     return {"ready": ready, "under": under, "last_contact": last_contact}
 
 
+def build_cooldown_service(config=settings) -> CooldownService:
+    """Create a :class:`CooldownService` instance based on ``config``."""
+
+    sources_raw = getattr(config, "COOLDOWN_SOURCES", ("csv", "db"))
+    if isinstance(sources_raw, str):
+        sources = tuple(
+            part.strip().lower() for part in sources_raw.split(",") if part.strip()
+        )
+    else:
+        sources = tuple(
+            str(part).strip().lower()
+            for part in sources_raw
+            if str(part).strip()
+        )
+    if not sources:
+        sources = ("csv", "db")
+
+    use_csv = "csv" in sources
+    use_db = "db" in sources
+
+    csv_path = Path(getattr(config, "SENT_LOG_PATH", settings.SENT_LOG_PATH))
+    db_path = Path(getattr(config, "HISTORY_DB", settings.HISTORY_DB))
+    raw_days = getattr(config, "SEND_COOLDOWN_DAYS", settings.SEND_COOLDOWN_DAYS)
+    try:
+        days = int(raw_days)
+    except Exception:
+        days = settings.SEND_COOLDOWN_DAYS
+
+    return CooldownService(
+        csv_path=csv_path,
+        db_path=db_path,
+        days=days,
+        use_csv=use_csv,
+        use_db=use_db,
+    )
+
+
 __all__ = [
+    "CooldownHit",
+    "CooldownService",
     "audit_emails",
     "is_under_cooldown",
     "normalize_email",
     "_load_history_from_csv",
     "_load_history_from_db",
     "_merged_history_map",
+    "build_cooldown_service",
 ]
