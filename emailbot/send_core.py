@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable, List, Optional, Sequence
 
-from . import messaging
+from . import messaging, settings
+from .audit import write_audit_drop
+from .cancel import is_cancelled
+from .cooldown import _merged_history_map, is_under_cooldown
 from .messaging import SendOutcome, log_sent_email, was_emailed_recently
 from .smtp_client import SmtpClient
-from .cancel import is_cancelled
+
+logger = logging.getLogger(__name__)
 
 
 def build_send_list(
@@ -77,6 +83,8 @@ async def run_smtp_send(
             await on_heartbeat()
         except Exception:
             pass
+    cooldown_days = getattr(settings, "SEND_COOLDOWN_DAYS", 180)
+    cooldown_cache: dict[str, datetime] | None = None
     while to_send:
         if should_stop_cb and should_stop_cb():
             aborted = True
@@ -89,6 +97,30 @@ async def run_smtp_send(
             break
 
         email_addr = to_send.pop(0)
+        if not override_180d and cooldown_days > 0:
+            if cooldown_cache is None:
+                cooldown_cache = _merged_history_map()
+            skip, last_dt = is_under_cooldown(
+                email_addr,
+                days=cooldown_days,
+                now=datetime.now(timezone.utc),
+                _cache=cooldown_cache,
+            )
+            if skip:
+                if on_cooldown:
+                    on_cooldown(email_addr)
+                try:
+                    details = (
+                        last_dt.astimezone(timezone.utc).isoformat()
+                        if last_dt
+                        else ""
+                    )
+                    write_audit_drop(email_addr, "cooldown_180d", details)
+                except Exception:
+                    logger.debug("cooldown audit write failed", exc_info=True)
+                if after_each:
+                    after_each(email_addr)
+                continue
         try:
             outcome, token, log_key, content_hash = messaging.send_email_with_sessions(
                 client,
