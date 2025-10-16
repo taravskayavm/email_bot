@@ -16,6 +16,7 @@ import secrets
 import time
 import urllib.parse
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -132,17 +133,8 @@ def _build_parse_task_name(update: Update, mode: str) -> str:
     base = user_id or chat_id or "anon"
     return f"parse:{base}:{mode}"
 
-# Компилируем один раз: быстрый матч URL, поддержка bare-доменов, аккуратное «обрезание» хвостовой пунктуации
-URL_RE = re.compile(
-    r"""(?ix)\b(
-        (?:https?://)?          # опциональная схема
-        (?:www\.)?              # опциональный www
-        [^\s<>()]+?\.[^\s<>()]{2,}  # домен + tld
-        [^\s<>()]*              # путь/квери/якорь
-    )
-    (?=$|[\s,;:!?)}\]])         # стоп-символы
-    """
-)
+# Простая регулярка для поиска ссылок в пользовательском тексте
+URL_REGEX = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
@@ -191,7 +183,7 @@ from . import messaging_utils as mu
 from . import extraction as _extraction
 from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
-from .progress_watchdog import heartbeat, start_watchdog
+from .progress_watchdog import heartbeat, start_watchdog, start_heartbeat_pulse
 from .reporting import log_mass_filter_digest, count_blocked
 from . import settings
 from . import mass_state
@@ -4397,10 +4389,189 @@ async def _handle_bulk_edit_text(
     return False
 
 
+async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text messages that contain URLs and extract e-mail addresses."""
+
+    message = update.message
+    if message is None:
+        return
+    if context.user_data.get("awaiting_manual_email") or context.user_data.get(
+        "awaiting_block_email"
+    ) or context.user_data.get("text_corrections"):
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    raw_urls = [item.rstrip(".,;:!?)]}'\"") for item in URL_REGEX.findall(text)]
+    urls = [url for url in raw_urls if url]
+    if not urls:
+        await message.reply_text("Не нашёл URL в сообщении 🤔")
+        return
+
+    url = urls[0]
+    lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
+    if lock.locked():
+        await message.reply_text("⏳ Уже идёт анализ этого URL")
+        return
+
+    now = time.monotonic()
+    last = context.chat_data.get("last_url")
+    last_url = None
+    last_ts = 0.0
+    if isinstance(last, dict):
+        if isinstance(last.get("urls"), list) and last.get("urls"):
+            last_url = last["urls"][0]
+        elif isinstance(last.get("url"), str):
+            last_url = last["url"]
+        try:
+            last_ts = float(last.get("ts", 0) or 0)
+        except Exception:
+            last_ts = 0.0
+    if last_url == url and now - last_ts < 10:
+        await message.reply_text("⏳ Уже идёт анализ этого URL")
+        return
+
+    clear_stop()
+    job_name = _build_parse_task_name(update, "url")
+    current_task = asyncio.current_task()
+    idle_seconds = _watchdog_idle_seconds()
+    if current_task:
+        register_task(job_name, current_task)
+        asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
+
+    status_msg = None
+    pulse_task: asyncio.Task[None] | None = None
+    try:
+        status_msg = await message.reply_text("⏳ Загружаю сайт, парсю адреса…")
+        await heartbeat()
+    except Exception:
+        status_msg = None
+
+    try:
+        async with lock:
+            context.chat_data["last_url"] = {"url": url, "urls": [url], "ts": now}
+            context.chat_data["entry_url"] = url
+            pulse_task = start_heartbeat_pulse(interval=5.0)
+            from .digest import extract_from_url
+
+            found = await extract_from_url(url, context=context)
+            await heartbeat()
+    except asyncio.CancelledError as exc:
+        cancelled_text = (
+            "⛔️ Задача прервана из-за отсутствия прогресса. Лог зависания сохранён в var/hang_dump.txt"
+            if exc.args and exc.args[0] == "watchdog"
+            else "🛑 Процесс был остановлен."
+        )
+        if status_msg:
+            try:
+                await status_msg.edit_text(cancelled_text)
+            except Exception:
+                pass
+        else:
+            try:
+                await message.reply_text(cancelled_text)
+            except Exception:
+                pass
+        raise
+    except Exception as exc:  # pragma: no cover - defensive branch
+        log_error(f"handle_url_text: {exc}")
+        error_text = f"❌ Ошибка загрузки сайта: {exc}"
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_text)
+            except Exception:
+                pass
+        else:
+            try:
+                await message.reply_text(error_text)
+            except Exception:
+                pass
+        return
+    finally:
+        if pulse_task:
+            pulse_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pulse_task
+        if current_task:
+            unregister_task(job_name, current_task)
+
+    if not found:
+        if status_msg:
+            try:
+                await status_msg.edit_text("⛔️ Не удалось найти адреса")
+            except Exception:
+                pass
+        explanation = (
+            "😕 На присланной ссылке не удалось найти e-mail адреса.\n\n"
+            "Что можно сделать:\n"
+            "• На странице нет явных e-mail;\n"
+            "• Контакты подгружаются скриптами (SPA/JS);\n"
+            "• Сайт блокирует ботов/требует капчу;\n"
+            "• Контакты спрятаны в PDF/изображениях.\n\n"
+            "Попробуйте: сохранить страницу в PDF и прислать файл — парсер по файлам у нас уже работает."
+        )
+        await message.reply_text(explanation)
+        return
+
+    allowed_all: Set[str] = set()
+    for raw_email in found:
+        candidate = (normalize_email(raw_email) or raw_email or "").strip()
+        if candidate:
+            allowed_all.add(candidate)
+
+    allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
+    repairs = list(dict.fromkeys(trunc_pairs))
+
+    technical_emails = [
+        addr for addr in allowed_all if any(pattern in addr for pattern in TECH_PATTERNS)
+    ]
+    filtered = [addr for addr in allowed_all if addr not in technical_emails and is_allowed_tld(addr)]
+    suspicious_numeric = sorted({addr for addr in filtered if is_numeric_localpart(addr)})
+    foreign_raw = {addr for addr in allowed_all if not is_allowed_tld(addr)}
+
+    state = get_state(context)
+    state.all_emails.update(allowed_all)
+    current = set(state.to_send)
+    current.update(filtered)
+    state.to_send = sorted(current)
+    _register_sources(state, allowed_all, url)
+    state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
+    state.repairs_sample = sample_preview([f"{bad} → {good}" for (bad, good) in state.repairs], 6)
+
+    foreign_total = set(state.foreign) | foreign_raw
+    suspicious_total = sorted({addr for addr in state.to_send if is_numeric_localpart(addr)})
+    blocked_after_parse = count_blocked(state.to_send)
+    total_footnote = state.footnote_dupes
+
+    context.user_data["last_parsed_emails"] = list(state.to_send)
+
+    if status_msg:
+        try:
+            await status_msg.edit_text("✅ Готово. Формирую превью…")
+        except Exception:
+            pass
+    await heartbeat()
+
+    report = await _compose_report_and_save(
+        context,
+        state.all_emails,
+        state.to_send,
+        suspicious_total,
+        sorted(foreign_total),
+        total_footnote,
+        blocked_after_parse=blocked_after_parse,
+    )
+    await _send_combined_parse_response(message, context, report, state)
+    await heartbeat()
+
+    raise ApplicationHandlerStop
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process text messages for uploads, blocking or manual lists."""
 
-    chat_id = update.effective_chat.id
     text = update.message.text or ""
     if await _handle_bulk_edit_text(update, context, text):
         return
@@ -4449,153 +4620,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")
         return
-
-    raw = [m.group(1) for m in URL_RE.finditer(text)]
-    urls = []
-    for u in raw:
-        u = u.rstrip('.,;:!?)]}')
-        if not u.lower().startswith(('http://','https://')):
-            u = 'https://' + u
-        urls.append(u)
-    if not urls:
-        await update.message.reply_text(
-            "❌ Не распознана ссылка. Пришлите полную URL, например: https://site.tld/path"
-        )
+    if URL_REGEX.search(text or ""):
+        await handle_url_text(update, context)
         return
-    if urls:
-        lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
-        if lock.locked():
-            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
-            return
-        now = time.monotonic()
-        last = context.chat_data.get("last_url")
-        if last and last.get("urls") == urls and now - last.get("ts", 0) < 10:
-            await update.message.reply_text("⏳ Уже идёт анализ этого URL")
-            return
-        clear_stop()
-        job_name = _build_parse_task_name(update, "url")
-        current_task = asyncio.current_task()
-        idle_seconds = _watchdog_idle_seconds()
-        if current_task:
-            register_task(job_name, current_task)
-            asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
-
-        status_msg = None
-        batch_id = secrets.token_hex(8)
-        try:
-            context.chat_data["last_url"] = {"urls": urls, "ts": now}
-            context.chat_data["batch_id"] = batch_id
-            mass_state.set_batch(chat_id, batch_id)
-            from . import extraction_url as _extraction_url  # noqa: E402
-
-            _extraction_url.set_batch(batch_id)
-            context.chat_data["entry_url"] = urls[0]
-            status_msg = await update.message.reply_text("🌐 Загружаем страницы...")
-            await heartbeat()
-            results = []
-            async with lock:
-                async with aiohttp.ClientSession() as session:
-                    tasks = [
-                        async_extract_emails_from_url(url, session, chat_id, batch_id)
-                        for url in sorted(urls)
-                    ]
-                    results = await asyncio.gather(*tasks)
-                    await heartbeat()
-            if batch_id != context.chat_data.get("batch_id"):
-                return
-            per_url_counts = {res[0]: len(res[1]) for res in results}
-            empty_urls = [u for u, cnt in per_url_counts.items() if cnt == 0]
-            if per_url_counts and all(cnt == 0 for cnt in per_url_counts.values()):
-                explanation = (
-                    "😕 На присланной ссылке не удалось найти e-mail адреса.\n\n"
-                    "Что можно сделать:\n"
-                    "• На странице нет явных e-mail;\n"
-                    "• Контакты подгружаются скриптами (SPA/JS);\n"
-                    "• Сайт блокирует ботов/требует капчу;\n"
-                    "• Контакты спрятаны в PDF/изображениях.\n\n"
-                    "Попробуйте: сохранить страницу в PDF и прислать файл — парсер по"
-                    " файлам у нас уже работает."
-                )
-                if status_msg:
-                    try:
-                        await status_msg.edit_text("⛔️ Не удалось найти адреса")
-                    except Exception:
-                        pass
-                await update.message.reply_text(explanation)
-                return
-            if empty_urls:
-                miss_text = "\n".join(f"• {url}" for url in empty_urls)
-                await update.message.reply_text(
-                    "ℹ️ Не нашли адреса на ссылках:\n"
-                    f"{miss_text}\n"
-                    "Если уверены, что e-mail есть, пришлите страницу файлом (PDF/HTML)."
-                )
-            allowed_all: Set[str] = set()
-            foreign_all: Set[str] = set()
-            repairs_all: List[tuple[str, str]] = []
-            footnote_dupes = 0
-            for _, allowed, foreign, repairs, stats in results:
-                allowed_all.update(allowed)
-                foreign_all.update(foreign)
-                repairs_all.extend(repairs)
-                footnote_dupes += stats.get("footnote_pairs_merged", 0)
-
-            technical_emails = [
-                e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)
-            ]
-            filtered = sorted(
-                e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
-            )
-            suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
-
-            state = get_state(context)
-            state.all_emails.update(allowed_all)
-            current = set(state.to_send)
-            current.update(filtered)
-            state.to_send = sorted(current)
-            foreign_total = set(state.foreign) | set(foreign_all)
-            state.repairs = list(dict.fromkeys((state.repairs or []) + repairs_all))
-            state.repairs_sample = sample_preview(
-                [f"{b} → {g}" for (b, g) in state.repairs], 6
-            )
-            suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
-            total_footnote = state.footnote_dupes + footnote_dupes
-            blocked_after_parse = count_blocked(state.to_send)
-
-            report = await _compose_report_and_save(
-                context,
-                state.all_emails,
-                state.to_send,
-                suspicious_total,
-                sorted(foreign_total),
-                total_footnote,
-                blocked_after_parse=blocked_after_parse,
-            )
-            await _send_combined_parse_response(update.message, context, report, state)
-            await heartbeat()
-            return
-        except asyncio.CancelledError as exc:
-            notified = False
-            cancelled_text = (
-                "⛔️ Задача прервана из-за отсутствия прогресса. Лог зависания сохранён в var/hang_dump.txt"
-                if exc.args and exc.args[0] == "watchdog"
-                else "🛑 Процесс был остановлен."
-            )
-            if status_msg:
-                try:
-                    await status_msg.edit_text(cancelled_text)
-                    notified = True
-                except Exception:
-                    pass
-            if not notified:
-                try:
-                    await update.message.reply_text(cancelled_text)
-                except Exception:
-                    pass
-            return
-        finally:
-            if current_task:
-                unregister_task(job_name, current_task)
+    await update.message.reply_text(
+        "❌ Не распознана ссылка. Пришлите полную URL, например: https://site.tld/path"
+    )
+    return
 
 
 async def ask_include_numeric(
