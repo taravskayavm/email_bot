@@ -512,6 +512,8 @@ async def extract_from_url_async(
     deep: bool = True,
     progress_cb: ProgressCB = None,
     path_prefixes: Optional[Sequence[str]] = None,
+    max_pages: int | None = None,
+    max_depth: int | None = None,
 ) -> tuple[list[str], dict]:
     """Extract e-mail addresses from ``url`` asynchronously.
 
@@ -520,7 +522,8 @@ async def extract_from_url_async(
     discovered HTML pages. ``progress_cb`` is invoked with ``(pages, page_url)``
     to report crawling progress; it is throttled internally to avoid flooding.
     ``path_prefixes`` (if provided) limits the deep crawl to URLs whose path
-    starts with one of the prefixes.
+    starts with one of the prefixes. ``max_pages`` and ``max_depth`` override
+    the default crawler limits when provided.
     """
 
     if os.getenv("CRAWLER_DISABLED", "0") == "1":
@@ -607,6 +610,8 @@ async def extract_from_url_async(
 
     crawler = Crawler(
         url,
+        max_pages=max_pages,
+        max_depth=max_depth,
         on_page=_on_page,
         path_prefixes=prefixes_list,
         stop_cb=should_stop,
@@ -669,6 +674,8 @@ async def extract_from_url_async(
     stats["page_urls"] = [page_url for page_url, _ in pages]
     stats["last_url"] = last_seen
     stats["aborted"] = bool(stats.get("aborted") or aborted)
+    stats["max_pages"] = crawler.max_pages
+    stats["max_depth"] = crawler.max_depth
     if prefixes_list:
         stats["path_prefixes"] = list(prefixes_list)
     return emails, stats

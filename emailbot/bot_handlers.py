@@ -487,6 +487,8 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             deep=True,
             progress_cb=_progress,
             path_prefixes=prefixes,
+            max_pages=max_pages,
+            max_depth=max_depth,
         )
     except Exception as exc:  # pragma: no cover - network/parse errors
         await msg.reply_text(f"Ошибка при обходе {url}: {exc.__class__.__name__}")
