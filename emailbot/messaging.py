@@ -460,7 +460,26 @@ LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 # Путь к блок-листу: по умолчанию используем файл из пакета, но разрешаем переопределить через ENV.
 # Это избавляет от ситуации, когда рантайм читает/пишет «другой» blocked_emails.txt.
 _BL_DEFAULT = str(SCRIPT_DIR / "blocked_emails.txt")
-BLOCKED_FILE = str(expand_path(os.getenv("BLOCKED_LIST_PATH", _BL_DEFAULT)))
+_blocked_env = (
+    os.getenv("BLOCKED_LIST_PATH")
+    or os.getenv("BLOCKED_EMAILS_PATH")
+)
+BLOCKED_FILE = str(expand_path(_blocked_env or _BL_DEFAULT))
+try:
+    _p = Path(BLOCKED_FILE)
+    logger.info(
+        "Stoplist path resolved: %s (env=%s)",
+        _p,
+        "BLOCKED_LIST_PATH"
+        if os.getenv("BLOCKED_LIST_PATH")
+        else (
+            "BLOCKED_EMAILS_PATH"
+            if os.getenv("BLOCKED_EMAILS_PATH")
+            else "default"
+        ),
+    )
+except Exception:
+    pass
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 
 SYNC_STATE_PATH = str(expand_path(os.getenv("SYNC_STATE_PATH", "var/sync_state.json")))
@@ -1202,27 +1221,63 @@ def send_email_with_sessions(
                 )
             except Exception:
                 logger.debug("debug EML save failed", exc_info=True)
-        client.send(EMAIL_ADDRESS, recipient, raw)
+        try:
+            client.send(msg)
+        except TypeError:
+            client.send(EMAIL_ADDRESS, recipient, raw)
         if append_message:
             save_to_sent_folder(raw_bytes, imap=imap, folder=sent_folder)
     except Exception as exc:
-        logger.exception("SMTP send failed for %s", recipient)
         code = getattr(exc, "smtp_code", None)
         msg_obj = getattr(exc, "smtp_error", None)
+
+        if isinstance(exc, smtplib.SMTPRecipientsRefused) and getattr(exc, "recipients", None):
+            try:
+                _addr, (code, msg_obj) = next(iter(exc.recipients.items()))
+            except Exception:
+                pass
+
+        if isinstance(exc, smtplib.SMTPSenderRefused):
+            if code is None and len(getattr(exc, "args", ())) >= 1:
+                code = exc.args[0]
+            if msg_obj is None and len(getattr(exc, "args", ())) >= 2:
+                msg_obj = exc.args[1]
+
+        if isinstance(exc, smtplib.SMTPResponseException):
+            code = getattr(exc, "smtp_code", code)
+            msg_obj = getattr(exc, "smtp_error", msg_obj)
+
         if msg_obj is None and exc.args:
             msg_obj = exc.args[0]
+
         if isinstance(msg_obj, (bytes, bytearray)):
-            msg_text = msg_obj.decode("utf-8", "ignore")
+            try:
+                msg_text = msg_obj.decode("utf-8", errors="ignore")
+            except Exception:
+                msg_text = repr(msg_obj)
         else:
-            msg_text = str(msg_obj) if msg_obj is not None else ""
+            msg_text = msg_obj or str(exc)
+
         try:
             write_audit(
                 "smtp_error",
                 email=recipient,
-                meta={"code": code, "message": msg_text},
+                meta={
+                    "code": code,
+                    "message": msg_text,
+                    "exc": type(exc).__name__,
+                },
             )
         except Exception:
             logger.debug("smtp_error audit logging failed", exc_info=True)
+
+        logger.error(
+            "SMTP send failed for %s (code=%s, msg=%s)",
+            recipient,
+            code,
+            msg_text,
+            exc_info=True,
+        )
         return SendOutcome.ERROR, "", None, None
 
     # 3) Зафиксировать отправку для кулдауна
