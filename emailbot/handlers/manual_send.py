@@ -51,6 +51,7 @@ from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
 from emailbot.smtp_client import RobustSMTP
 from emailbot.cooldown import build_cooldown_service
+from emailbot.progress_watchdog import heartbeat_now
 
 from .preview import (
     go_back as preview_go_back,
@@ -871,7 +872,9 @@ async def send_all(
             )
 
         try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            host = os.getenv("IMAP_HOST", "imap.mail.ru")
+            port = int(os.getenv("IMAP_PORT", "993"))
+            imap = imaplib.IMAP4_SSL(host, port)
             imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
             sent_folder = get_preferred_sent_folder(imap)
             imap.select(f'"{sent_folder}"')
@@ -885,6 +888,7 @@ async def send_all(
         cancel_event = context.chat_data.get("cancel_event")
         aborted = False
         smtp = RobustSMTP()
+        processed = 0
         try:
             while to_send:
                 if should_stop():
@@ -893,6 +897,12 @@ async def send_all(
                 if cancel_event and cancel_event.is_set():
                     aborted = True
                     break
+                try:
+                    if processed % 3 == 0:
+                        heartbeat_now()
+                except Exception:
+                    pass
+                processed += 1
                 email_addr = to_send.pop(0)
                 try:
                     outcome, token, log_key, content_hash = send_email_with_sessions(

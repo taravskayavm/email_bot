@@ -2014,7 +2014,9 @@ async def imap_folders_command(
     """List available IMAP folders and allow user to choose."""
 
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        host = os.getenv("IMAP_HOST", "imap.mail.ru")
+        port = int(os.getenv("IMAP_PORT", "993"))
+        imap = imaplib.IMAP4_SSL(host, port)
         imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         status, data = imap.list()
         imap.logout()
@@ -3953,7 +3955,9 @@ async def _send_batch_with_sessions(
     )
 
     try:
-        imap = imaplib.IMAP4_SSL("imap.mail.ru")
+        host = os.getenv("IMAP_HOST", "imap.mail.ru")
+        port = int(os.getenv("IMAP_PORT", "993"))
+        imap = imaplib.IMAP4_SSL(host, port)
         imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
         sent_folder = get_preferred_sent_folder(imap)
         imap.select(f'"{sent_folder}"')
@@ -4768,7 +4772,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         effective_lookup = 0 if ignore_180d else lookup_days
 
         try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            host = os.getenv("IMAP_HOST", "imap.mail.ru")
+            port = int(os.getenv("IMAP_PORT", "993"))
+            imap = imaplib.IMAP4_SSL(host, port)
             imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
             sent_folder = get_preferred_sent_folder(imap)
             imap.select(f'"{sent_folder}"')
@@ -5328,7 +5334,9 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await notify(query.message, start_text, event="start")
 
         try:
-            imap = imaplib.IMAP4_SSL("imap.mail.ru")
+            host = os.getenv("IMAP_HOST", "imap.mail.ru")
+            port = int(os.getenv("IMAP_PORT", "993"))
+            imap = imaplib.IMAP4_SSL(host, port)
             imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
             sent_folder = get_preferred_sent_folder(imap)
             imap.select(f'"{sent_folder}"')
