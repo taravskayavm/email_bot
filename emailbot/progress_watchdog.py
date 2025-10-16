@@ -9,7 +9,7 @@ from pathlib import Path
 
 import faulthandler
 
-__all__ = ["heartbeat", "heartbeat_now", "start_watchdog"]
+__all__ = ["heartbeat", "heartbeat_now", "start_watchdog", "start_heartbeat_pulse"]
 
 _last_beat: float = 0.0
 _lock = asyncio.Lock()
@@ -28,6 +28,24 @@ def heartbeat_now() -> None:
 
     global _last_beat
     _last_beat = time.monotonic()
+
+
+async def _heartbeat_pulse(interval: float = 5.0) -> None:
+    """Emit periodic heartbeats while awaiting long-running operations."""
+
+    try:
+        while True:
+            await asyncio.sleep(max(interval, 0.1))
+            await heartbeat()
+    except asyncio.CancelledError:  # pragma: no cover - cooperative cancellation
+        pass
+
+
+def start_heartbeat_pulse(*, interval: float = 5.0) -> asyncio.Task[None]:
+    """Start a background task that periodically emits heartbeats."""
+
+    loop = asyncio.get_running_loop()
+    return loop.create_task(_heartbeat_pulse(interval))
 
 
 async def start_watchdog(

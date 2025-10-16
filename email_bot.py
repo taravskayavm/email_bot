@@ -321,6 +321,14 @@ def main() -> None:
         )
     )
     app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND
+            & filters.Regex(bot_handlers.URL_REGEX),
+            bot_handlers.handle_url_text,
+        )
+    )
+    app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot_handlers.handle_text)
     )
 
