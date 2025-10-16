@@ -18,6 +18,22 @@ pip install -r requirements.txt
 python email_bot.py
 ```
 
+## Парсинг сайтов в боте
+
+Одна страница:
+
+```text
+/url https://example.com/page
+```
+
+Глубокий обход (несколько страниц):
+
+```text
+/crawl https://example.com
+/crawl https://example.com --max-pages 80 --max-depth 3
+/crawl https://example.com --prefix /staff,/contacts
+```
+
 ## Конфигурация через .env
 Подробности переменных окружения см. в файле `.env.example`.
 

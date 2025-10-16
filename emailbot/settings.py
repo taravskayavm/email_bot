@@ -155,6 +155,44 @@ RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
 # reference for callers that treat settings as a namespace.
 SETTINGS = sys.modules[__name__]
 
+# --- Web crawler (deep) defaults ---
+# Разрешённые типы контента для скачивания HTML-страниц
+ALLOWED_CONTENT_TYPES = tuple(
+    cleaned
+    for cleaned in (
+        part.strip()
+        for part in (
+            (os.getenv(
+                "ALLOWED_CONTENT_TYPES",
+                "text/html,application/xhtml+xml,text/plain",
+            )
+            or "")
+            .lower()
+            .split(",")
+        )
+    )
+    if cleaned
+)
+
+# Использовать ли sitemap.xml как источник стартовых URL'ов
+ENABLE_SITEMAP = os.getenv("ENABLE_SITEMAP", "1") == "1"
+
+# Таймауты сетевых запросов
+GET_TIMEOUT = _int_env(
+    "CRAWL_GET_TIMEOUT",
+    _int_env("GET_TIMEOUT", 20),
+)
+HEAD_TIMEOUT = _int_env(
+    "CRAWL_HEAD_TIMEOUT",
+    _int_env("HEAD_TIMEOUT", 10),
+)
+
+# Максимальный размер скачиваемого ответа (байт)
+MAX_CONTENT_LENGTH = _int_env("CRAWL_MAX_CONTENT_LENGTH", 3_000_000)
+
+# Ограничение на количество URL из sitemap
+SITEMAP_MAX_URLS = _int_env("SITEMAP_MAX_URLS", 1000)
+
 # Краулер: бюджеты и кэш
 CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
 CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
