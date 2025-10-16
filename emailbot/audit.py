@@ -18,10 +18,16 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_AUDIT_PATH = expand_path("var/audit.csv")
 AUDIT_PATH = os.getenv("AUDIT_PATH", str(_DEFAULT_AUDIT_PATH))
+_DEFAULT_EVENTS_PATH = expand_path("var/audit_events.jsonl")
+AUDIT_EVENTS_PATH = os.getenv("AUDIT_EVENTS_PATH", str(_DEFAULT_EVENTS_PATH))
 
 
 def _audit_path() -> Path:
     return expand_path(os.getenv("AUDIT_PATH", AUDIT_PATH))
+
+
+def _events_path() -> Path:
+    return expand_path(os.getenv("AUDIT_EVENTS_PATH", AUDIT_EVENTS_PATH))
 
 
 def _json_ready(value: Any) -> Any:
@@ -120,6 +126,39 @@ class AuditWriter:
         self._write_record(record)
 
 
+def write_audit(
+    event: str,
+    *,
+    email: str | None = None,
+    meta: Mapping[str, Any] | None = None,
+) -> None:
+    """Append a structured event record to ``audit_events.jsonl``."""
+
+    path = _events_path()
+    try:
+        ensure_parent(path)
+    except Exception:
+        logger.debug("audit events ensure_parent failed", exc_info=True)
+        return
+    record: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+    }
+    if email is not None:
+        record["email"] = email
+    if meta:
+        try:
+            record["meta"] = _json_ready(dict(meta))
+        except Exception:
+            record["meta"] = _json_ready(meta)
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False))
+            fh.write("\n")
+    except Exception:
+        logger.debug("audit events append failed", exc_info=True)
+
+
 def start_audit(label: str) -> AuditWriter:
     """Return an :class:`AuditWriter` writing to ``var/bulk_audit_*.jsonl``."""
 
@@ -162,4 +201,4 @@ def write_audit_drop(email: str, reason: str, details: str = "") -> None:
         )
 
 
-__all__ = ["AuditWriter", "start_audit", "write_audit_drop"]
+__all__ = ["AuditWriter", "start_audit", "write_audit", "write_audit_drop"]

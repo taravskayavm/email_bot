@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import BotCommand
 
 from emailbot.run_control import clear_stop, request_stop
+from emailbot.utils import warn_duplicate_env_keys
 from emailbot.utils.single_instance import single_instance_lock
 
 try:  # pragma: no cover - optional dependency
@@ -77,8 +78,18 @@ def _load_dotenv() -> None:
     env_file = Path(__file__).resolve().parent.parent.parent / ".env"
     if env_file.exists():
         load_dotenv(dotenv_path=env_file)
+        try:
+            warn_duplicate_env_keys(env_file)
+        except Exception:
+            logger.debug("duplicate env check failed", exc_info=True)
     else:
         load_dotenv()
+        default_env = Path(".env")
+        if default_env.exists():
+            try:
+                warn_duplicate_env_keys(default_env)
+            except Exception:
+                logger.debug("duplicate env check failed", exc_info=True)
 
     # Ensure SMTP credentials are initialized for the aiogram entrypoint.
     from emailbot import messaging

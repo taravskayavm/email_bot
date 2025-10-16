@@ -21,10 +21,22 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
 from email.message import EmailMessage
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
 from pathlib import Path
 from itertools import count
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    TYPE_CHECKING,
+)
 
 from .extraction import normalize_email, strip_html
 from .cooldown import (
@@ -40,6 +52,7 @@ from .sanitizer import sanitize_batch
 from emailbot import history_service
 from utils import rules
 from .smtp_client import SmtpClient, RobustSMTP, send_with_retry
+from .audit import write_audit as audit_write_audit
 from .utils import log_error
 from .settings import REPORT_TZ
 from emailbot import history_service
@@ -71,6 +84,35 @@ logger = logging.getLogger(__name__)
 
 _BULK_COOLDOWN_SERVICE: "CooldownService" | None = None
 _HISTORY_SHIM_WARNED_ONCE = False
+
+DEBUG_SAVE_EML = os.getenv("DEBUG_SAVE_EML", "0") == "1"
+
+
+def write_audit(
+    event: str,
+    *,
+    email: str | None = None,
+    meta: Mapping[str, Any] | None = None,
+) -> None:
+    """Safely record structured audit events."""
+
+    try:
+        audit_write_audit(event, email=email, meta=meta)
+    except Exception:
+        logger.debug("write_audit failed", exc_info=True)
+
+
+def _normalize_from_header(msg: EmailMessage) -> None:
+    """Force the ``From`` header to use the configured SMTP address."""
+
+    existing = msg.get("From", "")
+    name, _addr = parseaddr(existing)
+    display_name = os.getenv("EMAIL_FROM_NAME", "").strip() or name
+    normalized = formataddr((display_name or "", EMAIL_ADDRESS))
+    if "From" in msg:
+        msg.replace_header("From", normalized)
+    else:
+        msg["From"] = normalized
 
 
 def _reset_history_shim_warning() -> None:
@@ -829,6 +871,16 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", None)
             msg = getattr(e, "smtp_error", b"")
+            if isinstance(msg, (bytes, bytearray)):
+                msg_text = msg.decode("utf-8", "ignore")
+            else:
+                msg_text = str(msg or "")
+            try:
+                write_audit(
+                    "smtp_error", email=recipient, meta={"code": code, "message": msg_text}
+                )
+            except Exception:
+                logger.debug("smtp_error audit logging failed", exc_info=True)
             add_bounce(recipient, code, msg, "send")
             if is_soft_bounce(code, msg) and attempt < max_tries - 1:
                 delay = 2**attempt
@@ -932,9 +984,10 @@ def build_message(
     html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
-    msg["From"] = formataddr(
-        ("Редакция литературы по медицине, спорту и туризму", EMAIL_ADDRESS)
+    default_from_name = os.getenv(
+        "EMAIL_FROM_NAME", "Редакция литературы по медицине, спорту и туризму"
     )
+    msg["From"] = formataddr((default_from_name or "", EMAIL_ADDRESS))
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
@@ -957,6 +1010,7 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
+    _normalize_from_header(msg)
     return msg, token
 
 
@@ -1133,16 +1187,42 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
+    _normalize_from_header(msg)
 
     # 2) Отправка
     try:
         raw = msg.as_string()
         raw_bytes = msg.as_bytes()
+        if DEBUG_SAVE_EML:
+            try:
+                out_dir = Path("var/debug_outbox")
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / f"{uuid.uuid4()}.eml").write_text(
+                    raw, encoding="utf-8", errors="ignore"
+                )
+            except Exception:
+                logger.debug("debug EML save failed", exc_info=True)
         client.send(EMAIL_ADDRESS, recipient, raw)
         if append_message:
             save_to_sent_folder(raw_bytes, imap=imap, folder=sent_folder)
-    except Exception:
+    except Exception as exc:
         logger.exception("SMTP send failed for %s", recipient)
+        code = getattr(exc, "smtp_code", None)
+        msg_obj = getattr(exc, "smtp_error", None)
+        if msg_obj is None and exc.args:
+            msg_obj = exc.args[0]
+        if isinstance(msg_obj, (bytes, bytearray)):
+            msg_text = msg_obj.decode("utf-8", "ignore")
+        else:
+            msg_text = str(msg_obj) if msg_obj is not None else ""
+        try:
+            write_audit(
+                "smtp_error",
+                email=recipient,
+                meta={"code": code, "message": msg_text},
+            )
+        except Exception:
+            logger.debug("smtp_error audit logging failed", exc_info=True)
         return SendOutcome.ERROR, "", None, None
 
     # 3) Зафиксировать отправку для кулдауна
@@ -1833,6 +1913,7 @@ __all__ = [
     "add_blocked_email",
     "dedupe_blocked_file",
     "verify_unsubscribe_token",
+    "write_audit",
     "mark_unsubscribed",
     "log_sent_email",
     "detect_sent_folder",

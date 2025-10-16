@@ -2651,11 +2651,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     filename = (doc.file_name or "").lower()
     if filename.endswith(".pdf"):
         backend_states = _pdf.backend_status()
+        ocr_enabled = bool(backend_states.get("ocr_enabled"))
+        ocr_available = bool(backend_states.get("ocr")) if ocr_enabled else False
+        ocr_reason = backend_states.get("ocr_reason") if ocr_enabled else ""
+        if not ocr_enabled:
+            ocr_status = "не включён"
+        elif ocr_available:
+            ocr_status = "включён"
+        elif ocr_reason:
+            ocr_status = f"недоступен ({ocr_reason})"
+        else:
+            ocr_status = "недоступен"
         report += "\n\n" + "\n".join(
             [
                 "📄 PDF-бэкенды:",
                 f" • PDFMiner: {'доступен' if backend_states.get('pdfminer') else 'недоступен'}",
-                f" • OCR: {'включён' if backend_states.get('ocr') else 'не включён'}",
+                f" • OCR: {ocr_status}",
             ]
         )
 
@@ -3966,6 +3977,9 @@ async def _send_batch_with_sessions(
     sent_count = 0
     aborted = False
     attempt = 0
+    total = len(to_send)
+    processed = 0
+    last_progress_notice = 0
     while True:
         try:
             with SmtpClient(
@@ -3983,7 +3997,9 @@ async def _send_batch_with_sessions(
                         aborted = True
                         break
                     email_addr = to_send.pop(0)
+                    processed += 1
                     try:
+                        await heartbeat()
                         outcome, token, log_key, content_hash = send_email_with_sessions(
                             client,
                             imap,
@@ -4038,30 +4054,56 @@ async def _send_batch_with_sessions(
                         return
                     except Exception as err:
                         error_details.append(str(err))
-                        code, msg = None, None
+                        code = getattr(err, "smtp_code", None)
+                        msg_obj: object | None = None
                         if (
                             hasattr(err, "recipients")
                             and isinstance(err.recipients, dict)
                             and email_addr in err.recipients
                         ):
-                            code, msg = err.recipients[email_addr][:2]
-                        elif hasattr(err, "smtp_code"):
-                            code = getattr(err, "smtp_code", None)
-                            msg = getattr(err, "smtp_error", None)
-                        add_bounce(email_addr, code, str(msg or err), phase="manual_send")
-                        if is_hard_bounce(code, msg):
+                            recipient_info = err.recipients[email_addr]
+                            if isinstance(recipient_info, (list, tuple)) and recipient_info:
+                                code = recipient_info[0]
+                                msg_obj = recipient_info[1] if len(recipient_info) > 1 else None
+                        if msg_obj is None:
+                            msg_obj = getattr(err, "smtp_error", None)
+                        if msg_obj is None and err.args:
+                            msg_obj = err.args[0]
+                        if isinstance(code, str):
+                            try:
+                                code = int(code)
+                            except Exception:
+                                pass
+                        if isinstance(msg_obj, (bytes, bytearray)):
+                            msg_text = msg_obj.decode("utf-8", "ignore")
+                        else:
+                            msg_text = str(msg_obj) if msg_obj is not None else ""
+                        logger.error(
+                            "SMTP error: code=%s msg=%s to=%s", code, msg_text, email_addr
+                        )
+                        try:
+                            messaging.write_audit(
+                                "smtp_error",
+                                email=email_addr,
+                                meta={"code": code, "message": msg_text},
+                            )
+                        except Exception:
+                            logger.debug("smtp_error audit logging failed", exc_info=True)
+                        add_bounce(email_addr, code, msg_text or str(err), phase="manual_send")
+                        msg_for_classification = msg_obj if msg_obj is not None else msg_text
+                        if is_hard_bounce(code, msg_for_classification):
                             suppress_add(email_addr, code, "hard bounce on send")
-                        elif is_soft_bounce(code, msg):
+                        elif is_soft_bounce(code, msg_for_classification):
                             try:
                                 code_int: Optional[int]
                                 try:
                                     code_int = int(code) if code is not None else None
                                 except Exception:
                                     code_int = None
-                                if isinstance(msg, (bytes, bytearray)):
-                                    reason_text = msg.decode("utf-8", "ignore")
+                                if isinstance(msg_obj, (bytes, bytearray)):
+                                    reason_text = msg_obj.decode("utf-8", "ignore")
                                 else:
-                                    reason_text = str(msg or err)
+                                    reason_text = msg_text or str(err)
                                 log_soft_bounce(
                                     email_addr,
                                     reason=reason_text,
@@ -4080,6 +4122,23 @@ async def _send_batch_with_sessions(
                             template_path,
                             str(err),
                         )
+                    if processed % 5 == 0 or processed == total:
+                        logger.info("bulk_progress: %s/%s", processed, total)
+                        await heartbeat()
+                        if (
+                            (processed % 20 == 0 or processed == total)
+                            and processed != last_progress_notice
+                        ):
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"📬 Прогресс: {processed}/{total}",
+                                )
+                                last_progress_notice = processed
+                            except Exception:
+                                logger.debug(
+                                    "bulk progress notification failed", exc_info=True
+                                )
             break
         except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
             attempt += 1
