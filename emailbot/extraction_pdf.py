@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shutil
 import statistics
 import time
 from pathlib import Path
@@ -37,16 +38,41 @@ except Exception:  # pragma: no cover - тихая деградация до pdf
 
 # Заглушка: когда появится OCR, заменить на фактическую проверку.
 _OCR_AVAILABLE = False
+_OCR_LOGGED_MISSING = False
 
 
-def backend_status() -> Dict[str, bool]:
+def _detect_ocr_status() -> tuple[bool, bool, str]:
+    """Determine whether OCR is enabled and available."""
+
+    global _OCR_AVAILABLE, _OCR_LOGGED_MISSING
+    enabled = bool(get("ENABLE_OCR", settings.ENABLE_OCR))
+    if not enabled:
+        _OCR_AVAILABLE = False
+        return False, False, ""
+    engine = shutil.which("tesseract")
+    if engine:
+        _OCR_AVAILABLE = True
+        return True, True, ""
+    _OCR_AVAILABLE = False
+    if not _OCR_LOGGED_MISSING:
+        logger.warning("OCR engine not found")
+        _OCR_LOGGED_MISSING = True
+    return False, True, "не найден tesseract"
+
+
+def backend_status() -> Dict[str, bool | str]:
     """Return availability flags for PDF extraction backends."""
 
-    return {
+    ocr_available, ocr_enabled, reason = _detect_ocr_status()
+    status: Dict[str, bool | str] = {
         "fitz": FITZ_OK,
         "pdfminer": _PDFMINER_AVAILABLE,
-        "ocr": _OCR_AVAILABLE,
+        "ocr": ocr_available if ocr_enabled else False,
+        "ocr_enabled": ocr_enabled,
     }
+    if reason:
+        status["ocr_reason"] = reason
+    return status
 
 from emailbot import settings
 from emailbot.settings_store import get
@@ -493,7 +519,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+    ocr_available, ocr_configured, _ = _detect_ocr_status()
+    ocr = ocr_configured and ocr_available
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
@@ -689,7 +716,8 @@ def extract_from_pdf_stream(
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
+    ocr_available, ocr_configured, _ = _detect_ocr_status()
+    ocr = ocr_configured and ocr_available
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
