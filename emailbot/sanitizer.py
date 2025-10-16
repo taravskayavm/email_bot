@@ -5,6 +5,14 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, List
 
+ZWSP_CHARS = [
+    "\u200b",  # ZERO WIDTH SPACE
+    "\u200c",  # ZERO WIDTH NON-JOINER
+    "\u200d",  # ZERO WIDTH JOINER
+    "\u200e",  # LEFT-TO-RIGHT MARK
+    "\u200f",  # RIGHT-TO-LEFT MARK
+    "\ufeff",  # ZERO WIDTH NO-BREAK SPACE (BOM)
+]
 _ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 _WS_PUNCT_TRIM = re.compile(r"^[\s<>\[\]\(\)\.,;:\"']+|[\s<>\[\]\(\)\.,;:\"']+$")
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
@@ -74,12 +82,7 @@ def dedup_emails(items: Iterable[str]) -> list[str]:
 
 # Characters that should be removed before any filtering steps.
 _HIDDEN_CHARS = [
-    "\u200b",  # ZERO WIDTH SPACE
-    "\u200c",  # ZERO WIDTH NON-JOINER
-    "\u200d",  # ZERO WIDTH JOINER
-    "\u200e",  # LEFT-TO-RIGHT MARK
-    "\u200f",  # RIGHT-TO-LEFT MARK
-    "\ufeff",  # ZERO WIDTH NO-BREAK SPACE (BOM)
+    *ZWSP_CHARS,
     "\u00ad",  # SOFT HYPHEN
 ]
 
@@ -154,4 +157,5 @@ __all__ = [
     "email_key",
     "looks_like_email",
     "dedup_emails",
+    "ZWSP_CHARS",
 ]
