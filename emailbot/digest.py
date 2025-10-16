@@ -8,6 +8,7 @@ from typing import List, Set, Tuple
 
 import httpx
 from bs4 import BeautifulSoup
+from bs4 import FeatureNotFound
 
 # переиспользуем уже существующий шаблон regex, если он есть в проекте
 EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+")
@@ -39,7 +40,10 @@ async def _fetch_html(url: str) -> Tuple[str, str]:
 def _extract_emails_from_html(html: str) -> Set[str]:
     """Return a set of e-mail addresses extracted from ``html`` text."""
 
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except FeatureNotFound:
+        soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     text = soup.get_text(" ", strip=True)
