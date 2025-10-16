@@ -4526,9 +4526,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if empty_urls:
                 miss_text = "\n".join(f"• {url}" for url in empty_urls)
                 await update.message.reply_text(
-                    "ℹ️ Не нашли адреса на ссылках:\n"
-                    f"{miss_text}\n"
-                    "Если уверены, что e-mail есть, пришлите страницу файлом (PDF/HTML)."
+                    (
+                        "ℹ️ Не нашли адреса на ссылках:\n"
+                        f"{miss_text}\n"
+                        "Если уверены, что e-mail есть, пришлите страницу файлом (PDF/HTML)."
+                    )
                 )
             allowed_all: Set[str] = set()
             foreign_all: Set[str] = set()
