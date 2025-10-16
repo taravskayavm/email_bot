@@ -198,6 +198,8 @@ from emailbot.cooldown import (
     normalize_email as cooldown_normalize_email,
 )
 from emailbot.web_extract import fetch_and_extract
+from pipelines.extract_emails import extract_from_url_async as deep_extract_async
+from emailbot.suppress_list import is_blocked as is_blocked_email
 from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
@@ -340,6 +342,7 @@ async def async_extract_emails_from_url(
         return url, set(), set(), [], {}
 
     await heartbeat()
+    # Реализация использует пайплайн из emailbot.extraction через fetch_and_extract.
     final_url, emails = await asyncio.to_thread(fetch_and_extract, url)
     await heartbeat()
     foreign = {e for e in emails if not is_allowed_tld(e)}
@@ -348,6 +351,178 @@ async def async_extract_emails_from_url(
         extra={"event": "web_extract", "source": final_url, "count": len(emails)},
     )
     return final_url, emails, foreign, [], {}
+
+
+async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Принудительный одностраничный разбор URL: /url <link>"""
+
+    msg = update.message
+    if not msg:
+        return
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.reply_text("Формат: /url <ссылка>")
+        return
+
+    url = parts[1].strip()
+    if not URL_REGEX.search(url):
+        await msg.reply_text("Не похоже на ссылку. Пример: /url https://example.com")
+        return
+    if not settings.ENABLE_WEB:
+        await msg.reply_text("Веб-парсер отключен (ENABLE_WEB=0). Включи в .env.")
+        return
+
+    lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
+    if lock.locked():
+        await msg.reply_text("⏳ Уже идёт анализ этого URL")
+        return
+
+    clear_stop()
+
+    try:
+        async with lock:
+            final_url, emails, _foreign, _, _ = await async_extract_emails_from_url(
+                url, context, chat_id=msg.chat_id
+            )
+    except Exception as exc:  # pragma: no cover - network/parse errors
+        await msg.reply_text(f"Ошибка при загрузке {url}: {exc.__class__.__name__}")
+        return
+
+    unique = []
+    seen = set()
+    for addr in sorted(emails):
+        if addr in seen or is_blocked_email(addr):
+            continue
+        seen.add(addr)
+        unique.append(addr)
+
+    if not unique:
+        await msg.reply_text("Адреса не найдены.")
+        return
+
+    await _send_emails_as_file(
+        msg,
+        unique,
+        source=final_url or url,
+        title="Результат (1 страница)",
+    )
+
+
+async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Глубокий обход сайта: /crawl <url> [--max-pages N] [--max-depth D] [--prefix /staff,/contacts]"""
+
+    msg = update.message
+    if not msg:
+        return
+    if not settings.ENABLE_WEB:
+        await msg.reply_text("Веб-парсер отключен (ENABLE_WEB=0). Включи в .env.")
+        return
+
+    raw = (msg.text or "").strip()
+    if not raw:
+        return
+
+    parts = raw.split()
+    if len(parts) < 2:
+        await msg.reply_text(
+            "Формат: /crawl <ссылка> [--max-pages N] [--max-depth D] [--prefix /path1,/path2]"
+        )
+        return
+
+    url = parts[1]
+    if not URL_REGEX.search(url):
+        await msg.reply_text("Не похоже на ссылку. Пример: /crawl https://example.com")
+        return
+
+    max_pages: int | None = None
+    max_depth: int | None = None
+    prefixes: list[str] | None = None
+
+    idx = 2
+    while idx < len(parts):
+        token = parts[idx]
+        if token == "--max-pages" and idx + 1 < len(parts):
+            try:
+                max_pages = int(parts[idx + 1])
+            except Exception:
+                pass
+            idx += 2
+            continue
+        if token == "--max-depth" and idx + 1 < len(parts):
+            try:
+                max_depth = int(parts[idx + 1])
+            except Exception:
+                pass
+            idx += 2
+            continue
+        if token == "--prefix" and idx + 1 < len(parts):
+            raw_prefixes = parts[idx + 1].split(",")
+            prefixes = [p.strip() for p in raw_prefixes if p.strip()]
+            idx += 2
+            continue
+        idx += 1
+
+    last_report = {"ts": 0.0}
+
+    def _progress(pages: int, page_url: str) -> None:
+        now = time.time()
+        if now - last_report["ts"] <= 2.5:
+            return
+        last_report["ts"] = now
+        try:
+            asyncio.create_task(
+                msg.reply_text(f"Сканирую: {pages} стр. (посл.: {page_url})")
+            )
+        except Exception:
+            pass
+
+    clear_stop()
+
+    try:
+        emails, stats = await deep_extract_async(
+            url,
+            deep=True,
+            progress_cb=_progress,
+            path_prefixes=prefixes,
+        )
+    except Exception as exc:  # pragma: no cover - network/parse errors
+        await msg.reply_text(f"Ошибка при обходе {url}: {exc.__class__.__name__}")
+        return
+
+    stats_map = stats if isinstance(stats, dict) else {}
+    if max_pages is not None and isinstance(stats_map, dict):
+        pages_val = stats_map.get("pages")
+        if isinstance(pages_val, int) and pages_val > 0:
+            stats_map["pages"] = min(pages_val, max_pages)
+    if max_depth is not None and isinstance(stats_map, dict):
+        stats_map["max_depth"] = max_depth
+    if prefixes and isinstance(stats_map, dict):
+        stats_map.setdefault("path_prefixes", prefixes)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for addr in emails:
+        if addr in seen:
+            continue
+        seen.add(addr)
+        if is_blocked_email(addr):
+            continue
+        unique.append(addr)
+
+    if not unique:
+        await msg.reply_text("Адреса не найдены.")
+        return
+
+    await _send_emails_as_file(
+        msg,
+        sorted(unique),
+        source=url,
+        title="Результат (глубокий обход)",
+        stats=stats_map if isinstance(stats_map, dict) else None,
+    )
 
 
 def collapse_footnote_variants(emails):
@@ -405,6 +580,55 @@ def _register_sources(state: SessionState | None, emails: Iterable[str], source:
         bucket = state.source_map.setdefault(key, [])
         if source_text not in bucket:
             bucket.append(source_text)
+
+
+async def _send_emails_as_file(
+    message: Message,
+    emails: Iterable[str],
+    *,
+    source: str,
+    title: str,
+    stats: dict | None = None,
+) -> None:
+    items = [str(item).strip() for item in emails if str(item or "").strip()]
+    if not items:
+        await message.reply_text("Адреса не найдены.")
+        return
+
+    parsed = urllib.parse.urlparse(source or "")
+    base_name = parsed.netloc or parsed.path or "emails"
+    safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._") or "emails"
+    filename = f"{safe_base}_emails.txt"
+
+    payload = "\n".join(items)
+    buf = io.BytesIO(payload.encode("utf-8"))
+    buf.name = filename
+    buf.seek(0)
+
+    caption_lines = [title]
+    clean_source = source.strip()
+    if clean_source:
+        caption_lines.append(f"Источник: {clean_source}")
+    caption_lines.append(f"Адресов: {len(items)}")
+
+    if stats:
+        stat_lines: list[str] = []
+        pages = stats.get("pages") if isinstance(stats, dict) else None
+        if isinstance(pages, int) and pages > 0:
+            stat_lines.append(f"Страниц: {pages}")
+        unique = stats.get("unique") if isinstance(stats, dict) else None
+        if isinstance(unique, int) and unique >= 0:
+            stat_lines.append(f"Уникальных: {unique}")
+        depth_value = stats.get("max_depth") if isinstance(stats, dict) else None
+        if isinstance(depth_value, int) and depth_value > 0:
+            stat_lines.append(f"Глубина: {depth_value}")
+        if isinstance(stats, dict) and stats.get("aborted"):
+            stat_lines.append("⚠️ Остановлено по лимиту")
+        if stat_lines:
+            caption_lines.extend(stat_lines)
+
+    file_obj = InputFile(buf, filename=filename)
+    await message.reply_document(document=file_obj, caption="\n".join(caption_lines))
 
 
 async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4433,6 +4657,12 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await message.reply_text("⏳ Уже идёт анализ этого URL")
         return
 
+    if not settings.ENABLE_WEB:
+        await message.reply_text(
+            "Веб-парсер отключен (ENABLE_WEB=0). Используй /url или /crawl после включения."
+        )
+        return
+
     clear_stop()
     job_name = _build_parse_task_name(update, "url")
     current_task = asyncio.current_task()
@@ -6100,6 +6330,8 @@ __all__ = [
     "prompt_change_group",
     "force_send_command",
     "report_command",
+    "url_command",
+    "crawl_command",
     "report_callback",
     "on_diagnostics",
     "sync_imap_command",

@@ -227,6 +227,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
     app.add_handler(CommandHandler("features", bot_handlers.features))
     app.add_handler(CommandHandler("selfcheck", bot_handlers.selfcheck_command))
+    app.add_handler(CommandHandler("url", bot_handlers.url_command))
+    app.add_handler(CommandHandler("crawl", bot_handlers.crawl_command))
     app.add_handler(CommandHandler("drop", bot_handlers.handle_drop))
 
     app.add_handler(
