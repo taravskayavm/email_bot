@@ -2603,6 +2603,7 @@ async def _compose_report_and_save(
             "foreign_domain": len(foreign),
             "pages_skipped": 0,
             "footnote_dupes_removed": footnote_dupes,
+            "blocked": blocked_after_parse,
             "blocked_after_parse": blocked_after_parse,
         },
         examples=(),

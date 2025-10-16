@@ -142,6 +142,7 @@ async def _process_url_callback(callback: CallbackQuery, *, deep: bool) -> None:
             "foreign_domain": 0,
             "pages_skipped": 0,
             "footnote_dupes_removed": 0,
+            "blocked": stats.get("blocked", 0),
             "blocked_after_parse": stats.get("blocked", 0),
         },
         examples=filtered[:5],
