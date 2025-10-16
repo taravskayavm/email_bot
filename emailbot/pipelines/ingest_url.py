@@ -13,6 +13,7 @@ async def ingest_url(
     *,
     deep: bool = False,
     path_prefixes: Optional[list[str]] = None,
+    limit_pages: Optional[int] = None,
 ) -> Tuple[List[str], Dict[str, int]]:
     """Fetch ``url`` and return extracted e-mails along with summary stats."""
 
@@ -20,6 +21,7 @@ async def ingest_url(
         url,
         deep=deep,
         path_prefixes=path_prefixes,
+        max_pages=limit_pages if deep else None,
     )
     ok = list(dict.fromkeys(emails or []))
     stats: Dict[str, int] = {
@@ -38,6 +40,9 @@ async def ingest_url(
         pages_total = meta.get("pages")
         if isinstance(pages_total, int):
             stats["pages"] = pages_total
+        pages_limit = meta.get("pages_limit")
+        if isinstance(pages_limit, int):
+            stats["pages_limit"] = pages_limit
     if not stats["total_in"]:
         stats["total_in"] = len(ok)
     return ok, stats

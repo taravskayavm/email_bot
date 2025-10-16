@@ -512,6 +512,7 @@ async def extract_from_url_async(
     deep: bool = True,
     progress_cb: ProgressCB = None,
     path_prefixes: Optional[Sequence[str]] = None,
+    max_pages: Optional[int] = None,
 ) -> tuple[list[str], dict]:
     """Extract e-mail addresses from ``url`` asynchronously.
 
@@ -520,7 +521,8 @@ async def extract_from_url_async(
     discovered HTML pages. ``progress_cb`` is invoked with ``(pages, page_url)``
     to report crawling progress; it is throttled internally to avoid flooding.
     ``path_prefixes`` (if provided) limits the deep crawl to URLs whose path
-    starts with one of the prefixes.
+    starts with one of the prefixes. ``max_pages`` (if provided) caps the number
+    of pages processed during a deep crawl.
     """
 
     if os.getenv("CRAWLER_DISABLED", "0") == "1":
@@ -611,12 +613,16 @@ async def extract_from_url_async(
         path_prefixes=prefixes_list,
         stop_cb=should_stop,
     )
+    page_limit = max_pages if max_pages and max_pages > 0 else None
+
     try:
         async for page_url, text in crawler.crawl():
             if should_stop():
                 aborted = True
                 break
             pages.append((page_url, text))
+            if page_limit is not None and len(pages) >= page_limit:
+                break
             if should_stop():
                 aborted = True
                 break
@@ -645,12 +651,14 @@ async def extract_from_url_async(
             ) from last_error
 
     combined_parts: list[str] = []
+    processed = 0
     for page_url, text in pages:
         if should_stop():
             aborted = True
             break
         marker = f"<!-- {page_url} -->"
         combined_parts.append(f"{marker}\n{text}")
+        processed += 1
     combined_text = "\n\n".join(combined_parts)
 
     if aborted:
@@ -662,13 +670,29 @@ async def extract_from_url_async(
     if isinstance(meta, dict) and meta.get("aborted"):
         aborted = True
 
+    if isinstance(meta, dict):
+        try:
+            meta["pages_total"] = int(meta.get("pages_total") or processed)
+            if max_pages is not None:
+                meta["pages_limit"] = int(max_pages)
+        except Exception:
+            pass
+
     emails = list(dict.fromkeys(emails_raw))
     stats = dict(meta) if isinstance(meta, dict) else {}
-    stats["pages"] = crawler.pages_scanned
+    processed_pages = processed if processed else len(pages)
+    if not processed_pages and getattr(crawler, "pages_scanned", 0):
+        processed_pages = int(getattr(crawler, "pages_scanned", 0))
+    stats["pages"] = processed_pages
     stats["unique"] = len(emails)
     stats["page_urls"] = [page_url for page_url, _ in pages]
     stats["last_url"] = last_seen
     stats["aborted"] = bool(stats.get("aborted") or aborted)
+    if max_pages is not None:
+        try:
+            stats["pages_limit"] = int(max_pages)
+        except Exception:
+            pass
     if prefixes_list:
         stats["path_prefixes"] = list(prefixes_list)
     return emails, stats

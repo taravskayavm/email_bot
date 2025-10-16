@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest
@@ -41,6 +41,82 @@ REJECT_LABELS = {
 
 
 _LAST_URLS: dict[int, str] = {}
+
+_LIMITS_ATTR = "_page_limits"
+_AWAIT_ATTR = "_await_page_limits"
+
+
+def _get_limit_store(bot: Any) -> dict[int, int]:
+    store = getattr(bot, _LIMITS_ATTR, None)
+    if not isinstance(store, dict):
+        store = {}
+        setattr(bot, _LIMITS_ATTR, store)
+    return store
+
+
+def _get_awaiting_users(bot: Any) -> set[int]:
+    waiting = getattr(bot, _AWAIT_ATTR, None)
+    if not isinstance(waiting, set):
+        waiting = set()
+        setattr(bot, _AWAIT_ATTR, waiting)
+    return waiting
+
+
+def _is_waiting_for_limit(message: types.Message) -> bool:
+    user = message.from_user
+    if user is None:
+        return False
+    waiting = _get_awaiting_users(message.bot)
+    return user.id in waiting
+
+
+def _normalize_page_limit(raw: Any) -> int:
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        value = 50
+    if value < 1:
+        value = 1
+    if value > 500:
+        value = 500
+    return value
+
+
+def _prepare_filtered(addresses: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(_filter_stoplists(addresses)))
+
+
+def _build_summary(
+    filtered: list[str],
+    stats: dict[str, int],
+    *,
+    deep: bool,
+    limit_pages: int | None = None,
+) -> str:
+    summary = format_parse_summary(
+        {
+            "total_found": stats.get("total_in", 0),
+            "to_send": len(filtered),
+            "suspicious": 0,
+            "cooldown_180d": 0,
+            "foreign_domain": 0,
+            "pages_skipped": 0,
+            "footnote_dupes_removed": 0,
+            "blocked": stats.get("blocked", 0),
+            "blocked_after_parse": stats.get("blocked", 0),
+        },
+        examples=filtered[:5],
+    )
+    if filtered:
+        summary += "\nПримеры:\n" + "\n".join(hcode(addr) for addr in filtered[:5])
+    pages = stats.get("pages", 0)
+    if deep:
+        used_limit = stats.get("pages_limit") or limit_pages
+        if used_limit:
+            summary += f"\n\n🌐 Просканировано страниц: {pages} (лимит {used_limit})"
+        elif pages:
+            summary += f"\n\n🌐 Просканировано страниц: {pages}"
+    return summary
 
 
 def _format_rejects(rejects: dict[str, int], mapping: dict[str, str] | None = None) -> str:
@@ -96,7 +172,7 @@ async def handle_url(msg: types.Message) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔎 Парсить эту страницу", callback_data="parse_url:single")
     builder.button(
-        text="🕷️ Сканировать сайт (до 50 стр.)",
+        text="🕷️ Сканировать сайт",
         callback_data="parse_url:deep",
     )
     builder.adjust(1)
@@ -106,7 +182,12 @@ async def handle_url(msg: types.Message) -> None:
     )
 
 
-async def _process_url_callback(callback: CallbackQuery, *, deep: bool) -> None:
+async def _process_url_callback(
+    callback: CallbackQuery,
+    *,
+    deep: bool,
+    limit_pages: int | None = None,
+) -> None:
     user_id = callback.from_user.id if callback.from_user else None
     if user_id is None:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
@@ -115,8 +196,12 @@ async def _process_url_callback(callback: CallbackQuery, *, deep: bool) -> None:
     if not url:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
+    waiting = _get_awaiting_users(callback.message.bot)
+    waiting.discard(user_id)
     status_text = (
-        f"🕷️ Сканирую сайт (до 50 стр.):\n{hcode(url)}"
+        f"🕷️ Сканирую сайт (лимит {limit_pages} стр.):\n{hcode(url)}"
+        if deep and limit_pages is not None
+        else f"🕷️ Сканирую сайт:\n{hcode(url)}"
         if deep
         else f"🔎 Парсю одну страницу:\n{hcode(url)}"
     )
@@ -124,34 +209,18 @@ async def _process_url_callback(callback: CallbackQuery, *, deep: bool) -> None:
         await callback.message.edit_text(status_text)
     except TelegramBadRequest:
         await callback.message.answer(status_text)
+    if deep and limit_pages is not None:
+        _get_limit_store(callback.message.bot)[user_id] = limit_pages
     try:
-        ok, stats = await ingest_url(url, deep=deep)
+        ok, stats = await ingest_url(url, deep=deep, limit_pages=limit_pages)
     except Exception as exc:  # pragma: no cover - network errors are variable
         await callback.message.answer(
             f"Не удалось обработать ссылку {hcode(url)}: {exc}"
         )
         await callback.answer()
         return
-    filtered = list(dict.fromkeys(_filter_stoplists(ok)))
-    summary = format_parse_summary(
-        {
-            "total_found": stats.get("total_in", 0),
-            "to_send": len(filtered),
-            "suspicious": 0,
-            "cooldown_180d": 0,
-            "foreign_domain": 0,
-            "pages_skipped": 0,
-            "footnote_dupes_removed": 0,
-            "blocked": stats.get("blocked", 0),
-            "blocked_after_parse": stats.get("blocked", 0),
-        },
-        examples=filtered[:5],
-    )
-    if filtered:
-        summary += "\nПримеры:\n" + "\n".join(hcode(addr) for addr in filtered[:5])
-    pages = stats.get("pages", 0)
-    if deep and pages:
-        summary += f"\n\n🌐 Просканировано страниц: {pages}"
+    filtered = _prepare_filtered(ok)
+    summary = _build_summary(filtered, stats, deep=deep, limit_pages=limit_pages)
     await callback.message.answer(summary)
     await callback.answer()
 
@@ -163,7 +232,86 @@ async def parse_single(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "parse_url:deep")
 async def parse_deep(callback: CallbackQuery) -> None:
-    await _process_url_callback(callback, deep=True)
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    url = _LAST_URLS.get(user_id)
+    if not url:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    keyboard = InlineKeyboardBuilder()
+    for limit in (10, 25, 50, 100):
+        keyboard.button(text=f"{limit} стр.", callback_data=f"parse_limit:{limit}")
+    keyboard.button(text="Другое…", callback_data="parse_limit:custom")
+    keyboard.adjust(2)
+    waiting = _get_awaiting_users(callback.message.bot)
+    waiting.discard(user_id)
+    text = (
+        f"🕷️ Сканирование сайта:\n{hcode(url)}\n\nВыберите лимит страниц:"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard.as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=keyboard.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("parse_limit:"))
+async def parse_limit(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    url = _LAST_URLS.get(user_id)
+    if not url:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    choice = callback.data.split("parse_limit:", 1)[1]
+    waiting = _get_awaiting_users(callback.message.bot)
+    if choice == "custom":
+        waiting.add(user_id)
+        prompt = "Введите лимит страниц числом (1–500):"
+        try:
+            await callback.message.edit_text(prompt)
+        except TelegramBadRequest:
+            await callback.message.answer(prompt)
+        await callback.answer()
+        return
+    waiting.discard(user_id)
+    limit = _normalize_page_limit(choice)
+    await _process_url_callback(callback, deep=True, limit_pages=limit)
+
+
+@router.message(F.text, F.func(_is_waiting_for_limit))
+async def handle_limit_input(msg: types.Message) -> None:
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id is None:
+        return
+    waiting = _get_awaiting_users(msg.bot)
+    if user_id not in waiting:
+        return
+    text = (msg.text or "").strip()
+    if not text:
+        await msg.answer("Введите лимит страниц числом (1–500).")
+        return
+    waiting.discard(user_id)
+    url = _LAST_URLS.get(user_id)
+    if not url:
+        await msg.answer("Не удалось определить ссылку для сканирования.")
+        return
+    limit = _normalize_page_limit(text)
+    _get_limit_store(msg.bot)[user_id] = limit
+    status_text = f"🕷️ Сканирую сайт (лимит {limit} стр.):\n{hcode(url)}"
+    await msg.answer(status_text)
+    try:
+        ok, stats = await ingest_url(url, deep=True, limit_pages=limit)
+    except Exception as exc:  # pragma: no cover - network errors are variable
+        await msg.answer(f"Не удалось обработать ссылку {hcode(url)}: {exc}")
+        return
+    filtered = _prepare_filtered(ok)
+    summary = _build_summary(filtered, stats, deep=True, limit_pages=limit)
+    await msg.answer(summary)
 
 
 @router.message(F.document)
