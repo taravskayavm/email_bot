@@ -9,13 +9,15 @@ from typing import Iterable
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hcode
 
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
-from emailbot.pipelines.ingest_url import ingest_url_once
+from emailbot.pipelines.ingest_url import ingest_url
 from emailbot.settings import resolve_label
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
+from emailbot.ui.messages import format_parse_summary
 
 router = Router()
 URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
@@ -36,6 +38,9 @@ REJECT_LABELS = {
     "missing_dep_pdfminer": "нет зависимости pdfminer.six для .pdf",
     "unknown": "иная причина",
 }
+
+
+_LAST_URLS: dict[int, str] = {}
 
 
 def _format_rejects(rejects: dict[str, int], mapping: dict[str, str] | None = None) -> str:
@@ -72,40 +77,92 @@ async def handle_ingest(msg: types.Message) -> None:
     await msg.answer(text)
 
 
-@router.message(F.text.func(lambda t: bool(t) and URL_RE.search(t)))
-async def handle_url_ingest(msg: types.Message) -> None:
-    raw = [m.group(1) for m in URL_RE.finditer(msg.text)]
-    urls = []
-    for u in raw:
-        u = u.rstrip('.,;:!?)]}')
-        if not u.lower().startswith(('http://','https://')):
-            u = 'https://' + u
-        urls.append(u)
-    ack = await msg.reply("Приняла ссылку, парсю страницу…")
-    total_ok: list[str] = []
-    total_rejects: dict[str, int] = {}
-    errors: list[str] = []
-    for url in urls:
-        try:
-            ok, rejects = await ingest_url_once(url)
-        except Exception as exc:  # pragma: no cover - network errors are variable
-            errors.append(f"{url} — {type(exc).__name__}")
-            continue
-        filtered = _filter_stoplists(ok)
-        total_ok.extend(filtered)
-        for key, val in (rejects or {}).items():
-            total_rejects[key] = total_rejects.get(key, 0) + val
-    total_ok = list(dict.fromkeys(total_ok))
-    text = f"Готово.\nНайдено адресов: {len(total_ok)}"
-    text += _format_rejects(total_rejects)
-    if total_ok:
-        text += "\n\nПримеры:\n" + "\n".join(hcode(x) for x in total_ok[:5])
-    if errors:
-        text += "\n\nНе удалось загрузить:\n" + "\n".join(f" • {err}" for err in errors)
+@router.message(F.text.regexp(URL_RE))
+async def handle_url(msg: types.Message) -> None:
+    if not msg.text:
+        return
+    if msg.text.startswith("/ingest"):
+        return
+    match = URL_RE.search(msg.text)
+    if not match:
+        return
+    url = match.group(1)
+    url = url.rstrip(".,;:!?)]}")
+    if not url.lower().startswith(("http://", "https://")):
+        url = f"https://{url}"
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id is not None:
+        _LAST_URLS[user_id] = url
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔎 Парсить эту страницу", callback_data="parse_url:single")
+    builder.button(
+        text="🕷️ Сканировать сайт (до 50 стр.)",
+        callback_data="parse_url:deep",
+    )
+    builder.adjust(1)
+    await msg.answer(
+        f"Нашла ссылку:\n{hcode(url)}\nВыберите режим:",
+        reply_markup=builder.as_markup(),
+    )
+
+
+async def _process_url_callback(callback: CallbackQuery, *, deep: bool) -> None:
+    user_id = callback.from_user.id if callback.from_user else None
+    if user_id is None:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    url = _LAST_URLS.get(user_id)
+    if not url:
+        await callback.answer("Не удалось определить ссылку", show_alert=True)
+        return
+    status_text = (
+        f"🕷️ Сканирую сайт (до 50 стр.):\n{hcode(url)}"
+        if deep
+        else f"🔎 Парсю одну страницу:\n{hcode(url)}"
+    )
     try:
-        await ack.edit_text(text)
-    except TelegramBadRequest:  # message might be gone
-        await msg.answer(text)
+        await callback.message.edit_text(status_text)
+    except TelegramBadRequest:
+        await callback.message.answer(status_text)
+    try:
+        ok, stats = await ingest_url(url, deep=deep)
+    except Exception as exc:  # pragma: no cover - network errors are variable
+        await callback.message.answer(
+            f"Не удалось обработать ссылку {hcode(url)}: {exc}"
+        )
+        await callback.answer()
+        return
+    filtered = list(dict.fromkeys(_filter_stoplists(ok)))
+    summary = format_parse_summary(
+        {
+            "total_found": stats.get("total_in", 0),
+            "to_send": len(filtered),
+            "suspicious": 0,
+            "cooldown_180d": 0,
+            "foreign_domain": 0,
+            "pages_skipped": 0,
+            "footnote_dupes_removed": 0,
+            "blocked_after_parse": stats.get("blocked", 0),
+        },
+        examples=filtered[:5],
+    )
+    if filtered:
+        summary += "\nПримеры:\n" + "\n".join(hcode(addr) for addr in filtered[:5])
+    pages = stats.get("pages", 0)
+    if deep and pages:
+        summary += f"\n\n🌐 Просканировано страниц: {pages}"
+    await callback.message.answer(summary)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "parse_url:single")
+async def parse_single(callback: CallbackQuery) -> None:
+    await _process_url_callback(callback, deep=False)
+
+
+@router.callback_query(F.data == "parse_url:deep")
+async def parse_deep(callback: CallbackQuery) -> None:
+    await _process_url_callback(callback, deep=True)
 
 
 @router.message(F.document)
