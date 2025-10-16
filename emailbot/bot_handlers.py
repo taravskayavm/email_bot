@@ -98,6 +98,7 @@ def _import_mass_sender() -> Optional[Callable]:
     return None
 
 import aiohttp
+import httpx
 import pandas as pd
 from telegram import (
     CallbackQuery,
@@ -134,7 +135,7 @@ def _build_parse_task_name(update: Update, mode: str) -> str:
     return f"parse:{base}:{mode}"
 
 # Простая регулярка для поиска ссылок в пользовательском тексте
-URL_REGEX = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+URL_REGEX = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
@@ -199,7 +200,7 @@ from emailbot.cooldown import (
 )
 from emailbot.web_extract import fetch_and_extract
 from pipelines.extract_emails import extract_from_url_async as deep_extract_async
-from emailbot.suppress_list import is_blocked as is_blocked_email
+from emailbot.suppress_list import is_blocked
 from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
@@ -343,7 +344,7 @@ async def async_extract_emails_from_url(
 
     await heartbeat()
     # Реализация использует пайплайн из emailbot.extraction через fetch_and_extract.
-    final_url, emails = await asyncio.to_thread(fetch_and_extract, url)
+    final_url, emails = await fetch_and_extract(url)
     await heartbeat()
     foreign = {e for e in emails if not is_allowed_tld(e)}
     logger.info(
@@ -369,10 +370,10 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = parts[1].strip()
     if not URL_REGEX.search(url):
-        await msg.reply_text("Не похоже на ссылку. Пример: /url https://example.com")
+        await msg.reply_text("Не похоже на URL. Пример: /url https://example.com/page")
         return
     if not settings.ENABLE_WEB:
-        await msg.reply_text("Веб-парсер отключен (ENABLE_WEB=0). Включи в .env.")
+        await msg.reply_text("Веб-парсер отключён (ENABLE_WEB=0).")
         return
 
     lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
@@ -387,25 +388,35 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             final_url, emails, _foreign, _, _ = await async_extract_emails_from_url(
                 url, context, chat_id=msg.chat_id
             )
+    except httpx.HTTPStatusError as exc:
+        await msg.reply_text(
+            "Сайт ответил статусом "
+            f"{exc.response.status_code} при загрузке страницы.\nПопробуй позже или другую ссылку."
+        )
+        return
+    except httpx.ConnectError:
+        await msg.reply_text(
+            "Не удалось подключиться к сайту. Проверь ссылку или доступность ресурса."
+        )
+        return
+    except httpx.ReadTimeout:
+        await msg.reply_text(
+            "Таймаут чтения страницы. Попробуй ещё раз или укажи другую ссылку."
+        )
+        return
     except Exception as exc:  # pragma: no cover - network/parse errors
-        await msg.reply_text(f"Ошибка при загрузке {url}: {exc.__class__.__name__}")
+        await msg.reply_text(f"Не удалось получить страницу: {type(exc).__name__}")
         return
 
-    unique = []
-    seen = set()
-    for addr in sorted(emails):
-        if addr in seen or is_blocked_email(addr):
-            continue
-        seen.add(addr)
-        unique.append(addr)
+    allowed = [e for e in sorted(emails) if not is_blocked(e)]
 
-    if not unique:
+    if not allowed:
         await msg.reply_text("Адреса не найдены.")
         return
 
     await _send_emails_as_file(
         msg,
-        unique,
+        allowed,
         source=final_url or url,
         title="Результат (1 страница)",
     )
@@ -508,7 +519,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if addr in seen:
             continue
         seen.add(addr)
-        if is_blocked_email(addr):
+        if is_blocked(addr):
             continue
         unique.append(addr)
 
@@ -4617,19 +4628,35 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle text messages that contain URLs and extract e-mail addresses."""
 
     message = update.message
-    if message is None:
+    if not message:
         return
     if context.user_data.get("awaiting_manual_email") or context.user_data.get(
         "awaiting_block_email"
     ) or context.user_data.get("text_corrections"):
         return
 
-    text = (message.text or "").strip()
+    raw_text = message.text or ""
+    text = raw_text.strip()
     if not text:
         return
 
-    raw_urls = [item.rstrip(".,;:!?)]}'\"") for item in URL_REGEX.findall(text)]
-    urls = [url for url in raw_urls if url]
+    urls: list[str] = []
+    entities = getattr(message, "entities", None)
+    if entities:
+        for ent in entities:
+            if ent.type == "url":
+                segment = raw_text[ent.offset : ent.offset + ent.length].strip()
+                if segment:
+                    urls.append(segment)
+            elif ent.type == "text_link" and getattr(ent, "url", None):
+                urls.append(ent.url)
+    if not urls:
+        urls = [
+            item.rstrip(".,;:!?)]}'\"")
+            for item in URL_REGEX.findall(text)
+            if item
+        ]
+    urls = [url for url in urls if url]
     if not urls:
         await message.reply_text("Не нашёл URL в сообщении 🤔")
         return
@@ -4659,7 +4686,7 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not settings.ENABLE_WEB:
         await message.reply_text(
-            "Веб-парсер отключен (ENABLE_WEB=0). Используй /url или /crawl после включения."
+            "Веб-парсер отключён (ENABLE_WEB=0). Включи в .env и перезапусти бота."
         )
         return
 
@@ -4673,6 +4700,18 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     status_msg = None
     pulse_task: asyncio.Task[None] | None = None
+
+    async def _reply_status_error(text: str) -> None:
+        if status_msg:
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+        else:
+            try:
+                await message.reply_text(text)
+            except Exception:
+                pass
     try:
         status_msg = await message.reply_text("⏳ Загружаю сайт, парсю адреса…")
         await heartbeat()
@@ -4705,19 +4744,25 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 pass
         raise
+    except httpx.HTTPStatusError as exc:
+        await _reply_status_error(
+            "Сайт ответил статусом "
+            f"{exc.response.status_code} при загрузке страницы.\nПопробуй позже или другую ссылку."
+        )
+        return
+    except httpx.ConnectError:
+        await _reply_status_error(
+            "Не удалось подключиться к сайту. Проверь ссылку или доступность ресурса."
+        )
+        return
+    except httpx.ReadTimeout:
+        await _reply_status_error(
+            "Таймаут чтения страницы. Попробуй ещё раз или укажи другую ссылку."
+        )
+        return
     except Exception as exc:  # pragma: no cover - defensive branch
         log_error(f"handle_url_text: {exc}")
-        error_text = f"❌ Ошибка загрузки сайта: {exc}"
-        if status_msg:
-            try:
-                await status_msg.edit_text(error_text)
-            except Exception:
-                pass
-        else:
-            try:
-                await message.reply_text(error_text)
-            except Exception:
-                pass
+        await _reply_status_error(f"Не удалось получить страницу: {type(exc).__name__}")
         return
     finally:
         if pulse_task:

@@ -12,5 +12,5 @@ email-validator==2.3.0
 idna==3.7
 httpx[http2]~=0.26.0
 beautifulsoup4==4.12.3
-charset-normalizer>=3.3
+charset-normalizer>=3.3.0
 dnspython>=2.6

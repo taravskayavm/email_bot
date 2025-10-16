@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Iterable, Optional, Set, Tuple
+from typing import Set, Tuple
 
 import httpx
 from bs4 import BeautifulSoup
+from charset_normalizer import from_bytes
 
 from . import settings
 from .sanitizer import ZWSP_CHARS, dedup_emails, normalize_email
@@ -34,50 +35,64 @@ def _clean(text: str) -> str:
     return cleaned.strip()
 
 
-def _decode_content(content: bytes, encoding: Optional[str]) -> str:
-    candidates: Iterable[Optional[str]] = (encoding, "cp1251", "utf-8")
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            return content.decode(candidate, errors="ignore")
-        except Exception:
-            continue
-    return content.decode("utf-8", errors="ignore")
-
-
-def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
+async def fetch_and_extract(
+    url: str, *, timeout: int | None = None, user_agent: str | None = None
+) -> Tuple[str, Set[str]]:
     """Fetch ``url`` and return ``(final_url, {emails})``."""
 
+    ua = (
+        user_agent
+        or getattr(settings, "CRAWL_USER_AGENT", None)
+        or getattr(settings, "WEB_USER_AGENT", None)
+        or "Mozilla/5.0 EmailBotCrawler/1.0"
+    )
+    timeout_value = timeout or int(getattr(settings, "CRAWL_GET_TIMEOUT", 20))
     headers = {
-        "User-Agent": settings.WEB_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru,en;q=0.9",
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "ru,en;q=0.8",
         "Cache-Control": "no-cache",
     }
-    final_url = url
+    http2_enabled = getattr(settings, "CRAWL_HTTP2", None)
+    if isinstance(http2_enabled, bool):
+        http2 = http2_enabled
+    else:
+        http2 = bool(int(http2_enabled)) if http2_enabled is not None else True
+
     candidates: list[str] = []
-    try:
-        with httpx.Client(
-            follow_redirects=True,
-            timeout=settings.WEB_FETCH_TIMEOUT,
-            headers=headers,
-            http2=getattr(settings, "WEB_HTTP2", True),
-        ) as client:
-            response = client.get(url)
-            final_url = str(response.url)
-            data = response.content
-    except Exception as exc:  # pragma: no cover - defensive
-        # не валим поток, просто логируем причину
-        logger.info("web extract failed for %s: %s", url, exc)
-        return final_url, set()
+    final_url = url
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout_value,
+        http2=http2,
+        headers=headers,
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        final_url = str(response.url)
+        content = response.content or b""
 
     max_bytes = getattr(settings, "WEB_MAX_BYTES", 0) or 0
-    if max_bytes and len(data) > max_bytes:
-        data = data[:max_bytes]
+    if max_bytes and len(content) > max_bytes:
+        content = content[:max_bytes]
 
-    text = _decode_content(data, getattr(response, "encoding", None))
-    soup = BeautifulSoup(text, "html.parser")
+    html: str | None = None
+    try:
+        detection = from_bytes(content).best()
+        if detection is not None:
+            html = str(detection)
+    except Exception:
+        pass
+
+    if html is None:
+        encoding = getattr(response, "encoding", None) or "utf-8"
+        try:
+            html = content.decode(encoding, errors="replace")
+        except Exception:
+            html = content.decode("cp1251", errors="replace")
+
+    soup = BeautifulSoup(html, "html.parser")
 
     for tag in soup.find_all("a"):
         href = tag.get("href")
