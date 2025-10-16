@@ -4457,6 +4457,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not u.lower().startswith(('http://','https://')):
             u = 'https://' + u
         urls.append(u)
+    if not urls:
+        await update.message.reply_text(
+            "❌ Не распознана ссылка. Пришлите полную URL, например: https://site.tld/path"
+        )
+        return
     if urls:
         lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
         if lock.locked():
@@ -4498,6 +4503,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     await heartbeat()
             if batch_id != context.chat_data.get("batch_id"):
                 return
+            per_url_counts = {res[0]: len(res[1]) for res in results}
+            empty_urls = [u for u, cnt in per_url_counts.items() if cnt == 0]
+            if per_url_counts and all(cnt == 0 for cnt in per_url_counts.values()):
+                explanation = (
+                    "😕 На присланной ссылке не удалось найти e-mail адреса.\n\n"
+                    "Что можно сделать:\n"
+                    "• На странице нет явных e-mail;\n"
+                    "• Контакты подгружаются скриптами (SPA/JS);\n"
+                    "• Сайт блокирует ботов/требует капчу;\n"
+                    "• Контакты спрятаны в PDF/изображениях.\n\n"
+                    "Попробуйте: сохранить страницу в PDF и прислать файл — парсер по"
+                    " файлам у нас уже работает."
+                )
+                if status_msg:
+                    try:
+                        await status_msg.edit_text("⛔️ Не удалось найти адреса")
+                    except Exception:
+                        pass
+                await update.message.reply_text(explanation)
+                return
+            if empty_urls:
+                miss_text = "\n".join(f"• {url}" for url in empty_urls)
+                await update.message.reply_text(
+                    "ℹ️ Не нашли адреса на ссылках:\n"
+                    f"{miss_text}\n"
+                    "Если уверены, что e-mail есть, пришлите страницу файлом (PDF/HTML)."
+                )
             allowed_all: Set[str] = set()
             foreign_all: Set[str] = set()
             repairs_all: List[tuple[str, str]] = []

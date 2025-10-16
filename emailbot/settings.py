@@ -82,11 +82,14 @@ COOLDOWN_SOURCES = _tuple_env("COOLDOWN_SOURCES", "csv,db")
 HISTORY_DB = os.getenv("HISTORY_DB", "var/send_history.db")
 SENT_LOG_PATH = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
-WEB_FETCH_TIMEOUT = _int_env("WEB_FETCH_TIMEOUT", 15)
-WEB_MAX_BYTES = _int_env("WEB_MAX_BYTES", 2_000_000)
+WEB_FETCH_TIMEOUT = _int_env("WEB_FETCH_TIMEOUT", 45)
+WEB_MAX_BYTES = _int_env("WEB_MAX_BYTES", 3_000_000)
 WEB_USER_AGENT = os.getenv(
-    "WEB_USER_AGENT", "emailbot/1.0 (cooldown+web/ebot)"
+    "WEB_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
+WEB_HTTP2 = os.getenv("WEB_HTTP2", "1") == "1"
 
 
 # Совместимые экспортируемые значения (чтобы прямые импорты продолжали работать)
@@ -109,13 +112,14 @@ except Exception:
 try:
     logger.info(
         "settings: HISTORY_DB=%s; SENT_LOG_PATH=%s; ENABLE_WEB=%s; "
-        "WEB_FETCH_TIMEOUT=%s; WEB_MAX_BYTES=%s; WEB_USER_AGENT=%s",
+        "WEB_FETCH_TIMEOUT=%s; WEB_MAX_BYTES=%s; WEB_USER_AGENT=%s; WEB_HTTP2=%s",
         HISTORY_DB,
         SENT_LOG_PATH,
         ENABLE_WEB,
         WEB_FETCH_TIMEOUT,
         WEB_MAX_BYTES,
         WEB_USER_AGENT,
+        WEB_HTTP2,
     )
 except Exception:
     pass

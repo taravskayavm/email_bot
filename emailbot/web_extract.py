@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Iterable, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import httpx
 from bs4 import BeautifulSoup
 
 from . import settings
-from .sanitizer import dedup_emails, normalize_email
+from .sanitizer import ZWSP_CHARS, dedup_emails, normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,8 @@ MAIL_RE = re.compile(
     r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+",
     re.UNICODE,
 )
-ZWSP_CHARS = ["\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\ufeff"]
 SOFT_HYPHEN = "\u00ad"
-_REMOVE_MAP = {ord(ch): None for ch in ZWSP_CHARS + [SOFT_HYPHEN]}
+_REMOVE_MAP = {ord(ch): None for ch in [*ZWSP_CHARS, SOFT_HYPHEN]}
 
 
 def _clean(text: str) -> str:
@@ -35,8 +34,8 @@ def _clean(text: str) -> str:
     return cleaned.strip()
 
 
-def _decode_content(content: bytes, encoding: str | None) -> str:
-    candidates: Iterable[str | None] = (encoding, "cp1251", "utf-8")
+def _decode_content(content: bytes, encoding: Optional[str]) -> str:
+    candidates: Iterable[Optional[str]] = (encoding, "cp1251", "utf-8")
     for candidate in candidates:
         if not candidate:
             continue
@@ -50,7 +49,12 @@ def _decode_content(content: bytes, encoding: str | None) -> str:
 def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
     """Fetch ``url`` and return ``(final_url, {emails})``."""
 
-    headers = {"User-Agent": settings.WEB_USER_AGENT}
+    headers = {
+        "User-Agent": settings.WEB_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru,en;q=0.9",
+        "Cache-Control": "no-cache",
+    }
     final_url = url
     candidates: list[str] = []
     try:
@@ -58,11 +62,13 @@ def fetch_and_extract(url: str) -> Tuple[str, Set[str]]:
             follow_redirects=True,
             timeout=settings.WEB_FETCH_TIMEOUT,
             headers=headers,
+            http2=getattr(settings, "WEB_HTTP2", True),
         ) as client:
             response = client.get(url)
             final_url = str(response.url)
             data = response.content
     except Exception as exc:  # pragma: no cover - defensive
+        # не валим поток, просто логируем причину
         logger.info("web extract failed for %s: %s", url, exc)
         return final_url, set()
 
