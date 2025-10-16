@@ -44,6 +44,7 @@ _LAST_URLS: dict[int, str] = {}
 
 _LIMITS_ATTR = "_page_limits"
 _AWAIT_ATTR = "_await_page_limits"
+_PENDING_DEEP_URLS_ATTR = "_pending_deep_urls"
 
 
 def _get_limit_store(bot: Any) -> dict[int, int]:
@@ -60,6 +61,14 @@ def _get_awaiting_users(bot: Any) -> set[int]:
         waiting = set()
         setattr(bot, _AWAIT_ATTR, waiting)
     return waiting
+
+
+def _get_pending_deep_urls(bot: Any) -> dict[int, str]:
+    urls = getattr(bot, _PENDING_DEEP_URLS_ATTR, None)
+    if not isinstance(urls, dict):
+        urls = {}
+        setattr(bot, _PENDING_DEEP_URLS_ATTR, urls)
+    return urls
 
 
 def _is_waiting_for_limit(message: types.Message) -> bool:
@@ -187,12 +196,20 @@ async def _process_url_callback(
     *,
     deep: bool,
     limit_pages: int | None = None,
+    url: str | None = None,
 ) -> None:
     user_id = callback.from_user.id if callback.from_user else None
     if user_id is None:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
-    url = _LAST_URLS.get(user_id)
+    pending_urls = _get_pending_deep_urls(callback.message.bot)
+    if url is None:
+        if deep:
+            url = pending_urls.pop(user_id, None)
+        if not url:
+            url = _LAST_URLS.get(user_id)
+    elif deep:
+        pending_urls.pop(user_id, None)
     if not url:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
@@ -240,6 +257,8 @@ async def parse_deep(callback: CallbackQuery) -> None:
     if not url:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
+    pending_urls = _get_pending_deep_urls(callback.message.bot)
+    pending_urls[user_id] = url
     keyboard = InlineKeyboardBuilder()
     for limit in (10, 25, 50, 100):
         keyboard.button(text=f"{limit} стр.", callback_data=f"parse_limit:{limit}")
@@ -263,7 +282,8 @@ async def parse_limit(callback: CallbackQuery) -> None:
     if user_id is None:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
-    url = _LAST_URLS.get(user_id)
+    pending_urls = _get_pending_deep_urls(callback.message.bot)
+    url = pending_urls.get(user_id) or _LAST_URLS.get(user_id)
     if not url:
         await callback.answer("Не удалось определить ссылку", show_alert=True)
         return
@@ -280,7 +300,12 @@ async def parse_limit(callback: CallbackQuery) -> None:
         return
     waiting.discard(user_id)
     limit = _normalize_page_limit(choice)
-    await _process_url_callback(callback, deep=True, limit_pages=limit)
+    await _process_url_callback(
+        callback,
+        deep=True,
+        limit_pages=limit,
+        url=pending_urls.get(user_id) or url,
+    )
 
 
 @router.message(F.text, F.func(_is_waiting_for_limit))
@@ -296,7 +321,8 @@ async def handle_limit_input(msg: types.Message) -> None:
         await msg.answer("Введите лимит страниц числом (1–500).")
         return
     waiting.discard(user_id)
-    url = _LAST_URLS.get(user_id)
+    pending_urls = _get_pending_deep_urls(msg.bot)
+    url = pending_urls.pop(user_id, None) or _LAST_URLS.get(user_id)
     if not url:
         await msg.answer("Не удалось определить ссылку для сканирования.")
         return
