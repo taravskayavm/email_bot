@@ -35,6 +35,39 @@ def _clean(text: str) -> str:
     return cleaned.strip()
 
 
+def extract_emails_from_html(html: str | None) -> Set[str]:
+    """Return a set of e-mail addresses found in ``html``."""
+
+    if not html:
+        return set()
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    candidates: list[str] = []
+
+    for tag in soup.find_all("a"):
+        href = tag.get("href")
+        if not href or not href.lower().startswith("mailto:"):
+            continue
+        candidate = href.split(":", 1)[1]
+        if "?" in candidate:
+            candidate = candidate.split("?", 1)[0]
+        candidate = _clean(candidate)
+        norm = normalize_email(candidate)
+        if norm:
+            candidates.append(norm)
+
+    text_block = _clean(soup.get_text(" "))
+    for match in MAIL_RE.finditer(text_block):
+        candidate = _clean(match.group(0))
+        norm = normalize_email(candidate)
+        if norm:
+            candidates.append(norm)
+
+    unique = dedup_emails(candidates)
+    return set(unique)
+
+
 async def fetch_and_extract(
     url: str, *, timeout: int | None = None, user_agent: str | None = None
 ) -> Tuple[str, Set[str]]:
@@ -60,7 +93,6 @@ async def fetch_and_extract(
     else:
         http2 = bool(int(http2_enabled)) if http2_enabled is not None else True
 
-    candidates: list[str] = []
     final_url = url
     async with httpx.AsyncClient(
         follow_redirects=True,
@@ -92,29 +124,7 @@ async def fetch_and_extract(
         except Exception:
             html = content.decode("cp1251", errors="replace")
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    for tag in soup.find_all("a"):
-        href = tag.get("href")
-        if not href or not href.lower().startswith("mailto:"):
-            continue
-        candidate = href.split(":", 1)[1]
-        if "?" in candidate:
-            candidate = candidate.split("?", 1)[0]
-        candidate = _clean(candidate)
-        norm = normalize_email(candidate)
-        if norm:
-            candidates.append(norm)
-
-    text_block = _clean(soup.get_text(" "))
-    for match in MAIL_RE.finditer(text_block):
-        candidate = _clean(match.group(0))
-        norm = normalize_email(candidate)
-        if norm:
-            candidates.append(norm)
-
-    unique = dedup_emails(candidates)
-    return final_url, set(unique)
+    return final_url, extract_emails_from_html(html)
 
 
-__all__ = ["MAIL_RE", "ZWSP_CHARS", "fetch_and_extract"]
+__all__ = ["MAIL_RE", "ZWSP_CHARS", "extract_emails_from_html", "fetch_and_extract"]

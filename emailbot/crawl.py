@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from crawler.web_crawler import Crawler
 
 from emailbot import settings
-from emailbot.web_extract import fetch_and_extract
+from emailbot.web_extract import extract_emails_from_html, fetch_and_extract
 
 
 async def crawl_emails(start_url: str, limit_pages: int | None = None) -> Tuple[str, Set[str]]:
@@ -32,7 +32,7 @@ async def crawl_emails(start_url: str, limit_pages: int | None = None) -> Tuple[
     processed = 1 if limit and limit > 0 else 0
 
     try:
-        async for url, _html in crawler.crawl():
+        async for url, html in crawler.crawl():
             if limit and processed >= limit:
                 break
             if not url:
@@ -42,10 +42,12 @@ async def crawl_emails(start_url: str, limit_pages: int | None = None) -> Tuple[
             if url == final_start:
                 continue
             try:
-                _, emails = await fetch_and_extract(url)
+                emails = extract_emails_from_html(html)
             except Exception:
                 continue
-            seen |= set(emails or [])
+            if not emails:
+                continue
+            seen |= emails
             if processed:
                 processed += 1
             if crawler.stopped:
