@@ -45,7 +45,7 @@ from emailbot.messaging_utils import (
     is_suppressed,
     suppress_add,
 )
-from emailbot.reporting import log_mass_filter_digest
+from emailbot.reporting import log_mass_filter_digest, count_blocked
 from emailbot.ui.messages import format_dispatch_result, format_error_details
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
@@ -220,11 +220,18 @@ async def queue_and_send(
         sent, skipped_cooldown, errors = 0, skipped_initial, len(ready_list)
 
     total_skipped = max(skipped_cooldown, skipped_initial)
+
+    try:
+        blocked_count = count_blocked(raw_emails)
+    except Exception:
+        blocked_count = 0
+
     queue_info = (
         "📨 Рассылка завершена.\n"
         f"📊 В очереди было: {planned}\n"
         f"✅ Отправлено: {sent}\n"
         f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
+        f"🚫 В блок-листе/недоступны: {blocked_count}\n"
         "ℹ️ Осталось без изменений: 0\n"
         f"❌ Ошибок при отправке: {errors}"
     )
