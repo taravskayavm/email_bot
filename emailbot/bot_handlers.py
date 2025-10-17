@@ -5907,6 +5907,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         total_blocked = len(blocked_foreign) + len(blocked_invalid)
         total_duplicates = len(duplicates)
         total = total_sent + total_skipped + total_blocked + total_duplicates
+        try:
+            stoplist_blocked = count_blocked(blocked_invalid)
+        except Exception:
+            stoplist_blocked = 0
+        blocked_line_value = (
+            stoplist_blocked if (stoplist_blocked or total_blocked == 0) else total_blocked
+        )
         report_text = format_dispatch_result(
             total,
             total_sent,
@@ -5915,11 +5922,24 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             total_duplicates,
             aborted=aborted,
         )
+        lines = []
+        for line in report_text.splitlines():
+            if line.startswith("🚫"):
+                if total_blocked == 0:
+                    continue
+                line = f"🚫 В стоп-листе/недоступны: {blocked_line_value}"
+            lines.append(line)
+        report_text = "\n".join(lines)
         if blocked_foreign:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        if blocked_invalid:
-            report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
-        report_text += f"\n🛑 Пропущено (стоп-лист): {len(blocked_invalid)}"
+        non_stoplist_invalid = max(len(blocked_invalid) - stoplist_blocked, 0)
+        if non_stoplist_invalid:
+            report_text += (
+                "\n🚫 Недоставляемые (не в стоп-листе): "
+                f"{non_stoplist_invalid}"
+            )
+        if stoplist_blocked:
+            report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"
 
         await query.message.reply_text(report_text)
         if error_details:

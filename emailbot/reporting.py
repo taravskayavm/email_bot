@@ -108,10 +108,10 @@ def build_mass_report_text(
 
     lines = [
         "✉️ Рассылка завершена.",
-        f"📦 К отправке обработано (с учётом правила «180 дней»): {total}",
+        f"📦 В очереди было: {total}",
         f"✅ Успешно отправлено: {sent_cnt}",
         f"⏳ Пропущены (по правилу «180 дней»): {skipped_cnt}",
-        f"🚫 В блок-листе/недоступны: {blocked_cnt}",
+        f"🚫 В стоп-листе/недоступны: {blocked_cnt}",
         f"🌍 Иностранные (отложены): {foreign_cnt}",
     ]
     if dup_cnt:
@@ -120,9 +120,18 @@ def build_mass_report_text(
 
 
 def count_blocked(emails: Iterable[str]) -> int:
-    """Return how many addresses are present in the block list."""
+    """
+    Подсчитывает кол-во адресов, попадающих в стоп-лист.
+    Нормализация и IDNA уже должны быть применены раньше по пайплайну.
+    """
 
-    return sum(1 for email in emails if is_blocked(email))
+    if not emails:
+        return 0
+    try:
+        return sum(1 for email in emails if email and is_blocked(email))
+    except Exception:
+        # Не валим отчёт из-за внезапной ошибки санитайзера/IDNA
+        return 0
 
 
 def _stats_path(path_override: str | None = None) -> Path:
