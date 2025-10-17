@@ -15,7 +15,11 @@ from aiogram.utils.markdown import hcode
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
 from emailbot.pipelines.ingest_url import ingest_url
+from emailbot.reporting import count_blocked
 from emailbot.settings import resolve_label
+from emailbot.web_extract import fetch_and_extract
+from emailbot.crawl import crawl_emails
+from emailbot import settings
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
 from emailbot.ui.messages import format_parse_summary
 
@@ -133,6 +137,83 @@ def _filter_stoplists(addresses: Iterable[str]) -> list[str]:
     return [email for email in addresses if not (is_blocked(email) or is_suppressed(email))]
 
 
+def _extract_url_arg(text: str) -> str:
+    parts = (text or "").strip().split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+@router.message(F.text.startswith("/url"))
+async def parse_single_cmd(message: types.Message) -> None:
+    """Парсинг одной страницы по команде /url <ссылка>."""
+
+    url = _extract_url_arg(message.text or "")
+    if not url:
+        await message.reply("Формат: /url <ссылка>")
+        return
+
+    try:
+        await message.reply(f"🔎 Парсю одну страницу:\n{hcode(url)}")
+        final_url, emails = await fetch_and_extract(url)
+    except Exception as exc:  # pragma: no cover - network errors vary
+        await message.reply(f"⚠️ Ошибка парсинга: {exc}")
+        return
+
+    emails = set(emails or [])
+    blocked_num = count_blocked(emails)
+    allowed = [email for email in emails if not is_blocked(email)]
+    preview = "\n".join(hcode(addr) for addr in sorted(allowed)[:10]) or "—"
+
+    await message.reply(
+        f"✅ Готово\n"
+        f"URL: {hcode(final_url)}\n"
+        f"Найдено адресов: {len(emails)}\n"
+        f"🚫 В блок-листе: {blocked_num}\n"
+        f"👉 К рассылке пойдут: {len(allowed)}\n\n"
+        f"Примеры:\n{preview}"
+    )
+
+
+@router.message(F.text.startswith("/crawl"))
+async def crawl_cmd(message: types.Message) -> None:
+    """Глубокий скан по домену: /crawl <ссылка> [limit]."""
+
+    tokens = (message.text or "").strip().split()
+    if len(tokens) < 2:
+        await message.reply("Формат: /crawl <ссылка> [limit]")
+        return
+
+    url = tokens[1].strip()
+    limit_override: int | None = None
+    if len(tokens) >= 3:
+        try:
+            limit_override = max(1, int(tokens[2]))
+        except Exception:
+            limit_override = None
+
+    limit = limit_override or settings.CRAWL_MAX_PAGES_PER_DOMAIN
+
+    try:
+        await message.reply(f"🕷️ Сканирую сайт (лимит {limit} стр.):\n{hcode(url)}")
+        final_url, emails = await crawl_emails(url, limit)
+    except Exception as exc:  # pragma: no cover - network errors vary
+        await message.reply(f"⚠️ Ошибка сканирования: {exc}")
+        return
+
+    emails = set(emails or [])
+    blocked_num = count_blocked(emails)
+    allowed = [email for email in emails if not is_blocked(email)]
+    preview = "\n".join(hcode(addr) for addr in sorted(allowed)[:10]) or "—"
+
+    await message.reply(
+        f"✅ Готово\n"
+        f"Старт: {hcode(final_url)}\n"
+        f"Найдено адресов: {len(emails)}\n"
+        f"🚫 В блок-листе: {blocked_num}\n"
+        f"👉 К рассылке пойдут: {len(allowed)}\n\n"
+        f"Примеры:\n{preview}"
+    )
+
+
 @router.message(F.text & F.text.startswith("/ingest"))
 async def handle_ingest(msg: types.Message) -> None:
     """Process `/ingest` command with newline separated addresses."""
@@ -157,7 +238,7 @@ async def handle_ingest(msg: types.Message) -> None:
 async def handle_url(msg: types.Message) -> None:
     if not msg.text:
         return
-    if msg.text.startswith("/ingest"):
+    if msg.text.startswith(("/ingest", "/url", "/crawl")):
         return
     match = URL_RE.search(msg.text)
     if not match:
