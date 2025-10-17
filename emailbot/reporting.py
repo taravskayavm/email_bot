@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Iterable, List, Optional, TYPE_CHECKING
 
 from emailbot.suppress_list import is_blocked
+from emailbot.messaging_utils import is_suppressed
+from emailbot.sanitizer import normalize_email
+from utils import rules
 from emailbot.utils.fs import append_jsonl_atomic
 
 if TYPE_CHECKING:  # pragma: no cover - typing hints only
@@ -127,8 +130,43 @@ def count_blocked(emails: Iterable[str]) -> int:
 
     if not emails:
         return 0
+
     try:
-        return sum(1 for email in emails if email and is_blocked(email))
+        blocked = 0
+        for raw_email in emails:
+            if not raw_email:
+                continue
+
+            email = str(raw_email).strip()
+            if not email:
+                continue
+
+            try:
+                if is_blocked(email):
+                    blocked += 1
+                    continue
+            except Exception:
+                # Fall back to other checks when the block list lookup fails
+                pass
+
+            try:
+                if is_suppressed(email):
+                    blocked += 1
+                    continue
+            except Exception:
+                # Suppression list lookups shouldn't abort the whole report
+                pass
+
+            norm = normalize_email(email) or email.lower()
+            try:
+                if norm and rules.is_blocked(norm):
+                    blocked += 1
+                    continue
+            except Exception:
+                # Rule evaluation errors shouldn't abort the whole report
+                pass
+
+        return blocked
     except Exception:
         # Не валим отчёт из-за внезапной ошибки санитайзера/IDNA
         return 0
