@@ -20,7 +20,7 @@ from emailbot.handlers.common import safe_answer
 
 from emailbot.notify import notify
 
-from bot.keyboards import build_templates_kb
+from bot.keyboards import build_templates_kb, send_flow_keyboard
 
 from emailbot import config as C
 from emailbot import mass_state, messaging
@@ -45,8 +45,12 @@ from emailbot.messaging_utils import (
     is_suppressed,
     suppress_add,
 )
-from emailbot.reporting import log_mass_filter_digest, count_blocked
-from emailbot.ui.messages import format_dispatch_result, format_error_details
+from emailbot.reporting import log_mass_filter_digest
+from emailbot.ui.messages import (
+    format_dispatch_result,
+    format_error_details,
+    render_dispatch_summary,
+)
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
 from emailbot.smtp_client import RobustSMTP
@@ -219,23 +223,17 @@ async def queue_and_send(
         logger.exception("queue_and_send: bulk send failed")
         sent, skipped_cooldown, errors = 0, skipped_initial, len(ready_list)
 
-    total_skipped = max(skipped_cooldown, skipped_initial)
-
-    try:
-        blocked_count = count_blocked(raw_emails)
-    except Exception:
-        blocked_count = 0
-
-    queue_info = (
-        "📨 Рассылка завершена.\n"
-        f"📊 В очереди было: {planned}\n"
-        f"✅ Отправлено: {sent}\n"
-        f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
-        f"🚫 В стоп-листе/недоступны: {blocked_count}\n"
-        "ℹ️ Осталось без изменений: 0\n"
-        f"❌ Ошибок при отправке: {errors}"
+    summary_text = render_dispatch_summary(
+        planned=planned,
+        sent=sent,
+        skipped_cooldown=skipped_cooldown,
+        skipped_initial=skipped_initial,
+        errors=errors,
+        audit_path=None,
+        planned_emails=ready_list,
+        raw_emails=raw_emails,
     )
-    await update.effective_chat.send_message(queue_info)
+    await update.effective_chat.send_message(summary_text)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -438,16 +436,27 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 reply_markup=None,
             )
             return
-        await send_preview_report(
-            update,
-            context,
-            group_code,
-            template_label,
-            ready,
-            blocked_foreign,
-            blocked_invalid,
-            skipped_recent,
-        )
+        try:
+            await send_preview_report(
+                update,
+                context,
+                group_code,
+                template_label,
+                ready,
+                blocked_foreign,
+                blocked_invalid,
+                skipped_recent,
+            )
+        except Exception as exc:
+            logger.exception("Failed to render manual dispatch preview: %s", exc)
+            try:
+                keyboard = send_flow_keyboard()
+            except Exception:
+                keyboard = None
+            await query.message.reply_text(
+                "Предпросмотр недоступен, но рассылка готова. Нажмите «🚀 Отправить».",
+                reply_markup=keyboard,
+            )
 
 
 async def send_all(
