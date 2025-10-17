@@ -4143,6 +4143,8 @@ async def _send_batch_with_sessions(
     recipients: list[str],
     template_path: str,
     group_code: str,
+    *,
+    ignore_cooldown: bool = False,
 ) -> None:
     """Send e-mails using the resilient session-aware pipeline."""
 
@@ -4178,8 +4180,10 @@ async def _send_batch_with_sessions(
             )
         )
 
+    attempt_total = len(to_send)
+
     await query.message.reply_text(
-        f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
+        f"✉️ Рассылка начата. Отправляем {attempt_total} писем..."
     )
 
     try:
@@ -4239,6 +4243,7 @@ async def _send_batch_with_sessions(
                             email_addr,
                             template_path,
                             subject=messaging.DEFAULT_SUBJECT,
+                            override_180d=ignore_cooldown,
                         )
                         if outcome == messaging.SendOutcome.SENT:
                             log_sent_email(
@@ -4395,7 +4400,13 @@ async def _send_batch_with_sessions(
             f"🛑 Остановлено. Отправлено писем: {sent_count}"
         )
     else:
-        await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
+        suffix = ""
+        if sent_count == 0 and attempt_total > 0:
+            suffix = (
+                "\nℹ️ Проверьте: адреса могли попасть под блок-лист, дубликаты,"
+                " ограничения 180 дней или произошла SMTP-ошибка."
+            )
+        await query.message.reply_text(f"✅ Отправлено писем: {sent_count}{suffix}")
     if error_details:
         summary = format_error_details(error_details)
         if summary:
@@ -4492,7 +4503,14 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    await _send_batch_with_sessions(query, context, ready, template_path, group_code)
+    await _send_batch_with_sessions(
+        query,
+        context,
+        ready,
+        template_path,
+        group_code,
+        ignore_cooldown=ignore_180d,
+    )
 
     context.chat_data["awaiting_manual_emails"] = False
     context.chat_data["manual_emails"] = []

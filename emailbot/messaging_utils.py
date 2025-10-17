@@ -85,6 +85,8 @@ def _append_jsonl(path: Path, row: dict) -> None:
 
 def prepare_recipients_for_send(
     recipients: Iterable[str],
+    *,
+    ignore_cooldown: bool = False,
 ) -> Tuple[List[str], Set[str], Dict[str, str]]:
     """Normalise raw recipient strings before attempting delivery."""
 
@@ -93,6 +95,15 @@ def prepare_recipients_for_send(
     remap: Dict[str, str] = {}
     origins: Dict[str, List[str]] = {}
     dropped_originals: Set[str] = set()
+
+    cooldown_checker = None
+    if not ignore_cooldown:
+        try:
+            from emailbot.services import should_skip_by_cooldown as _cooldown_checker
+
+            cooldown_checker = _cooldown_checker
+        except Exception:
+            cooldown_checker = None
 
     for raw in recipients:
         fixed = sanitize_for_send(raw)
@@ -107,6 +118,17 @@ def prepare_recipients_for_send(
             else:
                 dropped_originals.add(fixed)
             continue
+        if cooldown_checker is not None:
+            try:
+                skip, _ = cooldown_checker(fixed)
+            except Exception:
+                skip = False
+            if skip:
+                if raw:
+                    dropped_originals.add(raw)
+                else:
+                    dropped_originals.add(fixed)
+                continue
         if fixed != raw:
             remap[raw] = fixed
         cleaned.append(fixed)
