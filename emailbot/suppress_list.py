@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -8,7 +9,9 @@ from typing import Set
 
 from utils.paths import expand_path
 
-_DEFAULT_BLOCKLIST = "blocked_emails.txt"
+_DEFAULT_BLOCKLIST = os.path.join("~", ".emailbot", "blocked_emails.txt")
+
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency
     from .extraction_common import normalize_email as _normalize_email
@@ -19,8 +22,7 @@ except Exception:  # pragma: no cover - fallback when extraction module unavaila
 
 _LOCK = threading.RLock()
 # Path can be overridden via environment variable BLOCKED_LIST_PATH (preferred)
-# or legacy BLOCKED_EMAILS_PATH; default is ./blocked_emails.txt in the working
-# directory.
+# or legacy BLOCKED_EMAILS_PATH; default is ~/.emailbot/blocked_emails.txt.
 _ENV_BLOCKLIST = os.getenv("BLOCKED_LIST_PATH") or os.getenv("BLOCKED_EMAILS_PATH")
 _BLOCKED_PATH: Path = expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)
 _CACHE: Set[str] = set()
@@ -101,8 +103,8 @@ def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
         try:
             _BLOCKED_PATH.parent.mkdir(parents=True, exist_ok=True)
             _BLOCKED_PATH.touch(exist_ok=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Cannot initialise block-list file %s: %s", _BLOCKED_PATH, exc)
         _load_file()
 
 
@@ -133,7 +135,8 @@ def add_to_blocklist(email: str) -> bool:
             except Exception:
                 pass
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to persist %s to block-list %s: %s", norm, _BLOCKED_PATH, exc)
             return False
 
 
