@@ -41,6 +41,8 @@ async def crawl_emails(start_url: str, limit_pages: int | None = None) -> Tuple[
                 continue
             if url == final_start:
                 continue
+            if limit:
+                processed += 1
             try:
                 emails = extract_emails_from_html(html)
             except Exception:
@@ -48,8 +50,6 @@ async def crawl_emails(start_url: str, limit_pages: int | None = None) -> Tuple[
             if not emails:
                 continue
             seen |= emails
-            if processed:
-                processed += 1
             if crawler.stopped:
                 break
     finally:
