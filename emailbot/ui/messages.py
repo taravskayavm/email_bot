@@ -124,21 +124,24 @@ def render_dispatch_summary(
     audit_path: str | None,
     planned_emails: Iterable[str] | None = None,
     raw_emails: Iterable[str] | None = None,
+    blocked_count: int | None = None,
 ) -> str:
     total_skipped = max(skipped_cooldown, skipped_initial)
-    blocked_source = planned_emails or raw_emails or []
-    blocked_count = 0
-    try:
-        global count_blocked, _HAVE_COUNT_BLOCKED
-        if not _HAVE_COUNT_BLOCKED:
-            from emailbot.reporting import count_blocked as _count_blocked  # type: ignore
+    final_blocked = blocked_count
+    if final_blocked is None:
+        blocked_source = planned_emails or raw_emails or []
+        final_blocked = 0
+        try:
+            global count_blocked, _HAVE_COUNT_BLOCKED
+            if not _HAVE_COUNT_BLOCKED:
+                from emailbot.reporting import count_blocked as _count_blocked  # type: ignore
 
-            count_blocked = _count_blocked  # type: ignore[assignment]
-            _HAVE_COUNT_BLOCKED = True
-        if callable(count_blocked):
-            blocked_count = count_blocked(blocked_source)  # type: ignore[arg-type]
-    except Exception:
-        blocked_count = 0
+                count_blocked = _count_blocked  # type: ignore[assignment]
+                _HAVE_COUNT_BLOCKED = True
+            if callable(count_blocked):
+                final_blocked = count_blocked(blocked_source)  # type: ignore[arg-type]
+        except Exception:
+            final_blocked = 0
 
     audit_suffix = f"\n\n📄 Аудит: {audit_path}" if audit_path else ""
     return (
@@ -146,11 +149,13 @@ def render_dispatch_summary(
         f"📊 В очереди было: {planned}\n"
         f"✅ Отправлено: {sent}\n"
         f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
-        f"🚫 В стоп-листе/недоступны: {blocked_count}\n"
+        f"🚫 В стоп-листе/недоступны: {final_blocked}\n"
         "ℹ️ Осталось без изменений: 0\n"
         f"❌ Ошибок при отправке: {errors}"
         f"{audit_suffix}"
     )
+
+
 def format_error_details(details: Iterable[str]) -> str:
     """Return an empty string to avoid sending hidden error summaries."""
 

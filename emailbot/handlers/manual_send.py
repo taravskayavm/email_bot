@@ -45,7 +45,7 @@ from emailbot.messaging_utils import (
     is_suppressed,
     suppress_add,
 )
-from emailbot.reporting import log_mass_filter_digest
+from emailbot.reporting import count_blocked, log_mass_filter_digest
 from emailbot.ui.messages import (
     format_dispatch_result,
     format_error_details,
@@ -218,6 +218,10 @@ async def queue_and_send(
 
     skipped_initial = len(hits)
     try:
+        blocked_total = count_blocked(raw_emails or [])
+    except Exception:
+        blocked_total = 0
+    try:
         sent, skipped_cooldown, errors = await send_bulk(ready_list, template_key)
     except Exception:
         logger.exception("queue_and_send: bulk send failed")
@@ -232,6 +236,7 @@ async def queue_and_send(
         audit_path=None,
         planned_emails=ready_list,
         raw_emails=raw_emails,
+        blocked_count=blocked_total,
     )
     await update.effective_chat.send_message(summary_text)
 

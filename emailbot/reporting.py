@@ -120,17 +120,14 @@ def build_mass_report_text(
 
 
 def count_blocked(emails: Iterable[str]) -> int:
-    """
-    Подсчитывает кол-во адресов, попадающих в стоп-лист.
-    Нормализация и IDNA уже должны быть применены раньше по пайплайну.
-    """
+    """Подсчёт адресов, попадающих в стоп-лист."""
 
     if not emails:
         return 0
     try:
         return sum(1 for email in emails if email and is_blocked(email))
     except Exception:
-        # Не валим отчёт из-за внезапной ошибки санитайзера/IDNA
+        # Не валим отчёт из-за внезапной ошибки санитайзера/IDNA.
         return 0
 
 
