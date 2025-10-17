@@ -2162,11 +2162,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to upload files or URLs with e-mail addresses."""
 
+    context.chat_data["awaiting_manual_emails"] = False
+    context.user_data["awaiting_manual_email"] = False
     await update.message.reply_text(
         (
             "📥 Загрузите данные с e-mail-адресами для рассылки.\n\n"
             "Поддерживаемые форматы: PDF, Excel (.xlsx), Word (.docx), CSV, "
-            "ZIP (с этими файлами внутри), а также ссылки на сайты."
+            "ZIP (с этими файлами внутри), а также ссылки на сайты.\n\n"
+            "Можно сразу прислать ссылку — бот распознает её автоматически. "
+            "Если пришлёте обычный текст без адресов, я попрошу ввести их вручную."
         )
     )
 
@@ -3953,6 +3957,30 @@ async def route_text_message(
     message = update.message
     if message is None:
         return
+
+    raw_text = message.text or ""
+    text = raw_text.strip()
+
+    urls: list[str] = []
+    entities = getattr(message, "entities", None)
+    if entities:
+        for ent in entities:
+            if ent.type == "url":
+                segment = raw_text[ent.offset : ent.offset + ent.length].strip()
+                if segment:
+                    urls.append(segment)
+            elif ent.type == "text_link" and getattr(ent, "url", None):
+                urls.append(ent.url)
+    if not urls and text:
+        urls = [
+            item.rstrip(".,;:!?)]}'\"")
+            for item in URL_REGEX.findall(text)
+            if item
+        ]
+    if urls:
+        await handle_url_text(update, context, allow_manual=True)
+        raise ApplicationHandlerStop
+
     awaiting = context.chat_data.get("awaiting_manual_emails") or context.user_data.get(
         "awaiting_manual_email"
     )
@@ -3961,7 +3989,6 @@ async def route_text_message(
     if context.user_data.get("text_corrections"):
         return
 
-    text = (message.text or "").strip()
     if (
         not text
         or text in {"✉️ Ручная", "Ручная"}
@@ -4643,15 +4670,22 @@ async def _handle_bulk_edit_text(
     return False
 
 
-async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_url_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    allow_manual: bool = False,
+) -> None:
     """Handle text messages that contain URLs and extract e-mail addresses."""
 
     message = update.message
     if not message:
         return
-    if context.user_data.get("awaiting_manual_email") or context.user_data.get(
-        "awaiting_block_email"
-    ) or context.user_data.get("text_corrections"):
+    if context.user_data.get("awaiting_block_email") or context.user_data.get(
+        "text_corrections"
+    ):
+        return
+    if context.user_data.get("awaiting_manual_email") and not allow_manual:
         return
 
     raw_text = message.text or ""
@@ -4681,6 +4715,8 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     url = urls[0]
+    context.chat_data["awaiting_manual_emails"] = False
+    context.user_data["awaiting_manual_email"] = False
     lock = context.chat_data.setdefault("extract_lock", asyncio.Lock())
     if lock.locked():
         await message.reply_text("⏳ Уже идёт анализ этого URL")
@@ -4866,7 +4902,13 @@ async def handle_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process text messages for uploads, blocking or manual lists."""
 
-    text = update.message.text or ""
+    message = update.message
+    if not message:
+        return
+
+    raw_text = message.text or ""
+    text = raw_text
+
     if await _handle_bulk_edit_text(update, context, text):
         return
     if context.user_data.get("awaiting_block_email"):
@@ -4914,7 +4956,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")
         return
-    if URL_REGEX.search(text or ""):
+    entities = getattr(message, "entities", None)
+    has_url = False
+    if entities:
+        for ent in entities:
+            if ent.type == "url":
+                segment = raw_text[ent.offset : ent.offset + ent.length].strip()
+                if segment:
+                    has_url = True
+                    break
+            elif ent.type == "text_link" and getattr(ent, "url", None):
+                has_url = True
+                break
+    if not has_url and URL_REGEX.search(raw_text or ""):
+        has_url = True
+    if has_url:
         await handle_url_text(update, context)
         return
     await update.message.reply_text(
