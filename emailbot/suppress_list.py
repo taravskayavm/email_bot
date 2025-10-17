@@ -8,6 +8,8 @@ from typing import Set
 
 from utils.paths import expand_path
 
+_DEFAULT_BLOCKLIST = "blocked_emails.txt"
+
 try:  # pragma: no cover - optional dependency
     from .extraction_common import normalize_email as _normalize_email
 except Exception:  # pragma: no cover - fallback when extraction module unavailable
@@ -16,7 +18,11 @@ except Exception:  # pragma: no cover - fallback when extraction module unavaila
 
 
 _LOCK = threading.RLock()
-_BLOCKED_PATH: Path = expand_path(os.getenv("BLOCKED_EMAILS_PATH", "blocked_emails.txt"))
+# Path can be overridden via environment variable BLOCKED_LIST_PATH (preferred)
+# or legacy BLOCKED_EMAILS_PATH; default is ./blocked_emails.txt in the working
+# directory.
+_ENV_BLOCKLIST = os.getenv("BLOCKED_LIST_PATH") or os.getenv("BLOCKED_EMAILS_PATH")
+_BLOCKED_PATH: Path = expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
 
@@ -92,7 +98,43 @@ def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
     with _LOCK:
         if path is not None:
             _BLOCKED_PATH = expand_path(path)
+        try:
+            _BLOCKED_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _BLOCKED_PATH.touch(exist_ok=True)
+        except Exception:
+            pass
         _load_file()
+
+
+def add_to_blocklist(email: str) -> bool:
+    """Add a normalised e-mail to the block-list file.
+
+    Returns ``True`` if the address is successfully persisted or already present,
+    ``False`` if the operation failed.
+    """
+
+    norm = _normalize(email)
+    if not norm:
+        return False
+
+    with _LOCK:
+        global _MTIME
+        refresh_if_changed()
+        if norm in _CACHE:
+            return True
+
+        try:
+            _BLOCKED_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _BLOCKED_PATH.open("a", encoding="utf-8") as handler:
+                handler.write(norm + "\n")
+            _CACHE.add(norm)
+            try:
+                _MTIME = _BLOCKED_PATH.stat().st_mtime
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
 
 
 def is_blocked(email: str) -> bool:
@@ -131,4 +173,5 @@ __all__ = [
     "get_blocked_count",
     "get_blocked_set",
     "invalidate_cache",
+    "add_to_blocklist",
 ]

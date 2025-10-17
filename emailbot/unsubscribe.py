@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from .messaging import verify_unsubscribe_token, mark_unsubscribed
+from .suppress_list import init_blocked, add_to_blocklist
 
 
 async def handle(request: web.Request) -> web.Response:
@@ -14,10 +15,18 @@ async def handle(request: web.Request) -> web.Response:
         token = data.get("token", "")
         if verify_unsubscribe_token(email, token):
             mark_unsubscribed(email, token)
-            return web.Response(
-                text="Вы отписаны. Вопросы: med@lanbook.ru",
-                content_type="text/html",
-            )
+            try:
+                init_blocked()
+                add_to_blocklist(email)
+            except Exception:
+                pass
+            html = """<html><head><meta charset=\"utf-8\"/></head><body>
+            <h3>Вы отписаны от рассылки</h3>
+            <p>Спасибо! Мы больше не будем присылать письма на ваш адрес.</p>
+            <p>Если вы передумаете — просто напишите нам.</p>
+            <p>Вопросы: <a href='mailto:med@lanbook.ru'>med@lanbook.ru</a></p>
+            </body></html>"""
+            return web.Response(text=html, content_type="text/html")
         return web.Response(
             text="Если хотите отписаться — ответьте Unsubscribe или свяжитесь по med@lanbook.ru",
             content_type="text/html",
