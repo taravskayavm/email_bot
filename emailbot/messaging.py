@@ -457,9 +457,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 # Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
-# Путь к блок-листу: по умолчанию используем файл из пакета, но разрешаем переопределить через ENV.
-# Это избавляет от ситуации, когда рантайм читает/пишет «другой» blocked_emails.txt.
-_BL_DEFAULT = str(SCRIPT_DIR / "blocked_emails.txt")
+# Путь к блок-листу: по умолчанию используем файл в профиле пользователя,
+# но разрешаем переопределить через переменные окружения.
+_BL_DEFAULT = os.path.join("~", ".emailbot", "blocked_emails.txt")
 _blocked_env = (
     os.getenv("BLOCKED_LIST_PATH")
     or os.getenv("BLOCKED_EMAILS_PATH")
