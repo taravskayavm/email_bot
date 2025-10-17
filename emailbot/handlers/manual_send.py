@@ -218,7 +218,7 @@ async def queue_and_send(
 
     skipped_initial = len(hits)
     try:
-        blocked_total = count_blocked(raw_emails or [])
+        blocked_total = count_blocked(ready_list or [])
     except Exception:
         blocked_total = 0
     try:
