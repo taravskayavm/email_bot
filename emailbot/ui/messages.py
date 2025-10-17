@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping
 
+# ВАЖНО: не делаем жёсткий импорт на уровне модуля — возможны циклические импорты
+_HAVE_COUNT_BLOCKED = True
+try:
+    from emailbot.reporting import count_blocked  # type: ignore
+except Exception:  # pragma: no cover - используем отложенный импорт
+    count_blocked = None  # type: ignore[assignment]
+    _HAVE_COUNT_BLOCKED = False
+
 # Старый «приятный» стиль сообщений под Telegram (эмодзи + плотные подпункты).
 # Никакого HTML – чистый текст/Markdown-safe (aiogram parse_mode="HTML"/"MarkdownV2" на твой выбор).
 
@@ -104,6 +112,45 @@ def format_dispatch_result(
     if aborted:
         lines.append("🛑 Процесс был остановлен по запросу.")
     return "\n".join(lines)
+
+
+def render_dispatch_summary(
+    *,
+    planned: int,
+    sent: int,
+    skipped_cooldown: int,
+    skipped_initial: int,
+    errors: int,
+    audit_path: str | None,
+    planned_emails: Iterable[str] | None = None,
+    raw_emails: Iterable[str] | None = None,
+) -> str:
+    total_skipped = max(skipped_cooldown, skipped_initial)
+    blocked_source = planned_emails or raw_emails or []
+    blocked_count = 0
+    try:
+        global count_blocked, _HAVE_COUNT_BLOCKED
+        if not _HAVE_COUNT_BLOCKED:
+            from emailbot.reporting import count_blocked as _count_blocked  # type: ignore
+
+            count_blocked = _count_blocked  # type: ignore[assignment]
+            _HAVE_COUNT_BLOCKED = True
+        if callable(count_blocked):
+            blocked_count = count_blocked(blocked_source)  # type: ignore[arg-type]
+    except Exception:
+        blocked_count = 0
+
+    audit_suffix = f"\n\n📄 Аудит: {audit_path}" if audit_path else ""
+    return (
+        "📨 Рассылка завершена.\n"
+        f"📊 В очереди было: {planned}\n"
+        f"✅ Отправлено: {sent}\n"
+        f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
+        f"🚫 В стоп-листе/недоступны: {blocked_count}\n"
+        "ℹ️ Осталось без изменений: 0\n"
+        f"❌ Ошибок при отправке: {errors}"
+        f"{audit_suffix}"
+    )
 def format_error_details(details: Iterable[str]) -> str:
     """Return an empty string to avoid sending hidden error summaries."""
 
