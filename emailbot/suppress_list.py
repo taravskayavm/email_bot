@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import threading
 from pathlib import Path
 from typing import Iterable, Set
@@ -10,6 +11,7 @@ from typing import Iterable, Set
 from utils.paths import expand_path
 
 _DEFAULT_BLOCKLIST = Path("~/.emailbot/blocked_emails.txt")
+_LEGACY_BLOCKLIST = Path("var/blocked_emails.txt")
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +30,16 @@ _ENV_BLOCKLIST = (
     or os.getenv("BLOCKED_LIST_PATH")
     or os.getenv("BLOCKED_EMAILS_PATH")
 )
-_BLOCKED_PATH: Path = expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)
+if _ENV_BLOCKLIST:
+    _BLOCKED_PATH: Path = expand_path(_ENV_BLOCKLIST)
+    _ALLOW_LEGACY_FALLBACK = False
+else:
+    _BLOCKED_PATH = expand_path(_DEFAULT_BLOCKLIST)
+    _ALLOW_LEGACY_FALLBACK = True
+_LEGACY_BLOCKED_PATH = expand_path(_LEGACY_BLOCKLIST)
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
+_SOURCE_PATH: Path | None = None
 
 _LEADING_DOTS_RE = re.compile(r"^\.+")
 _LEADING_DIGITS_RE = re.compile(r"^\d{1,2}(?=[A-Za-z])")
@@ -48,13 +57,49 @@ def _normalize(email: str) -> str:
     return value
 
 
-def _load_file() -> None:
-    global _CACHE, _MTIME
+def _select_blocklist_source() -> Path | None:
+    """Return path to read the block-list from, migrating legacy file if needed."""
 
-    path = _BLOCKED_PATH
-    if not path.exists():
+    try:
+        _BLOCKED_PATH.stat()
+        return _BLOCKED_PATH
+    except FileNotFoundError:
+        pass
+
+    if not _ALLOW_LEGACY_FALLBACK:
+        return None
+
+    legacy = _LEGACY_BLOCKED_PATH
+    if legacy == _BLOCKED_PATH:
+        return None
+
+    try:
+        legacy.stat()
+    except FileNotFoundError:
+        return None
+
+    try:
+        _ensure_dir(_BLOCKED_PATH)
+        shutil.copy2(legacy, _BLOCKED_PATH)
+        return _BLOCKED_PATH
+    except Exception as exc:
+        logger.warning(
+            "Cannot migrate legacy block-list from %s to %s: %s",
+            legacy,
+            _BLOCKED_PATH,
+            exc,
+        )
+        return legacy
+
+
+def _load_file() -> None:
+    global _CACHE, _MTIME, _SOURCE_PATH
+
+    path = _select_blocklist_source()
+    if path is None:
         _CACHE = set()
         _MTIME = None
+        _SOURCE_PATH = None
         return
 
     try:
@@ -62,6 +107,7 @@ def _load_file() -> None:
     except FileNotFoundError:
         _CACHE = set()
         _MTIME = None
+        _SOURCE_PATH = None
         return
 
     try:
@@ -69,6 +115,7 @@ def _load_file() -> None:
     except Exception:
         _CACHE = set()
         _MTIME = stat.st_mtime
+        _SOURCE_PATH = path
         return
 
     items: Set[str] = set()
@@ -81,6 +128,7 @@ def _load_file() -> None:
             items.add(norm)
     _CACHE = items
     _MTIME = stat.st_mtime
+    _SOURCE_PATH = path
 
 
 def _ensure_dir(path: Path) -> None:
@@ -163,28 +211,52 @@ def refresh_if_changed() -> None:
     """Reload the stop-list if the backing file has changed."""
 
     with _LOCK:
+        candidate: Path | None = None
+        mtime: float | None = None
+
         try:
             stat = _BLOCKED_PATH.stat()
-            mtime = stat.st_mtime
         except FileNotFoundError:
-            mtime = None
-        if mtime != _MTIME:
+            if _ALLOW_LEGACY_FALLBACK:
+                try:
+                    stat = _LEGACY_BLOCKED_PATH.stat()
+                    candidate = _LEGACY_BLOCKED_PATH
+                    mtime = stat.st_mtime
+                except FileNotFoundError:
+                    candidate = None
+                    mtime = None
+            else:
+                candidate = None
+                mtime = None
+        else:
+            candidate = _BLOCKED_PATH
+            mtime = stat.st_mtime
+
+        if candidate != _SOURCE_PATH or mtime != _MTIME:
             _load_file()
 
 
 def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
     """Initialise the stop-list cache explicitly (e.g. during startup)."""
 
-    global _BLOCKED_PATH
+    global _BLOCKED_PATH, _ALLOW_LEGACY_FALLBACK, _SOURCE_PATH
 
     with _LOCK:
         if path is not None:
             _BLOCKED_PATH = expand_path(path)
+            _ALLOW_LEGACY_FALLBACK = False
+        elif _ENV_BLOCKLIST:
+            _BLOCKED_PATH = expand_path(_ENV_BLOCKLIST)
+            _ALLOW_LEGACY_FALLBACK = False
+        else:
+            _BLOCKED_PATH = expand_path(_DEFAULT_BLOCKLIST)
+            _ALLOW_LEGACY_FALLBACK = True
         try:
             _ensure_dir(_BLOCKED_PATH)
             _BLOCKED_PATH.touch(exist_ok=True)
         except Exception as exc:
             logger.warning("Cannot initialise block-list file %s: %s", _BLOCKED_PATH, exc)
+        _SOURCE_PATH = None
         _load_file()
 
 
