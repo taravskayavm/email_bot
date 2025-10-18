@@ -459,24 +459,27 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 # Путь к блок-листу: по умолчанию используем файл в профиле пользователя,
 # но разрешаем переопределить через переменные окружения.
-_BL_DEFAULT = os.path.join("~", ".emailbot", "blocked_emails.txt")
+_BL_DEFAULT = Path("var/blocked_emails.txt")
 _blocked_env = (
-    os.getenv("BLOCKED_LIST_PATH")
+    os.getenv("BLOCKED_EMAILS_FILE")
+    or os.getenv("BLOCKED_LIST_PATH")
     or os.getenv("BLOCKED_EMAILS_PATH")
 )
 BLOCKED_FILE = str(expand_path(_blocked_env or _BL_DEFAULT))
 try:
     _p = Path(BLOCKED_FILE)
+    if os.getenv("BLOCKED_EMAILS_FILE"):
+        _env_name = "BLOCKED_EMAILS_FILE"
+    elif os.getenv("BLOCKED_LIST_PATH"):
+        _env_name = "BLOCKED_LIST_PATH"
+    elif os.getenv("BLOCKED_EMAILS_PATH"):
+        _env_name = "BLOCKED_EMAILS_PATH"
+    else:
+        _env_name = "default"
     logger.info(
         "Stoplist path resolved: %s (env=%s)",
         _p,
-        "BLOCKED_LIST_PATH"
-        if os.getenv("BLOCKED_LIST_PATH")
-        else (
-            "BLOCKED_EMAILS_PATH"
-            if os.getenv("BLOCKED_EMAILS_PATH")
-            else "default"
-        ),
+        _env_name,
     )
 except Exception:
     pass
@@ -1349,23 +1352,18 @@ def add_blocked_email(email_str: str) -> bool:
     email_norm = _canonical_blocked(email_str)
     if not email_norm or "@" not in email_norm:
         return False
-    existing = get_blocked_emails()
-    if email_norm in existing:
-        return False
-    with open(BLOCKED_FILE, "a", encoding="utf-8") as f:
-        f.write(email_norm + "\n")
-    suppress_list.refresh_if_changed()
-    return True
+    suppress_list.init_blocked(BLOCKED_FILE)
+    added = suppress_list.add_blocked([email_norm])
+    return added > 0
 
 
 def dedupe_blocked_file():
-    if not os.path.exists(BLOCKED_FILE):
+    suppress_list.init_blocked(BLOCKED_FILE)
+    keep = suppress_list.load_blocked_set()
+    if not keep:
+        suppress_list.save_blocked_set([])
         return
-    with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        keep = {_canonical_blocked(line) for line in f if "@" in line}
-    with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(keep)) + "\n")
-    suppress_list.refresh_if_changed()
+    suppress_list.save_blocked_set(keep)
 
 
 def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
