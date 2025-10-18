@@ -44,7 +44,7 @@ def _render_stats(
     txt = f"Найдено адресов: {found}"
     txt += f"\n📦 К отправке: {len(ok)}"
     if blocked_hits:
-        txt += f"\n🚫 В блок-листе: {blocked_hits}"
+        txt += f"\n🚫 В стоп-листе: {blocked_hits}"
     if rejects:
         txt += "\nПричины отбраковки:" + "".join(f"\n • {key} — {val}" for key, val in rejects.items())
     if warn:

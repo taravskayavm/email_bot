@@ -95,7 +95,7 @@ def test_build_mass_report_text_counts_only():
     assert "📦 В очереди было: 5" in text
     assert "✅ Успешно отправлено: 2" in text
     assert "⏳ Пропущены (по правилу «180 дней»): 1" in text
-    assert "🚫 В стоп-листе/недоступны: 1" in text
+    assert "🚫 В стоп-листе: 1" in text
     assert "🌍 Иностранные (отложены): 1" in text
 
 
@@ -105,5 +105,5 @@ def test_render_summary_always_shows_blocked_line():
     summary = render_summary(stats)
 
     assert "📦 К отправке: 3" in summary
-    assert "🚫 Из блок-листа: 0" in summary
+    assert "🚫 Из стоп-листа: 0" in summary
 

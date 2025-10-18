@@ -47,5 +47,5 @@ async def test_preview_after_filters(monkeypatch, tmp_path):
     update = DummyUpdate(callback_data="tpl:sport", chat_id=1)
     await bh.select_group(update, ctx)
 
-    assert any("блок-листах" in text for text in update.callback_query.message.replies)
+    assert any("стоп-листах" in text for text in update.callback_query.message.replies)
     assert update.callback_query.message.reply_markups[-1] is None
