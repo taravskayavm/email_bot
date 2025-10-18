@@ -376,11 +376,37 @@ def extract_emails_from_zip(
         if v:
             stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
-    emails, extra = filter_invalid_tld([h.email for h in hits])
+    emails, extra = filter_invalid_tld([h.email for h in hits], stats=stats)
     stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
-    if extra.get("invalid_tld"):
-        allowed = set(emails)
-        hits = [h for h in hits if h.email in allowed]
+    replacements = extra.get("replacements") or {}
+    if replacements:
+        updated_hits: list[EmailHit] = []
+        for h in hits:
+            new_email = replacements.get(h.email)
+            if new_email:
+                updated_hits.append(
+                    EmailHit(
+                        email=new_email,
+                        source_ref=h.source_ref,
+                        origin=h.origin,
+                        pre=h.pre,
+                        post=h.post,
+                        meta=h.meta,
+                    )
+                )
+            else:
+                updated_hits.append(h)
+        hits = _dedupe(updated_hits)
+    samples = extra.get("invalid_tld_examples") or []
+    if samples:
+        stored = stats.setdefault("invalid_tld_examples", [])
+        for sample in samples:
+            if sample not in stored:
+                stored.append(sample)
+            if len(stored) >= 3:
+                break
+    allowed = set(emails)
+    hits = [h for h in hits if h.email in allowed]
     stats["unique_after_cleanup"] = len(hits)
     suspicious = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
     if suspicious:

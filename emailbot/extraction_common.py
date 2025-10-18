@@ -13,6 +13,7 @@ from typing import Any, Iterable
 import idna
 
 from utils.email_deobfuscate import deobfuscate_text
+from emailbot.sanitizer import _join_linebreaks_around_dot, heal_ocr_email_fragments
 from .tld_registry import tld_of, is_known_tld
 from .footnotes import remove_footnotes_safe
 from .text_normalize import normalize_text_for_emails
@@ -345,7 +346,64 @@ def is_valid_domain(domain: str) -> bool:
     return tld is not None and is_known_tld(tld)
 
 
-def filter_invalid_tld(emails: list[str]) -> tuple[list[str], dict]:
+_OCR_ALLOWED_TLDS = {"ru", "com", "org", "net", "edu", "ac", "io"}
+
+
+def _levenshtein_is_one(a: str, b: str) -> bool:
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diff = sum(ch1 != ch2 for ch1, ch2 in zip(a, b))
+        return diff == 1
+    # Ensure ``a`` is the shorter string
+    if la > lb:
+        a, b = b, a
+        la, lb = lb, la
+    i = j = 0
+    mismatch = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        mismatch += 1
+        if mismatch > 1:
+            return False
+        j += 1
+    return True
+
+
+def _maybe_fix_ocr_email(email: str) -> tuple[str, bool]:
+    candidate = _join_linebreaks_around_dot(heal_ocr_email_fragments(email))
+    changed = candidate != email
+    if "@" not in candidate:
+        return candidate, changed
+    local, domain = candidate.split("@", 1)
+    domain = domain.strip()
+    if not domain or "." not in domain:
+        return candidate, changed
+    stem, tld = domain.rsplit(".", 1)
+    if not stem or not tld:
+        return candidate, changed
+    tld_lower = tld.lower()
+    if is_known_tld(tld_lower):
+        if tld_lower != tld:
+            candidate = f"{local}@{stem}.{tld_lower}"
+            changed = True
+        return candidate, changed
+    for allowed in _OCR_ALLOWED_TLDS:
+        if _levenshtein_is_one(tld_lower, allowed):
+            candidate = f"{local}@{stem}.{allowed}"
+            return candidate, True
+    return candidate, changed
+
+
+def filter_invalid_tld(
+    emails: list[str], *, stats: dict[str, Any] | None = None
+) -> tuple[list[str], dict]:
     """Filter out e-mails with unknown or malformed TLDs.
 
     Returns a tuple ``(valid, stats)`` where ``stats['invalid_tld']`` is the
@@ -354,16 +412,34 @@ def filter_invalid_tld(emails: list[str]) -> tuple[list[str], dict]:
 
     valid: list[str] = []
     dropped = 0
+    replacements: dict[str, str] = {}
+    samples: list[str] = []
+    ocr_hint = bool(stats and any(stats.get(key) for key in ("ocr_pages", "needs_ocr")))
     for e in emails:
-        if "@" not in e:
+        candidate = e
+        changed = False
+        if ocr_hint:
+            candidate, changed = _maybe_fix_ocr_email(candidate)
+        if "@" not in candidate:
             dropped += 1
+            if len(samples) < 3:
+                samples.append(candidate)
             continue
-        domain = e.split("@", 1)[1]
+        domain = candidate.split("@", 1)[1]
         if is_valid_domain(domain):
-            valid.append(e)
+            valid.append(candidate)
+            if changed and candidate != e:
+                replacements[e] = candidate
         else:
             dropped += 1
-    return valid, {"invalid_tld": dropped}
+            if len(samples) < 3:
+                samples.append(candidate)
+    extra: dict[str, Any] = {"invalid_tld": dropped}
+    if replacements:
+        extra["replacements"] = replacements
+    if samples:
+        extra["invalid_tld_examples"] = samples
+    return valid, extra
 
 
 def score_candidate(features: dict) -> int:

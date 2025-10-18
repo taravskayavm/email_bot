@@ -553,7 +553,19 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
     deduped = list(dict.fromkeys(hits))
     if stats is not None:
         stats["total_found"] = stats.get("total_found", 0) + len(deduped)
-    return deduped
+    if not deduped:
+        return []
+    filtered, _ = filter_invalid_tld(deduped, stats=stats)
+    if stats is not None and filtered:
+        try:
+            from emailbot.messaging_utils import classify_tld
+        except Exception:
+            classify_tld = None
+        if classify_tld is not None:
+            foreign = sum(1 for email in filtered if classify_tld(email) == "foreign")
+            if foreign:
+                stats["foreign_domains"] = stats.get("foreign_domains", 0) + foreign
+    return filtered
 
 
 # --- MANUAL mode (for chat input) ---------------------------------
@@ -681,12 +693,38 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
         if v:
             stats[k] = stats.get(k, 0) + v
     hits = _dedupe(fixed_hits)
-    emails, extra = filter_invalid_tld([h.email for h in hits])
+    emails, extra = filter_invalid_tld([h.email for h in hits], stats=stats)
     stats["invalid_tld"] = stats.get("invalid_tld", 0) + extra.get("invalid_tld", 0)
     logger.debug("filtered invalid TLD: %s", stats.get("invalid_tld"))
-    if extra.get("invalid_tld"):
-        allowed = set(emails)
-        hits = [h for h in hits if h.email in allowed]
+    replacements = extra.get("replacements") or {}
+    if replacements:
+        updated: list[EmailHit] = []
+        for h in hits:
+            new_email = replacements.get(h.email)
+            if new_email:
+                updated.append(
+                    EmailHit(
+                        email=new_email,
+                        source_ref=h.source_ref,
+                        origin=h.origin,
+                        pre=h.pre,
+                        post=h.post,
+                        meta=h.meta,
+                    )
+                )
+            else:
+                updated.append(h)
+        hits = _dedupe(updated)
+    samples = extra.get("invalid_tld_examples") or []
+    if samples:
+        stored = stats.setdefault("invalid_tld_examples", [])
+        for sample in samples:
+            if sample not in stored:
+                stored.append(sample)
+            if len(stored) >= 3:
+                break
+    allowed = set(emails)
+    hits = [h for h in hits if h.email in allowed]
     stats["unique_after_cleanup"] = len(hits)
     suspicious = sum(1 for h in hits if h.email.split("@", 1)[0].isdigit())
     if suspicious:

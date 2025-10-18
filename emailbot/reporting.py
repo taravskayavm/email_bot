@@ -21,6 +21,7 @@ def _now_ts() -> str:
 
 
 _DIGEST_LOGGER = logging.getLogger("emailbot.digest")
+_DEBUG_INVALID_TLD_SUMMARY = os.getenv("DEBUG_INVALID_TLD_SUMMARY", "0") == "1"
 
 
 def log_extract_digest(stats: dict) -> None:
@@ -80,7 +81,13 @@ def render_summary(stats: dict) -> str:
 
     invalid_tld = stats.get("invalid_tld")
     if invalid_tld:
-        lines.append(f"❗ Некорректные домены: {invalid_tld}")
+        line = f"❗ Некорректные домены: {invalid_tld}"
+        if _DEBUG_INVALID_TLD_SUMMARY:
+            examples = stats.get("invalid_tld_examples") or []
+            if examples:
+                sample = ", ".join(list(dict.fromkeys(examples))[:3])
+                line = f"{line} ({sample})"
+        lines.append(line)
 
     return "\n".join(lines)
 

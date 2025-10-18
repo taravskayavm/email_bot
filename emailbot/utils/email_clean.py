@@ -6,6 +6,8 @@ import re
 import unicodedata
 from typing import Optional, Tuple
 
+from emailbot.sanitizer import _join_linebreaks_around_dot, heal_ocr_email_fragments
+
 __all__ = [
     "EmailValidationError",
     "clean_and_normalize_email",
@@ -108,6 +110,8 @@ def clean_and_normalize_email(raw: str) -> Tuple[Optional[str], Optional[str]]:
     """Return canonical e-mail and optional rejection reason code."""
 
     s = _nkfc_trim(raw or "")
+    if s:
+        s = _join_linebreaks_around_dot(heal_ocr_email_fragments(s))
     # защита от частых ложнопозитивных случаев: «e.g. some.text.» и т.п.
     if s.count("@") != 1:
         return None, EmailValidationError("no_at_sign")
