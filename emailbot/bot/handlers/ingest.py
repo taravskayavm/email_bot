@@ -159,7 +159,10 @@ async def parse_single_cmd(message: types.Message) -> None:
         return
 
     emails = set(emails or [])
-    blocked_num = count_blocked(emails)
+    try:
+        blocked_num = count_blocked(emails)
+    except Exception:
+        blocked_num = 0
     allowed = [email for email in emails if not is_blocked(email)]
     preview = "\n".join(hcode(addr) for addr in sorted(allowed)[:10]) or "—"
 
@@ -200,7 +203,10 @@ async def crawl_cmd(message: types.Message) -> None:
         return
 
     emails = set(emails or [])
-    blocked_num = count_blocked(emails)
+    try:
+        blocked_num = count_blocked(emails)
+    except Exception:
+        blocked_num = 0
     allowed = [email for email in emails if not is_blocked(email)]
     preview = "\n".join(hcode(addr) for addr in sorted(allowed)[:10]) or "—"
 

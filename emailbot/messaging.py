@@ -483,6 +483,17 @@ try:
     )
 except Exception:
     pass
+
+# [EBOT-FIX-BLOCK-INIT-016] ensure directory and file exist
+try:
+    _blocked_path = Path(BLOCKED_FILE)
+    _blocked_path.parent.mkdir(parents=True, exist_ok=True)
+    if not _blocked_path.exists():
+        _blocked_path.write_text("", encoding="utf-8")
+except Exception:
+    logger.debug(
+        "Unable to precreate BLOCKED_FILE at %s", BLOCKED_FILE, exc_info=True
+    )
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 
 SYNC_STATE_PATH = str(expand_path(os.getenv("SYNC_STATE_PATH", "var/sync_state.json")))
