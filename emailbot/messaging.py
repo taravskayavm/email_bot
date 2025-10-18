@@ -459,7 +459,7 @@ DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
 # Путь к блок-листу: по умолчанию используем файл в профиле пользователя,
 # но разрешаем переопределить через переменные окружения.
-_BL_DEFAULT = Path("var/blocked_emails.txt")
+_BL_DEFAULT = Path("~/.emailbot/blocked_emails.txt")
 _blocked_env = (
     os.getenv("BLOCKED_EMAILS_FILE")
     or os.getenv("BLOCKED_LIST_PATH")
