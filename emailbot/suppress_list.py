@@ -7,7 +7,12 @@ import threading
 from pathlib import Path
 from typing import Iterable, Set
 
-from utils.paths import expand_path
+try:
+    # при запуске всего проекта из корня
+    from utils.paths import expand_path  # type: ignore
+except Exception:
+    # при пакетном импорте emailbot.*
+    from emailbot.utils.paths import expand_path  # type: ignore
 
 _DEFAULT_BLOCKLIST = Path("~/.emailbot/blocked_emails.txt")
 
@@ -48,6 +53,28 @@ def _normalize(email: str) -> str:
     return value
 
 
+def _read_blocked(path: Path) -> Set[str]:
+    """Safely read block-list entries from ``path`` into a set."""
+
+    try:
+        with path.open("r", encoding="utf-8") as handler:
+            items: Set[str] = set()
+            for raw_line in handler:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                norm = _normalize(line)
+                if norm:
+                    items.add(norm)
+            return items
+    except FileNotFoundError:
+        # только что не успели создать — считаем пустым
+        return set()
+    except Exception:
+        logger.debug("Failed to read block-list file %s", path, exc_info=True)
+        return set()
+
+
 def _load_file() -> None:
     global _CACHE, _MTIME
 
@@ -63,22 +90,18 @@ def _load_file() -> None:
         _CACHE = set()
         _MTIME = None
         return
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
+        logger.debug("Failed to stat block-list file %s", path, exc_info=True)
         _CACHE = set()
-        _MTIME = stat.st_mtime
+        _MTIME = None
         return
 
-    items: Set[str] = set()
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        norm = _normalize(stripped)
-        if norm:
-            items.add(norm)
+    items = _read_blocked(path)
+    if not path.exists():
+        _CACHE = set()
+        _MTIME = None
+        return
+
     _CACHE = items
     _MTIME = stat.st_mtime
 

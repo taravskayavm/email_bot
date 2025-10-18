@@ -120,14 +120,18 @@ def build_mass_report_text(
 
 
 def count_blocked(emails: Iterable[str]) -> int:
-    """Подсчёт адресов, попадающих в стоп-лист."""
+    """Возвращает, сколько адресов присутствует в блок-листе.
+
+    Никогда не бросает исключения — при любой ошибке возвращает 0.
+    """
 
     if not emails:
         return 0
+
     try:
         return sum(1 for email in emails if email and is_blocked(email))
     except Exception:
-        # Не валим отчёт из-за внезапной ошибки санитайзера/IDNA.
+        logging.getLogger(__name__).debug("count_blocked failed", exc_info=True)
         return 0
 
 

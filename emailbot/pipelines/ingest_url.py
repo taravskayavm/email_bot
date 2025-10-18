@@ -24,10 +24,15 @@ async def ingest_url(
         max_pages=limit_pages if deep else None,
     )
     ok = list(dict.fromkeys(emails or []))
+    try:
+        blocked_count = count_blocked(ok)
+    except Exception:
+        blocked_count = 0
+
     stats: Dict[str, int] = {
         "total_in": 0,
         "ok": len(ok),
-        "blocked": count_blocked(ok),
+        "blocked": blocked_count,
     }
     if isinstance(meta, dict):
         items = meta.get("items")
