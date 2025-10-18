@@ -437,7 +437,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         if not ready:
             await query.message.reply_text(
-                "Все адреса уже в истории за 180 дней или в блок-листах.",
+                "Все адреса уже в истории за 180 дней или в стоп-листах.",
                 reply_markup=None,
             )
             return
@@ -845,7 +845,7 @@ async def send_all(
 
             if not to_send:
                 await query.message.reply_text(
-                    "❗ Все адреса уже есть в истории отправок или в блок-листах."
+                    "❗ Все адреса уже есть в истории отправок или в стоп-листах."
                 )
                 return
 
@@ -1066,14 +1066,12 @@ async def send_all(
         for line in report_text.splitlines():
             if line.startswith("⏳") and total_skipped == 0:
                 continue
-            if line.startswith("🚫") and total_blocked == 0:
-                continue
             filtered_lines.append(line)
         report_text = "\n".join(filtered_lines)
         if blocked_foreign:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
         if blocked_invalid:
-            report_text += f"\n🚫 Недоставляемые/в блок-листе: {len(blocked_invalid)}"
+            report_text += f"\n🚫 Недоставляемые/в стоп-листе: {len(blocked_invalid)}"
         if error_addresses:
             report_text = (
                 f"{report_text}\n❌ Ошибок при отправке: {len(error_addresses)}"

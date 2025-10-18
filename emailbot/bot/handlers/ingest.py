@@ -167,7 +167,7 @@ async def parse_single_cmd(message: types.Message) -> None:
         f"✅ Готово\n"
         f"URL: {hcode(final_url)}\n"
         f"Найдено адресов: {len(emails)}\n"
-        f"🚫 В блок-листе: {blocked_num}\n"
+        f"🚫 В стоп-листе: {blocked_num}\n"
         f"👉 К рассылке пойдут: {len(allowed)}\n\n"
         f"Примеры:\n{preview}"
     )
@@ -208,7 +208,7 @@ async def crawl_cmd(message: types.Message) -> None:
         f"✅ Готово\n"
         f"Старт: {hcode(final_url)}\n"
         f"Найдено адресов: {len(emails)}\n"
-        f"🚫 В блок-листе: {blocked_num}\n"
+        f"🚫 В стоп-листе: {blocked_num}\n"
         f"👉 К рассылке пойдут: {len(allowed)}\n\n"
         f"Примеры:\n{preview}"
     )

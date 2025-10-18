@@ -696,7 +696,7 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         blk = 0
     await message.reply_text(
         f"🗑 Удалено из рассылки: {removed}. Осталось к отправке: {len(state.to_send)}.\n"
-        f"🚫 В блок-листе (по результатам парсинга): {blk}"
+        f"🚫 В стоп-листе (по результатам парсинга): {blk}"
     )
 
 
@@ -1628,7 +1628,7 @@ async def _apply_manual_text_corrections(
                 blocked_cnt = 0
             await message.reply_text(
                 f"🗑 Удалено: {removed}. Осталось: {len(stored)}.\n"
-                f"🚫 В блок-листе (по текущему списку): {blocked_cnt}"
+                f"🚫 В стоп-листе (по текущему списку): {blocked_cnt}"
             )
             return True
 
@@ -1731,7 +1731,7 @@ def _bulk_edit_status_text(
             if state and getattr(state, "to_send", None)
             else 0
         )
-        lines.append(f"🚫 В блок-листе (сейчас): {blocked_cnt}")
+        lines.append(f"🚫 В стоп-листе (сейчас): {blocked_cnt}")
     except Exception:
         pass
     if total:
@@ -2181,7 +2181,7 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         (
             "Бот делает рассылку HTML-писем с учётом истории отправки "
-            "(IMAP 180 дней) и блок-листа. Один адрес — не чаще 1 раза в 6 "
+            "(IMAP 180 дней) и стоп-листа. Один адрес — не чаще 1 раза в 6 "
             "месяцев. Домены: только .ru и .com."
         )
     )
@@ -3435,7 +3435,7 @@ async def bulk_delete_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     reply_lines = [
         f"🗑 Удалено: {removed}. Осталось: {len(updated)}.",
-        f"🚫 В блок-листе (по текущему списку): {blocked_now}",
+        f"🚫 В стоп-листе (по текущему списку): {blocked_now}",
     ]
 
     if missing:
@@ -3838,7 +3838,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _maybe_send_skipped_summary(query, summary_payload)
     if not ready:
         await query.message.reply_text(
-            "Все адреса уже в истории за 180 дней или в блок-листах.",
+            "Все адреса уже в истории за 180 дней или в стоп-листах.",
             reply_markup=None,
         )
         return
@@ -4296,7 +4296,7 @@ async def _send_batch_with_sessions(
                         elif outcome == messaging.SendOutcome.COOLDOWN:
                             error_details.append("пропущено (кулдаун 180 дней)")
                         elif outcome == messaging.SendOutcome.BLOCKED:
-                            error_details.append("пропущено (блок-лист)")
+                            error_details.append("пропущено (стоп-лист)")
                         else:
                             error_details.append("ошибка отправки")
                     except messaging.TemplateRenderError as err:
@@ -4430,7 +4430,7 @@ async def _send_batch_with_sessions(
         suffix = ""
         if sent_count == 0 and attempt_total > 0:
             suffix = (
-                "\nℹ️ Проверьте: адреса могли попасть под блок-лист, дубликаты,"
+                "\nℹ️ Проверьте: адреса могли попасть под стоп-лист, дубликаты,"
                 " ограничения 180 дней или произошла SMTP-ошибка."
             )
         await query.message.reply_text(f"✅ Отправлено писем: {sent_count}{suffix}")
@@ -5215,7 +5215,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         if not to_send:
-            reason = "блок-листе"
+            reason = "стоп-листе"
             if not ignore_180d:
                 reason += ", истории за 6 месяцев"
             reason += " или уже отправлены сегодня"
@@ -5306,7 +5306,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             error_details.append("пропущено (кулдаун 180 дней)")
 
                         def on_blocked(email_addr: str) -> None:
-                            error_details.append("пропущено (блок-лист)")
+                            error_details.append("пропущено (стоп-лист)")
 
                         def on_unknown(email_addr: str) -> None:
                             error_details.append("ошибка отправки")
@@ -5789,7 +5789,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         skipped_recent.append(email_addr)
 
                 def on_blocked(email_addr: str) -> None:
-                    error_details.append("пропущено (блок-лист)")
+                    error_details.append("пропущено (стоп-лист)")
                     if email_addr not in blocked_invalid:
                         blocked_invalid.append(email_addr)
 
@@ -5925,9 +5925,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines = []
         for line in report_text.splitlines():
             if line.startswith("🚫"):
-                if total_blocked == 0:
-                    continue
-                line = f"🚫 В стоп-листе/недоступны: {blocked_line_value}"
+                line = f"🚫 В стоп-листе: {blocked_line_value}"
             lines.append(line)
         report_text = "\n".join(lines)
         if blocked_foreign:

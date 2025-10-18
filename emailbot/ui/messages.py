@@ -29,8 +29,17 @@ def format_parse_summary(s: Mapping[str, int], examples: Iterable[str] = ()) -> 
     lines.append(f"🌍 Иностранные домены: {s.get('foreign_domain', 0)}")
     lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")
     lines.append(f"♻️ Возможные сносочные дубликаты удалены: {s.get('footnote_dupes_removed', 0)}")
-    lines.append(f"🚫 Уже в блок-листе: {s.get('blocked', 0)}")
-    lines.append(f"🛑 В стоп-листе (после парсинга): {s.get('blocked_after_parse', 0)}")
+    try:
+        blocked_before = int(s.get('blocked', 0) or 0)
+    except Exception:
+        blocked_before = 0
+    try:
+        blocked_after = int(s.get('blocked_after_parse', 0) or 0)
+    except Exception:
+        blocked_after = 0
+    total_blocked = blocked_before + blocked_after
+    if total_blocked > 0:
+        lines.append(f"🚫 В стоп-листе: {total_blocked}")
     lines.append("")
     return "\n".join(lines)
 
@@ -50,7 +59,7 @@ def format_dispatch_preview(stats: Mapping[str, int], xlsx_name: str) -> str:
         f"📎 {xlsx_name}\n"
         f"🚀 Готово к отправке: {stats.get('ready_to_send', 0)} адресов.\n"
         f"⏳ Отложено по правилу 180 дн.: {stats.get('deferred_180d', 0)}\n"
-        f"🧱 В исключениях/блок-листах: {stats.get('in_blacklists', 0)}\n"
+        f"🧱 В исключениях/стоп-листах: {stats.get('in_blacklists', 0)}\n"
         f"🔍 Требует проверки: {stats.get('need_review', 0)}\n"
         f"Файл-предпросмотра: подробности внутри."
     )
@@ -81,7 +90,7 @@ def format_dispatch_start(
     if deferred:
         lines.append(f"Отложено по правилу 180 дней: {deferred}")
     if suppressed:
-        lines.append(f"Исключено (супресс/блок-лист): {suppressed}")
+        lines.append(f"Исключено (супресс/стоп-лист): {suppressed}")
     if foreign:
         lines.append(f"Отложено (иностранные домены): {foreign}")
     if duplicates:
@@ -104,7 +113,7 @@ def format_dispatch_result(
         f"📊 В очереди было: {total}",
         f"✅ Отправлено: {sent}",
         f"⏳ Пропущены (по правилу «180 дней»): {cooldown_skipped}",
-        f"🚫 В стоп-листе/недоступны: {blocked}",
+        f"🚫 В стоп-листе: {blocked}",
     ]
     if duplicates:
         lines.append(f"🔁 Дубликаты за 24 ч: {duplicates}")
@@ -149,7 +158,7 @@ def render_dispatch_summary(
         f"📊 В очереди было: {planned}\n"
         f"✅ Отправлено: {sent}\n"
         f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
-        f"🚫 В стоп-листе/недоступны: {final_blocked}\n"
+        f"🚫 В стоп-листе: {final_blocked}\n"
         "ℹ️ Осталось без изменений: 0\n"
         f"❌ Ошибок при отправке: {errors}"
         f"{audit_suffix}"

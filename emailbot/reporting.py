@@ -68,7 +68,7 @@ def render_summary(stats: dict) -> str:
         lines.append(f"🟡 Подозрительные: {suspicious}")
 
     blocked_total = stats.get("blocked_total", 0)
-    lines.append(f"🚫 Из блок-листа: {blocked_total}")
+    lines.append(f"🚫 Из стоп-листа: {blocked_total}")
 
     missed_pages = stats.get("pdf_pages_failed")
     if missed_pages:
@@ -111,7 +111,7 @@ def build_mass_report_text(
         f"📦 В очереди было: {total}",
         f"✅ Успешно отправлено: {sent_cnt}",
         f"⏳ Пропущены (по правилу «180 дней»): {skipped_cnt}",
-        f"🚫 В стоп-листе/недоступны: {blocked_cnt}",
+        f"🚫 В стоп-листе: {blocked_cnt}",
         f"🌍 Иностранные (отложены): {foreign_cnt}",
     ]
     if dup_cnt:
