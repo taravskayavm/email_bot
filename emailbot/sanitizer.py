@@ -17,6 +17,39 @@ _ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 _WS_PUNCT_TRIM = re.compile(r"^[\s<>\[\]\(\)\.,;:\"']+|[\s<>\[\]\(\)\.,;:\"']+$")
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
+_OCR_EMAIL_FIXES = [
+    (
+        re.compile(
+            r"([A-Za-z0-9._%+\-]+)\s*@\s*([A-Za-z0-9.\-]+)\s*\.\s*([A-Za-z]{2,})",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}@{m.group(2)}.{m.group(3)}",
+    ),
+    (
+        re.compile(
+            r"(@[A-Za-z0-9.\-]+)\s*[·•∙⋅]?\s*\.\s*([A-Za-z]{2,})",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}.{m.group(2)}",
+    ),
+    (re.compile(r"\.\s*r\s*u\b", re.IGNORECASE), lambda m: ".ru"),
+]
+
+
+def heal_ocr_email_fragments(token: str) -> str:
+    """Fix common OCR artefacts in ``token`` before validation."""
+
+    s = token
+    for rx, repl in _OCR_EMAIL_FIXES:
+        s = rx.sub(repl, s)
+    return s
+
+
+def _join_linebreaks_around_dot(s: str) -> str:
+    """Collapse line breaks accidentally inserted around domain dots."""
+
+    return re.sub(r"\.\s*[\r\n]+\s*([A-Za-z]{2,})", r".\1", s)
+
 
 def normalize_unicode(value: str) -> str:
     """Return ``value`` normalised with Unicode NFKC and without ZW chars."""
@@ -35,6 +68,8 @@ def normalize_email(raw: str) -> str:
     s = normalize_unicode(str(raw))
     s = _WS_PUNCT_TRIM.sub("", s)
     s = s.strip()
+    if s:
+        s = _join_linebreaks_around_dot(heal_ocr_email_fragments(s))
     if not s:
         return ""
     if "@" not in s:
@@ -158,4 +193,5 @@ __all__ = [
     "looks_like_email",
     "dedup_emails",
     "ZWSP_CHARS",
+    "heal_ocr_email_fragments",
 ]
