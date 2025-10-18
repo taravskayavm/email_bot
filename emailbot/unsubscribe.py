@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from .messaging import verify_unsubscribe_token, mark_unsubscribed
-from .suppress_list import init_blocked, add_to_blocklist
+from .suppress_list import init_blocked, add_blocked
 
 
 async def handle(request: web.Request) -> web.Response:
@@ -17,7 +17,7 @@ async def handle(request: web.Request) -> web.Response:
             mark_unsubscribed(email, token)
             try:
                 init_blocked()
-                add_to_blocklist(email)
+                add_blocked([email], reason="unsubscribe")
             except Exception:
                 pass
             html = """<html><head><meta charset=\"utf-8\"/></head><body>
