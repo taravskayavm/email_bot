@@ -57,7 +57,9 @@ def _read_blocked(path: Path) -> Set[str]:
     """Safely read block-list entries from ``path`` into a set."""
 
     try:
-        with path.open("r", encoding="utf-8") as handler:
+        # ``errors="ignore"`` preserves behaviour from the previous implementation
+        # where stray non-UTF-8 bytes were skipped instead of aborting the read.
+        with path.open("r", encoding="utf-8", errors="ignore") as handler:
             items: Set[str] = set()
             for raw_line in handler:
                 line = raw_line.strip()
