@@ -32,6 +32,22 @@ _OCR_EMAIL_FIXES = [
         ),
         lambda m: f"{m.group(1)}.{m.group(2)}",
     ),
+    # пробел (и/или декоративная точка) вместо точки между доменом и TLD
+    (
+        re.compile(
+            r"(@[A-Za-z0-9.\-]+)\s*(?:[·•∙⋅]\s*)?\s+([A-Za-z]{2,})\b",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}.{m.group(2)}",
+    ),
+    # запятая вместо точки между доменом и TLD
+    (
+        re.compile(
+            r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}.{m.group(2)}",
+    ),
     (re.compile(r"\.\s*r\s*u\b", re.IGNORECASE), lambda m: ".ru"),
 ]
 
