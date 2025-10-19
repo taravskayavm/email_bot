@@ -18,7 +18,10 @@ import secrets
 import smtplib
 import uuid
 
-import idna
+try:  # pragma: no cover - optional dependency in lightweight deployments
+    import idna
+except Exception:  # pragma: no cover - used when idna is absent
+    idna = None
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
@@ -513,14 +516,36 @@ EMAIL_LOOKBACK_DAYS = _parse_int(
     180,
 )
 
-suppress_list.init_blocked(BLOCKED_FILE)
+_BLOCK_READY = False
+
+
+def ensure_blocklist_ready() -> None:
+    """Initialise the shared block-list lazily."""
+
+    global _BLOCK_READY
+    if _BLOCK_READY:
+        return
+    try:
+        suppress_list.init_blocked(BLOCKED_FILE)
+        _BLOCK_READY = True
+    except Exception:
+        logger.debug("blocklist init failed", exc_info=True)
+
+
+def _to_idna(domain: str) -> str:
+    if not domain or idna is None:
+        return domain
+    try:
+        return idna.encode(domain, uts46=True).decode("ascii")
+    except Exception:
+        return domain
 
 
 def _normalize_email_for_blocklist(addr: str) -> str:
     addr = (addr or "").strip().lower()
     try:
         local, dom = addr.split("@", 1)
-        dom_idna = idna.encode(dom, uts46=True).decode("ascii")
+        dom_idna = _to_idna(dom)
         return f"{local}@{dom_idna}"
     except Exception:
         return addr
@@ -529,9 +554,9 @@ def _normalize_email_for_blocklist(addr: str) -> str:
 def add_blocked_email(email: str) -> bool:
     """Persist ``email`` to the shared block-list file if it is new."""
 
+    ensure_blocklist_ready()
     try:
         path = Path(BLOCKED_FILE)
-        suppress_list.init_blocked(BLOCKED_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
         norm = _normalize_email_for_blocklist(email)
 
@@ -1402,11 +1427,12 @@ def process_unsubscribe_requests():
 
 
 def get_blocked_emails() -> Set[str]:
+    ensure_blocklist_ready()
     return suppress_list.get_blocked_set()
 
 
 def dedupe_blocked_file():
-    suppress_list.init_blocked(BLOCKED_FILE)
+    ensure_blocklist_ready()
     keep = suppress_list.load_blocked_set()
     if not keep:
         suppress_list.save_blocked_set([])
@@ -2010,6 +2036,7 @@ __all__ = [
     "send_email_with_sessions",
     "send_bulk",
     "process_unsubscribe_requests",
+    "ensure_blocklist_ready",
     "get_blocked_emails",
     "add_blocked_email",
     "dedupe_blocked_file",

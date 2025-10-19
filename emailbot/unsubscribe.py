@@ -4,12 +4,18 @@ import logging
 
 from aiohttp import web
 
-from .messaging import BLOCKED_FILE, verify_unsubscribe_token, mark_unsubscribed
+from .messaging import (
+    BLOCKED_FILE,
+    verify_unsubscribe_token,
+    mark_unsubscribed,
+    ensure_blocklist_ready,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def handle(request: web.Request) -> web.Response:
+    ensure_blocklist_ready()
     email = request.query.get("email", "")
     token = request.query.get("token", "")
     if request.method == "POST":

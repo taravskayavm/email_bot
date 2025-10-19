@@ -33,7 +33,7 @@ _ENV_BLOCKLIST = (
     or os.getenv("BLOCKED_LIST_PATH")
     or os.getenv("BLOCKED_EMAILS_PATH")
 )
-_BLOCKED_PATH: Path = expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)
+_BLOCKED_PATH: Path = Path(str(expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)))
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
 
@@ -202,7 +202,7 @@ def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
 
     with _LOCK:
         if path is not None:
-            _BLOCKED_PATH = expand_path(path)
+            _BLOCKED_PATH = Path(str(expand_path(path)))
         try:
             _ensure_dir(_BLOCKED_PATH)
             _BLOCKED_PATH.touch(exist_ok=True)
