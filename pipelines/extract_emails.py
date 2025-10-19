@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -18,6 +19,7 @@ from emailbot.utils.email_clean import (
     postclean_email_token,
     preclean_for_email_extraction,
 )
+from emailbot.sanitizer import apply_ocr_email_fixes
 from utils.email_clean import (
     dedupe_with_variants,
     finalize_email,
@@ -48,15 +50,38 @@ def _env_float(name: str, default: float) -> float:
 FIO_PERSONAL_THRESHOLD = _env_float("EMAIL_ROLE_PERSONAL_THRESHOLD", 0.9)
 
 
-def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
+def extract_emails_pipeline(
+    text: str, *, options: Optional[dict] = None
+) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
+    options = options or {}
     source_text = preclean_for_email_extraction(text or "")
     source_text = preclean_obfuscations(source_text)
     raw_text = normalize_text(source_text)
     cleaned_raw, meta_in = parse_emails_unified(raw_text, return_meta=True)
-    cleaned = [postclean_email_token(token) for token in cleaned_raw if token]
+    fix_stats = {
+        "ocr_fix_total": 0,
+        "ocr_fix_space_tld": 0,
+        "ocr_fix_comma_tld": 0,
+    }
+    cleaned: List[str] = []
+    for token in cleaned_raw:
+        if not token:
+            continue
+        healed, token_stats = apply_ocr_email_fixes(token)
+        for key, value in token_stats.items():
+            if value:
+                fix_stats[key] += int(value)
+        cleaned_token = postclean_email_token(healed)
+        if cleaned_token:
+            cleaned.append(cleaned_token)
     meta = dict(meta_in)
+    for key, value in fix_stats.items():
+        if value:
+            meta[key] = int(meta.get(key, 0) or 0) + value
+            if isinstance(meta_in, dict):
+                meta_in[key] = int(meta_in.get(key, 0) or 0) + value
     items = meta.get("items", [])
     for item in items:
         sanitized_val = item.get("sanitized")
@@ -122,6 +147,13 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
                 role_rejected_early += 1
                 continue
         final_for_send = sanitize_for_send(email_final)
+        if options.get("relax_tld"):
+            final_for_send = re.sub(
+                r"@([A-Za-z0-9.-]+)\b(ru|com|org|net|edu)\b$",
+                r"@\1.\2",
+                final_for_send,
+                flags=re.I,
+            )
         if not final_for_send:
             item["reason"] = "sanitize-send"
             item["stage"] = "send-normalize"
