@@ -128,7 +128,16 @@ def extract_emails_pipeline(
                 item.setdefault("stage", "sanitize")
                 rejected.append(dict(item))
             continue
-        final_domain = email_final.rsplit("@", 1)[-1]
+        email_for_validation = email_final
+        if options.get("relax_tld"):
+            email_for_validation = re.sub(
+                r"@([A-Za-z0-9.-]+)\b(ru|com|org|net|edu)\b$",
+                r"@\1.\2",
+                email_for_validation,
+                flags=re.I,
+            )
+
+        final_domain = email_for_validation.rsplit("@", 1)[-1]
         if not is_allowed_domain(final_domain):
             item["reason"] = "tld-not-allowed"
             item["stage"] = "finalize"
@@ -137,7 +146,7 @@ def extract_emails_pipeline(
             foreign_filtered_pre += 1
             continue
         if PERSONAL_ONLY:
-            local_candidate = email_final.split("@", 1)[0]
+            local_candidate = email_for_validation.split("@", 1)[0]
             info = classify_email_role(local_candidate, final_domain)
             if str(info.get("class")) == "role":
                 item["reason"] = "role-address"
@@ -146,14 +155,7 @@ def extract_emails_pipeline(
                 rejected.append(dict(item))
                 role_rejected_early += 1
                 continue
-        final_for_send = sanitize_for_send(email_final)
-        if options.get("relax_tld"):
-            final_for_send = re.sub(
-                r"@([A-Za-z0-9.-]+)\b(ru|com|org|net|edu)\b$",
-                r"@\1.\2",
-                final_for_send,
-                flags=re.I,
-            )
+        final_for_send = sanitize_for_send(email_for_validation)
         if not final_for_send:
             item["reason"] = "sanitize-send"
             item["stage"] = "send-normalize"
