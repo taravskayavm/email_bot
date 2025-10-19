@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+from pathlib import Path
 from typing import Any, Iterable
 
 from aiogram import F, Router, types
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hcode
 
+from emailbot.messaging import BLOCKED_FILE
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
 from emailbot.pipelines.ingest_url import ingest_url
@@ -22,6 +24,7 @@ from emailbot.crawl import crawl_emails
 from emailbot import settings
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
 from emailbot.ui.messages import format_parse_summary
+from emailbot.suppress_list import refresh_if_changed, is_blocked as suppress_is_blocked
 
 router = Router()
 URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
@@ -441,3 +444,34 @@ async def set_group(callback: CallbackQuery) -> None:
     slug = resolve_label(label)
     await callback.message.answer(f"Вы выбрали: {label} ({slug})")
     await callback.answer()
+
+
+@router.message(F.text.lower().in_({"блоклист", "блок-лист", "stoplist"}))
+async def show_blocklist_info(message: types.Message) -> None:
+    """Report block-list statistics to bot administrators."""
+
+    refresh_if_changed()
+    try:
+        path = Path(BLOCKED_FILE)
+        count = 0
+        if path.exists():
+            with path.open(encoding="utf-8") as handler:
+                count = sum(1 for line in handler if line.strip())
+        await message.answer(f"📛 Блок-лист: {count} адрес(ов)\nПуть: {BLOCKED_FILE}")
+    except Exception as exc:  # pragma: no cover - filesystem issues are rare
+        await message.answer(f"Не удалось прочитать блок-лист: {exc}")
+
+
+@router.message(F.text.regexp(r"^check\s+(.+@.+)$"))
+async def check_blocked_one(message: types.Message) -> None:
+    """Quickly check a single e-mail address against the block-list."""
+
+    text = message.text or ""
+    parts = text.split(None, 1)
+    email = parts[1].strip() if len(parts) > 1 else ""
+    if not email:
+        await message.answer("Не удалось определить адрес для проверки")
+        return
+    refresh_if_changed()
+    status = "в блок-листе" if suppress_is_blocked(email) else "не найден"
+    await message.answer(f"{email} ⇒ {status}")

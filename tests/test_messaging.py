@@ -47,6 +47,8 @@ def temp_files(tmp_path, monkeypatch):
     log = tmp_path / "logs" / "sent_log.csv"
     monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked))
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    messaging.suppress_list.init_blocked(str(blocked))
+    monkeypatch.setattr(unsubscribe, "BLOCKED_FILE", str(blocked), raising=False)
     return blocked, log
 
 
@@ -54,7 +56,8 @@ def test_add_blocked_email_handles_duplicates_and_invalid(temp_files):
     blocked, _ = temp_files
     # invalid email
     assert messaging.add_blocked_email("invalid") is False
-    assert not blocked.exists()
+    assert blocked.exists()
+    assert blocked.read_text() == ""
 
     # add new email
     assert messaging.add_blocked_email("User@Example.COM ") is True
@@ -67,6 +70,10 @@ def test_add_blocked_email_handles_duplicates_and_invalid(temp_files):
     # numeric variant should also be treated as duplicate
     assert messaging.add_blocked_email("1user@example.com") is False
     assert blocked.read_text().splitlines() == ["user@example.com"]
+
+    # IDNA normalization
+    assert messaging.add_blocked_email("Тест@пример.рф") is True
+    assert "тест@xn--e1afmkfd.xn--p1ai" in blocked.read_text().splitlines()
 
 
 def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
@@ -463,7 +470,7 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
             f"{base}/unsubscribe", data={"email": "user@example.com", "token": token}
         )
         html2 = await resp2.text()
-        assert "Вы отписаны" in html2
+        assert "Ваш адрес больше не будет получать письма." in html2
     await runner.cleanup()
     with open(log_path, encoding="utf-8") as f:
         row = next(csv.DictReader(f))

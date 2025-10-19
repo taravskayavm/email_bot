@@ -8,6 +8,7 @@ import email
 import hashlib
 import html
 import imaplib
+import io
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ import time
 import secrets
 import smtplib
 import uuid
+
+import idna
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
@@ -511,6 +514,56 @@ EMAIL_LOOKBACK_DAYS = _parse_int(
 )
 
 suppress_list.init_blocked(BLOCKED_FILE)
+
+
+def _normalize_email_for_blocklist(addr: str) -> str:
+    addr = (addr or "").strip().lower()
+    try:
+        local, dom = addr.split("@", 1)
+        dom_idna = idna.encode(dom, uts46=True).decode("ascii")
+        return f"{local}@{dom_idna}"
+    except Exception:
+        return addr
+
+
+def add_blocked_email(email: str) -> bool:
+    """Persist ``email`` to the shared block-list file if it is new."""
+
+    try:
+        path = Path(BLOCKED_FILE)
+        suppress_list.init_blocked(BLOCKED_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        norm = _normalize_email_for_blocklist(email)
+
+        if not norm or "@" not in norm:
+            return False
+
+        suppress_list.refresh_if_changed()
+        if suppress_list.is_blocked(norm):
+            return False
+
+        need_newline = False
+        if path.exists() and path.stat().st_size:
+            try:
+                with path.open("rb") as existing:
+                    existing.seek(-1, os.SEEK_END)
+                    need_newline = existing.read(1) not in {b"\n", b"\r"}
+            except Exception:
+                need_newline = True
+
+        with io.open(path, "a", encoding="utf-8", newline="\n") as handler:
+            if need_newline:
+                handler.write("\n")
+            handler.write(norm.rstrip("\n") + "\n")
+            handler.flush()
+            os.fsync(handler.fileno())
+
+        suppress_list.refresh_if_changed()
+        return True
+    except Exception:
+        logger.exception("Failed to add email to blocklist: %r", email)
+        return False
+
 
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
@@ -1348,24 +1401,8 @@ def process_unsubscribe_requests():
         log_error(f"process_unsubscribe_requests: {e}")
 
 
-def _canonical_blocked(email_str: str) -> str:
-    e = normalize_email(email_str)
-    e = re.sub(r"^\.+", "", e)
-    e = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", e)
-    return e
-
-
 def get_blocked_emails() -> Set[str]:
     return suppress_list.get_blocked_set()
-
-
-def add_blocked_email(email_str: str) -> bool:
-    email_norm = _canonical_blocked(email_str)
-    if not email_norm or "@" not in email_norm:
-        return False
-    suppress_list.init_blocked(BLOCKED_FILE)
-    added = suppress_list.add_blocked([email_norm])
-    return added > 0
 
 
 def dedupe_blocked_file():
@@ -1421,8 +1458,8 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
             writer.writerows(rows)
-    add_blocked_email(email_norm)
-    return changed
+    added = add_blocked_email(email_addr)
+    return added
 
 
 def log_sent_email(
