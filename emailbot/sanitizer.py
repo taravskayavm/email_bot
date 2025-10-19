@@ -52,13 +52,33 @@ _OCR_EMAIL_FIXES = [
 ]
 
 
+def apply_ocr_email_fixes(text: str) -> tuple[str, dict[str, int]]:
+    """Apply ``_OCR_EMAIL_FIXES`` sequentially and report replacement counts."""
+
+    s = text or ""
+    stats: dict[str, int] = {
+        "ocr_fix_total": 0,
+        "ocr_fix_space_tld": 0,
+        "ocr_fix_comma_tld": 0,
+    }
+    for rx, repl in _OCR_EMAIL_FIXES:
+        s_new, n = rx.subn(repl, s)
+        if n:
+            stats["ocr_fix_total"] += n
+            pattern = rx.pattern
+            if pattern == r"(@[A-Za-z0-9.\-]+)\s*(?:[·•∙⋅]\s*)?\s+([A-Za-z]{2,})\b":
+                stats["ocr_fix_space_tld"] += n
+            elif pattern == r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b":
+                stats["ocr_fix_comma_tld"] += n
+        s = s_new
+    return s, stats
+
+
 def heal_ocr_email_fragments(token: str) -> str:
     """Fix common OCR artefacts in ``token`` before validation."""
 
-    s = token
-    for rx, repl in _OCR_EMAIL_FIXES:
-        s = rx.sub(repl, s)
-    return s
+    healed, _ = apply_ocr_email_fixes(token)
+    return healed
 
 
 def _join_linebreaks_around_dot(s: str) -> str:
@@ -209,5 +229,6 @@ __all__ = [
     "looks_like_email",
     "dedup_emails",
     "ZWSP_CHARS",
+    "apply_ocr_email_fixes",
     "heal_ocr_email_fragments",
 ]

@@ -30,6 +30,18 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
     lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")
     lines.append(f"♻️ Возможные сносочные дубликаты удалены: {s.get('footnote_dupes_removed', 0)}")
     try:
+        ocr_total = int(s.get("ocr_fix_total", 0) or 0)
+        ocr_space = int(s.get("ocr_fix_space_tld", 0) or 0)
+        ocr_comma = int(s.get("ocr_fix_comma_tld", 0) or 0)
+    except Exception:
+        ocr_total = ocr_space = ocr_comma = 0
+    if ocr_total > 0:
+        lines.append(
+            "🧹 Исправления OCR: "
+            f"{ocr_total} (восстановлена точка перед зоной: {ocr_space}; "
+            f"запятая→точка: {ocr_comma})"
+        )
+    try:
         blocked_before = int(s.get('blocked', 0) or 0)
     except Exception:
         blocked_before = 0
