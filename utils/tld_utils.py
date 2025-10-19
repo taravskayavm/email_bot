@@ -4,6 +4,15 @@ import os
 
 import idna
 
+IDNA_DOMAIN_NORMALIZE = os.getenv("IDNA_DOMAIN_NORMALIZE", "0") == "1"
+
+
+def _to_idna(domain: str) -> str:
+    try:
+        return idna.encode(domain, uts46=True).decode("ascii")
+    except Exception:
+        return domain
+
 _DEFAULT_ALLOWED = {"ru", "com"}
 
 
@@ -11,11 +20,15 @@ def _normalize_tld(value: str) -> str:
     raw = (value or "").strip().lstrip(".").lower()
     if not raw:
         return ""
+    if IDNA_DOMAIN_NORMALIZE:
+        ascii_tld = _to_idna(raw)
+        if ascii_tld:
+            return ascii_tld.lower()
     try:
-        ascii_tld = idna.encode(raw).decode("ascii")
-    except Exception:
+        raw.encode("ascii")
+    except UnicodeEncodeError:
         return raw
-    return ascii_tld
+    return raw
 
 
 def allowed_tlds() -> set[str]:
@@ -41,6 +54,8 @@ def is_allowed_domain(domain: str) -> bool:
     """Return ``True`` if the domain belongs to the allow-list."""
 
     d = (domain or "").strip().lower()
+    if IDNA_DOMAIN_NORMALIZE and d:
+        d = _to_idna(d).lower()
     if "." not in d:
         return False
     tld = _normalize_tld(d.rsplit(".", 1)[-1])

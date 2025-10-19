@@ -14,6 +14,10 @@ from utils.charset_helper import best_effort_decode
 
 ProgressCB = Optional[Callable[[int, str], None]]
 
+from emailbot.utils.email_clean import (
+    postclean_email_token,
+    preclean_for_email_extraction,
+)
 from utils.email_clean import (
     dedupe_with_variants,
     finalize_email,
@@ -47,12 +51,19 @@ FIO_PERSONAL_THRESHOLD = _env_float("EMAIL_ROLE_PERSONAL_THRESHOLD", 0.9)
 def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
     """High-level pipeline that applies deobfuscation, normalization and dedupe."""
 
-    source_text = text or ""
+    source_text = preclean_for_email_extraction(text or "")
     source_text = preclean_obfuscations(source_text)
     raw_text = normalize_text(source_text)
-    cleaned, meta_in = parse_emails_unified(raw_text, return_meta=True)
+    cleaned_raw, meta_in = parse_emails_unified(raw_text, return_meta=True)
+    cleaned = [postclean_email_token(token) for token in cleaned_raw if token]
     meta = dict(meta_in)
     items = meta.get("items", [])
+    for item in items:
+        sanitized_val = item.get("sanitized")
+        if isinstance(sanitized_val, str) and sanitized_val:
+            fixed = postclean_email_token(sanitized_val)
+            if fixed != sanitized_val:
+                item["sanitized"] = fixed
     suspects = sorted(set(meta.get("suspects") or []))
 
     allowed_candidates: List[str] = []
@@ -414,6 +425,9 @@ def extract_emails_pipeline(text: str) -> Tuple[List[str], Dict[str, int]]:
         "items_rejected": rejected,
         "suspicious_count": len(suspects),
         "aborted": bool(meta.get("aborted", False)),
+        "invalid_tld_examples": meta.get("invalid_tld_examples", []),
+        "syntax_fail_examples": meta.get("syntax_fail_examples", []),
+        "confusable_fixed_examples": meta.get("confusable_fixed_examples", []),
     }
 
     return filtered, stats

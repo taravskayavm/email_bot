@@ -29,6 +29,7 @@ from .extraction_common import (
     maybe_decode_base64,
     strip_phone_prefix,
 )
+from emailbot.utils.email_clean import preclean_for_email_extraction
 from emailbot import settings
 from emailbot.settings_store import get
 from .run_control import should_stop
@@ -414,7 +415,8 @@ def _extract_from_json(obj, source_ref: str, stats: Dict[str, int]) -> List[Emai
         for v in obj:
             hits.extend(_extract_from_json(v, source_ref, stats))
     elif isinstance(obj, str):
-        text_candidates = [normalize_text(obj)]
+        cleaned_obj = preclean_for_email_extraction(obj)
+        text_candidates = [normalize_text(cleaned_obj)]
         decoded = maybe_decode_base64(obj)
         if decoded:
             text_candidates.append(decoded)
@@ -500,7 +502,7 @@ def extract_bundle_hits(
         count += 1
         stats["assets_scanned"] = stats.get("assets_scanned", 0) + 1
         source_ref = f"url:{url}"
-        text = normalize_text(js)
+        text = normalize_text(preclean_for_email_extraction(js))
         for e in extract_emails_document(text, stats):
             hits.append(EmailHit(email=e, source_ref=source_ref, origin="bundle"))
         hits.extend(extract_obfuscated_hits(text, source_ref, stats))
@@ -672,7 +674,7 @@ def extract_obfuscated_hits(
         if stats is not None:
             stats["hits_mailto"] = stats.get("hits_mailto", 0) + 1
 
-    text = normalize_text(text)
+    text = normalize_text(preclean_for_email_extraction(text))
     text = _SOB_WORD_ATTACHED_RE.sub(" at ", text)
     text = _SOB_WORD_RE.sub(" at ", text)
     text = _DOT_WORD_ATTACHED_RE.sub(" dot ", text)
