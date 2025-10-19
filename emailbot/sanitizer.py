@@ -32,7 +32,8 @@ _OCR_EMAIL_FIXES = [
         ),
         lambda m: f"{m.group(1)}.{m.group(2)}",
     ),
-    # пробел (и/или декоративная точка) вместо точки между доменом и TLD
+    # NEW: пробел (и/или декоративная «точка») вместо точки между доменом и TLD
+    # Примеры: user@domain ru   |   user@domain  ·  ru
     (
         re.compile(
             r"(@[A-Za-z0-9.\-]+)\s*(?:[·•∙⋅]\s*)?\s+([A-Za-z]{2,})\b",
@@ -40,7 +41,15 @@ _OCR_EMAIL_FIXES = [
         ),
         lambda m: f"{m.group(1)}.{m.group(2)}",
     ),
-    # запятая вместо точки между доменом и TLD
+    # NEW: декоративная «точка» без пробела: user@domain·ru
+    (
+        re.compile(
+            r"(@[A-Za-z0-9.\-]+)\s*[·•∙⋅]\s*([A-Za-z]{2,})\b",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}.{m.group(2)}",
+    ),
+    # NEW: запятая вместо точки: user@domain,ru
     (
         re.compile(
             r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b",
@@ -48,8 +57,23 @@ _OCR_EMAIL_FIXES = [
         ),
         lambda m: f"{m.group(1)}.{m.group(2)}",
     ),
+    # NEW: перенос строки между доменом и TLD: user@domain⏎ru
+    (
+        re.compile(
+            r"(@[A-Za-z0-9.\-]+)\s*[\r\n]+\s*([A-Za-z]{2,})\b",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m.group(1)}.{m.group(2)}",
+    ),
     (re.compile(r"\.\s*r\s*u\b", re.IGNORECASE), lambda m: ".ru"),
 ]
+
+_OCR_FIX_SPACE_PATTERNS = {
+    r"(@[A-Za-z0-9.\-]+)\s*(?:[·•∙⋅]\s*)?\s+([A-Za-z]{2,})\b",
+    r"(@[A-Za-z0-9.\-]+)\s*[·•∙⋅]\s*([A-Za-z]{2,})\b",
+    r"(@[A-Za-z0-9.\-]+)\s*[\r\n]+\s*([A-Za-z]{2,})\b",
+}
+_OCR_FIX_COMMA_PATTERN = r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b"
 
 
 def apply_ocr_email_fixes(text: str) -> tuple[str, dict[str, int]]:
@@ -66,9 +90,9 @@ def apply_ocr_email_fixes(text: str) -> tuple[str, dict[str, int]]:
         if n:
             stats["ocr_fix_total"] += n
             pattern = rx.pattern
-            if pattern == r"(@[A-Za-z0-9.\-]+)\s*(?:[·•∙⋅]\s*)?\s+([A-Za-z]{2,})\b":
+            if pattern in _OCR_FIX_SPACE_PATTERNS:
                 stats["ocr_fix_space_tld"] += n
-            elif pattern == r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b":
+            elif pattern == _OCR_FIX_COMMA_PATTERN:
                 stats["ocr_fix_comma_tld"] += n
         s = s_new
     return s, stats

@@ -38,7 +38,8 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
     if ocr_total > 0:
         lines.append(
             "🧹 Исправления OCR: "
-            f"{ocr_total} (восстановлена точка перед зоной: {ocr_space}; "
+            f"{ocr_total} (восстановлена точка перед зоной "
+            f"(пробел/символ/перенос): {ocr_space}; "
             f"запятая→точка: {ocr_comma})"
         )
     try:
