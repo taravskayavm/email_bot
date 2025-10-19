@@ -9,7 +9,7 @@ python-dotenv>=1.0
 pytest-asyncio>=0.23
 regex==2024.5.15  # нужен для быстрых и безопасных таймаутов в очистке/поиске e-mail
 email-validator==2.3.0
-idna==3.7
+idna>=3.6
 httpx[http2]~=0.26.0
 beautifulsoup4==4.12.3
 charset-normalizer>=3.3.0
