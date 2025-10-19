@@ -5,6 +5,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, List
 
+from .tld_registry import is_known_tld
+
 ZWSP_CHARS = [
     "\u200b",  # ZERO WIDTH SPACE
     "\u200c",  # ZERO WIDTH NON-JOINER
@@ -16,6 +18,15 @@ ZWSP_CHARS = [
 _ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 _WS_PUNCT_TRIM = re.compile(r"^[\s<>\[\]\(\)\.,;:\"']+|[\s<>\[\]\(\)\.,;:\"']+$")
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
+
+def _heal_comma_separated_tld(match: re.Match[str]) -> str:
+    """Return text with comma between domain and known TLD restored to a dot."""
+
+    tld = match.group(2)
+    if is_known_tld(tld):
+        return f"{match.group(1)}.{match.group(2)}"
+    return match.group(0)
+
 
 _OCR_EMAIL_FIXES = [
     (
@@ -43,10 +54,10 @@ _OCR_EMAIL_FIXES = [
     # запятая вместо точки между доменом и TLD
     (
         re.compile(
-            r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z]{2,})\b",
+            r"(@[A-Za-z0-9.\-]+)\s*,\s*([A-Za-z0-9\-]{2,})\b(?=\s*(?:$|[\.,;:!?\)\]]))",
             re.IGNORECASE,
         ),
-        lambda m: f"{m.group(1)}.{m.group(2)}",
+        _heal_comma_separated_tld,
     ),
     (re.compile(r"\.\s*r\s*u\b", re.IGNORECASE), lambda m: ".ru"),
 ]
