@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
-from .messaging import verify_unsubscribe_token, mark_unsubscribed
-from .suppress_list import init_blocked, add_blocked
+from .messaging import BLOCKED_FILE, verify_unsubscribe_token, mark_unsubscribed
+
+logger = logging.getLogger(__name__)
 
 
 async def handle(request: web.Request) -> web.Response:
@@ -14,19 +17,21 @@ async def handle(request: web.Request) -> web.Response:
         email = data.get("email", "")
         token = data.get("token", "")
         if verify_unsubscribe_token(email, token):
-            mark_unsubscribed(email, token)
-            try:
-                init_blocked()
-                add_blocked([email], reason="unsubscribe")
-            except Exception:
-                pass
+            added = mark_unsubscribed(email, token)
+            logger.info(
+                "unsubscribe: email=%s added=%s block_file=%s",
+                email,
+                added,
+                BLOCKED_FILE,
+            )
             html = """<html><head><meta charset=\"utf-8\"/></head><body>
-            <h3>Вы отписаны от рассылки</h3>
-            <p>Спасибо! Мы больше не будем присылать письма на ваш адрес.</p>
+            <h3>Вы отписались от рассылки</h3>
+            <p>Ваш адрес больше не будет получать письма.</p>
             <p>Если вы передумаете — просто напишите нам.</p>
             <p>Вопросы: <a href='mailto:med@lanbook.ru'>med@lanbook.ru</a></p>
             </body></html>"""
             return web.Response(text=html, content_type="text/html")
+        logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
         return web.Response(
             text="Если хотите отписаться — ответьте Unsubscribe или свяжитесь по med@lanbook.ru",
             content_type="text/html",
