@@ -556,6 +556,8 @@ def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List
     if not deduped:
         return []
     filtered, _ = filter_invalid_tld(deduped, stats=stats)
+    if filtered:
+        filtered = list(dict.fromkeys(filtered))
     if stats is not None and filtered:
         try:
             from emailbot.messaging_utils import classify_tld
