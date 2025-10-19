@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _FOOTNOTES_MODE = (os.getenv("FOOTNOTES_MODE", "smart") or "smart").lower()
 STRICT_LEFT_BOUNDARY = os.getenv("STRICT_LEFT_BOUNDARY", "1") == "1"
 REPAIR_TLD_TAIL = os.getenv("REPAIR_TLD_TAIL", "1") == "1"
+IDNA_DOMAIN_NORMALIZE = os.getenv("IDNA_DOMAIN_NORMALIZE", "0") == "1"
 
 # Простые маркеры, указывающие на обфусцированный адрес (например, name(at)domain).
 _AUTO_DEOBF_HINTS = re.compile(r"(?i)(\[[^\]]*(?:at|dot)[^\]]*\]|\([^)]*(?:at|dot)[^)]*\))")
@@ -981,6 +982,25 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     final_reasons: list[str | None] = []
     items_meta: list[dict[str, object]] = []
     confusables_fixed = 0
+    invalid_tld_examples: list[str] = []
+    syntax_fail_examples: list[str] = []
+    confusable_fixed_examples: list[str] = []
+    _invalid_seen: set[str] = set()
+    _syntax_seen: set[str] = set()
+    _conf_seen: set[str] = set()
+
+    def _store_example(bucket: list[str], seen: set[str], value: str) -> None:
+        if not value:
+            return
+        candidate = str(value).strip()
+        if not candidate:
+            return
+        trimmed = candidate[:80]
+        key = trimmed.lower()
+        if key in seen or len(bucket) >= 5:
+            return
+        bucket.append(trimmed)
+        seen.add(key)
 
     for m in matches:
         c = m.group(0)
@@ -1109,17 +1129,36 @@ def parse_emails_unified(text: str, return_meta: bool = False):
                 if stage is None:
                     stage = "sanitize"
 
+        reason_tokens = {
+            token.strip()
+            for token in str(final_reason or "").split(",")
+            if token and token.strip()
+        }
+        sample_value = sanitized or candidate or c
+
         if sanitized_final:
             if conf_fixed:
                 confusables_fixed += 1
                 if final_reason is None:
                     final_reason = "confusables-normalized"
+                _store_example(
+                    confusable_fixed_examples, _conf_seen, sanitized_final
+                )
             elif final_reason is None and deobf_applied:
                 if c not in raw and sanitized_final not in raw:
                     final_reason = "obfuscation-applied"
 
             cleaned.append(sanitized_final)
             final_reasons.append(final_reason)
+        else:
+            if reason_tokens:
+                if any(
+                    token in {"tld-not-allowed", "invalid-idna"}
+                    for token in reason_tokens
+                ):
+                    _store_example(invalid_tld_examples, _invalid_seen, sample_value)
+                else:
+                    _store_example(syntax_fail_examples, _syntax_seen, sample_value)
         items_meta.append(
             {
                 "raw": c,
@@ -1190,6 +1229,9 @@ def parse_emails_unified(text: str, return_meta: bool = False):
         "deobfuscation_rules": deobf_rules,
         "suspects": suspects,  # EB-GENERIC-GLUE-SUSPECTS
     }
+    meta["invalid_tld_examples"] = list(invalid_tld_examples)
+    meta["syntax_fail_examples"] = list(syntax_fail_examples)
+    meta["confusable_fixed_examples"] = list(confusable_fixed_examples)
     return cleaned, meta
 
 
@@ -1270,6 +1312,8 @@ def normalize_domain(domain: str) -> tuple[str, str | None]:
             label_nfkc.encode("ascii")
             ascii_label = label_nfkc
         except UnicodeEncodeError:
+            if not IDNA_DOMAIN_NORMALIZE:
+                return "", "invalid-idna"
             try:
                 ascii_label = idna.encode(label_nfkc, uts46=True).decode("ascii")
             except idna.IDNAError:

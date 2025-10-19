@@ -97,20 +97,26 @@ def _build_summary(
     deep: bool,
     limit_pages: int | None = None,
 ) -> str:
-    summary = format_parse_summary(
-        {
-            "total_found": stats.get("total_in", 0),
-            "to_send": len(filtered),
-            "suspicious": 0,
-            "cooldown_180d": 0,
-            "foreign_domain": 0,
-            "pages_skipped": 0,
-            "footnote_dupes_removed": 0,
-            "blocked": stats.get("blocked", 0),
-            "blocked_after_parse": stats.get("blocked", 0),
-        },
-        examples=filtered[:5],
-    )
+    summary_payload: dict[str, object] = {
+        "total_found": stats.get("total_in", 0),
+        "to_send": len(filtered),
+        "suspicious": 0,
+        "cooldown_180d": 0,
+        "foreign_domain": 0,
+        "pages_skipped": 0,
+        "footnote_dupes_removed": 0,
+        "blocked": stats.get("blocked", 0),
+        "blocked_after_parse": stats.get("blocked", 0),
+    }
+    for key in (
+        "invalid_tld_examples",
+        "syntax_fail_examples",
+        "confusable_fixed_examples",
+    ):
+        value = stats.get(key)
+        if value:
+            summary_payload[key] = value
+    summary = format_parse_summary(summary_payload, examples=filtered[:5])
     if filtered:
         summary += "\nПримеры:\n" + "\n".join(hcode(addr) for addr in filtered[:5])
     pages = stats.get("pages", 0)

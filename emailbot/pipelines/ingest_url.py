@@ -14,7 +14,7 @@ async def ingest_url(
     deep: bool = False,
     path_prefixes: Optional[list[str]] = None,
     limit_pages: Optional[int] = None,
-) -> Tuple[List[str], Dict[str, int]]:
+) -> Tuple[List[str], Dict[str, object]]:
     """Fetch ``url`` and return extracted e-mails along with summary stats."""
 
     emails, meta = await extract_from_url_async(
@@ -29,7 +29,7 @@ async def ingest_url(
     except Exception:
         blocked_count = 0
 
-    stats: Dict[str, int] = {
+    stats: Dict[str, object] = {
         "total_in": 0,
         "ok": len(ok),
         "blocked": blocked_count,
@@ -48,6 +48,13 @@ async def ingest_url(
         pages_limit = meta.get("pages_limit")
         if isinstance(pages_limit, int):
             stats["pages_limit"] = pages_limit
+        for key in (
+            "invalid_tld_examples",
+            "syntax_fail_examples",
+            "confusable_fixed_examples",
+        ):
+            if key in meta and meta.get(key):
+                stats[key] = meta.get(key)
     if not stats["total_in"]:
         stats["total_in"] = len(ok)
     return ok, stats

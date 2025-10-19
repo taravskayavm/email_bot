@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from emailbot.sanitizer import _join_linebreaks_around_dot, heal_ocr_email_fragments
 
 __all__ = [
     "EmailValidationError",
     "clean_and_normalize_email",
+    "strip_invisibles",
+    "normalize_confusables",
+    "deobfuscate_email_text",
+    "preclean_for_email_extraction",
+    "postclean_email_token",
 ]
 
 _ZW_CHARS = (
@@ -123,3 +128,100 @@ def clean_and_normalize_email(raw: str) -> Tuple[Optional[str], Optional[str]]:
         return None, exc
     # финальный канонический вид: локальная часть как есть (ASCII), домен — IDNA
     return f"{local}@{idna_domain}", None
+
+
+# ---------------------------------------------------------------------------
+# Pre/post-clean helpers used by extraction pipelines.
+
+_OCR_ZERO_WIDTH = "".join(["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"])
+_ZW_EXTRA_RE = re.compile(f"[{re.escape(_OCR_ZERO_WIDTH)}]")
+_NBSP_RE = re.compile(r"[\u00A0\u202F]")
+_SOFT_HYPHEN_RE = re.compile(r"\u00AD")
+_OBF_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\s*@\s*", re.IGNORECASE), "@"),
+    (re.compile(r"\s*\.\s*", re.IGNORECASE), "."),
+    (re.compile(r",\s*([A-Za-z]{2,})\\b", re.IGNORECASE), r".\\1"),
+    (re.compile(r"[\(\[\{]\s*at\s*[\)\]\}]", re.IGNORECASE), "@"),
+    (re.compile(r"\b(a|с)обака\b", re.IGNORECASE), "@"),
+    (re.compile(r"[\(\[\{]\s*dot\s*[\)\]\}]", re.IGNORECASE), "."),
+    (re.compile(r"\bточка\b", re.IGNORECASE), "."),
+    (re.compile(r"\.\s*r\s*u\b", re.IGNORECASE), ".ru"),
+    (re.compile(r"\.\s*c\s*o\s*m\b", re.IGNORECASE), ".com"),
+    (re.compile(r"\.\s*o\s*r\s*g\b", re.IGNORECASE), ".org"),
+    (re.compile(r"\.\s*n\s*e\s*t\b", re.IGNORECASE), ".net"),
+    (re.compile(r"\s*[·•∙]\s*([A-Za-z]{2,})\\b", re.IGNORECASE), r".\\1"),
+]
+_LINEBREAK_DOT_RE = re.compile(r"\.\s*[\r\n]+\s*([A-Za-z]{2,})", re.IGNORECASE)
+
+
+def strip_invisibles(text: str) -> str:
+    """Remove zero-width characters and normalise non-breaking spaces."""
+
+    if not text:
+        return ""
+    cleaned = _ZW_EXTRA_RE.sub("", text)
+    cleaned = _NBSP_RE.sub(" ", cleaned)
+    cleaned = _SOFT_HYPHEN_RE.sub("", cleaned)
+    return cleaned
+
+
+def normalize_confusables(text: str) -> str:
+    """Normalise Unicode confusables commonly used in obfuscated e-mails."""
+
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", text)
+    conf = {
+        "а": "a",
+        "А": "A",
+        "В": "B",
+        "Е": "E",
+        "К": "K",
+        "М": "M",
+        "Н": "H",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "Т": "T",
+        "Х": "X",
+        "у": "y",
+        "о": "o",
+        "с": "c",
+        "р": "p",
+        "е": "e",
+        "х": "x",
+        "т": "t",
+        "к": "k",
+        "м": "m",
+    }
+    return "".join(conf.get(ch, ch) for ch in normalized)
+
+
+def deobfuscate_email_text(text: str) -> str:
+    """Apply lightweight heuristics to undo textual e-mail obfuscations."""
+
+    s = strip_invisibles(text)
+    s = normalize_confusables(s)
+    s = _LINEBREAK_DOT_RE.sub(r".\\1", s)
+    for regex, replacement in _OBF_PATTERNS:
+        s = regex.sub(replacement, s)
+    s = re.sub(r"\s+@\s+", "@", s)
+    s = re.sub(r"\s*\.\s*", ".", s)
+    return s
+
+
+def preclean_for_email_extraction(text: str) -> str:
+    """Combine all safe pre-cleaning steps before e-mail extraction."""
+
+    return deobfuscate_email_text(text or "")
+
+
+def postclean_email_token(token: str) -> str:
+    """Normalise an extracted e-mail token before strict validation."""
+
+    cleaned = strip_invisibles(token or "")
+    cleaned = normalize_confusables(cleaned)
+    cleaned = re.sub(r"\s+", "", cleaned)
+    for wrong, right in ((",ru", ".ru"), (",com", ".com"), (",org", ".org"), (",net", ".net")):
+        cleaned = cleaned.replace(wrong, right)
+    return cleaned.strip()

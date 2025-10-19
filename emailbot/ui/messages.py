@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - используем отложенны�
 # Никакого HTML – чистый текст/Markdown-safe (aiogram parse_mode="HTML"/"MarkdownV2" на твой выбор).
 
 
-def format_parse_summary(s: Mapping[str, int], examples: Iterable[str] = ()) -> str:
+def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) -> str:
     """
     Ожидаемые ключи s:
       total_found, to_send, suspicious, cooldown_180d, foreign_domain,
@@ -41,6 +41,33 @@ def format_parse_summary(s: Mapping[str, int], examples: Iterable[str] = ()) -> 
     if total_blocked > 0:
         lines.append(f"🚫 В стоп-листе: {total_blocked}")
     lines.append("")
+
+    def _append_examples(title: str, key: str) -> bool:
+        values = s.get(key)
+        if not values:
+            return False
+        if isinstance(values, str):
+            iterable = [values]
+        else:
+            try:
+                iterable = list(values)
+            except TypeError:
+                iterable = [values]
+        samples = [str(item).strip()[:80] for item in iterable if str(item).strip()]
+        if not samples:
+            return False
+        lines.append(title)
+        for sample in samples:
+            lines.append(f" • {sample}")
+        return True
+
+    appended = False
+    appended |= _append_examples("❗ Примеры некорректных доменов:", "invalid_tld_examples")
+    appended |= _append_examples("🚫 Синтаксические отказы:", "syntax_fail_examples")
+    appended |= _append_examples("🔁 Исправлены гомоглифы:", "confusable_fixed_examples")
+    if appended:
+        lines.append("")
+
     return "\n".join(lines)
 
 
