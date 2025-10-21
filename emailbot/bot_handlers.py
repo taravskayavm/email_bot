@@ -136,6 +136,31 @@ def _build_parse_task_name(update: Update, mode: str) -> str:
 
 # Простая регулярка для поиска ссылок в пользовательском тексте
 URL_REGEX = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+# Более строгий детектор URL для ручного режима: распознаём http(s) и www.
+_MANUAL_URL_RE = re.compile(r"(?i)(?<!@)\bwww\.")
+
+
+def _message_has_url(message: Message | None, raw_text: str | None) -> bool:
+    """Return ``True`` if ``raw_text`` or entities contain a URL-like token."""
+
+    text = raw_text or ""
+    entities = getattr(message, "entities", None)
+    if entities:
+        for ent in entities:
+            if ent.type == "url":
+                return True
+            if ent.type == "text_link" and getattr(ent, "url", None):
+                return True
+    if not text:
+        return False
+    lowered = text.lower()
+    if "http://" in lowered or "https://" in lowered:
+        return True
+    if URL_REGEX.search(text):
+        return True
+    if _MANUAL_URL_RE.search(text):
+        return True
+    return False
 
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
@@ -882,6 +907,10 @@ ADMIN_IDS = {
 }
 
 MANUAL_WAIT_INPUT = "manual_wait_input"
+MANUAL_URL_REJECT_MESSAGE = (
+    "🔒 В ручном режиме ссылки не принимаются.\n"
+    "Отправьте только e-mail-адреса, либо используйте режим массовой рассылки для парсинга сайтов."
+)
 
 PREVIEW_ALLOWED = 10
 PREVIEW_NUMERIC = 6
@@ -3909,6 +3938,10 @@ async def manual_input_router(
     if not text:
         raise ApplicationHandlerStop
 
+    if _message_has_url(message, message.text):
+        await message.reply_text(MANUAL_URL_REJECT_MESSAGE)
+        raise ApplicationHandlerStop
+
     raw_emails = messaging.parse_emails_from_text(text)
     if not raw_emails:
         await message.reply_text(
@@ -3978,7 +4011,14 @@ async def route_text_message(
             if item
         ]
     if urls:
-        await handle_url_text(update, context, allow_manual=True)
+        awaiting_manual = bool(
+            context.chat_data.get("awaiting_manual_emails")
+            or context.user_data.get("awaiting_manual_email")
+        )
+        if awaiting_manual:
+            await message.reply_text(MANUAL_URL_REJECT_MESSAGE)
+            raise ApplicationHandlerStop
+        await handle_url_text(update, context)
         raise ApplicationHandlerStop
 
     awaiting = context.chat_data.get("awaiting_manual_emails") or context.user_data.get(
@@ -4908,6 +4948,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     raw_text = message.text or ""
     text = raw_text
+    has_url = _message_has_url(message, raw_text)
 
     if await _handle_bulk_edit_text(update, context, text):
         return
@@ -4923,6 +4964,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["awaiting_block_email"] = False
         return
     if context.user_data.get("awaiting_manual_email"):
+        if has_url:
+            await message.reply_text(MANUAL_URL_REJECT_MESSAGE)
+            return
         clear_stop()
         found = await asyncio.to_thread(extract_emails_manual, text)
         filtered = sorted(set(e.lower().strip() for e in found))
@@ -4956,20 +5000,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await update.message.reply_text("❌ Не найдено ни одного email.")
         return
-    entities = getattr(message, "entities", None)
-    has_url = False
-    if entities:
-        for ent in entities:
-            if ent.type == "url":
-                segment = raw_text[ent.offset : ent.offset + ent.length].strip()
-                if segment:
-                    has_url = True
-                    break
-            elif ent.type == "text_link" and getattr(ent, "url", None):
-                has_url = True
-                break
-    if not has_url and URL_REGEX.search(raw_text or ""):
-        has_url = True
     if has_url:
         await handle_url_text(update, context)
         return
