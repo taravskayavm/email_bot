@@ -5,12 +5,10 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-import httpx
 from aiogram import F, Router, types
 
 from emailbot.reporting import count_blocked
 from emailbot.ui.messages import render_dispatch_summary
-from emailbot.pipelines.ingest_url import ingest_url
 from emailbot.utils.email_clean import preclean_for_email_extraction
 from utils.email_clean import parse_emails_unified
 
@@ -75,7 +73,7 @@ async def handle_manual_input(message: types.Message) -> None:
         await message.answer("Пришлите адреса или ссылку ещё раз.")
         return
 
-    if "@" in text and not _looks_like_url(text):
+    if "@" in text:
         emails = _extract_manual_emails(text)
         if emails:
             await message.answer(_render_summary(emails))
@@ -86,30 +84,10 @@ async def handle_manual_input(message: types.Message) -> None:
         return
 
     if _looks_like_url(text):
-        try:
-            emails, _meta = await ingest_url(text)
-        except httpx.UnsupportedProtocol as exc:
-            emails = _extract_manual_emails(text)
-            if emails:
-                summary = _render_summary(emails)
-                await message.answer(
-                    "⚠️ Это невалидная ссылка (UnsupportedProtocol). "
-                    "Разобрал как список e-mail-адресов.\n\n"
-                    + summary
-                )
-            else:
-                await message.answer(
-                    "Это похоже не на ссылку. Пришлите адреса через пробел/запятую."
-                )
-            return
-        except Exception as exc:  # pragma: no cover - network errors vary
-            await message.answer(f"Не удалось получить страницу: {exc}")
-            return
-
-        if emails:
-            await message.answer(_render_summary(emails))
-            return
-        await message.answer("Ссылка не дала e-mail-адресов. Попробуйте другую или пришлите список вручную.")
+        await message.answer(
+            "🔒 В ручном режиме ссылки не принимаются.\n"
+            "Отправьте только e-mail-адреса, либо используйте режим массовой рассылки для парсинга сайтов."
+        )
         return
 
     emails = _extract_manual_emails(text)

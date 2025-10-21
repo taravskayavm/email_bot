@@ -5936,7 +5936,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         total_skipped = len(skipped_recent)
         total_blocked = len(blocked_foreign) + len(blocked_invalid)
         total_duplicates = len(duplicates)
-        total = total_sent + total_skipped + total_blocked + total_duplicates
+        total_planned = initial_count
         try:
             stoplist_blocked = count_blocked(blocked_invalid)
         except Exception:
@@ -5945,7 +5945,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             stoplist_blocked if (stoplist_blocked or total_blocked == 0) else total_blocked
         )
         report_text = format_dispatch_result(
-            total,
+            total_planned,
             total_sent,
             total_skipped,
             total_blocked,
