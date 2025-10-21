@@ -98,7 +98,11 @@ async def handle(request: web.Request) -> web.Response:
                 data = None
 
         raw_marker = (data and (_form_value(data, "List-Unsubscribe") or "")) or ""
-        marker = raw_marker.strip().lower() or (request.headers.get("List-Unsubscribe-Post") or "").strip().lower()
+        header_marker = (request.headers.get("List-Unsubscribe-Post") or "").strip()
+        marker = raw_marker.strip()
+        marker_lower = marker.lower()
+        header_marker_lower = header_marker.lower()
+        normalized_marker = marker_lower or header_marker_lower
 
         query = request.rel_url.query
         addr = await _extract_email_any(request, data, query)
@@ -134,6 +138,14 @@ async def handle(request: web.Request) -> web.Response:
                 dict(request.headers),
             )
             raise web.HTTPBadRequest(text="Missing recipient")
+
+        if "one-click" not in normalized_marker:
+            logger.warning(
+                "unsubscribe POST denied: missing one-click marker marker=%r header_marker=%r",
+                raw_marker or None,
+                header_marker or None,
+            )
+            raise web.HTTPForbidden(text="Invalid unsubscribe request")
 
         added = mark_unsubscribed(addr)
         logger.info(
