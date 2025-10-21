@@ -282,6 +282,17 @@ def test_handle_text_manual_emails():
     assert "support@support.com — role-like" in drop_reply
 
 
+def test_handle_text_manual_rejects_url():
+    update = DummyUpdate(text="https://example.com")
+    ctx = DummyContext()
+    ctx.user_data["awaiting_manual_email"] = True
+
+    run(handle_text(update, ctx))
+
+    assert ctx.user_data["awaiting_manual_email"] is True
+    assert update.message.replies == [bh.MANUAL_URL_REJECT_MESSAGE]
+
+
 def test_manual_input_router_summary(monkeypatch):
     update = DummyUpdate(text="User@example.com other@example.com")
     ctx = DummyContext()
@@ -302,6 +313,20 @@ def test_manual_input_router_summary(monkeypatch):
         "other@example.com",
         "user@example.com",
     }
+
+
+def test_manual_input_router_rejects_url():
+    update = DummyUpdate(text="https://example.com")
+    ctx = DummyContext()
+    ctx.user_data["state"] = MANUAL_WAIT_INPUT
+    ctx.user_data["awaiting_manual_email"] = True
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(manual_input_router(update, ctx))
+
+    assert ctx.user_data["state"] == MANUAL_WAIT_INPUT
+    assert ctx.user_data["awaiting_manual_email"] is True
+    assert update.message.replies == [bh.MANUAL_URL_REJECT_MESSAGE]
 
 
 def test_prompt_manual_email_clears_previous_list():
