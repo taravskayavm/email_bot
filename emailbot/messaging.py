@@ -463,43 +463,28 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 # Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
-# Путь к блок-листу: по умолчанию используем файл в профиле пользователя,
-# но разрешаем переопределить через переменные окружения.
-_BL_DEFAULT = Path("~/.emailbot/blocked_emails.txt")
+# Путь к блок-листу: используем var/blocked_emails.txt по умолчанию и
+# разрешаем переопределять через переменные окружения (новый порядок: EMAILS_PATH → LIST_PATH → legacy FILE).
+_BL_DEFAULT = "var/blocked_emails.txt"
 _blocked_env = (
-    os.getenv("BLOCKED_EMAILS_FILE")
+    os.getenv("BLOCKED_EMAILS_PATH")
     or os.getenv("BLOCKED_LIST_PATH")
-    or os.getenv("BLOCKED_EMAILS_PATH")
+    or os.getenv("BLOCKED_EMAILS_FILE")
 )
 BLOCKED_FILE = str(expand_path(_blocked_env or _BL_DEFAULT))
 try:
-    _p = Path(BLOCKED_FILE)
-    if os.getenv("BLOCKED_EMAILS_FILE"):
-        _env_name = "BLOCKED_EMAILS_FILE"
+    _path = Path(BLOCKED_FILE)
+    if os.getenv("BLOCKED_EMAILS_PATH"):
+        source = "BLOCKED_EMAILS_PATH"
     elif os.getenv("BLOCKED_LIST_PATH"):
-        _env_name = "BLOCKED_LIST_PATH"
-    elif os.getenv("BLOCKED_EMAILS_PATH"):
-        _env_name = "BLOCKED_EMAILS_PATH"
+        source = "BLOCKED_LIST_PATH"
+    elif os.getenv("BLOCKED_EMAILS_FILE"):
+        source = "BLOCKED_EMAILS_FILE"
     else:
-        _env_name = "default"
-    logger.info(
-        "Stoplist path resolved: %s (env=%s)",
-        _p,
-        _env_name,
-    )
+        source = "default"
+    logger.info("Stoplist path resolved: %s (source=%s)", _path, source)
 except Exception:
-    pass
-
-# [EBOT-FIX-BLOCK-INIT-016] ensure directory and file exist
-try:
-    _blocked_path = Path(BLOCKED_FILE)
-    _blocked_path.parent.mkdir(parents=True, exist_ok=True)
-    if not _blocked_path.exists():
-        _blocked_path.write_text("", encoding="utf-8")
-except Exception:
-    logger.debug(
-        "Unable to precreate BLOCKED_FILE at %s", BLOCKED_FILE, exc_info=True
-    )
+    logger.debug("Unable to log stoplist path", exc_info=True)
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
 
 SYNC_STATE_PATH = str(expand_path(os.getenv("SYNC_STATE_PATH", "var/sync_state.json")))
