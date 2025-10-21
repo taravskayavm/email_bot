@@ -3934,11 +3934,18 @@ async def manual_input_router(
     if not message:
         return
 
-    text = (message.text or "").strip()
+    raw_text = message.text or ""
+    text = raw_text.strip()
     if not text:
         raise ApplicationHandlerStop
 
-    if _message_has_url(message, message.text):
+    # EBOT-MANUAL-NOURL-WHEN-EMAILS: если в тексте есть хотя бы один символ '@',
+    # считаем, что пользователь прислал адреса, даже если встречаются доменные
+    # шаблоны. Это защищает от ложного срабатывания URL-ветки, где мы запрещаем
+    # ссылки в ручном режиме.
+    looks_like_emails = "@" in raw_text
+
+    if not looks_like_emails and _message_has_url(message, message.text):
         await message.reply_text(MANUAL_URL_REJECT_MESSAGE)
         raise ApplicationHandlerStop
 
