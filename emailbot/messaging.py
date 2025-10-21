@@ -1452,7 +1452,7 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
     return False
 
 
-def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
+def mark_unsubscribed(email_addr: str) -> bool:
     email_norm = normalize_email(email_addr)
     p = Path(LOG_FILE)
     rows: list[dict] = []
@@ -1462,7 +1462,7 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> bool:
             reader = csv.DictReader(f)
             rows = list(reader)
         for row in rows:
-            if row.get("email") == email_norm and (token is None or row.get("unsubscribe_token") == token):
+            if row.get("email") == email_norm:
                 row["unsubscribed"] = "1"
                 row["unsubscribed_at"] = datetime.utcnow().isoformat()
                 changed = True
