@@ -14,7 +14,7 @@ except Exception:
     # при пакетном импорте emailbot.*
     from emailbot.utils.paths import expand_path  # type: ignore
 
-_DEFAULT_BLOCKLIST = Path("~/.emailbot/blocked_emails.txt")
+_DEFAULT_BLOCKLIST = Path("var/blocked_emails.txt")
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - fallback when extraction module unavaila
 
 _LOCK = threading.RLock()
 # Path can be overridden via environment variable BLOCKED_EMAILS_FILE (preferred)
-# or legacy BLOCKED_LIST_PATH / BLOCKED_EMAILS_PATH; default is ~/.emailbot/blocked_emails.txt.
+# or legacy BLOCKED_LIST_PATH / BLOCKED_EMAILS_PATH; default is var/blocked_emails.txt.
 _ENV_BLOCKLIST = (
     os.getenv("BLOCKED_EMAILS_FILE")
     or os.getenv("BLOCKED_LIST_PATH")
