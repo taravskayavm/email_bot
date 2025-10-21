@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+import httpx
+
 from emailbot.reporting import count_blocked
 from pipelines.extract_emails import extract_from_url_async
 
@@ -17,12 +19,21 @@ async def ingest_url(
 ) -> Tuple[List[str], Dict[str, object]]:
     """Fetch ``url`` and return extracted e-mails along with summary stats."""
 
-    emails, meta = await extract_from_url_async(
-        url,
-        deep=deep,
-        path_prefixes=path_prefixes,
-        max_pages=limit_pages if deep else None,
-    )
+    try:
+        emails, meta = await extract_from_url_async(
+            url,
+            deep=deep,
+            path_prefixes=path_prefixes,
+            max_pages=limit_pages if deep else None,
+        )
+    except httpx.UnsupportedProtocol as exc:
+        return [], {
+            "total_in": 0,
+            "ok": 0,
+            "blocked": 0,
+            "errors": [f"unsupported_protocol: {exc}"],
+            "pages": 0,
+        }
     ok = list(dict.fromkeys(emails or []))
     try:
         blocked_count = count_blocked(ok)
