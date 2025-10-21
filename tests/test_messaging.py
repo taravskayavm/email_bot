@@ -433,7 +433,7 @@ def test_mark_unsubscribed_updates_log(temp_files):
     messaging.log_sent_email(
         "user@example.com", "group1", unsubscribe_token="tok123"
     )
-    assert messaging.mark_unsubscribed("user@example.com", "tok123")
+    assert messaging.mark_unsubscribed("user@example.com")
     with open(log_path, encoding="utf-8") as f:
         row = next(csv.DictReader(f))
     assert row["unsubscribed"] == "1" and row["unsubscribe_token"] == "tok123"
@@ -450,7 +450,7 @@ async def _start_app(app):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_flow(temp_files, monkeypatch):
-    _, log_path = temp_files
+    blocked_path, log_path = temp_files
     monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
     token = "tok123"
     messaging.log_sent_email("user@example.com", "g", unsubscribe_token=token)
@@ -461,20 +461,26 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
             f"{base}/unsubscribe?email=user@example.com&token={token}"
         )
         html = await resp.text()
-        assert "Подтвердить отписку" in html
+        assert resp.status == 200
+        assert "Ваш адрес больше не будет получать письма." in html
         resp_bad = await session.get(
             f"{base}/unsubscribe?email=user@example.com&token=bad"
         )
-        assert "ответьте Unsubscribe" in (await resp_bad.text())
-        resp2 = await session.post(
-            f"{base}/unsubscribe", data={"email": "user@example.com", "token": token}
+        assert resp_bad.status == 403
+        resp_post = await session.post(
+            f"{base}/unsubscribe",
+            data={
+                "List-Unsubscribe": "One-Click",
+                "recipient": "post@example.com",
+            },
         )
-        html2 = await resp2.text()
-        assert "Ваш адрес больше не будет получать письма." in html2
+        assert resp_post.status == 200
+        assert (await resp_post.text()) == "OK"
     await runner.cleanup()
     with open(log_path, encoding="utf-8") as f:
         row = next(csv.DictReader(f))
     assert row["unsubscribed"] == "1"
+    assert "post@example.com" in blocked_path.read_text().splitlines()
 
 
 def test_process_unsubscribe_requests_skips_without_imap_config(monkeypatch):
