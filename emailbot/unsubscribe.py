@@ -139,7 +139,7 @@ async def handle(request: web.Request) -> web.Response:
 
         result: MarkUnsubscribedResult = mark_unsubscribed(addr)
         logger.info(
-            "unsubscribe POST: email=%s csv=%s block=%s block_file=%s",
+            "unsubscribe POST(one-click): email=%s csv=%s block=%s block_file=%s",
             addr,
             result.csv_updated,
             result.block_added,

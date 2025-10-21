@@ -176,9 +176,18 @@ def render_dispatch_summary(
     blocked_count: int | None = None,
 ) -> str:
     total_skipped = max(skipped_cooldown, skipped_initial)
+    planned_materialized: list[str] | None = None
+    planned_display = planned
+    if planned_emails is not None:
+        planned_materialized = list(planned_emails)
+        planned_display = len(planned_materialized)
     final_blocked = blocked_count
     if final_blocked is None:
-        blocked_source = planned_emails or raw_emails or []
+        blocked_source = (
+            planned_materialized
+            if planned_materialized is not None
+            else planned_emails
+        ) or raw_emails or []
         final_blocked = 0
         try:
             global count_blocked, _HAVE_COUNT_BLOCKED
@@ -195,7 +204,7 @@ def render_dispatch_summary(
     audit_suffix = f"\n\n📄 Аудит: {audit_path}" if audit_path else ""
     return (
         "📨 Рассылка завершена.\n"
-        f"📊 В очереди было: {planned}\n"
+        f"📊 В очереди было: {planned_display}\n"
         f"✅ Отправлено: {sent}\n"
         f"⏳ Пропущены (по правилу «180 дней»): {total_skipped}\n"
         f"🚫 В стоп-листе: {final_blocked}\n"
