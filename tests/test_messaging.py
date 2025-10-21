@@ -453,7 +453,9 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
     blocked_path, log_path = temp_files
     monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
     token = "tok123"
+    post_token = "post123"
     messaging.log_sent_email("user@example.com", "g", unsubscribe_token=token)
+    messaging.log_sent_email("post@example.com", "g", unsubscribe_token=post_token)
     app = unsubscribe.create_app()
     runner, base = await _start_app(app)
     async with aiohttp.ClientSession() as session:
@@ -467,19 +469,39 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
             f"{base}/unsubscribe?email=user@example.com&token=bad"
         )
         assert resp_bad.status == 403
-        resp_post = await session.post(
+        resp_post_missing_token = await session.post(
             f"{base}/unsubscribe",
             data={
                 "List-Unsubscribe": "One-Click",
                 "recipient": "post@example.com",
             },
         )
+        assert resp_post_missing_token.status == 400
+        resp_post_bad_token = await session.post(
+            f"{base}/unsubscribe",
+            data={
+                "List-Unsubscribe": "One-Click",
+                "recipient": "post@example.com",
+                "token": "bad",
+            },
+        )
+        assert resp_post_bad_token.status == 403
+        resp_post = await session.post(
+            f"{base}/unsubscribe",
+            data={
+                "List-Unsubscribe": "One-Click",
+                "recipient": "post@example.com",
+                "token": post_token,
+            },
+        )
         assert resp_post.status == 200
         assert (await resp_post.text()) == "OK"
     await runner.cleanup()
     with open(log_path, encoding="utf-8") as f:
-        row = next(csv.DictReader(f))
-    assert row["unsubscribed"] == "1"
+        rows = list(csv.DictReader(f))
+    by_email = {row["email"]: row for row in rows}
+    assert by_email["user@example.com"]["unsubscribed"] == "1"
+    assert by_email["post@example.com"]["unsubscribed"] == "1"
     assert "post@example.com" in blocked_path.read_text().splitlines()
 
 
