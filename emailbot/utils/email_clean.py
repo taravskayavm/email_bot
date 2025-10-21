@@ -193,6 +193,8 @@ def normalize_confusables(text: str) -> str:
         "т": "t",
         "к": "k",
         "м": "m",
+        "ё": "e",
+        "Ё": "E",
     }
     return "".join(conf.get(ch, ch) for ch in normalized)
 
