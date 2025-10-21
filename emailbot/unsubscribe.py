@@ -9,6 +9,7 @@ from aiohttp import web
 
 from .messaging import (
     BLOCKED_FILE,
+    MarkUnsubscribedResult,
     ensure_blocklist_ready,
     mark_unsubscribed,
     verify_unsubscribe_token,
@@ -118,11 +119,12 @@ async def handle(request: web.Request) -> web.Response:
             if not verify_unsubscribe_token(email, token):
                 logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
                 raise web.HTTPForbidden(text="Invalid token")
-            added = mark_unsubscribed(email)
+            result: MarkUnsubscribedResult = mark_unsubscribed(email)
             logger.info(
-                "unsubscribe POST(token): email=%s added=%s block_file=%s",
+                "unsubscribe POST(token): email=%s csv=%s block=%s block_file=%s",
                 email,
-                added,
+                result.csv_updated,
+                result.block_added,
                 BLOCKED_FILE,
             )
             return web.Response(text=_ok_html(), content_type="text/html")
@@ -135,11 +137,12 @@ async def handle(request: web.Request) -> web.Response:
             )
             raise web.HTTPBadRequest(text="Missing recipient")
 
-        added = mark_unsubscribed(addr)
+        result: MarkUnsubscribedResult = mark_unsubscribed(addr)
         logger.info(
-            "unsubscribe POST: email=%s added=%s block_file=%s",
+            "unsubscribe POST: email=%s csv=%s block=%s block_file=%s",
             addr,
-            added,
+            result.csv_updated,
+            result.block_added,
             BLOCKED_FILE,
         )
         return web.Response(text="OK", content_type="text/plain")
@@ -151,11 +154,12 @@ async def handle(request: web.Request) -> web.Response:
     if not verify_unsubscribe_token(email, token):
         logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
         raise web.HTTPForbidden(text="Invalid token")
-    added = mark_unsubscribed(email)
+    result: MarkUnsubscribedResult = mark_unsubscribed(email)
     logger.info(
-        "unsubscribe GET: email=%s added=%s block_file=%s",
+        "unsubscribe GET: email=%s csv=%s block=%s block_file=%s",
         email,
-        added,
+        result.csv_updated,
+        result.block_added,
         BLOCKED_FILE,
     )
     return web.Response(text=_ok_html(), content_type="text/html")

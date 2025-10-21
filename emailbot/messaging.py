@@ -1437,7 +1437,16 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
     return False
 
 
-def mark_unsubscribed(email_addr: str) -> bool:
+@dataclass
+class MarkUnsubscribedResult:
+    csv_updated: bool
+    block_added: bool
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience for legacy callers
+        return self.csv_updated or self.block_added
+
+
+def mark_unsubscribed(email_addr: str) -> MarkUnsubscribedResult:
     email_norm = normalize_email(email_addr)
     p = Path(LOG_FILE)
     rows: list[dict] = []
@@ -1469,8 +1478,12 @@ def mark_unsubscribed(email_addr: str) -> bool:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
             writer.writerows(rows)
-    added = add_blocked_email(email_addr)
-    return added
+    block_added = False
+    try:
+        block_added = add_blocked_email(email_norm)
+    except Exception:
+        logger.debug("mark_unsubscribed: add_blocked_email failed", exc_info=True)
+    return MarkUnsubscribedResult(csv_updated=changed, block_added=block_added)
 
 
 def log_sent_email(
@@ -2027,6 +2040,7 @@ __all__ = [
     "dedupe_blocked_file",
     "verify_unsubscribe_token",
     "write_audit",
+    "MarkUnsubscribedResult",
     "mark_unsubscribed",
     "log_sent_email",
     "detect_sent_folder",
