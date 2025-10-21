@@ -46,9 +46,21 @@ async def handle(request: web.Request) -> web.Response:
             ).strip()
             if not email:
                 raise web.HTTPBadRequest(text="Missing recipient")
+            token = (
+                _form_value(data, "token")
+                or request.query.get("token", "")
+            ).strip()
+            if not token:
+                raise web.HTTPBadRequest(text="Missing token")
+            if not verify_unsubscribe_token(email, token):
+                logger.warning(
+                    "unsubscribe denied(one-click): email=%s token_invalid=1",
+                    email,
+                )
+                raise web.HTTPForbidden(text="Invalid token")
             added = mark_unsubscribed(email)
             logger.info(
-                "unsubscribe POST: email=%s added=%s block_file=%s",
+                "unsubscribe POST(one-click): email=%s added=%s block_file=%s",
                 email,
                 added,
                 BLOCKED_FILE,
