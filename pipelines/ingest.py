@@ -1,4 +1,14 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Callable, TypeVar
+
 from utils.email_clean import sanitize_email, dedupe_with_variants, _strip_leading_footnote
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 def ingest(all_extracted_emails: list[str]) -> tuple[list[str], str]:
@@ -27,3 +37,21 @@ def ingest(all_extracted_emails: list[str]) -> tuple[list[str], str]:
     )
 
     return emails, stats
+
+
+def process_files(paths: list[Path], process_one: Callable[[Path], T]) -> list[T]:
+    """Process ``paths`` sequentially while logging successes and failures."""
+
+    results: list[T] = []
+    for path in paths:
+        try:
+            results.append(process_one(path))
+        except Exception as exc:  # pragma: no cover - diagnostic logging only
+            logger.exception("Skip %s: %s", path, exc)
+        else:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = -1
+            logger.info("Parsed: %s (ext=%s, size=%d)", path.name, path.suffix, size)
+    return results
