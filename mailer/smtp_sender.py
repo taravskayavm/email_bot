@@ -19,6 +19,9 @@ from emailbot.history_service import (
     register_send_attempt,
 )
 from utils.send_stats import log_error, log_success
+from config import BLOCKED_EMAILS_PATH
+from utils.blocked_store import BlockedStore
+from utils.email_normalize import normalize_email
 
 
 def _extract_group(msg: EmailMessage) -> str:
@@ -74,6 +77,8 @@ class DomainRateLimiter:
 
 _rate_limiter = DomainRateLimiter(DOMAIN_RATE_LIMIT)
 
+_blocked_store = BlockedStore(BLOCKED_EMAILS_PATH)
+
 
 def _domain_of(addr: str) -> str:
     return (addr or "").split("@")[-1].lower().strip()
@@ -108,6 +113,21 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
         if not recipients and msg.get("X-EBOT-Recipient"):
             recipients = [msg.get("X-EBOT-Recipient")]
         recipients = [addr for addr in recipients if addr]
+
+        blocked_set = _blocked_store.read_all()
+        if blocked_set:
+            filtered: list[str] = []
+            for addr in recipients:
+                norm = normalize_email(addr) or ""
+                if norm and norm in blocked_set:
+                    try:
+                        write_audit_drop(addr, "blocked", "stop-list")
+                    except Exception:
+                        logger.debug("write_audit_drop failed", exc_info=True)
+                    logger.info("Skipping SMTP send to blocked address %s", addr)
+                    continue
+                filtered.append(addr)
+            recipients = filtered
 
         send_now, deferred, rate_increments = _rate_plan(recipients)
         if deferred:
