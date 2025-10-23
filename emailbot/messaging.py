@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
+from email.utils import formataddr, parseaddr, getaddresses
 from pathlib import Path
 from itertools import count
 from typing import (
@@ -43,6 +43,7 @@ from typing import (
     Tuple,
     TYPE_CHECKING,
 )
+from threading import RLock
 
 from .extraction import normalize_email, strip_html
 from .cooldown import (
@@ -148,6 +149,74 @@ def _get_bulk_cooldown_service():
 # [EBOT-087] Запуск корутины Telegram строго в PTB-лупе из любого потока
 def run_in_app_loop(application, coro):
     return asyncio.run_coroutine_threadsafe(coro, application.loop)
+
+
+def log_domain_rate_limit(domain: str, sleep_s: float | int) -> None:
+    """Log a per-domain throttle event and pause for ``sleep_s`` seconds."""
+
+    delay = max(float(sleep_s or 0.0), 0.0)
+    logger.info("rate-limit: domain=%s sleep=%.2fs", domain, delay)
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _normalize_recipient_list(values: Iterable[str]) -> list[str]:
+    addresses: list[str] = []
+    for _, addr in getaddresses(values):
+        if not addr:
+            continue
+        addresses.append(addr.strip().lower())
+    return sorted(dict.fromkeys(addresses))
+
+
+def _make_send_key(msg: EmailMessage, *, now: datetime | None = None) -> str:
+    """Return a stable idempotency key for ``msg`` within the current day."""
+
+    timestamp = (now or datetime.now(timezone.utc)).date().isoformat()
+    payload = {
+        "from": (msg.get("From", "") or "").strip().lower(),
+        "to": _normalize_recipient_list(msg.get_all("To", [])),
+        "cc": _normalize_recipient_list(msg.get_all("Cc", [])),
+        "subject": (msg.get("Subject", "") or "").strip(),
+        "day": timestamp,
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def was_sent_recently(msg: EmailMessage, *, window: float | None = None) -> bool:
+    """Return ``True`` if ``msg`` was marked as sent within ``window`` seconds."""
+
+    ttl = float(window if window is not None else _SENT_IDS_TTL)
+    if ttl <= 0:
+        return False
+    key = _make_send_key(msg)
+    now = time.time()
+    with _sent_history_lock:
+        _ensure_sent_history_loaded_locked()
+        _prune_sent_history_locked(now)
+        ts = _sent_history.get(key)
+    if ts is None:
+        return False
+    return now - ts < ttl
+
+
+def mark_sent(msg: EmailMessage) -> None:
+    """Record that ``msg`` has been sent just now."""
+
+    key = _make_send_key(msg)
+    ts = time.time()
+    with _sent_history_lock:
+        _ensure_sent_history_loaded_locked()
+        _prune_sent_history_locked(ts)
+        _sent_history[key] = ts
+        try:
+            path = SENT_IDS_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handler:
+                handler.write(json.dumps({"key": key, "ts": ts}, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.debug("Failed to append to sent idempotency file", exc_info=True)
 
 
 async def send_bulk(emails: Iterable[str], template_key: str) -> Tuple[int, int, int]:
@@ -575,6 +644,57 @@ def add_blocked_email(email: str) -> bool:
         return False
 
 
+def _flag_enabled(value: str | None) -> bool:
+    if value is None:
+        return False
+    lowered = value.strip().lower()
+    return lowered in {"1", "true", "yes", "on"}
+
+
+def _extra_blocklist() -> set[str]:
+    raw = os.getenv("FILTER_BLOCKLIST", "")
+    if not raw:
+        return set()
+    items: set[str] = set()
+    for token in raw.split(","):
+        candidate = _normalize_email_for_blocklist(token)
+        if candidate and "@" in candidate:
+            items.add(candidate)
+    return items
+
+
+def _should_block_support_addresses() -> bool:
+    return _flag_enabled(os.getenv("FILTER_SUPPORT"))
+
+
+def _is_blocklisted(email: str) -> bool:
+    """Return ``True`` if ``email`` is rejected by local block-list rules."""
+
+    if not email:
+        return False
+    ensure_blocklist_ready()
+    suppress_list.refresh_if_changed()
+
+    normalized = _normalize_email_for_blocklist(email)
+    if not normalized or "@" not in normalized:
+        return False
+
+    if normalized in _DEFAULT_BLOCKLIST:
+        return True
+    if normalized in _extra_blocklist():
+        return True
+
+    local = normalized.split("@", 1)[0]
+    if _should_block_support_addresses() and local.lower().startswith("support"):
+        return True
+
+    try:
+        return suppress_list.is_blocked(normalized)
+    except Exception:
+        logger.debug("blocklist lookup failed", exc_info=True)
+        return False
+
+
 # HTML templates are stored at the root-level ``templates`` directory.
 TEMPLATES_DIR = str(SCRIPT_DIR / "templates")
 TEMPLATE_MAP = {
@@ -631,6 +751,64 @@ IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
 _sent_idempotency: Set[str] = set()
+
+_DEFAULT_BLOCKLIST = {
+    "no-reply@site.com",
+    "mailer-daemon@site.com",
+}
+
+SENT_IDS_FILE: Path = Path(os.getenv("SENT_IDS_FILE", "var/sent_ids.jsonl"))
+_SENT_IDS_TTL = int(os.getenv("SENT_IDS_TTL", "86400"))
+_sent_history_lock = RLock()
+_sent_history: Dict[str, float] = {}
+_sent_history_loaded = False
+
+
+def _ensure_sent_history_loaded_locked() -> None:
+    global _sent_history_loaded
+    if _sent_history_loaded:
+        return
+    path = SENT_IDS_FILE
+    try:
+        with path.open("r", encoding="utf-8") as handler:
+            for raw in handler:
+                try:
+                    record = json.loads(raw)
+                except Exception:
+                    continue
+                key = record.get("key") or record.get("id")
+                ts = record.get("ts") or record.get("timestamp")
+                if not key or not isinstance(ts, (int, float)):
+                    continue
+                _sent_history[str(key)] = float(ts)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.debug("Failed to load sent idempotency file", exc_info=True)
+    _sent_history_loaded = True
+
+
+def _rewrite_sent_history_locked() -> None:
+    path = SENT_IDS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handler:
+            for key, ts in sorted(_sent_history.items(), key=lambda item: item[1]):
+                handler.write(json.dumps({"key": key, "ts": ts}, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.debug("Failed to rewrite sent idempotency file", exc_info=True)
+
+
+def _prune_sent_history_locked(now: float) -> None:
+    if not _sent_history:
+        return
+    cutoff = now - float(max(_SENT_IDS_TTL, 0))
+    stale = [key for key, ts in _sent_history.items() if ts < cutoff]
+    if not stale:
+        return
+    for key in stale:
+        _sent_history.pop(key, None)
+    _rewrite_sent_history_locked()
 
 _RE_JINJA = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
 _RE_FMT = re.compile(r"\{([A-Z0-9_]+)\}")
@@ -910,7 +1088,8 @@ def _rate_limit_domain(recipient: str) -> None:
     if last is not None:
         elapsed = now - last
         if elapsed < _DOMAIN_RATE_LIMIT:
-            time.sleep(_DOMAIN_RATE_LIMIT - elapsed)
+            delay = _DOMAIN_RATE_LIMIT - elapsed
+            log_domain_rate_limit(domain, delay)
             now = last + _DOMAIN_RATE_LIMIT
     _last_domain_send[domain] = now
 
@@ -2035,6 +2214,7 @@ __all__ = [
     "send_bulk",
     "process_unsubscribe_requests",
     "ensure_blocklist_ready",
+    "log_domain_rate_limit",
     "get_blocked_emails",
     "add_blocked_email",
     "dedupe_blocked_file",
@@ -2057,4 +2237,8 @@ __all__ = [
     "check_env_vars",
     "was_sent_within",
     "was_emailed_recently",
+    "was_sent_recently",
+    "mark_sent",
+    "_make_send_key",
+    "_is_blocklisted",
 ]
