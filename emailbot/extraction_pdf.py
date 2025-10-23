@@ -272,6 +272,7 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
 
     out: list[str] = []
     pages_with_text = 0
+    mailtos: set[str] = set()
     for i, page in enumerate(doc):
         heartbeat_now()
         if budget:
@@ -288,6 +289,23 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
         if text and text.strip():
             pages_with_text += 1
             out.append(text)
+        try:
+            links = page.get_links() or []
+        except Exception:
+            links = []
+        for link in links:
+            uri = (link.get("uri") or "").strip()
+            if uri.lower().startswith("mailto:"):
+                email = uri[7:]
+                if "?" in email:
+                    email = email.split("?", 1)[0]
+                if email:
+                    mailtos.add(email)
+    if mailtos:
+        mailto_block = " ".join(sorted(mailtos))
+        if out:
+            mailto_block = " " + mailto_block
+        out.append(mailto_block)
     return "\n".join(out), pages_with_text
 
 

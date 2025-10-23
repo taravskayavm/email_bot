@@ -23,6 +23,22 @@ def _create_pdf(path: Path, text: str) -> None:
     doc.save(path)
 
 
+def _create_pdf_with_mailto(path: Path, email: str) -> None:
+    import fitz  # type: ignore
+
+    doc = fitz.open()
+    page = doc.new_page()
+    # текст без явного email, чтобы поймать mailto-аннотацию
+    page.insert_text((72, 72), "Contact us")
+    rect = fitz.Rect(72, 72, 200, 90)
+    page.insert_link({
+        "kind": fitz.LINK_URI,
+        "from": rect,
+        "uri": f"mailto:{email}?subject=Hello",
+    })
+    doc.save(path)
+
+
 def _create_docx(path: Path, text: str) -> None:
     import docx  # type: ignore
 
@@ -151,6 +167,16 @@ def test_extract_from_documents(tmp_path: Path):
     assert [h.email for h in hits_docx] == ["b@docx.com"]
     assert [h.email for h in hits_xlsx] == ["c@xlsx.com"]
     assert [h.email for h in hits_txt] == ["d@text.com"]
+
+
+def test_extract_mailto_from_pdf(tmp_path: Path):
+    pdf = tmp_path / "mailto.pdf"
+    _create_pdf_with_mailto(pdf, "hello@example.com")
+
+    hits, _ = extraction.extract_from_pdf(str(pdf))
+    emails = {h.email for h in hits}
+
+    assert "hello@example.com" in emails
 
 
 def test_xlsx_no_handle_leak(tmp_path: Path):
