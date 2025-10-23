@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from collections import Counter
 import imaplib
 import importlib
 import inspect
@@ -991,6 +992,89 @@ TECH_PATTERNS = [
     "admin",
     "info@",
 ]
+
+_REPORT_DOMAIN_THRESHOLD = int(os.getenv("REPORT_DOMAIN_THRESHOLD", "5"))
+
+
+def _normalize_for_report(email: str) -> str | None:
+    norm = normalize_email(email)
+    if norm and "@" in norm:
+        return norm
+    cleaned, _ = sanitize_email(email)
+    cleaned = (cleaned or "").strip().lower()
+    if cleaned and "@" in cleaned:
+        return cleaned
+    return None
+
+
+def _is_suspicious_address(addr: str) -> bool:
+    local = addr.split("@", 1)[0]
+    collapsed = (
+        local.replace(".", "")
+        .replace("_", "")
+        .replace("-", "")
+        .lower()
+    )
+    if not collapsed:
+        return True
+    if collapsed.isdigit():
+        return True
+    suspicious_prefixes = {
+        "admin",
+        "contact",
+        "office",
+        "sales",
+        "service",
+        "support",
+        "info",
+        "mail",
+        "postmaster",
+        "noreply",
+        "donotreply",
+        "sus",
+    }
+    for prefix in suspicious_prefixes:
+        if collapsed.startswith(prefix):
+            return True
+    return False
+
+
+def _needs_cooldown(addr: str, domain_counts: Counter) -> bool:
+    if "@" not in addr:
+        return False
+    domain = addr.rsplit("@", 1)[-1]
+    return domain_counts[domain] > max(_REPORT_DOMAIN_THRESHOLD, 0)
+
+
+def _classify_emails(emails: Iterable[str]) -> dict[str, set[str]]:
+    """Group ``emails`` into report sets for downstream rendering."""
+
+    normalized = [
+        value
+        for email in emails or []
+        for value in (_normalize_for_report(email),)
+        if value
+    ]
+    all_set: set[str] = set(normalized)
+    domain_counts: Counter = Counter(addr.rsplit("@", 1)[-1] for addr in all_set if "@" in addr)
+
+    foreign = {addr for addr in all_set if not is_allowed_tld(addr)}
+    suspicious = {addr for addr in all_set if _is_suspicious_address(addr)}
+    cooldown = {
+        addr
+        for addr in all_set
+        if addr not in foreign and addr not in suspicious and _needs_cooldown(addr, domain_counts)
+    }
+
+    sendable = all_set - foreign - suspicious - cooldown
+
+    return {
+        "all": set(all_set),
+        "sus": suspicious,
+        "foreign": foreign,
+        "cool": cooldown,
+        "send": sendable,
+    }
 
 
 BULK_EDIT_PAGE_SIZE = 10
