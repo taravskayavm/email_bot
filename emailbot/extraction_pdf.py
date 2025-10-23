@@ -1,6 +1,7 @@
 """PDF extraction helpers with optional layout and OCR features."""
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -69,6 +70,8 @@ def backend_status() -> Dict[str, bool | str]:
         "pdfminer": _PDFMINER_AVAILABLE,
         "ocr": ocr_available if ocr_enabled else False,
         "ocr_enabled": ocr_enabled,
+        "ocr_engine": _OCR_ENGINE,
+        "ocr_lang": _OCR_LANG,
     }
     if reason:
         status["ocr_reason"] = reason
@@ -94,8 +97,17 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
+_OCR_ENGINE = os.getenv("OCR_ENGINE", "pytesseract") or "pytesseract"
+_OCR_LANG = os.getenv("OCR_LANG", "eng+rus") or "eng+rus"
 _OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
 _OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
+_OCR_MIN_TEXT_RATIO = float(os.getenv("OCR_MIN_TEXT_RATIO", "0.05"))
+_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "150"))
+_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_OCR_PAGE_LIMIT)))
+_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
+_OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
+_OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
+_OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
 MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "200"))
 
@@ -106,6 +118,11 @@ if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
 PDF_BACKEND = _pdf_backend_env
 
 logger = logging.getLogger(__name__)
+
+try:  # pragma: no cover - depends on runtime environment
+    _OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:  # pragma: no cover - cache directory is best-effort
+    logger.debug("Failed to create OCR cache directory", exc_info=True)
 
 _SOFT_HYPH = "\u00AD"
 
@@ -118,6 +135,24 @@ _QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}"
 # Порог, начиная с которого страницу считаем «простой» и не гоним через тяжёлый пайплайн
 _PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
 _PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
+
+
+_ZERO_WIDTH_MAP = dict.fromkeys(map(ord, "\u200B\u200C\u200D\u2060\uFEFF"), None)
+_NBSP_TRANSLATE = str.maketrans({"\u00A0": " ", "\u202F": " "})
+_HARD_HYPHENS_RE = re.compile(r"[‐-‒–—―]")
+
+
+def clean_pdf_text(text: str) -> str:
+    """Remove invisible characters and normalize whitespace for OCR text."""
+
+    if not text:
+        return text
+    text = text.replace(_SOFT_HYPH, "")
+    text = text.translate(_ZERO_WIDTH_MAP)
+    text = text.translate(_NBSP_TRANSLATE)
+    text = _HARD_HYPHENS_RE.sub("-", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text
 
 
 def _legacy_cleanup_text(text: str) -> str:
@@ -285,11 +320,96 @@ def _ocr_page(page) -> str:
         )
         return ""
     try:
-        pix = page.get_pixmap(dpi=200)
+        pix = page.get_pixmap(dpi=_OCR_DPI)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        return pytesseract.image_to_string(img)
+        return pytesseract.image_to_string(img, lang=_OCR_LANG)
     except Exception:
         return ""
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _ocr_cache_get(key: str) -> str | None:
+    path = _OCR_CACHE_DIR / f"{key}.txt"
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        logger.debug("Failed to read OCR cache entry", exc_info=True)
+        return None
+
+
+def _ocr_cache_set(key: str, text: str) -> None:
+    path = _OCR_CACHE_DIR / f"{key}.txt"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except Exception:
+        logger.debug("Failed to write OCR cache entry", exc_info=True)
+
+
+def _should_document_ocr(text: str, data: bytes) -> bool:
+    if not data:
+        return False
+    ocr_available, ocr_enabled, _ = _detect_ocr_status()
+    if not ocr_enabled:
+        return False
+    if not (ocr_available or _OCR_ALLOW_BEST_EFFORT):
+        return False
+    cleaned = clean_pdf_text(text or "").strip()
+    if not cleaned:
+        return True
+    if len(cleaned) < _OCR_MIN_CHARS:
+        return True
+    ratio = len(cleaned) / max(len(data), 1)
+    return ratio < _OCR_MIN_TEXT_RATIO
+
+
+def _document_ocr(data: bytes, *, budget: TimeBudget | None = None) -> tuple[str, int]:
+    try:
+        from pdf2image import convert_from_bytes  # type: ignore
+    except Exception:
+        logger.warning("pdf2image is not installed; PDF OCR fallback disabled")
+        return "", 0
+    try:
+        import pytesseract  # type: ignore
+    except Exception:
+        logger.warning("pytesseract is not installed; PDF OCR fallback disabled")
+        return "", 0
+
+    try:
+        images = convert_from_bytes(data, dpi=_OCR_DPI)
+    except Exception:
+        logger.debug("Failed to render PDF pages for OCR", exc_info=True)
+        return "", 0
+
+    if not images:
+        return "", 0
+
+    ocr_parts: list[str] = []
+    start = time.time()
+    pages = images[: min(len(images), _OCR_MAX_PAGES)]
+    for img in pages:
+        if budget:
+            budget.checkpoint()
+        page_start = time.time()
+        try:
+            text = pytesseract.image_to_string(img, lang=_OCR_LANG)
+        except Exception:
+            text = ""
+        if text:
+            ocr_parts.append(text)
+        if time.time() - page_start > _OCR_TIMEOUT_PER_PAGE:
+            break
+        if time.time() - start > _OCR_TIMEOUT_PER_PAGE * min(len(pages), 5):
+            break
+
+    combined = clean_pdf_text("\n".join(ocr_parts))
+    if combined:
+        return combined, len(ocr_parts)
+    return "", 0
 
 
 def _fitz_extract(path: Path) -> str:
@@ -397,6 +517,7 @@ def _extract_with_backend(path: Path, backend: str) -> str:
 def cleanup_text(text: str) -> str:
     if not text:
         return ""
+    text = clean_pdf_text(text)
     text = _legacy_cleanup_text(text)
     return preprocess_text(text, stats=None)
 
@@ -449,8 +570,33 @@ def extract_text_from_pdf_bytes(
                 text = text_pdfminer
                 pages_with_text = max(pages_with_text, 1)
 
+    ocr_pages = 0
+    ocr_used = False
+    if _should_document_ocr(text, data):
+        if stats is not None:
+            stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
+        key = _sha256(data)
+        cached = _ocr_cache_get(key)
+        if cached:
+            text = cached
+            ocr_used = True
+        else:
+            ocr_text, ocr_pages = _document_ocr(data, budget=budget)
+            if ocr_text:
+                text = ocr_text
+                ocr_used = True
+                _ocr_cache_set(key, ocr_text)
+
     if stats is not None and pages_with_text:
         stats["pages"] = stats.get("pages", 0) + pages_with_text
+
+    if ocr_used and not pages_with_text and text and text.strip():
+        pages_with_text = 1
+        if stats is not None:
+            stats["pages"] = stats.get("pages", 0) + 1
+
+    if stats is not None and ocr_used and ocr_pages:
+        stats["ocr_pages"] = stats.get("ocr_pages", 0) + ocr_pages
 
     if not text:
         return ""
@@ -461,6 +607,11 @@ def extract_text_from_pdf_bytes(
 
 def extract_text_from_pdf(path: str | Path) -> str:
     pdf_path = Path(path)
+
+    try:
+        pdf_bytes = pdf_path.read_bytes()
+    except Exception:
+        pdf_bytes = b""
 
     text = ""
     pages = 0
@@ -476,6 +627,18 @@ def extract_text_from_pdf(path: str | Path) -> str:
     if not text or not text.strip():
         fallback = _extract_with_pypdf(pdf_path)
         text = fallback if fallback.strip() else ""
+
+    if pdf_bytes and _should_document_ocr(text, pdf_bytes):
+        key = _sha256(pdf_bytes)
+        cached = _ocr_cache_get(key)
+        if cached:
+            text = cached
+        else:
+            ocr_text, _ = _document_ocr(pdf_bytes)
+            if ocr_text:
+                text = ocr_text
+                _ocr_cache_set(key, ocr_text)
+
     if not text:
         return ""
     if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
@@ -520,7 +683,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr_available, ocr_configured, _ = _detect_ocr_status()
-    ocr = ocr_configured and ocr_available
+    ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
@@ -717,7 +880,7 @@ def extract_from_pdf_stream(
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr_available, ocr_configured, _ = _detect_ocr_status()
-    ocr = ocr_configured and ocr_available
+    ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
