@@ -379,8 +379,13 @@ def _document_ocr(data: bytes, *, budget: TimeBudget | None = None) -> tuple[str
         logger.warning("pytesseract is not installed; PDF OCR fallback disabled")
         return "", 0
 
+    convert_kwargs: dict[str, int] = {"dpi": _OCR_DPI}
+    if _OCR_MAX_PAGES > 0:
+        convert_kwargs["first_page"] = 1
+        convert_kwargs["last_page"] = _OCR_MAX_PAGES
+
     try:
-        images = convert_from_bytes(data, dpi=_OCR_DPI)
+        images = convert_from_bytes(data, **convert_kwargs)
     except Exception:
         logger.debug("Failed to render PDF pages for OCR", exc_info=True)
         return "", 0
