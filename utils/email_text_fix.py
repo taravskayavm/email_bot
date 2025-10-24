@@ -36,8 +36,8 @@ def _preclean_obfuscations(s: str) -> str:
     s = re.sub(r"\s*\[?\(?\s*точка\s*\)?\]?\s*", ".", s, flags=re.I)  # «точка»
     s = re.sub(r"\s*\[?\(?\s*dot\s*\)?\]?\s*", ".", s, flags=re.I)
     # убираем пробелы вокруг @ и . (не трогаем переводы строк — они управляются флагами)
-    s = re.sub(rf"({_LOCAL_CHARS})[ \t]*@[ \t]*({_DOMAIN_CHARS})", r"\1@\2", s)
-    s = re.sub(rf"({_DOMAIN_CHARS})[ \t]*\.[ \t]*({_DOMAIN_CHARS})", r"\1.\2", s)
+    s = re.sub(rf"({_LOCAL_CHARS})[^\S\r\n]*@[^\S\r\n]*({_DOMAIN_CHARS})", r"\1@\2", s)
+    s = re.sub(rf"({_DOMAIN_CHARS})[^\S\r\n]*\.[^\S\r\n]*({_DOMAIN_CHARS})", r"\1.\2", s)
     return s
 
 
