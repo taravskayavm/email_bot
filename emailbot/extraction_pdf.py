@@ -83,6 +83,7 @@ from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
 from emailbot.timebudget import TimeBudget
+from utils.email_text_fix import fix_email_text
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -536,6 +537,7 @@ def cleanup_text(text: str) -> str:
     if not text:
         return ""
     text = clean_pdf_text(text)
+    text = fix_email_text(text)
     text = _legacy_cleanup_text(text)
     return preprocess_text(text, stats=None)
 
@@ -677,13 +679,13 @@ def extract_text(
     if text_fitz and text_fitz.strip():
         if stats is not None and pages_fitz:
             stats["pages"] = stats.get("pages", 0) + pages_fitz
-        return text_fitz
+        return fix_email_text(text_fitz)
 
     text_pdfminer, pages_pdfminer = _pdfminer_extract_with_stats(pdf_path, budget)
     if text_pdfminer and text_pdfminer.strip():
         if stats is not None:
             stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
-        return text_pdfminer
+        return fix_email_text(text_pdfminer)
 
     if stats is not None and max(pages_fitz, pages_pdfminer):
         stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
@@ -731,6 +733,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -810,6 +813,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = fix_email_text(text)
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -927,6 +931,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -1015,6 +1020,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = fix_email_text(text)
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
