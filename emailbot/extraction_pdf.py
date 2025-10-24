@@ -733,7 +733,11 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        prepared = fix_email_text(prepared)
+        prepared = fix_email_text(
+            prepared,
+            join_email_breaks=join_email_breaks,
+            join_hyphen_breaks=join_hyphen_breaks,
+        )
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -813,7 +817,11 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        text = fix_email_text(text)
+        text = fix_email_text(
+            text,
+            join_email_breaks=join_email_breaks,
+            join_hyphen_breaks=join_hyphen_breaks,
+        )
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -931,7 +939,11 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        prepared = fix_email_text(prepared)
+        prepared = fix_email_text(
+            prepared,
+            join_email_breaks=join_email_breaks,
+            join_hyphen_breaks=join_hyphen_breaks,
+        )
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
@@ -1020,7 +1032,11 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
-        text = fix_email_text(text)
+        text = fix_email_text(
+            text,
+            join_email_breaks=join_email_breaks,
+            join_hyphen_breaks=join_hyphen_breaks,
+        )
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
             stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1

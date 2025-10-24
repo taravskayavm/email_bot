@@ -3,8 +3,18 @@ import re
 from typing import Optional
 
 # Флаги из .env
-JOIN_EMAIL_BREAKS = os.getenv("JOIN_EMAIL_BREAKS", "1") == "1"
-JOIN_HYPHEN_BREAKS = os.getenv("JOIN_HYPHEN_BREAKS", "1") == "1"
+
+
+def _env_flag(*names: str, default: bool = True) -> bool:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            return value == "1"
+    return default
+
+
+JOIN_EMAIL_BREAKS = _env_flag("JOIN_EMAIL_BREAKS", "PDF_JOIN_EMAIL_BREAKS")
+JOIN_HYPHEN_BREAKS = _env_flag("JOIN_HYPHEN_BREAKS", "PDF_JOIN_HYPHEN_BREAKS")
 
 # Невидимые/служебные символы
 _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200B\u200C\u200D\u2060\uFEFF"), None)  # ZWSP/ZWJ/etc
@@ -22,12 +32,12 @@ def _preclean_obfuscations(s: str) -> str:
     """Снимаем популярные «обфускации» вида name (at) domain [dot] ru, «собака», «точка» и пр."""
 
     s = re.sub(r"\s*\[?\(?\s*at\s*\)?\]?\s*", "@", s, flags=re.I)
-    s = re.sub(r"\s*\[?\(?\s*dog\s*\)?\]?\s*", "@", s, flags=re.I)  # «собака»
+    s = re.sub(r"(?i)(\[\s*dog\s*\]|\(\s*dog\s*\)|\{\s*dog\s*\})", "@", s)  # «собака»
     s = re.sub(r"\s*\[?\(?\s*точка\s*\)?\]?\s*", ".", s, flags=re.I)  # «точка»
     s = re.sub(r"\s*\[?\(?\s*dot\s*\)?\]?\s*", ".", s, flags=re.I)
-    # убираем пробелы вокруг @ и .
-    s = re.sub(rf"({_LOCAL_CHARS})\s*@\s*({_DOMAIN_CHARS})", r"\1@\2", s)
-    s = re.sub(rf"({_DOMAIN_CHARS})\s*\.\s*({_DOMAIN_CHARS})", r"\1.\2", s)
+    # убираем пробелы вокруг @ и . (не трогаем переводы строк — они управляются флагами)
+    s = re.sub(rf"({_LOCAL_CHARS})[ \t]*@[ \t]*({_DOMAIN_CHARS})", r"\1@\2", s)
+    s = re.sub(rf"({_DOMAIN_CHARS})[ \t]*\.[ \t]*({_DOMAIN_CHARS})", r"\1.\2", s)
     return s
 
 
@@ -71,7 +81,12 @@ def _join_soft_hyphen_breaks(s: str) -> str:
     return s.replace(_SOFT_HYPHEN, "")
 
 
-def fix_email_text(raw: Optional[str]) -> str:
+def fix_email_text(
+    raw: Optional[str],
+    *,
+    join_email_breaks: Optional[bool] = None,
+    join_hyphen_breaks: Optional[bool] = None,
+) -> str:
     """
     Полный пайплайн «ремонта» текста перед e-mail regex:
       1) снимаем обфускации,
@@ -85,8 +100,12 @@ def fix_email_text(raw: Optional[str]) -> str:
     s = str(raw)
     s = _preclean_obfuscations(s)
     s = _strip_invisibles(s)
-    if JOIN_EMAIL_BREAKS:
+    if join_email_breaks is None:
+        join_email_breaks = JOIN_EMAIL_BREAKS
+    if join_hyphen_breaks is None:
+        join_hyphen_breaks = JOIN_HYPHEN_BREAKS
+    if join_email_breaks:
         s = _join_email_internal_breaks(s)
-    if JOIN_HYPHEN_BREAKS:
+    if join_hyphen_breaks:
         s = _join_soft_hyphen_breaks(s)
     return s
