@@ -12,6 +12,10 @@ __all__ = [
     "IMAP_PORT",
     "INBOX_MAILBOX",
     "BOUNCE_SINCE_DAYS",
+    "LOCAL_TLDS",
+    "LOCAL_DOMAINS_EXTRA",
+    "ALLOW_FOREIGN_DEFAULT",
+    "UI_STATE_PATH",
 ]
 
 
@@ -58,3 +62,25 @@ IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
 IMAP_PORT = _get_int("IMAP_PORT", 993)
 INBOX_MAILBOX = os.getenv("INBOX_MAILBOX", "INBOX")
 BOUNCE_SINCE_DAYS = _get_int("BOUNCE_SINCE_DAYS", 7)
+
+# Локальные TLD (через запятую). Всё остальное считаем «иностранным», если не в allow-list доменов.
+LOCAL_TLDS = [
+    s.strip().lower() for s in os.getenv("LOCAL_TLDS", ".ru,.рф,.su").split(",") if s.strip()
+]
+
+# Явный allow-list доменов, считающихся «локальными» даже с не-локальным TLD.
+# По умолчанию — gmail.com.
+LOCAL_DOMAINS_EXTRA = {
+    s.strip().lower()
+    for s in os.getenv("LOCAL_DOMAINS_EXTRA", "gmail.com").split(",")
+    if s.strip()
+}
+
+# Включать ли иностранные домены по умолчанию в «К отправке»
+ALLOW_FOREIGN_DEFAULT = os.getenv("ALLOW_FOREIGN_DEFAULT", "0") == "1"
+
+# Файл для хранения пользовательских UI-переключателей (без БД/Redis)
+UI_STATE_PATH = Path(os.getenv("UI_STATE_PATH", "var/ui_state.json"))
+UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not UI_STATE_PATH.exists():
+    UI_STATE_PATH.write_text("{}", encoding="utf-8")
