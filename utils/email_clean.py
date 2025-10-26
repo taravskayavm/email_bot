@@ -1605,7 +1605,10 @@ def finalize_email(
     email = sanitized
     reason = sanitize_reason
     if email is None:
-        email, reason = sanitize_email(candidate, already_normalized=True)
+        email, reason = sanitize_email(
+            candidate,
+            already_normalized=sanitized is not None,
+        )
 
     if not email:
         return "", str(reason or "invalid"), sanitize_stage
