@@ -398,6 +398,25 @@ def get_variants(addr: str):
 
 
 # Автоматическая проверка наличия ключевых экспортов
+
+
+_FOOTNOTE_PREFIX_RE = re.compile(r"^(?:[\[(]?\d+[\])]?[\s_.:\-]*)+")
+
+
+def _strip_leading_footnote(local: str) -> str:
+    """Legacy helper: strip leading numeric footnote markers from ``local`` part."""
+
+    if not local:
+        return local
+    return _FOOTNOTE_PREFIX_RE.sub("", local)
+
+
+def _normalize_text(text: str) -> str:
+    """Legacy wrapper delegating to :mod:`utils.text_normalize`."""
+
+    from utils.text_normalize import normalize_text
+
+    return normalize_text(text)
 def _check_legacy_exports():
     required = {
         "dedupe_with_variants",
