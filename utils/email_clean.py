@@ -381,3 +381,101 @@ def _check_legacy_exports():
 
 _check_legacy_exports()
 
+
+# ---------------------------------------------------------------------------
+# 🧩 Полный набор устаревших функций для совместимости со старым кодом
+# ---------------------------------------------------------------------------
+
+def is_valid_email(addr: str) -> bool:
+    """Раньше проверяла валидность e-mail; теперь просто проверяем через EMAIL_RE."""
+    if not addr:
+        return False
+    return bool(EMAIL_RE.fullmatch(addr.strip().lower()))
+
+
+def strict_validate_domain(addr: str) -> bool:
+    """Проверка домена по STRICT_DOMAIN_VALIDATE (из .env)."""
+    try:
+        if not addr or "@" not in addr:
+            return False
+        dom = addr.split("@", 1)[1]
+        if os.getenv("STRICT_DOMAIN_VALIDATE", "1") == "1":
+            return bool(re.fullmatch(r"[a-z0-9\-]+(\.[a-z0-9\-]+)+", dom.lower()))
+        return True
+    except Exception:
+        return False
+
+
+def looks_like_email(text: str) -> bool:
+    """Простая проверка, похоже ли на e-mail (раньше использовалась в пайплайне)."""
+    return bool(EMAIL_RE.search(text or ""))
+
+
+def safe_parse_email(text: str):
+    """Раньше возвращала нормализованный адрес или None при ошибке."""
+    try:
+        emails = parse_emails_unified(text)
+        return emails[0] if emails else None
+    except Exception:
+        return None
+
+
+def split_email(text: str):
+    """Возвращает local и domain (старый интерфейс)."""
+    try:
+        local, dom = (text or "").split("@", 1)
+        return local.strip(), dom.strip()
+    except Exception:
+        return "", ""
+
+
+def strip_bad_chars(text: str) -> str:
+    """Удаляет кавычки, пробелы, скобки вокруг e-mail."""
+    return (text or "").strip("()[]{}<>,;\"'`«»„“”‚‘’ ")
+
+
+def normalize_domain(dom: str) -> str:
+    """Привести домен к IDNA / lowercase."""
+    try:
+        return _idna_domain(dom)
+    except Exception:
+        return (dom or "").lower()
+
+
+def extract_possible_emails(text: str):
+    """Раньше возвращала список всех найденных адресов (без нормализации)."""
+    try:
+        return EMAIL_RE.findall(preclean_for_email_extraction(text))
+    except Exception:
+        return []
+
+
+def remove_bad_glyphs(text: str) -> str:
+    """Удалить невидимые символы, zero-width, soft hyphens."""
+    return strip_invisibles(text)
+
+
+def normalize_confusables(text: str) -> str:
+    """Псевдоним для _normalize_confusables()."""
+    return _normalize_confusables(text)
+
+
+def fix_confusables(text: str) -> str:
+    """Ещё один синоним старой функции."""
+    return _normalize_confusables(text)
+
+
+def email_variants(addr: str):
+    """Alias для get_variants()."""
+    return get_variants(addr)
+
+
+def clean_local_part(addr: str) -> str:
+    """Вернуть только локальную часть (до @)."""
+    return (addr or "").split("@", 1)[0].strip()
+
+
+def safe_split_email(addr: str):
+    """Alias split_email() для старых модулей."""
+    return split_email(addr)
+
