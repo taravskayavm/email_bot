@@ -296,11 +296,63 @@ def finalize_email(addr: str) -> str:
         return (addr or "").strip().lower()
 
 
+def normalize_email(addr: str) -> str:
+    """
+    Ранее использовалась для «нормализации», теперь оборачивает canonical_email().
+    Оставлена для совместимости со старыми импортами.
+    """
+
+    try:
+        return canonical_email(addr)
+    except Exception as e:
+        logger.warning("normalize_email fallback for %r: %s", addr, e)
+        return (addr or "").strip().lower()
+
+
+def repair_email(addr: str) -> str:
+    """
+    Legacy: попытка «подлечить» адрес (обрезать пробелы, привести домен к IDNA).
+    В новой логике — это просто canonical_email() c мягким фолбэком.
+    """
+
+    try:
+        a = (addr or "").strip()
+        # базовая подчистка типичных артефактов
+        a = a.strip("()[]{}<>,;")
+        return canonical_email(a)
+    except Exception as e:
+        logger.warning("repair_email fallback for %r: %s", addr, e)
+        return (addr or "").strip().lower()
+
+
+def get_variants(addr: str):
+    """
+    Legacy: вернуть набор возможных вариантов адреса.
+    Чтобы не раздувать список и не ломать старую логику,
+    возвращаем минимально безопасный набор: только канонический и исходный.
+    Если старый код ожидает множество/итерируемое — это совместимо.
+    """
+
+    try:
+        canon = canonical_email(addr)
+        base = (addr or "").strip().lower()
+        s = {canon}
+        if base and base != canon:
+            s.add(base)
+        return s
+    except Exception:
+        a = (addr or "").strip().lower()
+        return {a} if a else set()
+
+
 # Автоматическая проверка наличия ключевых экспортов
 def _check_legacy_exports():
     required = {
         "dedupe_with_variants",
         "finalize_email",
+        "normalize_email",
+        "repair_email",
+        "get_variants",
         "canonical_email",
         "drop_leading_char_twins",
         "drop_trailing_char_twins",
