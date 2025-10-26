@@ -43,6 +43,19 @@ CYR_TO_LAT = {
     "Х": "X",
 }
 
+_SUPERSCRIPT_DIGITS = {
+    "\u00b9",  # SUPERSCRIPT ONE
+    "\u00b2",  # SUPERSCRIPT TWO
+    "\u00b3",  # SUPERSCRIPT THREE
+    "\u2070",  # SUPERSCRIPT ZERO
+    "\u2074",  # SUPERSCRIPT FOUR
+    "\u2075",  # SUPERSCRIPT FIVE
+    "\u2076",  # SUPERSCRIPT SIX
+    "\u2077",  # SUPERSCRIPT SEVEN
+    "\u2078",  # SUPERSCRIPT EIGHT
+    "\u2079",  # SUPERSCRIPT NINE
+}
+
 _INVISIBLES_RE = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]")
 
 EMAIL_RE = re.compile(r"(?ix)\b" r"[a-z0-9._%+\-]+@(?:[a-z0-9\-]+\.)+[a-z0-9\-]{2,}" r"\b")
@@ -62,6 +75,17 @@ def _normalize_confusables(text: str) -> str:
 
 def strip_invisibles(text: str) -> str:
     return _INVISIBLES_RE.sub("", text or "")
+
+
+def _strip_leading_footnote(local: str) -> str:
+    """Remove leading superscript footnote digits from ``local``."""
+
+    if not local:
+        return local
+    idx = 0
+    while idx < len(local) and local[idx] in _SUPERSCRIPT_DIGITS:
+        idx += 1
+    return local[idx:]
 
 
 def _idna_domain(domain: str) -> str:
@@ -196,7 +220,7 @@ def _strip_plus_tag(local: str) -> str:
 
 
 def _canonical_local(local: str, domain: str) -> str:
-    l = local.lower()
+    l = _strip_leading_footnote(local).lower()
     d = domain.lower()
     if d in _PLUS_TAG_PROVIDERS:
         l = _strip_plus_tag(l)
@@ -241,6 +265,8 @@ def dedupe_with_variants(emails, return_map: bool = False):
             continue
         dom_c = _canonical_domain(dom)
         loc_c = _canonical_local(local, dom_c)
+        if not loc_c:
+            continue
         canon = f"{loc_c}@{dom_c}"
         mapping.setdefault(canon, set()).add(e)
     uniques = sorted(mapping.keys())
