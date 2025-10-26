@@ -52,6 +52,42 @@ SAFE_URL_RE = re.compile(
     r"(?ix)(?<!@)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])"
 )
 
+# ---------------------------------------------------------------------------
+#  Дедупликация с сохранением ОРИГИНАЛА (нужна для emailbot/handlers/preview.py)
+#  Объявляем РАНО (выше по файлу), чтобы точно успеть к моменту импорта.
+# ---------------------------------------------------------------------------
+def dedupe_keep_original(emails, return_map: bool = False):
+    """
+    Дедупликация по канону, но вернуть ПЕРВЫЙ встреченный ОРИГИНАЛ строки.
+    Возвращает:
+      - список оригиналов (в порядке первого появления) без дублей по канону;
+      - при return_map=True → (result, canonical->set(originals)).
+    """
+
+    if not emails:
+        return ([], {}) if return_map else []
+    seen = set()
+    mapping = {}
+    result = []
+    for raw in emails:
+        e = (raw or "").strip()
+        if not e:
+            continue
+        try:
+            # canonical_email определена ниже в этом модуле; если порядок импорта
+            # ещё не дошёл — используем мягкий фолбэк на lowercase.
+            canon = canonical_email(e)  # type: ignore[name-defined]
+        except Exception:
+            canon = e.lower()
+        mapping.setdefault(canon, set()).add(e)
+        if canon in seen:
+            continue
+        seen.add(canon)
+        result.append(e)
+    if return_map:
+        return result, mapping
+    return result
+
 # «Мусор» на краях токена: пробелы, NBSP/soft hyphen, пунктуация, кавычки, тире, маркеры списков
 _LEADING_JUNK_RE = re.compile(
     r'^[\s\u00A0\u00AD\.\-–—·•_*~=:;|/\\<>\(\)\[\]\{\}"\'`«»„“”‚‘’]+'
@@ -380,6 +416,26 @@ def _check_legacy_exports():
 
 
 _check_legacy_exports()
+
+# ---------------------------------------------------------------------------
+#  Экспорт через __all__ (на случай, если проект его использует)
+# ---------------------------------------------------------------------------
+try:
+    __all__
+except NameError:
+    __all__ = []
+if isinstance(__all__, (list, tuple, set)):
+    if "dedupe_keep_original" not in __all__:
+        try:
+            __all__ = list(__all__) + ["dedupe_keep_original"]
+        except Exception:
+            pass
+
+# Диагностика: при импорте выведем в лог факт наличия функции
+try:
+    logger.info("email_clean: dedupe_keep_original present: %s", "dedupe_keep_original" in globals())
+except Exception:
+    pass
 
 
 # ---------------------------------------------------------------------------
