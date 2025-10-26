@@ -384,9 +384,8 @@ def sanitize_email(
             reason = "no_at"
     except Exception as e:
         logger.warning("sanitize_email fallback for %r: %s", addr, e)
-        cleaned = (raw or "").strip().lower()
-        if "@" not in cleaned:
-            reason = reason or "invalid"
+        cleaned = ""
+        reason = "invalid"
 
     if cleaned and _is_role_like(cleaned.split("@", 1)[0]):
         cleaned = ""
