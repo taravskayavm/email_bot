@@ -1058,6 +1058,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             return_meta=True,
             left=left_token,
             right=right_token,
+            already_normalized=True,
         )
         sanitize_reason = sanitize_meta.get("reason") if isinstance(sanitize_meta, dict) else None
         sanitized = sanitized_variants[0] if sanitized_variants else ""
@@ -1392,6 +1393,7 @@ def sanitize_email(
     return_meta: bool = False,
     left: str = "",
     right: str = "",
+    already_normalized: bool = False,
 ) -> tuple[str, str | None] | tuple[list[str], dict[str, object]]:
     """Финальная чистка и проверка адреса."""
 
@@ -1443,7 +1445,7 @@ def sanitize_email(
             return _finalize("", reason_no_at)
         email = f"{_strip_footnotes(local0)}@{domain0}"
 
-    normalized_text = _normalize_text(email)
+    normalized_text = email if already_normalized else _normalize_text(email)
     compact_original = normalized_text.replace(" ", "").strip()
     s = compact_original.lower()
     before_trim = s
@@ -1603,7 +1605,7 @@ def finalize_email(
     email = sanitized
     reason = sanitize_reason
     if email is None:
-        email, reason = sanitize_email(candidate)
+        email, reason = sanitize_email(candidate, already_normalized=True)
 
     if not email:
         return "", str(reason or "invalid"), sanitize_stage
