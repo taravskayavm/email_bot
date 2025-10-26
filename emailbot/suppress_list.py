@@ -34,6 +34,7 @@ _ENV_BLOCKLIST = (
     or os.getenv("BLOCKED_EMAILS_PATH")
 )
 _BLOCKED_PATH: Path = Path(str(expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)))
+BLOCKED_EMAILS_PATH: Path = _BLOCKED_PATH
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
 
@@ -63,7 +64,8 @@ def _read_blocked(path: Path) -> Set[str]:
                 line = raw_line.strip()
                 if not line or line.startswith("#"):
                     continue
-                norm = _normalize(line)
+                email_part = line.split("\t", 1)[0]
+                norm = _normalize(email_part)
                 if norm:
                     items.add(norm)
             return items
@@ -198,11 +200,12 @@ def refresh_if_changed() -> None:
 def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
     """Initialise the stop-list cache explicitly (e.g. during startup)."""
 
-    global _BLOCKED_PATH
+    global _BLOCKED_PATH, BLOCKED_EMAILS_PATH
 
     with _LOCK:
         if path is not None:
             _BLOCKED_PATH = Path(str(expand_path(path)))
+            BLOCKED_EMAILS_PATH = _BLOCKED_PATH
         try:
             _ensure_dir(_BLOCKED_PATH)
             _BLOCKED_PATH.touch(exist_ok=True)
@@ -211,7 +214,7 @@ def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
         _load_file()
 
 
-def add_to_blocklist(email: str) -> bool:
+def add_to_blocklist(email: str, reason: str | None = None) -> bool:
     """Add a normalised e-mail to the block-list file.
 
     Returns ``True`` if the address is successfully persisted or already present,
@@ -222,13 +225,33 @@ def add_to_blocklist(email: str) -> bool:
     if not norm:
         return False
 
-    added = add_blocked([norm])
+    added = add_blocked([norm], reason)
     if added:
         return True
 
     with _LOCK:
         refresh_if_changed()
         return norm in _CACHE
+
+
+def add_blocked_email(email: str, reason: str | None = None) -> bool:
+    """Compatibility wrapper adding a single address with duplicate protection."""
+
+    norm = _normalize(email)
+    if not norm:
+        return False
+
+    added = add_blocked([norm], reason)
+    if added:
+        logger.info(
+            "blocked_emails: added %s -> %s",
+            norm,
+            BLOCKED_EMAILS_PATH.resolve(),
+        )
+        return True
+
+    logger.info("blocked_emails: already present: %s", norm)
+    return False
 
 
 def is_blocked(email: str) -> bool:
@@ -261,6 +284,7 @@ def invalidate_cache() -> None:
 
 
 __all__ = [
+    "BLOCKED_EMAILS_PATH",
     "init_blocked",
     "refresh_if_changed",
     "is_blocked",
@@ -270,5 +294,6 @@ __all__ = [
     "load_blocked_set",
     "save_blocked_set",
     "add_blocked",
+    "add_blocked_email",
     "add_to_blocklist",
 ]
