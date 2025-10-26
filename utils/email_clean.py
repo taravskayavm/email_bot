@@ -325,20 +325,76 @@ def repair_email(addr: str) -> str:
         return (addr or "").strip().lower()
 
 
-def sanitize_email(addr: str) -> str:
-    """
-    Legacy wrapper: раньше удаляла пробелы и лишние символы из e-mail.
-    Теперь безопасно делегирует canonical_email(), сохраняя прежний интерфейс.
-    """
+_SUPERSCRIPT_FOOTNOTE_RE = re.compile(r"^[\u00B9\u00B2\u00B3\u2070-\u2079]+")
+_ROLE_LIKE_PREFIXES = {
+    "admin",
+    "contact",
+    "editor",
+    "info",
+    "journal",
+    "mail",
+    "office",
+    "press",
+    "sales",
+    "service",
+    "support",
+}
 
+
+def _strip_leading_footnote(local: str) -> str:
+    """Remove leading superscript footnote markers from ``local``."""
+
+    if not local:
+        return ""
+    return _SUPERSCRIPT_FOOTNOTE_RE.sub("", local)
+
+
+def _is_role_like(local: str) -> bool:
+    if not local:
+        return False
+    lowered = local.lower()
+    return any(lowered.startswith(prefix) for prefix in _ROLE_LIKE_PREFIXES)
+
+
+def sanitize_email(
+    addr: str,
+    strip_footnote: bool = True,
+    *,
+    return_meta: bool = False,
+    left: str = "",
+    right: str = "",
+) -> tuple[str, str | None] | tuple[list[str], dict[str, object]]:
+    """Legacy sanitize_email wrapper with backward-compatible signature."""
+
+    del left, right  # legacy API compatibility; parameters are ignored now
+
+    raw = (addr or "").strip()
+    raw = raw.strip("()[]{}<>,;\"'`«»„“”‚‘’")
+    if strip_footnote and "@" in raw:
+        local, sep, domain = raw.partition("@")
+        local = _strip_leading_footnote(local)
+        raw = f"{local}{sep}{domain}"
+
+    cleaned = ""
+    reason: str | None = None
     try:
-        a = (addr or "").strip()
-        # Подчистим видимые кавычки и скобки, если вдруг остались
-        a = a.strip("()[]{}<>,;\"'`«»„“”‚‘’")
-        return canonical_email(a)
+        if "@" in raw:
+            cleaned = canonical_email(raw)
+        else:
+            reason = "no_at"
     except Exception as e:
         logger.warning("sanitize_email fallback for %r: %s", addr, e)
-        return (addr or "").strip().lower()
+        cleaned = (raw or "").strip().lower()
+        if "@" not in cleaned:
+            reason = reason or "invalid"
+
+    if cleaned and _is_role_like(cleaned.split("@", 1)[0]):
+        cleaned = ""
+        reason = "role-like-prefix"
+
+    if return_meta:
+        return ([cleaned] if cleaned else [], {"reason": reason, "suspects": []})
+    return cleaned, reason
 
 
 def get_variants(addr: str):
@@ -369,10 +425,11 @@ def _check_legacy_exports():
         "normalize_email",
         "repair_email",
         "get_variants",
-        "sanitize_email",
         "canonical_email",
         "drop_leading_char_twins",
         "drop_trailing_char_twins",
+        "sanitize_email",
+        "_strip_leading_footnote",
     }
     missing = [r for r in required if r not in globals()]
     if missing:
