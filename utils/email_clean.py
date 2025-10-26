@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import unicodedata
-from typing import Iterable
+from typing import Iterable, Optional, Tuple
 
 try:
     import idna  # type: ignore
@@ -252,17 +252,50 @@ def dedupe_with_variants(emails, return_map: bool = False):
 #  Совместимость со старым кодом (legacy API)
 # ---------------------------------------------------------------------------
 
-def finalize_email(addr: str) -> str:
+def finalize_email(
+    local: str,
+    domain: Optional[str] = None,
+    *,
+    raw_text: Optional[str] = None,
+    span: Optional[Tuple[int, int]] = None,
+    sanitized: Optional[str] = None,
+    sanitize_reason: Optional[str] = None,
+) -> Tuple[str, Optional[str], Optional[str]]:
     """
-    Backward-compatible stub.
-    Старые версии pipelines/extract_emails.py и messaging.py вызывали finalize_email
-    для нормализации адресов. Теперь это делегируется canonical_email().
+    Backward-compatible stub that preserves the legacy finalize_email API.
+
+    Старые версии pipelines/extract_emails.py и messaging.py ожидали, что функция
+    finalize_email вернёт кортеж ``(email, reason, stage)`` и принимала локальную и
+    доменную части адреса вместе с метаданными. Мы теперь делегируем
+    нормализацию в canonical_email(), но должны сохранять интерфейс, чтобы
+    существующие вызовы продолжали работать.
     """
+
+    del raw_text, span  # метаинформация используется только в старом коде
+
+    if domain is None and "@" in (local or ""):
+        addr = (local or "").strip()
+    else:
+        local_part = (local or "").strip()
+        domain_part = (domain or "").strip() if domain is not None else ""
+        addr = f"{local_part}@{domain_part}" if local_part and domain_part else ""
+
+    sanitized_addr = (sanitized or "").strip()
+    if sanitized_addr:
+        addr = sanitized_addr
+
+    if not addr or "@" not in addr:
+        reason = sanitize_reason or "finalize-invalid"
+        stage = "sanitize" if sanitize_reason else "finalize"
+        return "", reason, stage
+
     try:
-        return canonical_email(addr)
+        email = canonical_email(addr)
     except Exception as e:
         logger.warning("finalize_email fallback for %r: %s", addr, e)
-        return (addr or "").strip().lower()
+        email = addr.strip().lower()
+
+    return email, None, None
 
 
 # Автоматическая проверка наличия ключевых экспортов
