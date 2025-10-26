@@ -25,6 +25,47 @@ from telegram.ext import (
     filters,
 )
 
+logger = logging.getLogger("email_bot.selfcheck")
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+
+def _selfcheck_email_clean_exports() -> None:
+    if os.getenv("EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST", "0") == "1":
+        logger.warning("Selfcheck skipped by EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST=1")
+        return
+    required = {
+        "canonical_email",
+        "parse_emails_unified",
+        "dedupe_with_variants",
+        "dedupe_keep_original",
+        "sanitize_email",
+        "finalize_email",
+        "normalize_email",
+        "repair_email",
+        "get_variants",
+        "drop_leading_char_twins",
+        "drop_trailing_char_twins",
+    }
+    try:
+        import importlib
+
+        module = importlib.import_module("utils.email_clean")
+    except Exception as exc:  # pragma: no cover - диагностический путь
+        logger.error("[EBOT-SC-001] Failed to import utils.email_clean: %s", exc)
+        sys.exit(1)
+    missing = sorted(name for name in required if not hasattr(module, name))
+    if missing:
+        logger.error(
+            "[EBOT-SC-002] Missing exports in utils.email_clean: %s\n"
+            "Please apply the compatibility patch to utils/email_clean.py.",
+            ", ".join(missing),
+        )
+        sys.exit(1)
+    logger.info("[EBOT-SC-OK] utils.email_clean exports are complete.")
+
+
+_selfcheck_email_clean_exports()
+
 from emailbot import bot_handlers, messaging, history_service
 from emailbot import compat  # EBOT-105
 
