@@ -248,3 +248,30 @@ def dedupe_with_variants(emails, return_map: bool = False):
         return uniques, mapping
     return uniques
 
+# ---------------------------------------------------------------------------
+#  Совместимость со старым кодом (legacy API)
+# ---------------------------------------------------------------------------
+
+def finalize_email(addr: str) -> str:
+    """
+    Backward-compatible stub.
+    Старые версии pipelines/extract_emails.py и messaging.py вызывали finalize_email
+    для нормализации адресов. Теперь это делегируется canonical_email().
+    """
+    try:
+        return canonical_email(addr)
+    except Exception as e:
+        logger.warning("finalize_email fallback for %r: %s", addr, e)
+        return (addr or "").strip().lower()
+
+
+# Автоматическая проверка наличия ключевых экспортов
+def _check_legacy_exports():
+    required = {"dedupe_with_variants", "finalize_email", "canonical_email"}
+    missing = [r for r in required if r not in globals()]
+    if missing:
+        logger.warning("email_clean: missing legacy exports: %s", missing)
+
+
+_check_legacy_exports()
+
