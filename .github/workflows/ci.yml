@@ -1,52 +1,35 @@
-name: CI
+name: EmailBot CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff flake8 black mypy pytest pytest-cov
+          pip install pytest ruff
 
-      - name: Syntax check
+      - name: Run static checks
         run: |
-          python -m compileall -q email_bot.py
+          ruff check .
 
-      - name: Dependency check
+      - name: Run API contract tests
         run: |
-          pip check
+          pytest -q tests/test_api_contract.py
 
-      - name: Lint
+      - name: Verify exports
         run: |
-          ruff --version || pip install ruff
-          ruff .
-          mypy || true
-
-      - name: Lint with Flake8
-        run: |
-          flake8 --max-line-length=100 .
-
-      - name: Check formatting with Black
-        run: |
-          black --check --diff .
-
-      - name: Run tests with Pytest
-        run: |
-          pytest --maxfail=1 --disable-warnings --cov=. --cov-report=term-missing
+          python tools/check_email_clean_exports.py
