@@ -52,6 +52,36 @@ SAFE_URL_RE = re.compile(
     r"(?ix)(?<!@)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])"
 )
 
+# «Мусор» на краях токена: пробелы, NBSP/soft hyphen, пунктуация, кавычки, тире, маркеры списков
+_LEADING_JUNK_RE = re.compile(
+    r'^[\s\u00A0\u00AD\.\-–—·•_*~=:;|/\\<>\(\)\[\]\{\}"\'`«»„“”‚‘’]+'
+)
+_TRAILING_JUNK_RE = re.compile(
+    r'[\s\u00A0\u00AD\.\-–—·•_*~=:;|/\\<>\(\)\[\]\{\}"\'`«»„“”‚‘’]+$'
+)
+
+
+def drop_leading_char_twins(s: str) -> str:
+    """
+    Legacy helper: убрать «здвоенные»/повторяющиеся ведущие символы и общую пунктуацию
+    в начале токена (буллеты, тире, точки, кавычки и т.п.).
+    """
+
+    if not s:
+        return s
+    return _LEADING_JUNK_RE.sub("", s)
+
+
+def drop_trailing_char_twins(s: str) -> str:
+    """
+    Парная функция: убрать хвостовой «мусор»/повторы пунктуации в конце токена.
+    Добавлена на случай старых импортов в пайплайне.
+    """
+
+    if not s:
+        return s
+    return _TRAILING_JUNK_RE.sub("", s)
+
 
 def _normalize_confusables(text: str) -> str:
     if not text or not CONFUSABLES_NORMALIZE:
@@ -127,7 +157,8 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             found.add(f"{local.lower()}@{_idna_domain(dom)}")
             continue
         # попытка вытащить из токена без лишних обрамлений
-        core = tok.strip("()[]{}<>,;:.")
+        # мягкая подчистка краёв (совместимо со старым пайплайном)
+        core = drop_trailing_char_twins(drop_leading_char_twins(tok))
         for m in EMAIL_RE.finditer(core):
             local, dom = m.group(0).split("@", 1)
             found.add(f"{local.lower()}@{_idna_domain(dom)}")
@@ -267,7 +298,13 @@ def finalize_email(addr: str) -> str:
 
 # Автоматическая проверка наличия ключевых экспортов
 def _check_legacy_exports():
-    required = {"dedupe_with_variants", "finalize_email", "canonical_email"}
+    required = {
+        "dedupe_with_variants",
+        "finalize_email",
+        "canonical_email",
+        "drop_leading_char_twins",
+        "drop_trailing_char_twins",
+    }
     missing = [r for r in required if r not in globals()]
     if missing:
         logger.warning("email_clean: missing legacy exports: %s", missing)
