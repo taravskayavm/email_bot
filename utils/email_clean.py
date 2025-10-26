@@ -325,6 +325,22 @@ def repair_email(addr: str) -> str:
         return (addr or "").strip().lower()
 
 
+def sanitize_email(addr: str) -> str:
+    """
+    Legacy wrapper: раньше удаляла пробелы и лишние символы из e-mail.
+    Теперь безопасно делегирует canonical_email(), сохраняя прежний интерфейс.
+    """
+
+    try:
+        a = (addr or "").strip()
+        # Подчистим видимые кавычки и скобки, если вдруг остались
+        a = a.strip("()[]{}<>,;\"'`«»„“”‚‘’")
+        return canonical_email(a)
+    except Exception as e:
+        logger.warning("sanitize_email fallback for %r: %s", addr, e)
+        return (addr or "").strip().lower()
+
+
 def get_variants(addr: str):
     """
     Legacy: вернуть набор возможных вариантов адреса.
@@ -353,6 +369,7 @@ def _check_legacy_exports():
         "normalize_email",
         "repair_email",
         "get_variants",
+        "sanitize_email",
         "canonical_email",
         "drop_leading_char_twins",
         "drop_trailing_char_twins",
