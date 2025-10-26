@@ -452,6 +452,7 @@ async def _start_app(app):
 async def test_unsubscribe_flow(temp_files, monkeypatch):
     blocked_path, log_path = temp_files
     monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(unsubscribe, "UNSUB_SOFT", False, raising=False)
     token = "tok123"
     messaging.log_sent_email("user@example.com", "g", unsubscribe_token=token)
     app = unsubscribe.create_app()
@@ -481,6 +482,37 @@ async def test_unsubscribe_flow(temp_files, monkeypatch):
         row = next(csv.DictReader(f))
     assert row["unsubscribed"] == "1"
     assert "post@example.com" in blocked_path.read_text().splitlines()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_soft_allows_without_token(temp_files, monkeypatch):
+    blocked_path, log_path = temp_files
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(unsubscribe, "UNSUB_SOFT", True, raising=False)
+    token = "tok999"
+    messaging.log_sent_email("soft@example.com", "g", unsubscribe_token=token)
+    app = unsubscribe.create_app()
+    runner, base = await _start_app(app)
+    async with aiohttp.ClientSession() as session:
+        resp_missing = await session.get(
+            f"{base}/unsubscribe?email=missing@example.com"
+        )
+        assert resp_missing.status == 200
+        assert "Ваш адрес больше не будет получать письма" in await resp_missing.text()
+
+        resp_bad = await session.get(
+            f"{base}/unsubscribe?email=soft@example.com&token=bad"
+        )
+        assert resp_bad.status == 200
+        assert "Ваш адрес больше не будет получать письма" in await resp_bad.text()
+    await runner.cleanup()
+
+    with open(log_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["unsubscribed"] == "1"
+    blocked_entries = blocked_path.read_text().splitlines()
+    assert "missing@example.com" in blocked_entries
+    assert "soft@example.com" in blocked_entries
 
 
 def test_process_unsubscribe_requests_skips_without_imap_config(monkeypatch):

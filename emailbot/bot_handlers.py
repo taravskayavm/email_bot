@@ -2632,13 +2632,12 @@ async def retry_last_command(
     await update.message.reply_text(f"Повторно отправлено: {sent}")
 
 
-async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Clear stored e-mails and reset the session state."""
 
     chat_id = update.effective_chat.id
     init_state(context)
-    context.user_data.pop("manual_emails", None)
-    edit_message = context.user_data.pop("bulk_edit_message", None)
+    edit_message = context.user_data.get("bulk_edit_message")
     if edit_message:
         try:
             await context.bot.delete_message(
@@ -2646,19 +2645,14 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception:
             pass
-    for key in (
-        "bulk_edit_working",
-        "bulk_edit_mode",
-        "bulk_edit_page",
-        "bulk_edit_replace_old",
-    ):
-        context.user_data.pop(key, None)
+    context.user_data.clear()
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     context.chat_data["extract_lock"] = asyncio.Lock()
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"
     )
+    return ConversationHandler.END
 
 
 async def _compose_report_and_save(
