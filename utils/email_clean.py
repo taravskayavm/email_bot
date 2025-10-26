@@ -144,3 +144,107 @@ def contains_url_but_not_email(text: str) -> bool:
         return False
     return bool(SAFE_URL_RE.search(cleaned))
 
+
+# ---------------------------------------------------------------------------
+#  Провайдер-aware каноникализация и дедупликация адресов
+# ---------------------------------------------------------------------------
+
+_PLUS_TAG_PROVIDERS = {
+    "gmail.com",
+    "googlemail.com",
+    "yandex.ru",
+    "yandex.com",
+    "yandex.ua",
+    "yandex.by",
+    "yandex.kz",
+    "yandex.com.tr",
+    "ya.ru",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+}
+
+_IGNORE_DOTS_PROVIDERS = {
+    # Gmail/Googlemail игнорируют точки в local-part
+    "gmail.com",
+    "googlemail.com",
+    # Яндекс/ya.ru тоже игнорирует точки
+    "yandex.ru",
+    "yandex.com",
+    "yandex.ua",
+    "yandex.by",
+    "yandex.kz",
+    "yandex.com.tr",
+    "ya.ru",
+}
+
+_DOMAIN_ALIASES = {
+    # Приводим к одному канону, чтобы не плодить варианты
+    "googlemail.com": "gmail.com",
+}
+
+
+def _canonical_domain(dom: str) -> str:
+    d = _idna_domain(dom.lower().strip())
+    return _DOMAIN_ALIASES.get(d, d)
+
+
+def _strip_plus_tag(local: str) -> str:
+    # всё, что после первого '+', режем (стандартно для многих провайдеров)
+    i = local.find("+")
+    return local if i < 0 else local[:i]
+
+
+def _canonical_local(local: str, domain: str) -> str:
+    l = local.lower()
+    d = domain.lower()
+    if d in _PLUS_TAG_PROVIDERS:
+        l = _strip_plus_tag(l)
+    if d in _IGNORE_DOTS_PROVIDERS:
+        l = l.replace(".", "")
+    return l
+
+
+def canonical_email(addr: str) -> str:
+    """
+    Каноникализация адреса: lowercase, IDNA для домена, провайдер-спец. правила.
+    Предполагается, что вход уже синтаксически валиден.
+    """
+
+    local, dom = addr.split("@", 1)
+    dom_c = _canonical_domain(dom)
+    loc_c = _canonical_local(local, dom_c)
+    return f"{loc_c}@{dom_c}"
+
+
+def dedupe_with_variants(emails, return_map: bool = False):
+    """
+    Дедупликация с учётом провайдер-вариантов:
+    - gmail/googlemail, yandex/ya: игнор точек в local, режем +tag
+    - IDNA и lowercase для домена
+    Возвращает:
+      - список уникальных адресов (в каноническом виде);
+      - при return_map=True кортеж (уникальные, mapping), где
+        mapping[canonical] = {варианты_как_вводились}.
+    """
+
+    if not emails:
+        return ([], {}) if return_map else []
+    mapping: dict[str, set[str]] = {}
+    for raw in emails:
+        e = (raw or "").strip().lower()
+        if not e or "@" not in e:
+            continue
+        try:
+            local, dom = e.split("@", 1)
+        except ValueError:
+            continue
+        dom_c = _canonical_domain(dom)
+        loc_c = _canonical_local(local, dom_c)
+        canon = f"{loc_c}@{dom_c}"
+        mapping.setdefault(canon, set()).add(e)
+    uniques = sorted(mapping.keys())
+    if return_map:
+        return uniques, mapping
+    return uniques
+
