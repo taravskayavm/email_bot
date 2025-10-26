@@ -99,6 +99,15 @@ def _deobfuscate_chunks(chunks: Iterable[str]) -> Iterable[str]:
         yield t
 
 
+def preclean_obfuscations(text: str) -> str:
+    """Return ``text`` normalised for matching while undoing simple obfuscations."""
+
+    cleaned = preclean_for_email_extraction(text)
+    if not cleaned:
+        return ""
+    return "".join(_deobfuscate_chunks([cleaned]))
+
+
 def parse_emails_unified(text: str, return_meta: bool = False):
     """
     Нормализация (гомоглифы/невидимые) → деобфускация → извлечение e-mail → IDNA для домена.

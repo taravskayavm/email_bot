@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Mapping as MappingABC
 from typing import Mapping
 
 from aiohttp import web
+
+from utils.email_clean import parse_emails_unified
 
 from .messaging import (
     BLOCKED_FILE,
@@ -16,6 +19,18 @@ from .messaging import (
 )
 
 logger = logging.getLogger(__name__)
+UNSUB_SOFT = os.getenv("UNSUBSCRIBE_ALLOW_WITHOUT_TOKEN", "1") == "1"
+
+
+def _clean_single_email(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parsed = parse_emails_unified(raw)
+    if parsed:
+        return parsed[0].strip().lower()
+    lowered = raw.lower()
+    return lowered if "@" in lowered else ""
 
 
 def _ok_html(message: str = "Вы отписались от рассылки") -> str:
@@ -77,8 +92,9 @@ async def _extract_email_any(
                         candidates.append(raw)
 
     for candidate in candidates:
-        if "@" in candidate:
-            return candidate
+        cleaned = _clean_single_email(candidate)
+        if cleaned:
+            return cleaned
     return ""
 
 
@@ -104,19 +120,32 @@ async def handle(request: web.Request) -> web.Response:
         query = request.rel_url.query
         addr = await _extract_email_any(request, data, query)
 
-        form_email = (data and (_form_value(data, "email") or "")) or ""
+        form_email_raw = (data and (_form_value(data, "email") or "")) or ""
         token = (data and (_form_value(data, "token") or "")) or ""
-        if not form_email:
-            form_email = (query.get("email") or "").strip()
-        else:
-            form_email = form_email.strip()
+        form_email = _clean_single_email(form_email_raw) or _clean_single_email(
+            query.get("email", "")
+        )
         token = token.strip() or (query.get("token") or "").strip()
 
         if token:
             email = form_email or addr
+            email = _clean_single_email(email)
             if not email:
                 raise web.HTTPBadRequest(text="Missing email/token")
             if not verify_unsubscribe_token(email, token):
+                if UNSUB_SOFT:
+                    logger.warning(
+                        "unsubscribe soft-allow: email=%s token_invalid=1", email
+                    )
+                    result = mark_unsubscribed(email)
+                    logger.info(
+                        "unsubscribe POST(token-soft): email=%s csv=%s block=%s block_file=%s",
+                        email,
+                        result.csv_updated,
+                        result.block_added,
+                        BLOCKED_FILE,
+                    )
+                    return web.Response(text=_ok_html(), content_type="text/html")
                 logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
                 raise web.HTTPForbidden(text="Invalid token")
             result: MarkUnsubscribedResult = mark_unsubscribed(email)
@@ -147,22 +176,51 @@ async def handle(request: web.Request) -> web.Response:
         )
         return web.Response(text="OK", content_type="text/plain")
 
-    email = request.query.get("email", "").strip()
+    email_raw = request.query.get("email", "")
     token = request.query.get("token", "").strip()
-    if not email or not token:
+    email = _clean_single_email(email_raw)
+    if not email:
         raise web.HTTPBadRequest(text="Missing email/token")
-    if not verify_unsubscribe_token(email, token):
-        logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
-        raise web.HTTPForbidden(text="Invalid token")
-    result: MarkUnsubscribedResult = mark_unsubscribed(email)
-    logger.info(
-        "unsubscribe GET: email=%s csv=%s block=%s block_file=%s",
-        email,
-        result.csv_updated,
-        result.block_added,
-        BLOCKED_FILE,
-    )
-    return web.Response(text=_ok_html(), content_type="text/html")
+
+    if token and verify_unsubscribe_token(email, token):
+        result: MarkUnsubscribedResult = mark_unsubscribed(email)
+        logger.info(
+            "unsubscribe GET: email=%s csv=%s block=%s block_file=%s",
+            email,
+            result.csv_updated,
+            result.block_added,
+            BLOCKED_FILE,
+        )
+        return web.Response(text=_ok_html(), content_type="text/html")
+
+    if not token:
+        if UNSUB_SOFT:
+            logger.warning("unsubscribe soft-allow: email=%s token_missing=1", email)
+            result = mark_unsubscribed(email)
+            logger.info(
+                "unsubscribe GET(token-soft-missing): email=%s csv=%s block=%s block_file=%s",
+                email,
+                result.csv_updated,
+                result.block_added,
+                BLOCKED_FILE,
+            )
+            return web.Response(text=_ok_html(), content_type="text/html")
+        raise web.HTTPBadRequest(text="Missing email/token")
+
+    if UNSUB_SOFT:
+        logger.warning("unsubscribe soft-allow: email=%s token_invalid=1", email)
+        result = mark_unsubscribed(email)
+        logger.info(
+            "unsubscribe GET(token-soft): email=%s csv=%s block=%s block_file=%s",
+            email,
+            result.csv_updated,
+            result.block_added,
+            BLOCKED_FILE,
+        )
+        return web.Response(text=_ok_html(), content_type="text/html")
+
+    logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
+    raise web.HTTPForbidden(text="Invalid token")
 
 
 async def _ping(_: web.Request) -> web.Response:
