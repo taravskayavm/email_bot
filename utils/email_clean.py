@@ -59,28 +59,88 @@ _LEADING_JUNK_RE = re.compile(
 _TRAILING_JUNK_RE = re.compile(
     r'[\s\u00A0\u00AD\.\-–—·•_*~=:;|/\\<>\(\)\[\]\{\}"\'`«»„“”‚‘’]+$'
 )
+def _strip_leading_token_junk(token: str) -> str:
+    if not token:
+        return token
+    return _LEADING_JUNK_RE.sub("", token)
 
 
-def drop_leading_char_twins(s: str) -> str:
+def _strip_trailing_token_junk(token: str) -> str:
+    if not token:
+        return token
+    return _TRAILING_JUNK_RE.sub("", token)
+
+
+def drop_leading_char_twins(emails: Iterable[str] | str) -> list[str] | str:
+    """Legacy helper working on lists of e-mails.
+
+    Historically this helper accepted ``list[str]`` and removed "twin" entries where a
+    domain shared two local-parts differing only by the very first character. Some
+    pipelines still import it for that deduplication step. Recent refactors also used
+    the name for per-token trimming, so we now support both call styles: passing a
+    single ``str`` keeps the lightweight punctuation stripping behaviour, while any
+    iterable retains the original list-processing semantics.
     """
-    Legacy helper: убрать «здвоенные»/повторяющиеся ведущие символы и общую пунктуацию
-    в начале токена (буллеты, тире, точки, кавычки и т.п.).
-    """
 
-    if not s:
-        return s
-    return _LEADING_JUNK_RE.sub("", s)
+    if isinstance(emails, str):
+        return _strip_leading_token_junk(emails)
+
+    email_list = list(emails)
+    if len(email_list) <= 1:
+        return email_list
+
+    groups: dict[str, dict[str, str]] = {}
+    for item in email_list:
+        if not isinstance(item, str):
+            continue
+        try:
+            local, domain = item.split("@", 1)
+        except ValueError:
+            continue
+        groups.setdefault(domain.lower(), {})[local] = item
+
+    to_drop: set[tuple[str, str]] = set()
+    for domain, mapping in groups.items():
+        locals_set = set(mapping.keys())
+        for local in locals_set:
+            if len(local) < 2:
+                continue
+            trimmed = local[1:]
+            if trimmed in locals_set:
+                drop_local = trimmed
+                keep_local = local
+                if local and not local[0].isalpha() and trimmed and trimmed[0].isalpha():
+                    drop_local = local
+                    keep_local = trimmed
+                to_drop.add((domain, drop_local))
+                kept_email = mapping.get(keep_local)
+                dropped_email = mapping.get(drop_local)
+                if kept_email and dropped_email:
+                    logger.debug(
+                        "drop_leading_char_twins: dropping %s as twin of %s",
+                        dropped_email,
+                        kept_email,
+                    )
+
+    out: list[str] = []
+    for item in email_list:
+        if not isinstance(item, str):
+            continue
+        try:
+            local, domain = item.split("@", 1)
+        except ValueError:
+            out.append(item)
+            continue
+        if (domain.lower(), local) not in to_drop:
+            out.append(item)
+
+    return out
 
 
 def drop_trailing_char_twins(s: str) -> str:
-    """
-    Парная функция: убрать хвостовой «мусор»/повторы пунктуации в конце токена.
-    Добавлена на случай старых импортов в пайплайне.
-    """
+    """Legacy helper retained for backwards compatibility with older imports."""
 
-    if not s:
-        return s
-    return _TRAILING_JUNK_RE.sub("", s)
+    return _strip_trailing_token_junk(s)
 
 
 def _normalize_confusables(text: str) -> str:
@@ -158,7 +218,7 @@ def parse_emails_unified(text: str, return_meta: bool = False):
             continue
         # попытка вытащить из токена без лишних обрамлений
         # мягкая подчистка краёв (совместимо со старым пайплайном)
-        core = drop_trailing_char_twins(drop_leading_char_twins(tok))
+        core = _strip_trailing_token_junk(_strip_leading_token_junk(tok))
         for m in EMAIL_RE.finditer(core):
             local, dom = m.group(0).split("@", 1)
             found.add(f"{local.lower()}@{_idna_domain(dom)}")
