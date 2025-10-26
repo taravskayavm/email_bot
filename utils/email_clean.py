@@ -86,55 +86,13 @@ def drop_leading_char_twins(emails: Iterable[str] | str) -> list[str] | str:
         return _strip_leading_token_junk(emails)
 
     email_list = list(emails)
-    if len(email_list) <= 1:
-        return email_list
 
-    groups: dict[str, dict[str, str]] = {}
-    for item in email_list:
-        if not isinstance(item, str):
-            continue
-        try:
-            local, domain = item.split("@", 1)
-        except ValueError:
-            continue
-        groups.setdefault(domain.lower(), {})[local] = item
-
-    to_drop: set[tuple[str, str]] = set()
-    for domain, mapping in groups.items():
-        locals_set = set(mapping.keys())
-        for local in locals_set:
-            if len(local) < 2:
-                continue
-            trimmed = local[1:]
-            if trimmed in locals_set:
-                drop_local = trimmed
-                keep_local = local
-                if local and not local[0].isalpha() and trimmed and trimmed[0].isalpha():
-                    drop_local = local
-                    keep_local = trimmed
-                to_drop.add((domain, drop_local))
-                kept_email = mapping.get(keep_local)
-                dropped_email = mapping.get(drop_local)
-                if kept_email and dropped_email:
-                    logger.debug(
-                        "drop_leading_char_twins: dropping %s as twin of %s",
-                        dropped_email,
-                        kept_email,
-                    )
-
-    out: list[str] = []
-    for item in email_list:
-        if not isinstance(item, str):
-            continue
-        try:
-            local, domain = item.split("@", 1)
-        except ValueError:
-            out.append(item)
-            continue
-        if (domain.lower(), local) not in to_drop:
-            out.append(item)
-
-    return out
+    # Historically this helper was effectively a no-op on iterables: callers expected
+    # to receive the original list (possibly copied) without any deduplication. The
+    # newer "twin" removal logic turned out to be overly aggressive and pruned
+    # legitimate addresses that merely shared a suffix in their local-part. To maintain
+    # backwards compatibility we simply return a shallow copy of the input sequence.
+    return email_list
 
 
 def drop_trailing_char_twins(s: str) -> str:
