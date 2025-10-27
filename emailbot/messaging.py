@@ -46,6 +46,7 @@ from typing import (
 from threading import RLock
 
 from .extraction import normalize_email, strip_html
+from utils.email_clean import strip_invisibles
 from .cooldown import (
     audit_emails,
     build_cooldown_service,
@@ -1308,8 +1309,9 @@ def send_email(
             except Exception:
                 logger.exception("cooldown check failed")
                 return SendOutcome.ERROR
+        transport_recipient = _prepare_transport_email(recipient)
         msg, token = build_message(
-            recipient,
+            transport_recipient,
             html_path,
             subject,
             override_180d=override_180d,
@@ -1330,7 +1332,7 @@ def send_email(
             payload = f"{key}|{subject_norm}|{body_for_hash}".encode("utf-8")
             content_hash = hashlib.sha1(payload).hexdigest()
         raw = msg.as_string()
-        send_raw_smtp_with_retry(raw, recipient, max_tries=3)
+        send_raw_smtp_with_retry(raw, transport_recipient, max_tries=3)
         save_to_sent_folder(raw)
         try:
             cooldown_mark_sent(recipient)
@@ -2242,3 +2244,13 @@ __all__ = [
     "_make_send_key",
     "_is_blocklisted",
 ]
+def _prepare_transport_email(raw: str) -> str:
+    """Return an SMTP-safe address preserving the original local-part."""
+
+    cleaned = (raw or "").strip()
+    cleaned = strip_invisibles(cleaned)
+    cleaned = cleaned.strip("()[]{}<>,;\"'`«»„“”‚‘’ ")
+    if "@" in cleaned:
+        local, _, domain = cleaned.partition("@")
+        return f"{local}@{(domain or '').strip().lower()}"
+    return cleaned.lower()
