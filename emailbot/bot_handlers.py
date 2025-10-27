@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
+from . import report_service
 from . import send_selected as _pkg_send_selected
 from zoneinfo import ZoneInfo
 
@@ -2480,6 +2481,17 @@ def get_report(period: str = "day") -> dict[str, object]:
         "period": period,
     }
 
+    if period == "day":
+        ok, err = report_service.summarize_day_local()
+        stats.update({
+            "sent": ok,
+            "errors": err,
+            "tz": report_service.REPORT_TZ_NAME,
+        })
+        if ok == 0 and err == 0:
+            stats["message"] = "Нет данных о рассылках."
+        return stats
+
     if not os.path.exists(LOG_FILE):
         stats["message"] = "Нет данных о рассылках."
         return stats
@@ -2548,7 +2560,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
     title = mapping.get(period, period)
     if period == "day":
-        title = f"{title} ({report.get('tz', REPORT_TZ)})"
+        title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
     await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
 
 
