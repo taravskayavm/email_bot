@@ -385,6 +385,17 @@ def sanitize_email(addr: str, strip_footnote: bool = True) -> tuple[str, str | N
             return "", "invalid-local"
         if not domain:
             return "", "invalid-domain"
+        domain = domain.strip()
+        if ".." in domain:
+            return "", "invalid-domain"
+        labels = domain.split(".")
+        if any(not label for label in labels):
+            return "", "invalid-domain"
+        for label in labels:
+            if label.startswith("-") or label.endswith("-"):
+                return "", "invalid-domain"
+            if len(label) > 63:
+                return "", "invalid-domain"
         try:
             cleaned = canonical_email(a)
         except Exception:
