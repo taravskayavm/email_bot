@@ -47,7 +47,8 @@ def temp_files(tmp_path, monkeypatch):
     log = tmp_path / "logs" / "sent_log.csv"
     monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked))
     monkeypatch.setattr(messaging, "LOG_FILE", str(log))
-    messaging.suppress_list.init_blocked(str(blocked))
+    messaging.suppress_list.init_blocked(blocked)
+    messaging._BLOCK_READY = False
     monkeypatch.setattr(unsubscribe, "BLOCKED_FILE", str(blocked), raising=False)
     return blocked, log
 
@@ -542,7 +543,7 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     monkeypatch.setenv("EMAIL_PASSWORD", "env-secret")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "module@example.com")
     monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "module-secret")
-    monkeypatch.setattr(messaging, "mark_unsubscribed", lambda addr: unsubscribed.append(addr))
+    monkeypatch.setattr(messaging, "handle_unsubscribe", lambda addr, source=None: unsubscribed.append(addr))
 
     calls: dict[str, object] = {}
 

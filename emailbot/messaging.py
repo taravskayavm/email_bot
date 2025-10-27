@@ -8,7 +8,6 @@ import email
 import hashlib
 import html
 import imaplib
-import io
 import json
 import logging
 import os
@@ -82,6 +81,7 @@ from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
 )
 from . import suppress_list
+from .suppress_list import add_to_blocklist, blocklist_path
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
@@ -533,26 +533,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 # Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
 LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
-# Путь к блок-листу: используем var/blocked_emails.txt по умолчанию и
-# разрешаем переопределять через переменные окружения (новый порядок: EMAILS_PATH → LIST_PATH → legacy FILE).
-_BL_DEFAULT = "var/blocked_emails.txt"
-_blocked_env = (
-    os.getenv("BLOCKED_EMAILS_PATH")
-    or os.getenv("BLOCKED_LIST_PATH")
-    or os.getenv("BLOCKED_EMAILS_FILE")
-)
-BLOCKED_FILE = str(expand_path(_blocked_env or _BL_DEFAULT))
+# Путь к блок-листу фиксирован относительно корня репозитория.
+BLOCKED_FILE = str(blocklist_path())
 try:
-    _path = Path(BLOCKED_FILE)
-    if os.getenv("BLOCKED_EMAILS_PATH"):
-        source = "BLOCKED_EMAILS_PATH"
-    elif os.getenv("BLOCKED_LIST_PATH"):
-        source = "BLOCKED_LIST_PATH"
-    elif os.getenv("BLOCKED_EMAILS_FILE"):
-        source = "BLOCKED_EMAILS_FILE"
-    else:
-        source = "default"
-    logger.info("Stoplist path resolved: %s (source=%s)", _path, source)
+    logger.info("Stoplist path resolved: %s", BLOCKED_FILE)
 except Exception:
     logger.debug("Unable to log stoplist path", exc_info=True)
 MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "300"))
@@ -581,7 +565,7 @@ def ensure_blocklist_ready() -> None:
     if _BLOCK_READY:
         return
     try:
-        suppress_list.init_blocked(BLOCKED_FILE)
+        suppress_list.init_blocked()
         _BLOCK_READY = True
     except Exception:
         logger.debug("blocklist init failed", exc_info=True)
@@ -611,35 +595,15 @@ def add_blocked_email(email: str) -> bool:
 
     ensure_blocklist_ready()
     try:
-        path = Path(BLOCKED_FILE)
-        path.parent.mkdir(parents=True, exist_ok=True)
         norm = _normalize_email_for_blocklist(email)
 
         if not norm or "@" not in norm:
             return False
 
-        suppress_list.refresh_if_changed()
-        if suppress_list.is_blocked(norm):
-            return False
-
-        need_newline = False
-        if path.exists() and path.stat().st_size:
-            try:
-                with path.open("rb") as existing:
-                    existing.seek(-1, os.SEEK_END)
-                    need_newline = existing.read(1) not in {b"\n", b"\r"}
-            except Exception:
-                need_newline = True
-
-        with io.open(path, "a", encoding="utf-8", newline="\n") as handler:
-            if need_newline:
-                handler.write("\n")
-            handler.write(norm.rstrip("\n") + "\n")
-            handler.flush()
-            os.fsync(handler.fileno())
-
-        suppress_list.refresh_if_changed()
-        return True
+        added = add_to_blocklist(norm)
+        if added:
+            logger.info("blocked_emails: added %s -> %s", norm, BLOCKED_FILE)
+        return added
     except Exception:
         logger.exception("Failed to add email to blocklist: %r", email)
         return False
@@ -1585,7 +1549,7 @@ def process_unsubscribe_requests():
             msg = email.message_from_bytes(raw_email)
             sender = email.utils.parseaddr(msg.get("From"))[1]
             if sender:
-                mark_unsubscribed(sender)
+                handle_unsubscribe(sender, source="imap")
             imap.store(num, "+FLAGS", "\\Seen")
         imap.logout()
     except Exception as e:
@@ -1659,12 +1623,20 @@ def mark_unsubscribed(email_addr: str) -> MarkUnsubscribedResult:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
             writer.writerows(rows)
-    block_added = False
+    return MarkUnsubscribedResult(csv_updated=changed, block_added=False)
+
+
+def handle_unsubscribe(email: str, source: str | None = None) -> MarkUnsubscribedResult:
+    result = mark_unsubscribed(email)
     try:
-        block_added = add_blocked_email(email_norm)
-    except Exception:
-        logger.debug("mark_unsubscribed: add_blocked_email failed", exc_info=True)
-    return MarkUnsubscribedResult(csv_updated=changed, block_added=block_added)
+        added = add_to_blocklist(email)
+        logger.info("Unsubscribe -> blocklist: %s (added=%s, source=%s)", email, added, source)
+        if added or result.block_added:
+            return MarkUnsubscribedResult(csv_updated=result.csv_updated, block_added=added or result.block_added)
+        return result
+    except Exception as exc:
+        logger.exception("Failed to append to blocked_emails.txt for %s: %s", email, exc)
+        return result
 
 
 def log_sent_email(
@@ -2224,6 +2196,7 @@ __all__ = [
     "write_audit",
     "MarkUnsubscribedResult",
     "mark_unsubscribed",
+    "handle_unsubscribe",
     "log_sent_email",
     "detect_sent_folder",
     "get_recent_6m_union",

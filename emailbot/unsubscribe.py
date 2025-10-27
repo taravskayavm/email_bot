@@ -14,7 +14,7 @@ from .messaging import (
     BLOCKED_FILE,
     MarkUnsubscribedResult,
     ensure_blocklist_ready,
-    mark_unsubscribed,
+    handle_unsubscribe,
     verify_unsubscribe_token,
 )
 
@@ -137,7 +137,7 @@ async def handle(request: web.Request) -> web.Response:
                     logger.warning(
                         "unsubscribe soft-allow: email=%s token_invalid=1", email
                     )
-                    result = mark_unsubscribed(email)
+                    result = handle_unsubscribe(email, source="soft-token")
                     logger.info(
                         "unsubscribe POST(token-soft): email=%s csv=%s block=%s block_file=%s",
                         email,
@@ -148,7 +148,7 @@ async def handle(request: web.Request) -> web.Response:
                     return web.Response(text=_ok_html(), content_type="text/html")
                 logger.warning("unsubscribe denied: email=%s token_invalid=1", email)
                 raise web.HTTPForbidden(text="Invalid token")
-            result: MarkUnsubscribedResult = mark_unsubscribed(email)
+            result: MarkUnsubscribedResult = handle_unsubscribe(email, source="token")
             logger.info(
                 "unsubscribe POST(token): email=%s csv=%s block=%s block_file=%s",
                 email,
@@ -166,7 +166,7 @@ async def handle(request: web.Request) -> web.Response:
             )
             raise web.HTTPBadRequest(text="Missing recipient")
 
-        result: MarkUnsubscribedResult = mark_unsubscribed(addr)
+        result: MarkUnsubscribedResult = handle_unsubscribe(addr, source="one-click")
         logger.info(
             "unsubscribe POST(one-click): email=%s csv=%s block=%s block_file=%s",
             addr,
@@ -183,7 +183,7 @@ async def handle(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing email/token")
 
     if token and verify_unsubscribe_token(email, token):
-        result: MarkUnsubscribedResult = mark_unsubscribed(email)
+        result: MarkUnsubscribedResult = handle_unsubscribe(email, source="token")
         logger.info(
             "unsubscribe GET: email=%s csv=%s block=%s block_file=%s",
             email,
@@ -196,7 +196,7 @@ async def handle(request: web.Request) -> web.Response:
     if not token:
         if UNSUB_SOFT:
             logger.warning("unsubscribe soft-allow: email=%s token_missing=1", email)
-            result = mark_unsubscribed(email)
+            result = handle_unsubscribe(email, source="soft-get-missing")
             logger.info(
                 "unsubscribe GET(token-soft-missing): email=%s csv=%s block=%s block_file=%s",
                 email,
@@ -209,7 +209,7 @@ async def handle(request: web.Request) -> web.Response:
 
     if UNSUB_SOFT:
         logger.warning("unsubscribe soft-allow: email=%s token_invalid=1", email)
-        result = mark_unsubscribed(email)
+        result = handle_unsubscribe(email, source="soft-get")
         logger.info(
             "unsubscribe GET(token-soft): email=%s csv=%s block=%s block_file=%s",
             email,

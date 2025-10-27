@@ -1,6 +1,8 @@
 from pathlib import Path
 import os
 
+from emailbot.suppress_list import blocklist_path
+
 __all__ = [
     "CONFUSABLES_NORMALIZE",
     "OBFUSCATION_ENABLE",
@@ -47,9 +49,7 @@ CONFUSABLES_NORMALIZE = get_bool("CONFUSABLES_NORMALIZE", False)
 OBFUSCATION_ENABLE = get_bool("OBFUSCATION_ENABLE", False)
 
 # Путь к файлу заблокированных адресов (var/blocked_emails.txt по умолчанию)
-BLOCKED_EMAILS_PATH = Path(
-    os.getenv("BLOCKED_EMAILS_PATH", str(BASE_DIR / "var" / "blocked_emails.txt"))
-)
+BLOCKED_EMAILS_PATH = blocklist_path()
 
 # Гарантируем, что каталог и файл существуют
 BLOCKED_EMAILS_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,8 @@ import pytest
 def _prepare_blocklist(monkeypatch, messaging_mod, rules_mod, suppress_list_mod, path):
     monkeypatch.setattr(messaging_mod, "BLOCKED_FILE", str(path))
     monkeypatch.setattr(rules_mod, "BLOCKLIST_PATH", path)
-    suppress_list_mod.init_blocked(str(path))
+    suppress_list_mod.init_blocked(path)
+    messaging_mod._BLOCK_READY = False
 
 
 def test_role_like_filter_allows_digit_prefixed(monkeypatch, tmp_path):
@@ -17,8 +18,6 @@ def test_role_like_filter_allows_digit_prefixed(monkeypatch, tmp_path):
 
     blocked = tmp_path / "blocked_emails.txt"
     blocked.write_text("", encoding="utf-8")
-    monkeypatch.setenv("BLOCKED_LIST_PATH", str(blocked))
-    monkeypatch.setenv("BLOCKED_EMAILS_PATH", str(blocked))
 
     from emailbot import messaging, suppress_list
     from utils import rules
@@ -49,8 +48,6 @@ def test_role_like_manual_approval_future(monkeypatch, tmp_path):
 
     blocked = tmp_path / "blocked_emails.txt"
     blocked.write_text("", encoding="utf-8")
-    monkeypatch.setenv("BLOCKED_LIST_PATH", str(blocked))
-    monkeypatch.setenv("BLOCKED_EMAILS_PATH", str(blocked))
 
     from emailbot import messaging, suppress_list
     from utils import rules

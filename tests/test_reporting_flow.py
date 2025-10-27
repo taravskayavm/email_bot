@@ -12,8 +12,6 @@ def test_reporting_counts_after_parse_and_after_send(monkeypatch, tmp_path):
 
     blocked = tmp_path / "blocked_emails.txt"
     blocked.write_text("ban1@x.com\nban2@x.com\n", encoding="utf-8")
-    monkeypatch.setenv("BLOCKED_LIST_PATH", str(blocked))
-    monkeypatch.setenv("BLOCKED_EMAILS_PATH", str(blocked))
 
     from emailbot import messaging, suppress_list
     from emailbot.reporting import count_blocked
@@ -21,7 +19,8 @@ def test_reporting_counts_after_parse_and_after_send(monkeypatch, tmp_path):
 
     monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked))
     monkeypatch.setattr(rules, "BLOCKLIST_PATH", blocked)
-    suppress_list.init_blocked(str(blocked))
+    suppress_list.init_blocked(blocked)
+    messaging._BLOCK_READY = False
 
     emails = ["ok1@x.com", "ban1@x.com", "ok2@y.org", "ban2@x.com"]
     ready, *_rest, digest = messaging.prepare_mass_mailing(emails, ignore_cooldown=True)
