@@ -17,15 +17,14 @@ def test_cooldown_should_skip_and_ignore(monkeypatch, tmp_path):
     # Блок-лист укажем на пустой временный файл
     blocked = tmp_path / "blocked_emails.txt"
     blocked.write_text("", encoding="utf-8")
-    monkeypatch.setenv("BLOCKED_LIST_PATH", str(blocked))
-    monkeypatch.setenv("BLOCKED_EMAILS_PATH", str(blocked))
 
     # Импортируем после настройки ENV, чтобы модули подхватили правильные пути
     from emailbot.services import cooldown
     from emailbot import messaging, suppress_list
 
-    suppress_list.init_blocked(str(blocked))
-    suppress_list.refresh_if_changed()
+    suppress_list.init_blocked(blocked)
+    monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked), raising=False)
+    messaging._BLOCK_READY = False
 
     # Исходные данные
     now = datetime(2025, 10, 12, 12, 0, 0, tzinfo=timezone.utc)

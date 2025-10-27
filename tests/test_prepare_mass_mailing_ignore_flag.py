@@ -17,14 +17,13 @@ def test_prepare_mass_mailing_respects_ignore_flag(monkeypatch, tmp_path):
     # Пустой блок-лист
     blocked = tmp_path / "blocked_emails.txt"
     blocked.write_text("", encoding="utf-8")
-    monkeypatch.setenv("BLOCKED_LIST_PATH", str(blocked))
-    monkeypatch.setenv("BLOCKED_EMAILS_PATH", str(blocked))
 
     from emailbot.services import cooldown
     from emailbot import messaging, suppress_list
 
-    suppress_list.init_blocked(str(blocked))
-    suppress_list.refresh_if_changed()
+    suppress_list.init_blocked(blocked)
+    monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked), raising=False)
+    messaging._BLOCK_READY = False
 
     addr = "user@example.com"
     now = datetime(2025, 10, 12, 8, 0, 0, tzinfo=timezone.utc)

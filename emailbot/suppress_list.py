@@ -1,299 +1,216 @@
+"""Helpers for managing the global e-mail block list.
+
+The block list lives under ``<repo_root>/var/blocked_emails.txt`` regardless of
+the working directory.  The helpers exposed here provide a very small API for
+checking and updating that file while keeping basic thread-safety guarantees.
+"""
+
 from __future__ import annotations
 
-import logging
-import os
-import re
-import threading
 from pathlib import Path
+from threading import RLock
 from typing import Iterable, Set
 
-try:
-    # при запуске всего проекта из корня
-    from utils.paths import expand_path  # type: ignore
-except Exception:
-    # при пакетном импорте emailbot.*
-    from emailbot.utils.paths import expand_path  # type: ignore
+__all__ = [
+    "BLOCKED_EMAILS_PATH",
+    "blocklist_path",
+    "is_blocked",
+    "add_to_blocklist",
+    "add_blocked",
+    "add_blocked_email",
+    "load_blocked_set",
+    "get_blocked_set",
+    "save_blocked_set",
+    "get_blocked_count",
+    "refresh_if_changed",
+    "invalidate_cache",
+    "init_blocked",
+]
 
-_DEFAULT_BLOCKLIST = Path("var/blocked_emails.txt")
 
-logger = logging.getLogger(__name__)
+_LOCK = RLock()
+_BLOCKLIST_PATH = Path(__file__).resolve().parents[1] / "var" / "blocked_emails.txt"
+_BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-try:  # pragma: no cover - optional dependency
-    from .extraction_common import normalize_email as _normalize_email
-except Exception:  # pragma: no cover - fallback when extraction module unavailable
-    def _normalize_email(value: str) -> str:
-        return (value or "").strip().lower()
+BLOCKED_EMAILS_PATH: Path = _BLOCKLIST_PATH
 
-
-_LOCK = threading.RLock()
-# Path can be overridden via environment variable BLOCKED_EMAILS_FILE (preferred)
-# or legacy BLOCKED_LIST_PATH / BLOCKED_EMAILS_PATH; default is var/blocked_emails.txt.
-_ENV_BLOCKLIST = (
-    os.getenv("BLOCKED_EMAILS_FILE")
-    or os.getenv("BLOCKED_LIST_PATH")
-    or os.getenv("BLOCKED_EMAILS_PATH")
-)
-_BLOCKED_PATH: Path = Path(str(expand_path(_ENV_BLOCKLIST or _DEFAULT_BLOCKLIST)))
-BLOCKED_EMAILS_PATH: Path = _BLOCKED_PATH
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
 
-_LEADING_DOTS_RE = re.compile(r"^\.+")
-_LEADING_DIGITS_RE = re.compile(r"^\d{1,2}(?=[A-Za-z])")
+
+def blocklist_path() -> Path:
+    """Return the path of the shared block list file."""
+
+    return _BLOCKLIST_PATH
 
 
 def _normalize(email: str) -> str:
-    """Return canonical representation for stop-list comparison."""
-
-    try:
-        value = _normalize_email(email)
-    except Exception:
-        value = (email or "").strip().lower()
-    value = _LEADING_DOTS_RE.sub("", value)
-    value = _LEADING_DIGITS_RE.sub("", value)
-    return value
+    return (email or "").strip().lower()
 
 
-def _read_blocked(path: Path) -> Set[str]:
-    """Safely read block-list entries from ``path`` into a set."""
-
-    try:
-        with path.open("r", encoding="utf-8") as handler:
-            items: Set[str] = set()
-            for raw_line in handler:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                email_part = line.split("\t", 1)[0]
-                norm = _normalize(email_part)
-                if norm:
-                    items.add(norm)
-            return items
-    except FileNotFoundError:
-        # только что не успели создать — считаем пустым
+def _read_blocklist_locked() -> Set[str]:
+    if not _BLOCKLIST_PATH.exists():
         return set()
-    except Exception:
-        logger.debug("Failed to read block-list file %s", path, exc_info=True)
-        return set()
+    text = _BLOCKLIST_PATH.read_text(encoding="utf-8")
+    return {
+        line.strip().lower()
+        for line in text.splitlines()
+        if line.strip()
+    }
 
 
-def _load_file() -> None:
+def _write_blocklist_locked(items: Iterable[str]) -> None:
+    _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    values = [value.rstrip("\n") for value in items]
+    if values:
+        data = "\n".join(values) + "\n"
+    else:
+        data = ""
+    _BLOCKLIST_PATH.write_text(data, encoding="utf-8")
+
+
+def _ensure_loaded_locked() -> None:
     global _CACHE, _MTIME
 
-    path = _BLOCKED_PATH
-    if not path.exists():
-        _CACHE = set()
-        _MTIME = None
-        return
-
     try:
-        stat = path.stat()
+        mtime = _BLOCKLIST_PATH.stat().st_mtime
     except FileNotFoundError:
-        _CACHE = set()
-        _MTIME = None
-        return
-    except Exception:
-        logger.debug("Failed to stat block-list file %s", path, exc_info=True)
-        _CACHE = set()
-        _MTIME = None
+        mtime = None
+    if mtime == _MTIME:
         return
 
-    items = _read_blocked(path)
-    if not path.exists():
-        _CACHE = set()
-        _MTIME = None
-        return
-
-    _CACHE = items
-    _MTIME = stat.st_mtime
+    _CACHE = _read_blocklist_locked()
+    _MTIME = mtime
 
 
-def _ensure_dir(path: Path) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+def refresh_if_changed() -> None:
+    """Reload the cached block list if the underlying file changed."""
+
+    with _LOCK:
+        _ensure_loaded_locked()
 
 
 def load_blocked_set() -> Set[str]:
-    """Return the stop-list as a set, reading from disk when necessary."""
+    """Return a copy of the cached block list, refreshing if needed."""
 
     with _LOCK:
-        _load_file()
+        _ensure_loaded_locked()
         return set(_CACHE)
 
 
-def _atomic_write(lines: Iterable[str]) -> None:
-    """Persist ``lines`` to the block-list file atomically."""
-
-    _ensure_dir(_BLOCKED_PATH)
-    tmp = _BLOCKED_PATH.with_name(_BLOCKED_PATH.name + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handler:
-        for line in lines:
-            handler.write(line.rstrip("\n") + "\n")
-    os.replace(tmp, _BLOCKED_PATH)
+def get_blocked_set() -> Set[str]:
+    return load_blocked_set()
 
 
-def save_blocked_set(items: Iterable[str]) -> None:
-    """Persist the provided items as the canonical block-list."""
+def get_blocked_count() -> int:
+    with _LOCK:
+        _ensure_loaded_locked()
+        return len(_CACHE)
 
-    normalized = {
+
+def _add_items_locked(items: Iterable[str]) -> int:
+    global _CACHE, _MTIME
+
+    cleaned = {
         _normalize(item)
         for item in items
         if item is not None
     }
-    normalized.discard("")
-    ordered = sorted(normalized)
+    cleaned.discard("")
+    if not cleaned:
+        return 0
 
-    with _LOCK:
-        global _CACHE, _MTIME
-        _atomic_write(ordered)
-        _CACHE = set(ordered)
-        try:
-            _MTIME = _BLOCKED_PATH.stat().st_mtime
-        except Exception:
-            _MTIME = None
+    _ensure_loaded_locked()
+    before = set(_CACHE)
+    updated = before | cleaned
+    if updated == _CACHE:
+        return 0
+
+    ordered = sorted(updated)
+    _write_blocklist_locked(ordered)
+    _CACHE = set(ordered)
+    try:
+        _MTIME = _BLOCKLIST_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _MTIME = None
+    return len(updated) - len(before)
 
 
 def add_blocked(emails: Iterable[str], reason: str | None = None) -> int:
-    """Add e-mail addresses to the block-list and persist the change."""
+    """Add multiple emails to the block list."""
 
-    del reason  # Reason is currently informational only.
-    candidates = {
-        _normalize(email)
-        for email in (emails or [])
-        if email is not None
-    }
-    candidates.discard("")
-    if not candidates:
-        return 0
-
+    del reason  # retained for compatibility with older callers
     with _LOCK:
-        global _CACHE, _MTIME
-        refresh_if_changed()
-        before = set(_CACHE)
-        updated = before | candidates
-        if updated == _CACHE:
-            return 0
-        _atomic_write(sorted(updated))
-        _CACHE = updated
-        try:
-            _MTIME = _BLOCKED_PATH.stat().st_mtime
-        except Exception:
-            _MTIME = None
-        return len(updated) - len(before)
-
-
-def refresh_if_changed() -> None:
-    """Reload the stop-list if the backing file has changed."""
-
-    with _LOCK:
-        try:
-            stat = _BLOCKED_PATH.stat()
-            mtime = stat.st_mtime
-        except FileNotFoundError:
-            mtime = None
-        if mtime != _MTIME:
-            _load_file()
-
-
-def init_blocked(path: str | os.PathLike[str] | None = None) -> None:
-    """Initialise the stop-list cache explicitly (e.g. during startup)."""
-
-    global _BLOCKED_PATH, BLOCKED_EMAILS_PATH
-
-    with _LOCK:
-        if path is not None:
-            _BLOCKED_PATH = Path(str(expand_path(path)))
-            BLOCKED_EMAILS_PATH = _BLOCKED_PATH
-        try:
-            _ensure_dir(_BLOCKED_PATH)
-            _BLOCKED_PATH.touch(exist_ok=True)
-        except Exception as exc:
-            logger.warning("Cannot initialise block-list file %s: %s", _BLOCKED_PATH, exc)
-        _load_file()
-
-
-def add_to_blocklist(email: str, reason: str | None = None) -> bool:
-    """Add a normalised e-mail to the block-list file.
-
-    Returns ``True`` if the address is successfully persisted or already present,
-    ``False`` if the operation failed.
-    """
-
-    norm = _normalize(email)
-    if not norm:
-        return False
-
-    added = add_blocked([norm], reason)
-    if added:
-        return True
-
-    with _LOCK:
-        refresh_if_changed()
-        return norm in _CACHE
+        return _add_items_locked(emails)
 
 
 def add_blocked_email(email: str, reason: str | None = None) -> bool:
-    """Compatibility wrapper adding a single address with duplicate protection."""
+    """Compatibility wrapper that adds a single email to the block list."""
 
-    norm = _normalize(email)
-    if not norm:
+    return add_to_blocklist(email, reason=reason)
+
+
+def add_to_blocklist(email: str, reason: str | None = None) -> bool:
+    """Add ``email`` to the block list if it is non-empty and absent."""
+
+    del reason  # compatibility placeholder
+    normalized = _normalize(email)
+    if not normalized:
         return False
-
-    added = add_blocked([norm], reason)
-    if added:
-        logger.info(
-            "blocked_emails: added %s -> %s",
-            norm,
-            BLOCKED_EMAILS_PATH.resolve(),
-        )
-        return True
-
-    logger.info("blocked_emails: already present: %s", norm)
-    return False
+    with _LOCK:
+        added = _add_items_locked([normalized])
+        return added > 0
 
 
 def is_blocked(email: str) -> bool:
-    """Return True if ``email`` is present in ``blocked_emails.txt``."""
-
-    refresh_if_changed()
-    return _normalize(email) in _CACHE
-
-
-def get_blocked_count() -> int:
-    """Return the number of cached blocked addresses."""
-
-    refresh_if_changed()
-    return len(_CACHE)
+    normalized = _normalize(email)
+    if not normalized:
+        return False
+    with _LOCK:
+        _ensure_loaded_locked()
+        return normalized in _CACHE
 
 
-def get_blocked_set() -> Set[str]:
-    """Return a snapshot of the cached blocked addresses."""
-
-    refresh_if_changed()
-    return set(_CACHE)
+def save_blocked_set(items: Iterable[str]) -> None:
+    with _LOCK:
+        normalized_values = {
+            _normalize(item)
+            for item in items
+            if item is not None
+        }
+        normalized_values.discard("")
+        normalized = sorted(normalized_values)
+        _write_blocklist_locked(normalized)
+        global _CACHE, _MTIME
+        _CACHE = set(normalized)
+        try:
+            _MTIME = _BLOCKLIST_PATH.stat().st_mtime
+        except FileNotFoundError:
+            _MTIME = None
 
 
 def invalidate_cache() -> None:
-    """Force cache reload on the next access (useful after manual updates)."""
-
     global _MTIME
     with _LOCK:
         _MTIME = None
 
 
-__all__ = [
-    "BLOCKED_EMAILS_PATH",
-    "init_blocked",
-    "refresh_if_changed",
-    "is_blocked",
-    "get_blocked_count",
-    "get_blocked_set",
-    "invalidate_cache",
-    "load_blocked_set",
-    "save_blocked_set",
-    "add_blocked",
-    "add_blocked_email",
-    "add_to_blocklist",
-]
+def init_blocked(path: str | Path | None = None) -> None:
+    """Initialise the block list file (optionally overriding the path)."""
+
+    global _BLOCKLIST_PATH, BLOCKED_EMAILS_PATH, _CACHE, _MTIME
+
+    with _LOCK:
+        if path is not None:
+            _BLOCKLIST_PATH = Path(path)
+            BLOCKED_EMAILS_PATH = _BLOCKLIST_PATH
+            _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not _BLOCKLIST_PATH.exists():
+            _BLOCKLIST_PATH.touch()
+        _CACHE = set()
+        try:
+            _CACHE = _read_blocklist_locked()
+            _MTIME = _BLOCKLIST_PATH.stat().st_mtime
+        except FileNotFoundError:
+            _MTIME = None
