@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -465,6 +466,56 @@ def extract_emails_pipeline(
     return filtered, stats
 
 
+def extract_emails_from_pdf(path: str) -> List[str]:
+    """Извлечь e-mail из PDF с условным запуском OCR."""
+
+    try:
+        from emailbot.extraction_pdf import cleanup_text, extract_text
+    except Exception:
+        cleanup_text = None  # type: ignore[assignment]
+        extract_text = None  # type: ignore[assignment]
+
+    text = ""
+    if extract_text is not None:
+        try:
+            text = extract_text(path)
+        except Exception:
+            text = ""
+
+    emails_text = set(parse_emails_unified(text)) if text else set()
+
+    try:
+        force_threshold = int(os.getenv("PDF_FORCE_OCR_IF_FOUND_LT", "25"))
+    except Exception:
+        force_threshold = 25
+
+    do_ocr = os.getenv("PDF_OCR_ENABLE", "0") == "1"
+    if do_ocr and len(emails_text) < force_threshold:
+        try:
+            pdf_bytes = Path(path).read_bytes()
+        except Exception:
+            pdf_bytes = b""
+        if pdf_bytes:
+            try:
+                from emailbot.extraction_pdf import _document_ocr
+            except Exception:
+                _document_ocr = None  # type: ignore[assignment]
+            if _document_ocr is not None:
+                try:
+                    ocr_text, _ = _document_ocr(pdf_bytes)
+                except Exception:
+                    ocr_text = ""
+                if ocr_text:
+                    if cleanup_text is not None:
+                        try:
+                            ocr_text = cleanup_text(ocr_text)
+                        except Exception:
+                            pass
+                    emails_text.update(parse_emails_unified(ocr_text))
+
+    return sorted(emails_text)
+
+
 def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
     """Convenience helper returning final e-mails and dropped candidates."""
 
@@ -754,6 +805,7 @@ def extract_from_url(url: str, *, deep: bool = True) -> list[str]:
 __all__ = [
     "extract_emails_pipeline",
     "run_pipeline_on_text",
+    "extract_emails_from_pdf",
     "extract_from_url_async",
     "extract_from_url",
 ]
