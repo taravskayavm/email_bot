@@ -12,12 +12,10 @@ from email.utils import getaddresses
 from smtplib import SMTPResponseException
 
 from emailbot.audit import write_audit_drop
-from emailbot.services.cooldown import COOLDOWN_DAYS, should_skip_by_cooldown, mark_sent as cooldown_mark_sent
-from emailbot.history_service import (
-    cancel_send_attempt,
-    mark_sent,
-    register_send_attempt,
-)
+from emailbot.services.cooldown import COOLDOWN_DAYS
+from emailbot.history_service import cancel_send_attempt, register_send_attempt
+from emailbot.policy import decide, Decision
+from emailbot import ledger
 from utils.send_stats import log_error, log_success
 from config import BLOCKED_EMAILS_PATH
 from utils.blocked_store import BlockedStore
@@ -155,28 +153,42 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
         if not send_now:
             return True, None
 
-        if override_flag not in {"1", "true", "yes", "on"}:
-            for addr in send_now:
-                if not addr:
-                    continue
-                skip, skip_reason = should_skip_by_cooldown(addr)
-                if skip:
-                    reason_code = (
-                        skip_reason.split(";", 1)[0]
-                        if skip_reason
-                        else f"cooldown<{COOLDOWN_DAYS}d"
-                    )
-                    try:
-                        write_audit_drop(addr, reason_code, skip_reason)
-                    except Exception:  # pragma: no cover - defensive logging
-                        logger.debug("write_audit_drop failed", exc_info=True)
-                    logger.info(
-                        "Skipping SMTP send to %s due to cooldown: %s",
-                        addr,
-                        skip_reason,
-                    )
-                    return True, None
+        override_enabled = override_flag in {"1", "true", "yes", "on"}
+        campaign = group_key or ""
+        decision_moment = datetime.now(timezone.utc)
+        filtered_send_now: list[str] = []
+        for addr in send_now:
+            if not addr:
+                continue
+            decision, reason = decide(addr, campaign, decision_moment)
+            if decision is Decision.SEND_NOW or (
+                decision is Decision.SKIP_COOLDOWN and override_enabled
+            ):
+                filtered_send_now.append(addr)
+                continue
+            logger.info("skip %s: reason=%s campaign=%s", addr, reason, campaign)
+            if decision is Decision.SKIP_COOLDOWN:
+                reason_code = f"cooldown<{COOLDOWN_DAYS}d"
+                details = reason or reason_code
+                try:
+                    write_audit_drop(addr, reason_code, details)
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.debug("write_audit_drop failed", exc_info=True)
 
+        send_now = filtered_send_now
+        if not send_now:
+            return True, None
+
+        if send_now:
+            new_increments: dict[str, int] = {}
+            for addr in send_now:
+                domain = _domain_of(addr)
+                if not domain:
+                    continue
+                new_increments[domain] = new_increments.get(domain, 0) + 1
+            rate_increments = new_increments
+
+        if not override_enabled:
             if COOLDOWN_DAYS > 0:
                 seen_for_reserve: set[str] = set()
                 for addr in send_now:
@@ -230,19 +242,17 @@ def send_messages(messages: Iterable[EmailMessage], user: str, password: str, ho
                     if key in seen:
                         continue
                     seen.add(key)
-                    sent_at = reservations.get(key)
-                    mark_sent(
-                        addr_norm,
-                        group_key,
-                        message_id,
-                        sent_at,
-                        run_id=run_id,
-                        smtp_result="ok",
-                    )
+                    sent_at = reservations.get(key) or datetime.now(timezone.utc)
                     try:
-                        cooldown_mark_sent(addr_norm)
+                        ledger.record_send(
+                            addr_norm,
+                            group_key,
+                            sent_at,
+                            message_id=message_id,
+                            run_id=run_id,
+                        )
                     except Exception:
-                        logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
+                        logger.warning("ledger_record_failed", exc_info=True)
             except Exception:
                 logger.warning("history_registry_record_failed", exc_info=True)
 

@@ -528,7 +528,8 @@ def parse_emails_from_text(text: str) -> list[str]:
 # Resolve the project root (one level above this file) and use shared
 # directories located at the repository root.
 from utils.paths import expand_path
-from emailbot.services.cooldown import should_skip_by_cooldown, mark_sent as cooldown_mark_sent
+from emailbot.policy import decide, Decision
+from emailbot import ledger
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
 # Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
@@ -692,6 +693,14 @@ class SendOutcome(Enum):
     BLOCKED = "blocked"
     ERROR = "error"
     DUPLICATE = "duplicate"
+
+
+def _outcome_for_decision(decision: Decision) -> SendOutcome:
+    if decision is Decision.SKIP_COOLDOWN:
+        return SendOutcome.COOLDOWN
+    if decision in {Decision.SKIP_BLOCKED, Decision.SKIP_ROLE, Decision.SKIP_DOMAIN_POLICY}:
+        return SendOutcome.BLOCKED
+    return SendOutcome.ERROR
 
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
@@ -1264,15 +1273,16 @@ def send_email(
     override_180d: bool = False,
 ) -> SendOutcome:
     try:
-        if not override_180d:
-            try:
-                skip, reason = should_skip_by_cooldown(recipient)
-                if skip:
-                    logger.info("Cooldown skip for %s: %s", recipient, reason)
-                    return SendOutcome.COOLDOWN
-            except Exception:
-                logger.exception("cooldown check failed")
-                return SendOutcome.ERROR
+        campaign = Path(html_path).stem
+        now = datetime.now(timezone.utc)
+        decision, reason = decide(recipient, campaign, now)
+        if decision is Decision.SKIP_COOLDOWN and override_180d:
+            decision = Decision.SEND_NOW
+        if decision is not Decision.SEND_NOW:
+            logger.info(
+                "skip %s: reason=%s campaign=%s", recipient, reason, campaign
+            )
+            return _outcome_for_decision(decision)
         transport_recipient = _prepare_transport_email(recipient)
         msg, token = build_message(
             transport_recipient,
@@ -1299,22 +1309,18 @@ def send_email(
         send_raw_smtp_with_retry(raw, transport_recipient, max_tries=3)
         save_to_sent_folder(raw)
         try:
-            cooldown_mark_sent(recipient)
-        except Exception:
-            logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
-        try:
-            history_service.mark_sent(
+            ledger.record_send(
                 recipient,
-                Path(html_path).stem,
-                msg.get("Message-ID"),
+                campaign,
                 datetime.now(timezone.utc),
-                smtp_result="ok",
+                message_id=msg.get("Message-ID"),
+                run_id=batch_id,
             )
         except Exception:
-            logger.debug("history mark_sent failed (non-fatal)", exc_info=True)
+            logger.debug("ledger record_send failed", exc_info=True)
         log_sent_email(
             recipient,
-            Path(html_path).stem,
+            campaign,
             status="ok",
             filename=html_path,
             unsubscribe_token=token,
@@ -1388,17 +1394,15 @@ def send_email_with_sessions(
     return_raw: bool = False,
 ) -> tuple[SendOutcome, str, str | None, str | None]:
     # 0) Проверка кулдауна (если не запросили явный override)
-    if not override_180d:
-        try:
-            skip, reason = should_skip_by_cooldown(recipient)
-            if skip:
-                logger.info("Cooldown skip for %s: %s", recipient, reason)
-                return SendOutcome.COOLDOWN, "", None, None
-        except Exception:
-            # Не роняем поток из-за побочного сервиса — fail-open запрещён,
-            # поэтому при ошибке проверку считаем «нет допуска»
-            logger.exception("cooldown check failed")
-            return SendOutcome.ERROR, "", None, None
+    campaign = group_key or group_title or Path(html_path).stem
+    now = datetime.now(timezone.utc)
+    decision, reason = decide(recipient, campaign, now)
+    if decision is Decision.SKIP_COOLDOWN and override_180d:
+        decision = Decision.SEND_NOW
+    if decision is not Decision.SEND_NOW:
+        logger.info("skip %s: reason=%s campaign=%s", recipient, reason, campaign)
+        outcome = _outcome_for_decision(decision)
+        return outcome, "", None, None
 
     msg, token = build_message(
         recipient,
@@ -1504,19 +1508,15 @@ def send_email_with_sessions(
 
     # 3) Зафиксировать отправку для кулдауна
     try:
-        cooldown_mark_sent(recipient)
-    except Exception:
-        logger.debug("cooldown mark_sent failed (non-fatal)", exc_info=True)
-    try:
-        history_service.mark_sent(
+        ledger.record_send(
             recipient,
-            group_key or group_title or Path(html_path).stem,
-            msg.get("Message-ID"),
+            campaign,
             datetime.now(timezone.utc),
-            smtp_result="ok",
+            message_id=msg.get("Message-ID"),
+            run_id=batch_id,
         )
     except Exception:
-        logger.debug("history mark_sent failed (non-fatal)", exc_info=True)
+        logger.debug("ledger record_send failed", exc_info=True)
 
     log_source = group_key or group_title or Path(html_path).stem or "session"
     log_key = log_sent_email(
