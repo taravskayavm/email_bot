@@ -2648,6 +2648,12 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.clear()
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
+    # Сброс ожиданий ручного режима, чтобы не ловить "Не нашла корректных адресов…"
+    try:
+        context.chat_data["awaiting_manual_emails"] = False
+        context.user_data["awaiting_manual_email"] = False
+    except Exception:
+        pass
     context.chat_data["extract_lock"] = asyncio.Lock()
     await update.message.reply_text(
         "Список email-адресов и файлов очищен. Можно загружать новые файлы!"

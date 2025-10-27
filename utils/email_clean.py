@@ -361,20 +361,40 @@ def repair_email(addr: str) -> str:
         return (addr or "").strip().lower()
 
 
-def sanitize_email(addr: str) -> str:
+def sanitize_email(addr: str, strip_footnote: bool = True) -> tuple[str, str | None]:
     """
-    Legacy wrapper: раньше удаляла пробелы и лишние символы из e-mail.
-    Теперь безопасно делегирует canonical_email(), сохраняя прежний интерфейс.
+    Совместимый с легаси интерфейс:
+      возвращает (cleaned, reason).
+    - cleaned: нормализованный e-mail в канонической форме (ключ для кулдауна/дедупа),
+               либо "" если адрес некорректный;
+    - reason:  строковый код причины отказа (например, "invalid", "invalid-local",
+               "invalid-domain"), либо None.
+    ВАЖНО: ЭТО НЕ «транспортный» адрес для SMTP. Для фактической отправки используйте
+    адрес пользователя без удаления точек/плюсов (см. emailbot.messaging).
     """
 
     try:
         a = (addr or "").strip()
-        # Подчистим видимые кавычки и скобки, если вдруг остались
         a = a.strip("()[]{}<>,;\"'`«»„“”‚‘’")
-        return canonical_email(a)
+        if not a or "@" not in a:
+            return "", "invalid"
+        local, sep, domain = a.partition("@")
+        if not sep:
+            return "", "invalid"
+        if not local:
+            return "", "invalid-local"
+        if not domain:
+            return "", "invalid-domain"
+        try:
+            cleaned = canonical_email(a)
+        except Exception:
+            cleaned = a.strip().lower()
+        if not cleaned or "@" not in cleaned:
+            return "", "invalid"
+        return cleaned, None
     except Exception as e:
         logger.warning("sanitize_email fallback for %r: %s", addr, e)
-        return (addr or "").strip().lower()
+        return "", "invalid"
 
 
 def get_variants(addr: str):
