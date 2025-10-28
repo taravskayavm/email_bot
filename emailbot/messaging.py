@@ -1591,7 +1591,26 @@ class MarkUnsubscribedResult:
         return self.csv_updated or self.block_added
 
 
-def mark_unsubscribed(email_addr: str) -> MarkUnsubscribedResult:
+def mark_unsubscribed(email_addr: str, token: str | None = None) -> MarkUnsubscribedResult:
+    """Mark ``email_addr`` as unsubscribed and persist the blocklist entry.
+
+    The ``token`` argument is accepted for compatibility, but is not used here.
+    """
+
+    block_added = False
+    try:
+        addr = normalize_email(email_addr)
+        if not addr or "@" not in addr:
+            logger.warning("mark_unsubscribed: invalid email %r", email_addr)
+        else:
+            block_added = add_blocked_email(addr)
+            if block_added:
+                logger.info("Unsubscribe -> blocklist: %s", addr)
+            # поддерживаем файл в чистом виде (без дублей)
+            dedupe_blocked_file()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log_error(f"mark_unsubscribed: {email_addr}: {exc}")
+
     email_norm = normalize_email(email_addr)
     p = Path(LOG_FILE)
     rows: list[dict] = []
@@ -1623,7 +1642,7 @@ def mark_unsubscribed(email_addr: str) -> MarkUnsubscribedResult:
             writer = csv.DictWriter(f, fieldnames=list(headers))
             writer.writeheader()
             writer.writerows(rows)
-    return MarkUnsubscribedResult(csv_updated=changed, block_added=False)
+    return MarkUnsubscribedResult(csv_updated=changed, block_added=block_added)
 
 
 def handle_unsubscribe(email: str, source: str | None = None) -> MarkUnsubscribedResult:
