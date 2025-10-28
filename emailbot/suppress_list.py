@@ -51,12 +51,20 @@ def _normalize(email: str) -> str:
 def _read_blocklist_locked() -> Set[str]:
     if not _BLOCKLIST_PATH.exists():
         return set()
+
+    items: Set[str] = set()
     text = _BLOCKLIST_PATH.read_text(encoding="utf-8")
-    return {
-        line.strip().lower()
-        for line in text.splitlines()
-        if line.strip()
-    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        email_part = line.split("\t", 1)[0]
+        normalized = _normalize(email_part)
+        if normalized:
+            items.add(normalized)
+
+    return items
 
 
 def _write_blocklist_locked(items: Iterable[str]) -> None:
