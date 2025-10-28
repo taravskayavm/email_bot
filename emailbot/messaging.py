@@ -1582,6 +1582,28 @@ def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
     return False
 
 
+def _mark_unsubscribed_block_only(email_addr: str, token: str | None = None) -> bool:
+    """Записать отписавшийся адрес в блок-лист (идемпотентно).
+    Ничего более не трогаем.
+    """
+
+    added = False
+    try:
+        addr = normalize_email(email_addr)
+        if not addr or "@" not in addr:
+            logger.warning("mark_unsubscribed: invalid email %r", email_addr)
+        else:
+            added = add_blocked_email(addr)
+            if added:
+                logger.info("Unsubscribe -> blocklist: %s", addr)
+            # поддерживаем файл в чистом виде (без дублей)
+            dedupe_blocked_file()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log_error(f"mark_unsubscribed: {email_addr}: {exc}")
+
+    return added
+
+
 @dataclass
 class MarkUnsubscribedResult:
     csv_updated: bool
@@ -1597,19 +1619,7 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> MarkUnsubscr
     The ``token`` argument is accepted for compatibility, but is not used here.
     """
 
-    block_added = False
-    try:
-        addr = normalize_email(email_addr)
-        if not addr or "@" not in addr:
-            logger.warning("mark_unsubscribed: invalid email %r", email_addr)
-        else:
-            block_added = add_blocked_email(addr)
-            if block_added:
-                logger.info("Unsubscribe -> blocklist: %s", addr)
-            # поддерживаем файл в чистом виде (без дублей)
-            dedupe_blocked_file()
-    except Exception as exc:  # pragma: no cover - defensive logging
-        log_error(f"mark_unsubscribed: {email_addr}: {exc}")
+    block_added = _mark_unsubscribed_block_only(email_addr, token)
 
     email_norm = normalize_email(email_addr)
     p = Path(LOG_FILE)
