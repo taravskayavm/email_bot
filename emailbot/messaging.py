@@ -1275,7 +1275,14 @@ def send_email(
     try:
         campaign = Path(html_path).stem
         now = datetime.now(timezone.utc)
-        decision, reason = decide(recipient, campaign, now)
+        try:
+            decision, reason = decide(recipient, campaign, now)
+        except Exception as exc:  # noqa: BLE001 - preserve existing contract by swallowing policy errors
+            logger.exception("decision pipeline failed for %s", recipient)
+            log_error(f"send_email decision pipeline failed: {recipient}: {exc}")
+            if notify_func:
+                notify_func(f"❌ Ошибка при отправке на {recipient}: {exc}")
+            return SendOutcome.ERROR
         if decision is Decision.SKIP_COOLDOWN and override_180d:
             decision = Decision.SEND_NOW
         if decision is not Decision.SEND_NOW:
