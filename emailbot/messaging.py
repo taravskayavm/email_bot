@@ -96,6 +96,64 @@ _HISTORY_SHIM_WARNED_ONCE = False
 
 DEBUG_SAVE_EML = os.getenv("DEBUG_SAVE_EML", "0") == "1"
 
+# Единые метки исхода (взаимно исключающие)
+OUTCOME = {
+    "sent": "sent",  # письмо отправлено успешно
+    "blocked": "blocked",  # в стоп-листе (не пытались отправлять)
+    "cooldown": "cooldown",  # 180-дневное правило (не пытались отправлять)
+    "undeliverable": "undeliverable",  # недоставляемый (bounce/валидатор/некорректный)
+    "error": "error",  # ошибка при попытке отправки (исключение SMTP/timeout и т.п.)
+    "unchanged": "unchanged",  # «оставлено как было» (например, уже в этой кампании)
+}
+
+
+def classify_audit_outcome(reason: str | None, *, default: str | None = None) -> str:
+    """Map textual ``reason`` to one of the allowed audit outcome labels."""
+
+    if default is None:
+        default = OUTCOME["error"]
+    value = (reason or "").strip().lower()
+    if not value:
+        return default
+
+    if value in OUTCOME.values():
+        return value
+
+    if "cooldown" in value or value.startswith("skip_cooldown"):
+        return OUTCOME["cooldown"]
+
+    if any(token in value for token in ("stop", "block", "foreign_domain", "foreign", "suppressed")):
+        return OUTCOME["blocked"]
+
+    if any(
+        token in value
+        for token in (
+            "duplicate",
+            "daily_limit",
+            "history",
+            "unchanged",
+            "skip",
+        )
+    ):
+        return OUTCOME["unchanged"]
+
+    if any(
+        token in value
+        for token in (
+            "bounce",
+            "validator",
+            "undeliverable",
+            "invalid",
+            "smtp_error",
+        )
+    ):
+        return OUTCOME["undeliverable"]
+
+    if "error" in value or "exception" in value or "timeout" in value:
+        return OUTCOME["error"]
+
+    return default
+
 
 def write_audit(
     event: str,
