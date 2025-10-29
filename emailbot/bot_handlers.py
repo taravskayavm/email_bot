@@ -167,6 +167,23 @@ def _message_has_url(message: Message | None, raw_text: str | None) -> bool:
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
 
+# Состояние для пользовательских запросов отчётов.
+REPORT_STATE: dict[int, dict[str, object]] = {}
+
+
+def _report_menu_kb() -> InlineKeyboardMarkup:
+    """Построить клавиатуру выбора периода отчёта."""
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📆 День", callback_data="report:day")],
+            [InlineKeyboardButton("🗓 Неделя", callback_data="report:week")],
+            [InlineKeyboardButton("🗓 Месяц", callback_data="report:month")],
+            [InlineKeyboardButton("📅 Год", callback_data="report:year")],
+            [InlineKeyboardButton("🗓 Указать период", callback_data="report:period")],
+        ]
+    )
+
 
 def _extract_emails_loose(text: str) -> list[str]:
     """Return unique e-mail addresses extracted from ``text``."""
@@ -2497,14 +2514,15 @@ async def force_send_command(
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to select a reporting period."""
 
-    keyboard = [
-        [InlineKeyboardButton("📆 День", callback_data="report_day")],
-        [InlineKeyboardButton("🗓 Неделя", callback_data="report_week")],
-        [InlineKeyboardButton("🗓 Месяц", callback_data="report_month")],
-        [InlineKeyboardButton("📅 Год", callback_data="report_year")],
-    ]
+    user = update.effective_user
+    if user:
+        REPORT_STATE.pop(user.id, None)
     await update.message.reply_text(
-        "Выберите период отчёта:", reply_markup=InlineKeyboardMarkup(keyboard)
+        (
+            "Выберите период отчёта или нажмите «🗓 Указать период», "
+            "чтобы ввести конкретную дату или диапазон."
+        ),
+        reply_markup=_report_menu_kb(),
     )
 
 
@@ -2577,18 +2595,201 @@ def get_report(period: str = "day") -> dict[str, object]:
     return stats
 
 
+_DATE_TOKEN_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
+_REPORT_SUCCESS = {"sent", "success", "ok", "synced"}
+_REPORT_ERRORS = {
+    "failed",
+    "fail",
+    "error",
+    "bounce",
+    "bounced",
+    "soft_bounce",
+    "soft-bounce",
+    "hard_bounce",
+    "hard-bounce",
+}
+
+
+def _parse_flexible_date(text: str) -> datetime | None:
+    """Распознаёт дату в формате ISO (YYYY-MM-DD) или русском (ДД.ММ.ГГГГ)."""
+
+    value = (text or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date_range(text: str) -> tuple[str, str] | None:
+    """Вернуть диапазон дат (ISO) из строки."""
+
+    payload = (text or "").strip()
+    if not payload:
+        return None
+
+    tokens = _DATE_TOKEN_RE.findall(payload)
+    if len(tokens) == 1:
+        dt = _parse_flexible_date(tokens[0])
+        if not dt:
+            return None
+        iso = dt.strftime("%Y-%m-%d")
+        return iso, iso
+    if len(tokens) == 2:
+        first = _parse_flexible_date(tokens[0])
+        second = _parse_flexible_date(tokens[1])
+        if not first or not second:
+            return None
+        start_iso = first.strftime("%Y-%m-%d")
+        end_iso = second.strftime("%Y-%m-%d")
+        if start_iso > end_iso:
+            start_iso, end_iso = end_iso, start_iso
+        return start_iso, end_iso
+    return None
+
+
+def _detect_report_delimiter(sample: str) -> str:
+    return ";" if sample.count(";") > sample.count(",") else ","
+
+
+def _parse_report_ts(raw: str, tz: ZoneInfo) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        ts = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=tz)
+    return ts.astimezone(tz)
+
+
+def _iter_report_records(base_dir: Path, tz: ZoneInfo):
+    sent_log = base_dir / "sent_log.csv"
+    if sent_log.exists():
+        try:
+            with sent_log.open("r", encoding="utf-8", newline="") as handle:
+                sample = handle.read(1024)
+                handle.seek(0)
+                delimiter = _detect_report_delimiter(sample)
+                reader = csv.DictReader(handle, delimiter=delimiter)
+                for row in reader:
+                    if not row:
+                        continue
+                    ts = _parse_report_ts(row.get("last_sent_at") or row.get("ts"), tz)
+                    if not ts:
+                        continue
+                    status = (row.get("status") or row.get("result") or "").strip()
+                    yield ts, status
+        except Exception:
+            logger.debug("failed to read sent_log.csv", exc_info=True)
+
+    stats_path = base_dir / "send_stats.jsonl"
+    if stats_path.exists():
+        try:
+            with stats_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    payload = line.strip()
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = _parse_report_ts(
+                        str(data.get("ts") or data.get("last_sent_at") or ""), tz
+                    )
+                    if not ts:
+                        continue
+                    status_raw = data.get("status")
+                    if status_raw:
+                        status = str(status_raw).strip()
+                    else:
+                        status = "success" if data.get("success") else ""
+                    yield ts, status
+        except Exception:
+            logger.debug("failed to read send_stats.jsonl", exc_info=True)
+
+
+def report_period(base_dir: Path, *, start: str, end: str) -> str:
+    """Построить текстовый отчёт за указанный период."""
+
+    try:
+        start_date = datetime.strptime(start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("invalid date range")
+
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+
+    tz = ZoneInfo(REPORT_TZ)
+    success = 0
+    errors = 0
+
+    for ts, status in _iter_report_records(base_dir, tz):
+        ts_date = ts.date()
+        if not (start_date <= ts_date <= end_date):
+            continue
+        status_norm = (status or "").strip().lower()
+        if status_norm in _REPORT_SUCCESS or not status_norm:
+            success += 1
+        elif status_norm in _REPORT_ERRORS:
+            errors += 1
+        else:
+            success += 1
+
+    if success == 0 and errors == 0:
+        return "Нет данных о рассылках."
+
+    return f"Успешных: {success}\nОшибок: {errors}"
+
+
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send the selected report to the user."""
 
     query = update.callback_query
-    await query.answer()
-    period = query.data.replace("report_", "")
+    data = query.data or ""
+    action, payload = _split_cb(data)
+    if action == "report":
+        period = payload or ""
+    elif data.startswith("report_"):
+        period = data.replace("report_", "", 1)
+    else:
+        period = action or data
+
+    if period == "period":
+        user = query.from_user
+        if user:
+            base_dir = Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+            REPORT_STATE[user.id] = {"await": "date_or_range", "base_dir": base_dir}
+        await query.answer()
+        await _safe_edit_message(
+            query,
+            text=(
+                "Введите дату или диапазон дат:\n"
+                "• Пример одной даты: 29.10.2025 или 2025-10-29\n"
+                "• Пример диапазона: 01.10.2025–15.10.2025 или 2025-10-01 2025-10-15"
+            ),
+            reply_markup=None,
+        )
+        return
+
     mapping = {
         "day": "Отчёт за день",
         "week": "Отчёт за неделю",
         "month": "Отчёт за месяц",
         "year": "Отчёт за год",
     }
+    if period not in mapping:
+        await query.answer("Неизвестный период", show_alert=True)
+        return
+    await query.answer()
     report = get_report(period)
     message = report.get("message")
     if message:
@@ -2598,7 +2799,11 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     title = mapping.get(period, period)
     if period == "day":
         title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
-    await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
+    await _safe_edit_message(
+        query,
+        text=f"📊 {title}:\n{body}",
+        reply_markup=_report_menu_kb(),
+    )
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5094,6 +5299,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     raw_text = message.text or ""
     text = raw_text
+    user = update.effective_user
+    uid = user.id if user else None
+    if uid is not None:
+        st = REPORT_STATE.get(uid)
+        if isinstance(st, dict) and st.get("await") == "date_or_range":
+            rng = _parse_date_range(raw_text)
+            if not rng:
+                await message.reply_text(
+                    "Не удалось распознать дату.\n"
+                    "Пример: 29.10.2025 или 01.10.2025–15.10.2025"
+                )
+                return
+            start, end = rng
+            base_dir_raw = st.get("base_dir") if isinstance(st, dict) else None
+            base_dir = Path(base_dir_raw) if base_dir_raw else Path("var")
+            try:
+                summary = report_period(base_dir, start=start, end=end)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.exception("report_period failed: %s", exc)
+                summary = f"Ошибка формирования отчёта: {exc}"
+            REPORT_STATE.pop(uid, None)
+            try:
+                start_dt = datetime.strptime(start, "%Y-%m-%d")
+                end_dt = datetime.strptime(end, "%Y-%m-%d")
+            except ValueError:
+                header = "📅 Отчёт"
+            else:
+                if start_dt.date() == end_dt.date():
+                    label = start_dt.strftime("%d.%m.%Y")
+                    header = f"📅 Отчёт за {label}"
+                else:
+                    s_label = start_dt.strftime("%d.%m.%Y")
+                    e_label = end_dt.strftime("%d.%m.%Y")
+                    header = f"📅 Отчёт за период {s_label} — {e_label}"
+            await message.reply_text(
+                f"{header}\n\n{summary}", reply_markup=_report_menu_kb()
+            )
+            return
     has_url = _message_has_url(message, raw_text)
 
     if await _handle_bulk_edit_text(update, context, text):
@@ -6665,6 +6908,7 @@ __all__ = [
     "url_command",
     "crawl_command",
     "report_callback",
+    "report_period",
     "on_diagnostics",
     "sync_imap_command",
     "reset_email_list",

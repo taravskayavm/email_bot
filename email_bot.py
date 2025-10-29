@@ -414,7 +414,7 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.start_sending, pattern="^bulk_start:")
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")
