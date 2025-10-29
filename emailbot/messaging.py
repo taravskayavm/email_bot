@@ -97,6 +97,8 @@ _HISTORY_SHIM_WARNED_ONCE = False
 DEBUG_SAVE_EML = os.getenv("DEBUG_SAVE_EML", "0") == "1"
 
 # Единые метки исхода (взаимно исключающие)
+# При записи аудита использовать только значения из этого словаря, например:
+# record["outcome"] = OUTCOME["sent"]
 OUTCOME = {
     "sent": "sent",  # письмо отправлено успешно
     "blocked": "blocked",  # в стоп-листе (не пытались отправлять)
@@ -2408,6 +2410,7 @@ def check_env_vars():
 
 
 __all__ = [
+    "OUTCOME",
     "SendOutcome",
     "DOWNLOAD_DIR",
     "LOG_FILE",

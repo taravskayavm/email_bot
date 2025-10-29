@@ -837,6 +837,9 @@ def _summarize_from_audit(audit_path: str) -> dict[str, int]:
                         record = json.loads(line)
                     except Exception:
                         continue
+                    record_type = str(record.get("type", "")).strip().lower()
+                    if record_type == "meta":
+                        continue
                     outcome = str(record.get("outcome", "")).strip().lower()
                     total += 1
                     if outcome in OUTCOME.values():
