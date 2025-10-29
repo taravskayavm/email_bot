@@ -17,6 +17,7 @@ import secrets
 import time
 import urllib.parse
 import uuid
+import calendar
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -183,6 +184,36 @@ def _report_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🗓 Указать период", callback_data="report:period")],
         ]
     )
+
+
+def _confirm_period_kb() -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения периода отчёта."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data="report:confirm"),
+                InlineKeyboardButton("❌ Отмена", callback_data="report:cancel"),
+            ]
+        ]
+    )
+
+
+def _format_period_label(start_iso: str, end_iso: str) -> str:
+    """Вернуть человеко-читаемое описание периода."""
+
+    try:
+        start_dt = datetime.strptime(start_iso, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_iso, "%Y-%m-%d")
+    except ValueError:
+        return f"{start_iso} — {end_iso}" if start_iso != end_iso else start_iso
+
+    start_label = start_dt.strftime("%d.%m.%Y")
+    end_label = end_dt.strftime("%d.%m.%Y")
+    return start_label if start_iso == end_iso else f"{start_label} — {end_label}"
+
+
+_DATE_TOKEN_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
 
 
 def _extract_emails_loose(text: str) -> list[str]:
@@ -2595,7 +2626,6 @@ def get_report(period: str = "day") -> dict[str, object]:
     return stats
 
 
-_DATE_TOKEN_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
 _REPORT_SUCCESS = {"sent", "success", "ok", "synced"}
 _REPORT_ERRORS = {
     "failed",
@@ -2625,29 +2655,82 @@ def _parse_flexible_date(text: str) -> datetime | None:
 
 
 def _parse_date_range(text: str) -> tuple[str, str] | None:
-    """Вернуть диапазон дат (ISO) из строки."""
+    """Универсальный разбор даты или диапазона."""
 
     payload = (text or "").strip()
     if not payload:
         return None
 
+    # Попробовать распознать диапазон из двух дат.
+    for sep in ("—", "–", "-", " "):
+        if sep == " ":
+            parts = [p.strip() for p in payload.split() if p.strip()]
+        else:
+            parts = [p.strip() for p in payload.split(sep) if p.strip()]
+        if len(parts) != 2:
+            continue
+        first = _parse_flexible_date(parts[0])
+        second = _parse_flexible_date(parts[1])
+        if not first or not second:
+            continue
+        if first > second:
+            first, second = second, first
+        return first.strftime("%Y-%m-%d"), second.strftime("%Y-%m-%d")
+
     tokens = _DATE_TOKEN_RE.findall(payload)
-    if len(tokens) == 1:
-        dt = _parse_flexible_date(tokens[0])
-        if not dt:
-            return None
-        iso = dt.strftime("%Y-%m-%d")
-        return iso, iso
     if len(tokens) == 2:
         first = _parse_flexible_date(tokens[0])
         second = _parse_flexible_date(tokens[1])
-        if not first or not second:
+        if first and second:
+            if first > second:
+                first, second = second, first
+            return first.strftime("%Y-%m-%d"), second.strftime("%Y-%m-%d")
+
+    # Только год.
+    if re.fullmatch(r"\d{4}", payload):
+        year = int(payload)
+        if year < 1:
             return None
-        start_iso = first.strftime("%Y-%m-%d")
-        end_iso = second.strftime("%Y-%m-%d")
-        if start_iso > end_iso:
-            start_iso, end_iso = end_iso, start_iso
-        return start_iso, end_iso
+        try:
+            start = datetime(year, 1, 1)
+            end = datetime(year, 12, 31)
+        except ValueError:
+            return None
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    # Месяц в форматах MM.YYYY или YYYY-MM.
+    if re.fullmatch(r"\d{2}\.\d{4}", payload):
+        month_str, year_str = payload.split(".")
+        year = int(year_str)
+        month = int(month_str)
+    elif re.fullmatch(r"\d{4}-\d{2}", payload):
+        year_str, month_str = payload.split("-")
+        year = int(year_str)
+        month = int(month_str)
+    else:
+        month = None
+        year = None
+
+    if month and year:
+        if year < 1 or not (1 <= month <= 12):
+            return None
+        try:
+            start = datetime(year, month, 1)
+        except ValueError:
+            return None
+        _, days_in_month = calendar.monthrange(year, month)
+        try:
+            end = datetime(year, month, days_in_month)
+        except ValueError:
+            return None
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    # Одиночная дата.
+    single = _parse_flexible_date(payload)
+    if single:
+        iso = single.strftime("%Y-%m-%d")
+        return iso, iso
+
     return None
 
 
@@ -2763,6 +2846,47 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         period = action or data
 
+    if action == "report" and payload in {"confirm", "cancel"}:
+        user = query.from_user
+        if not user:
+            await query.answer("Не удалось определить пользователя", show_alert=True)
+            return
+        state = REPORT_STATE.get(user.id) or {}
+        if payload == "cancel":
+            REPORT_STATE.pop(user.id, None)
+            await query.answer("Отменено")
+            await _safe_edit_message(
+                query,
+                text="Выберите период отчёта:",
+                reply_markup=_report_menu_kb(),
+            )
+            return
+
+        start = state.get("start")
+        end = state.get("end")
+        if not (isinstance(start, str) and isinstance(end, str)):
+            await query.answer("Нет выбранного периода", show_alert=True)
+            return
+        base_dir_raw = state.get("base_dir")
+        base_dir = Path(base_dir_raw) if base_dir_raw else Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+        try:
+            summary = report_period(base_dir, start=start, end=end)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.exception("report_period failed: %s", exc)
+            summary = f"Ошибка формирования отчёта: {exc}"
+        label = _format_period_label(start, end)
+        REPORT_STATE.pop(user.id, None)
+        await query.answer()
+        header = (
+            f"📅 Отчёт за {label}" if start == end else f"📅 Отчёт за период {label}"
+        )
+        await _safe_edit_message(
+            query,
+            text=f"{header}\n\n{summary}",
+            reply_markup=_report_menu_kb(),
+        )
+        return
+
     if period == "period":
         user = query.from_user
         if user:
@@ -2774,7 +2898,9 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text=(
                 "Введите дату или диапазон дат:\n"
                 "• Пример одной даты: 29.10.2025 или 2025-10-29\n"
-                "• Пример диапазона: 01.10.2025–15.10.2025 или 2025-10-01 2025-10-15"
+                "• Пример диапазона: 01.10.2025–15.10.2025 или 2025-10-01 2025-10-15\n"
+                "• Пример месяца: 10.2025 или 2025-10\n"
+                "• Пример года: 2025"
             ),
             reply_markup=None,
         )
@@ -5303,38 +5429,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     uid = user.id if user else None
     if uid is not None:
         st = REPORT_STATE.get(uid)
-        if isinstance(st, dict) and st.get("await") == "date_or_range":
+        if isinstance(st, dict) and st.get("await") in {"date_or_range", "confirm"}:
             rng = _parse_date_range(raw_text)
             if not rng:
                 await message.reply_text(
                     "Не удалось распознать дату.\n"
-                    "Пример: 29.10.2025 или 01.10.2025–15.10.2025"
+                    "Примеры:\n"
+                    "• 29.10.2025 — один день\n"
+                    "• 01.10.2025–15.10.2025 — диапазон\n"
+                    "• 10.2025 или 2025-10 — месяц\n"
+                    "• 2025 — год"
                 )
                 return
             start, end = rng
-            base_dir_raw = st.get("base_dir") if isinstance(st, dict) else None
-            base_dir = Path(base_dir_raw) if base_dir_raw else Path("var")
-            try:
-                summary = report_period(base_dir, start=start, end=end)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.exception("report_period failed: %s", exc)
-                summary = f"Ошибка формирования отчёта: {exc}"
-            REPORT_STATE.pop(uid, None)
-            try:
-                start_dt = datetime.strptime(start, "%Y-%m-%d")
-                end_dt = datetime.strptime(end, "%Y-%m-%d")
-            except ValueError:
-                header = "📅 Отчёт"
-            else:
-                if start_dt.date() == end_dt.date():
-                    label = start_dt.strftime("%d.%m.%Y")
-                    header = f"📅 Отчёт за {label}"
-                else:
-                    s_label = start_dt.strftime("%d.%m.%Y")
-                    e_label = end_dt.strftime("%d.%m.%Y")
-                    header = f"📅 Отчёт за период {s_label} — {e_label}"
+            base_dir_raw = st.get("base_dir")
+            REPORT_STATE[uid] = {
+                "await": "confirm",
+                "start": start,
+                "end": end,
+                "base_dir": base_dir_raw,
+            }
+            label = _format_period_label(start, end)
             await message.reply_text(
-                f"{header}\n\n{summary}", reply_markup=_report_menu_kb()
+                f"Период: {label}\nПодтвердить построение отчёта?",
+                reply_markup=_confirm_period_kb(),
             )
             return
     has_url = _message_has_url(message, raw_text)
