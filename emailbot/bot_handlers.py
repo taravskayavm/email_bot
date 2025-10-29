@@ -2825,7 +2825,9 @@ def _load_audit_records(
                         record = json.loads(line)
                     except Exception:
                         continue
-                    ts = parse_timestamp_any(record.get("timestamp") or record.get("time"))
+                    ts = parse_timestamp_any(
+                        record.get("timestamp") or record.get("time") or record.get("ts")
+                    )
                     if start and ts and ts < start:
                         continue
                     if end and ts and ts > end:
