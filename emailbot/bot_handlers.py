@@ -26,6 +26,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
+from .time_utils import LOCAL_TZ, parse_timestamp_any, parse_user_date_once
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -177,11 +178,15 @@ def _report_menu_kb() -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📆 День", callback_data="report:day")],
-            [InlineKeyboardButton("🗓 Неделя", callback_data="report:week")],
-            [InlineKeyboardButton("🗓 Месяц", callback_data="report:month")],
-            [InlineKeyboardButton("📅 Год", callback_data="report:year")],
-            [InlineKeyboardButton("🗓 Указать период", callback_data="report:period")],
+            [
+                InlineKeyboardButton("📆 День", callback_data="report:day"),
+                InlineKeyboardButton("🗓 Неделя", callback_data="report:week"),
+            ],
+            [
+                InlineKeyboardButton("📆 Месяц", callback_data="report:month"),
+                InlineKeyboardButton("📈 Год", callback_data="report:year"),
+            ],
+            [InlineKeyboardButton("📌 День по дате…", callback_data="report:single")],
         ]
     )
 
@@ -2550,8 +2555,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         REPORT_STATE.pop(user.id, None)
     await update.message.reply_text(
         (
-            "Выберите период отчёта или нажмите «🗓 Указать период», "
-            "чтобы ввести конкретную дату или диапазон."
+            "Выберите период отчёта или нажмите «📌 День по дате…», "
+            "чтобы построить отчёт за конкретный день."
         ),
         reply_markup=_report_menu_kb(),
     )
@@ -2799,6 +2804,99 @@ def _iter_report_records(base_dir: Path, tz: ZoneInfo):
             logger.debug("failed to read send_stats.jsonl", exc_info=True)
 
 
+def _load_audit_records(
+    audit_dir: Path,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict]:
+    """Load audit records from all ``bulk_audit_*.jsonl`` files."""
+
+    records: list[dict] = []
+    if not audit_dir.exists():
+        return records
+
+    for path in sorted(audit_dir.glob("bulk_audit_*.jsonl")):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    ts = parse_timestamp_any(record.get("timestamp") or record.get("time"))
+                    if start and ts and ts < start:
+                        continue
+                    if end and ts and ts > end:
+                        continue
+                    records.append(record)
+        except Exception:
+            logger.debug("failed to read %s", path, exc_info=True)
+    return records
+
+
+def _summarize(
+    records: list[dict],
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> str:
+    """Return a human-readable summary for ``records``."""
+
+    counter: Counter[str] = Counter()
+    for item in records:
+        outcome = str(item.get("outcome", "")).strip().lower()
+        counter[outcome] += 1
+
+    total = len(records)
+    tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
+    lines: list[str] = []
+    if start and end:
+        lines.append(
+            f"📅 Период: {start.strftime('%Y-%m-%d')} — {end.strftime('%Y-%m-%d')} ({tzname})"
+        )
+    lines.append(f"Всего записей: {total}")
+    for key, value in sorted(counter.items()):
+        lines.append(f"{key or '—'}: {value}")
+
+    parts_sum = sum(counter.values())
+    if parts_sum != total:
+        lines.append("")
+        lines.append(
+            f"⚠️ Несостыковка: сумма по категориям {parts_sum} ≠ всего {total}"
+        )
+    return "\n".join(lines)
+
+
+def report_day(audit_dir: Path) -> str:
+    now = datetime.now(tz=LOCAL_TZ)
+    start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=LOCAL_TZ)
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_week(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=7)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_month(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=30)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_year(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=365)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
 def report_period(base_dir: Path, *, start: str, end: str) -> str:
     """Построить текстовый отчёт за указанный период."""
 
@@ -2888,46 +2986,47 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if period == "period":
+        period = "single"
+
+    if period == "single":
         user = query.from_user
         if user:
             base_dir = Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
-            REPORT_STATE[user.id] = {"await": "date_or_range", "base_dir": base_dir}
+            REPORT_STATE[user.id] = {"await": "single_date", "base_dir": base_dir}
         await query.answer()
         await _safe_edit_message(
             query,
             text=(
-                "Введите дату или диапазон дат:\n"
-                "• Пример одной даты: 29.10.2025 или 2025-10-29\n"
-                "• Пример диапазона: 01.10.2025–15.10.2025 или 2025-10-01 2025-10-15\n"
-                "• Пример месяца: 10.2025 или 2025-10\n"
-                "• Пример года: 2025"
+                "Введите одну дату отчёта.\n"
+                "Поддерживаемые форматы: 29.10.2025 или 2025-10-29."
             ),
             reply_markup=None,
         )
         return
 
-    mapping = {
-        "day": "Отчёт за день",
-        "week": "Отчёт за неделю",
-        "month": "Отчёт за месяц",
-        "year": "Отчёт за год",
+    mapping: dict[str, tuple[str, Callable[[Path], str]]] = {
+        "day": ("Отчёт за день", report_day),
+        "week": ("Отчёт за неделю", report_week),
+        "month": ("Отчёт за месяц", report_month),
+        "year": ("Отчёт за год", report_year),
     }
     if period not in mapping:
         await query.answer("Неизвестный период", show_alert=True)
         return
     await query.answer()
-    report = get_report(period)
-    message = report.get("message")
-    if message:
-        body = str(message)
-    else:
-        body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
-    title = mapping.get(period, period)
+    base_dir = Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+    title, fn = mapping[period]
+    try:
+        summary = fn(base_dir)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.exception("report %s failed: %s", period, exc)
+        summary = f"Ошибка формирования отчёта: {exc}"
+    tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
     if period == "day":
-        title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
+        title = f"{title} ({tzname})"
     await _safe_edit_message(
         query,
-        text=f"📊 {title}:\n{body}",
+        text=f"📊 {title}\n\n{summary}",
         reply_markup=_report_menu_kb(),
     )
 
@@ -5429,6 +5528,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     uid = user.id if user else None
     if uid is not None:
         st = REPORT_STATE.get(uid)
+        if isinstance(st, dict) and st.get("await") == "single_date":
+            try:
+                start_dt, end_dt, ddmmyyyy = parse_user_date_once(raw_text)
+            except Exception:
+                await message.reply_text(
+                    "Не удалось распознать дату. Пример: 29.10.2025 или 2025-10-29"
+                )
+                return
+            base_dir_raw = st.get("base_dir")
+            base_dir = (
+                Path(base_dir_raw)
+                if base_dir_raw
+                else Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+            )
+            records = _load_audit_records(base_dir, start_dt, end_dt)
+            summary = _summarize(records, start_dt, end_dt)
+            REPORT_STATE.pop(uid, None)
+            tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
+            await message.reply_text(
+                f"📅 Отчёт за {ddmmyyyy} ({tzname})\n\n{summary}",
+                reply_markup=_report_menu_kb(),
+            )
+            return
         if isinstance(st, dict) and st.get("await") in {"date_or_range", "confirm"}:
             rng = _parse_date_range(raw_text)
             if not rng:
