@@ -16,7 +16,9 @@ def test_report_metrics_from_audit(tmp_path):
         {"email": "g@x", "outcome": "SENT"},
         {"email": "h@x", "outcome": "unknown"},
     ]
+    meta = {"type": "meta", "label": "example"}
     with audit.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(meta, ensure_ascii=False) + "\n")
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
