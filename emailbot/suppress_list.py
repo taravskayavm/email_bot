@@ -1,12 +1,14 @@
 """Helpers for managing the global e-mail block list.
 
-The block list lives under ``<repo_root>/var/blocked_emails.txt`` regardless of
-the working directory.  The helpers exposed here provide a very small API for
-checking and updating that file while keeping basic thread-safety guarantees.
+The block list lives under the shared data directory (``EMAILBOT_DATA_DIR`` when
+set, otherwise the current working directory).  The helpers exposed here provide
+an API for checking and updating that file while keeping basic thread-safety
+guarantees.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from threading import RLock
 from typing import Iterable, Set
@@ -29,7 +31,27 @@ __all__ = [
 
 
 _LOCK = RLock()
-_BLOCKLIST_PATH = Path(__file__).resolve().parents[1] / "var" / "blocked_emails.txt"
+
+
+def _resolve_data_dir() -> Path:
+    """Determine the directory where persistent data should be stored."""
+
+    override = os.getenv("EMAILBOT_DATA_DIR")
+    if override:
+        try:
+            base = Path(override).expanduser()
+        except Exception:
+            base = Path(override)
+    else:
+        base = Path.cwd()
+    return base.resolve()
+
+
+def _default_blocklist_path() -> Path:
+    return _resolve_data_dir() / "blocked_emails.txt"
+
+
+_BLOCKLIST_PATH = _default_blocklist_path()
 _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 BLOCKED_EMAILS_PATH: Path = _BLOCKLIST_PATH
