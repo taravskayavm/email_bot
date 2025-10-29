@@ -6065,11 +6065,13 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         report_text = "\n".join(lines)
         if blocked_foreign:
             report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        non_stoplist_invalid = max(len(blocked_invalid) - stoplist_blocked, 0)
-        if non_stoplist_invalid:
+        undeliverable_count = len(blocked_invalid)
+        blocked_count = stoplist_blocked
+        undeliverable_only = max(0, undeliverable_count - blocked_count)
+        if undeliverable_only:
             report_text += (
-                "\n🚫 Недоставляемые (не в стоп-листе): "
-                f"{non_stoplist_invalid}"
+                "\n🚫 Недоставляемые (без стоп-листа): "
+                f"{undeliverable_only}"
             )
         if stoplist_blocked:
             report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"

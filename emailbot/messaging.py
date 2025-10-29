@@ -1547,9 +1547,15 @@ def process_unsubscribe_requests():
             _, msg_data = imap.fetch(num, "(RFC822)")
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
-            sender = email.utils.parseaddr(msg.get("From"))[1]
-            if sender:
+            raw_from = msg.get("From", "")
+            _, addr = parseaddr(raw_from)
+            sender = normalize_email(addr)
+            if sender and "@" in sender:
                 handle_unsubscribe(sender, source="imap")
+            else:
+                logger.warning(
+                    "unsubscribe: could not extract email from From=%r", raw_from
+                )
             imap.store(num, "+FLAGS", "\\Seen")
         imap.logout()
     except Exception as e:
@@ -1594,6 +1600,9 @@ def _mark_unsubscribed_block_only(email_addr: str, token: str | None = None) -> 
             logger.warning("mark_unsubscribed: invalid email %r", email_addr)
         else:
             added = add_blocked_email(addr)
+            logger.info(
+                "mark_unsubscribed: blocklist_path=%s add=%s", BLOCKED_FILE, addr
+            )
             if added:
                 logger.info("Unsubscribe -> blocklist: %s", addr)
             # поддерживаем файл в чистом виде (без дублей)
