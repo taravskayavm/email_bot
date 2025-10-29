@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from enum import Enum
 from email.message import EmailMessage
+from email.header import decode_header, make_header
 from email.utils import formataddr, parseaddr, getaddresses
 from pathlib import Path
 from itertools import count
@@ -1534,32 +1535,79 @@ def send_email_with_sessions(
     return SendOutcome.SENT, token, log_key, content_hash
 
 
-def process_unsubscribe_requests():
+def process_unsubscribe_requests(
+    imap: imaplib.IMAP4_SSL | None = None,
+    mailbox: str = "INBOX",
+) -> int:
+    """Fetch unseen unsubscribe requests and persist them to the block list."""
+
+    cnt = 0
+    created_connection = False
+    imap_client = imap
+
     try:
-        host = os.getenv("IMAP_HOST", "imap.mail.ru")
-        port = _parse_int(os.getenv("IMAP_PORT"), 993)
-        timeout = get_imap_timeout()
-        imap = imap_connect_ssl(host, port, timeout)
-        imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        imap.select("INBOX")
-        result, data = imap.search(None, '(UNSEEN SUBJECT "unsubscribe")')
-        for num in data[0].split() if data and data[0] else []:
-            _, msg_data = imap.fetch(num, "(RFC822)")
+        if imap_client is None:
+            user = os.getenv("EMAIL_ADDRESS") or EMAIL_ADDRESS
+            password = os.getenv("EMAIL_PASSWORD") or EMAIL_PASSWORD
+            host_env = os.getenv("IMAP_HOST")
+            host = host_env or "imap.mail.ru"
+            if not user or not password:
+                return 0
+
+            port = _parse_int(os.getenv("IMAP_PORT"), 993)
+            timeout = get_imap_timeout()
+            imap_client = imap_connect_ssl(host, port, timeout)
+            created_connection = True
+            imap_client.login(user, password)
+            imap_client.select(mailbox)
+
+        if imap_client is None:
+            return 0
+
+        typ, data = imap_client.search(None, 'UNSEEN')
+        if typ != 'OK' or not data:
+            return 0
+
+        message_ids = data[0].split() if data and data[0] else []
+        for num in message_ids:
+            typ, msg_data = imap_client.fetch(num, '(RFC822)')
+            if typ != 'OK' or not msg_data:
+                continue
+
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
-            raw_from = msg.get("From", "")
-            _, addr = parseaddr(raw_from)
-            sender = normalize_email(addr)
-            if sender and "@" in sender:
-                handle_unsubscribe(sender, source="imap")
-            else:
+
+            if not _message_has_unsubscribe_intent(msg):
+                continue
+
+            sender = _extract_sender_email(msg)
+            if not sender:
                 logger.warning(
-                    "unsubscribe: could not extract email from From=%r", raw_from
+                    "unsubscribe: cannot extract sender email; msg-id=%r",
+                    msg.get("Message-Id"),
                 )
-            imap.store(num, "+FLAGS", "\\Seen")
-        imap.logout()
+                continue
+
+            try:
+                mark_unsubscribed(sender)
+            except Exception as exc:
+                log_error(f"process_unsubscribe_requests: {sender}: {exc}")
+                continue
+
+            imap_client.store(num, '+FLAGS', '\\Seen')
+            cnt += 1
     except Exception as e:
         log_error(f"process_unsubscribe_requests: {e}")
+    finally:
+        if created_connection and imap_client is not None:
+            try:
+                imap_client.logout()
+            except Exception:
+                logger.debug(
+                    "process_unsubscribe_requests: logout failed", exc_info=True
+                )
+
+    return cnt
 
 
 def get_blocked_emails() -> Set[str]:
@@ -1662,6 +1710,72 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> MarkUnsubscr
             writer.writeheader()
             writer.writerows(rows)
     return MarkUnsubscribedResult(csv_updated=changed, block_added=block_added)
+
+
+# --- unsubscribe helpers -----------------------------------------------------
+
+def _decode_header_value(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value or ""
+
+
+def _extract_sender_email(msg) -> str:
+    """Extract a sender address from ``Reply-To`` or ``From`` headers."""
+
+    raw_reply = msg.get("Reply-To", "")
+    raw_from = msg.get("From", "")
+    candidate = raw_reply or raw_from
+    candidate = _decode_header_value(candidate)
+    _name, addr = parseaddr(candidate)
+    addr_norm = normalize_email(addr)
+    return addr_norm if addr_norm and "@" in addr_norm else ""
+
+
+def _message_has_unsubscribe_intent(msg) -> bool:
+    """Return ``True`` if ``msg`` contains an unsubscribe keyword."""
+
+    try:
+        subject = _decode_header_value(msg.get("Subject", ""))
+        if "unsubscribe" in subject.casefold():
+            return True
+
+        body_chunks: list[str] = []
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() != "text/plain":
+                    continue
+                payload = part.get_payload(decode=True)
+                if payload is None:
+                    text_payload = part.get_payload()
+                    if isinstance(text_payload, str):
+                        body_chunks.append(text_payload)
+                    continue
+                charset = part.get_content_charset() or "utf-8"
+                try:
+                    body_chunks.append(payload.decode(charset, errors="replace"))
+                except Exception:
+                    body_chunks.append(payload.decode("utf-8", errors="replace"))
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload is None:
+                text_payload = msg.get_payload()
+                if isinstance(text_payload, str):
+                    body_chunks.append(text_payload)
+            else:
+                charset = msg.get_content_charset() or "utf-8"
+                try:
+                    body_chunks.append(payload.decode(charset, errors="replace"))
+                except Exception:
+                    body_chunks.append(payload.decode("utf-8", errors="replace"))
+
+        body_text = "\n".join(body_chunks)
+        return "unsubscribe" in body_text.casefold()
+    except Exception:
+        return False
 
 
 def handle_unsubscribe(email: str, source: str | None = None) -> MarkUnsubscribedResult:

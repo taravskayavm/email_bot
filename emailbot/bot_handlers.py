@@ -6068,11 +6068,10 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         undeliverable_count = len(blocked_invalid)
         blocked_count = stoplist_blocked
         undeliverable_only = max(0, undeliverable_count - blocked_count)
-        if undeliverable_only:
-            report_text += (
-                "\n🚫 Недоставляемые (без стоп-листа): "
-                f"{undeliverable_only}"
-            )
+        report_text += (
+            "\n🚫 Недоставляемые (без стоп-листа): "
+            f"{undeliverable_only}"
+        )
         if stoplist_blocked:
             report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"
 

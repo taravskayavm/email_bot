@@ -543,7 +543,11 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     monkeypatch.setenv("EMAIL_PASSWORD", "env-secret")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "module@example.com")
     monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "module-secret")
-    monkeypatch.setattr(messaging, "handle_unsubscribe", lambda addr, source=None: unsubscribed.append(addr))
+    monkeypatch.setattr(
+        messaging,
+        "mark_unsubscribed",
+        lambda addr, token=None: unsubscribed.append(addr),
+    )
 
     calls: dict[str, object] = {}
 
@@ -565,7 +569,10 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
 
         def fetch(self, num, spec):
             calls.setdefault("fetch", []).append((num, spec))
-            raw = b"From: User <unsubscribe@example.com>\r\n\r\nBody"
+            raw = (
+                b"From: User <unsubscribe@example.com>\r\n"
+                b"Subject: unsubscribe\r\n\r\nunsubscribe"
+            )
             return "OK", [(b"1 (RFC822 {42}", raw)]
 
         def store(self, num, command, flags):
@@ -581,8 +588,9 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
         return DummyIMAP()
 
     monkeypatch.setattr(messaging, "imap_connect_ssl", fake_connect)
-    messaging.process_unsubscribe_requests()
+    processed = messaging.process_unsubscribe_requests()
 
+    assert processed == 1
     assert unsubscribed == ["unsubscribe@example.com"]
     assert calls["host"] == "imap.example.com"
     assert calls["port"] == 1143
@@ -590,7 +598,7 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     assert calls["user"] == "env@example.com"
     assert calls["password"] == "env-secret"
     assert calls["mailbox"] == "INBOX"
-    assert calls["search"] == (None, '(UNSEEN SUBJECT "unsubscribe")')
+    assert calls["search"] == (None, 'UNSEEN')
     assert calls["fetch"] == [(b"1", "(RFC822)")]
     assert calls["store"] == [(b"1", "+FLAGS", "\\Seen")]
     assert calls.get("logout") is True
