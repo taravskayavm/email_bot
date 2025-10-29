@@ -82,7 +82,7 @@ from .messaging_utils import (
     SYNC_SEEN_EVENTS_PATH,
 )
 from . import suppress_list
-from .suppress_list import add_to_blocklist, blocklist_path
+from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
@@ -531,12 +531,18 @@ def parse_emails_from_text(text: str) -> list[str]:
 from utils.paths import expand_path
 from emailbot.policy import decide, Decision
 from emailbot import ledger
+
+# Data dir: сначала берём EMAILBOT_DATA_DIR, иначе – текущая рабочая директория.
+# Это гарантирует запись в D:\\email_bot\\... при запуске через Anaconda PowerShell.
+DATA_DIR = Path(os.getenv("EMAILBOT_DATA_DIR") or Path.cwd()).resolve()
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
-DOWNLOAD_DIR = str(SCRIPT_DIR / "downloads")
-# Был жёсткий путь /mnt/data/sent_log.csv → падало на Windows/Linux без /mnt.
-LOG_FILE = str(expand_path(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
-# Путь к блок-листу фиксирован относительно корня репозитория.
-BLOCKED_FILE = str(blocklist_path())
+DOWNLOAD_DIR = str(DATA_DIR / "downloads")
+LOG_FILE = str(DATA_DIR / "sent_log.csv")
+BLOCKED_FILE = str(DATA_DIR / "blocked_emails.txt")
+try:
+    suppress_list.init_blocked(BLOCKED_FILE)
+except Exception:
+    logger.debug("Unable to initialise blocklist path", exc_info=True)
 try:
     logger.info("Stoplist path resolved: %s", BLOCKED_FILE)
 except Exception:
@@ -567,7 +573,7 @@ def ensure_blocklist_ready() -> None:
     if _BLOCK_READY:
         return
     try:
-        suppress_list.init_blocked()
+        suppress_list.init_blocked(BLOCKED_FILE)
         _BLOCK_READY = True
     except Exception:
         logger.debug("blocklist init failed", exc_info=True)
@@ -592,12 +598,19 @@ def _normalize_email_for_blocklist(addr: str) -> str:
         return addr
 
 
+def _canonical_blocked(email_str: str) -> str:
+    email_norm = normalize_email(email_str)
+    email_norm = re.sub(r"^\.+", "", email_norm)
+    email_norm = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", email_norm)
+    return _normalize_email_for_blocklist(email_norm)
+
+
 def add_blocked_email(email: str) -> bool:
     """Persist ``email`` to the shared block-list file if it is new."""
 
     ensure_blocklist_ready()
     try:
-        norm = _normalize_email_for_blocklist(email)
+        norm = _canonical_blocked(email)
 
         if not norm or "@" not in norm:
             return False
@@ -721,7 +734,7 @@ SIGNATURE_HTML = SIGNATURE_TEXT
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
-IMAP_FOLDER_FILE = SCRIPT_DIR / "imap_sent_folder.txt"
+IMAP_FOLDER_FILE = DATA_DIR / "imap_sent_folder.txt"
 
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
@@ -1564,12 +1577,25 @@ def process_unsubscribe_requests(
         if imap_client is None:
             return 0
 
-        typ, data = imap_client.search(None, 'UNSEEN')
-        if typ != 'OK' or not data:
+        search_terms = [
+            ('HEADER', 'Subject', 'unsubscribe'),
+            ('HEADER', 'List-Unsubscribe', '<'),
+            ('BODY', 'unsubscribe'),
+        ]
+        message_ids: set[bytes] = set()
+        for term in search_terms:
+            try:
+                typ, data = imap_client.search('UTF-8', 'UNSEEN', *term)
+            except Exception:
+                logger.debug("unsubscribe search failed", exc_info=True)
+                continue
+            if typ == 'OK' and data and data[0]:
+                message_ids.update(data[0].split())
+
+        if not message_ids:
             return 0
 
-        message_ids = data[0].split() if data and data[0] else []
-        for num in message_ids:
+        for num in sorted(message_ids, key=int):
             typ, msg_data = imap_client.fetch(num, '(RFC822)')
             if typ != 'OK' or not msg_data:
                 continue
@@ -1612,16 +1638,24 @@ def process_unsubscribe_requests(
 
 def get_blocked_emails() -> Set[str]:
     ensure_blocklist_ready()
-    return suppress_list.get_blocked_set()
+    canonical = {
+        _canonical_blocked(value)
+        for value in suppress_list.get_blocked_set()
+    }
+    return {item for item in canonical if item and "@" in item}
 
 
 def dedupe_blocked_file():
     ensure_blocklist_ready()
-    keep = suppress_list.load_blocked_set()
+    keep = {
+        _canonical_blocked(value)
+        for value in suppress_list.load_blocked_set()
+        if value
+    }
     if not keep:
         suppress_list.save_blocked_set([])
         return
-    suppress_list.save_blocked_set(keep)
+    suppress_list.save_blocked_set(sorted(keep))
 
 
 def verify_unsubscribe_token(email_addr: str, token: str) -> bool:
