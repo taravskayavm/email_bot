@@ -192,7 +192,6 @@ from emailbot.ui.keyboards import (
 )
 from emailbot.notify import notify
 from emailbot.ui.messages import (
-    format_dispatch_result,
     format_dispatch_start,
     format_error_details,
     format_parse_summary,
@@ -789,6 +788,7 @@ def sample_preview(items, k: int):
 
 
 from .messaging import (
+    OUTCOME,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
@@ -821,6 +821,39 @@ from .messaging_utils import (
     BOUNCE_LOG_PATH,
 )
 from .cancel import start_cancel, request_cancel, is_cancelled, clear_cancel
+
+
+def _summarize_from_audit(audit_path: str) -> dict[str, int]:
+    """Return aggregated counters derived from the bulk audit jsonl file."""
+
+    totals: Counter[str] = Counter()
+    total = 0
+    path = Path(audit_path)
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as handler:
+                for line in handler:
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    outcome = str(record.get("outcome", "")).strip().lower()
+                    total += 1
+                    if outcome in OUTCOME.values():
+                        totals[outcome] += 1
+                    else:
+                        totals[OUTCOME["error"]] += 1
+        except Exception:
+            logger.debug("bulk audit read failed", exc_info=True)
+    return {
+        "total": total,
+        "sent": totals.get(OUTCOME["sent"], 0),
+        "blocked": totals.get(OUTCOME["blocked"], 0),
+        "cooldown": totals.get(OUTCOME["cooldown"], 0),
+        "undeliverable_only": totals.get(OUTCOME["undeliverable"], 0),
+        "unchanged": totals.get(OUTCOME["unchanged"], 0),
+        "errors": totals.get(OUTCOME["error"], 0),
+    }
 
 
 def _diag_bulk_line(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -6042,45 +6075,62 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        total_sent = len(sent_ok)
-        total_skipped = len(skipped_recent)
-        total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total_duplicates = len(duplicates)
         total_planned = initial_count
         try:
             stoplist_blocked = count_blocked(blocked_invalid)
         except Exception:
             stoplist_blocked = 0
-        blocked_line_value = (
-            stoplist_blocked if (stoplist_blocked or total_blocked == 0) else total_blocked
+        undeliverable_only = max(0, len(blocked_invalid) - stoplist_blocked)
+        fallback_total = total_planned or (
+            len(sent_ok)
+            + len(skipped_recent)
+            + stoplist_blocked
+            + undeliverable_only
+            + len(duplicates)
         )
-        report_text = format_dispatch_result(
-            total_planned,
-            total_sent,
-            total_skipped,
-            total_blocked,
-            total_duplicates,
-            aborted=aborted,
-        )
-        lines = []
-        for line in report_text.splitlines():
-            if line.startswith("🚫"):
-                line = f"🚫 В стоп-листе: {blocked_line_value}"
-            lines.append(line)
-        report_text = "\n".join(lines)
-        if blocked_foreign:
-            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        undeliverable_count = len(blocked_invalid)
-        blocked_count = stoplist_blocked
-        undeliverable_only = max(0, undeliverable_count - blocked_count)
-        report_text += (
-            "\n🚫 Недоставляемые (без стоп-листа): "
-            f"{undeliverable_only}"
-        )
-        if stoplist_blocked:
-            report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"
+        fallback_metrics = {
+            "total": fallback_total,
+            "sent": len(sent_ok),
+            "blocked": stoplist_blocked,
+            "cooldown": len(skipped_recent),
+            "undeliverable_only": undeliverable_only,
+            "unchanged": len(duplicates),
+            "errors": len(error_details),
+        }
+        audit_path = None
+        try:
+            audit_path = context.chat_data.get("bulk_audit_path")
+        except Exception:
+            audit_path = None
+        metrics = fallback_metrics
+        if audit_path:
+            metrics = _summarize_from_audit(str(audit_path))
+            if not metrics.get("total") and fallback_metrics["total"]:
+                metrics = fallback_metrics
 
-        await query.message.reply_text(report_text)
+        summary_lines: list[str] = []
+        summary_lines.append("📨 Рассылка завершена.")
+        summary_lines.append(f"📊 В очереди было: {metrics['total']}")
+        summary_lines.append(f"✅ Отправлено: {metrics['sent']}")
+        summary_lines.append(
+            f"⏳ Пропущены (по правилу «180 дней»): {metrics['cooldown']}"
+        )
+        summary_lines.append(f"🚫 В стоп-листе: {metrics['blocked']}")
+        summary_lines.append(f"ℹ️ Осталось без изменений: {metrics['unchanged']}")
+        summary_lines.append(
+            f"🚫 Недоставляемые (без стоп-листа): {metrics['undeliverable_only']}"
+        )
+        summary_lines.append(f"❌ Ошибок при отправке: {metrics['errors']}")
+        if aborted:
+            summary_lines.append("⛔ Рассылка остановлена досрочно.")
+        if blocked_foreign:
+            summary_lines.append(
+                f"🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
+            )
+        if audit_path:
+            summary_lines.append(f"📄 Аудит: {audit_path}")
+
+        await query.message.reply_text("\n".join(summary_lines))
         if error_details:
             summary = format_error_details(error_details)
             if summary:
