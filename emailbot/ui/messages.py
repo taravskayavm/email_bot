@@ -20,13 +20,28 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
       total_found, to_send, suspicious, cooldown_180d, foreign_domain,
       pages_skipped, footnote_dupes_removed, blocked, blocked_after_parse
     """
+    def _as_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            try:
+                return int(str(value).strip() or 0)
+            except Exception:
+                return 0
+
     lines = []
     lines.append("✅ Анализ завершён.")
     lines.append(f"Найдено адресов: {s.get('total_found', 0)}")
     lines.append(f"📦 К отправке: {s.get('to_send', 0)}")
     lines.append(f"🟡 Подозрительные: {s.get('suspicious', 0)}")
     lines.append(f"⏳ Под кулдауном (180 дней): {s.get('cooldown_180d', 0)}")
-    lines.append(f"🌍 Иностранные домены: {s.get('foreign_domain', 0)}")
+    foreign_corp = _as_int(s.get("foreign_corporate", s.get("foreign_domain", 0)))
+    global_mail = _as_int(s.get("global_mail", 0))
+    ru_like = _as_int(s.get("ru_like", 0))
+    lines.append(f"🌍 Иностранные домены (корп.): {foreign_corp}")
+    lines.append(f"📫 Глобальные почтовики: {global_mail}")
+    if "ru_like" in s:
+        lines.append(f"🇷🇺 RU/РФ/SU: {ru_like}")
     lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")
     lines.append(f"♻️ Возможные сносочные дубликаты удалены: {s.get('footnote_dupes_removed', 0)}")
     try:

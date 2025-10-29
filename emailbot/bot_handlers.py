@@ -182,6 +182,7 @@ def _extract_emails_loose(text: str) -> list[str]:
             found.append(email)
     return found
 
+from emailbot.domain_utils import count_domains
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -2723,13 +2724,17 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = cooldown_examples
     state.cooldown_preview_window = cooldown_window
 
+    dom_stats = count_domains(list(filtered))
     summary = format_parse_summary(
         {
             "total_found": len(allowed_all),
             "to_send": max(len(filtered) - cooldown_blocked, 0),
             "suspicious": len(suspicious_numeric),
             "cooldown_180d": cooldown_blocked,
-            "foreign_domain": len(foreign),
+            "foreign_corporate": dom_stats["foreign_corporate"],
+            "global_mail": dom_stats["global_mail"],
+            "ru_like": dom_stats["ru_like"],
+            "foreign_domain": dom_stats["foreign_corporate"],
             "pages_skipped": 0,
             "footnote_dupes_removed": footnote_dupes,
             "blocked": blocked_after_parse,

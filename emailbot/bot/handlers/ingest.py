@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hcode
 
+from emailbot.domain_utils import count_domains
 from emailbot.messaging import BLOCKED_FILE
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
@@ -111,6 +112,15 @@ def _build_summary(
         "blocked": stats.get("blocked", 0),
         "blocked_after_parse": stats.get("blocked", 0),
     }
+    dom_stats = count_domains(filtered)
+    summary_payload.update(
+        {
+            "foreign_corporate": dom_stats["foreign_corporate"],
+            "global_mail": dom_stats["global_mail"],
+            "ru_like": dom_stats["ru_like"],
+            "foreign_domain": dom_stats["foreign_corporate"],
+        }
+    )
     for key in (
         "invalid_tld_examples",
         "syntax_fail_examples",
