@@ -70,6 +70,48 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
         lines.append(f"🚫 В стоп-листе: {total_blocked}")
     lines.append("")
 
+    dedup_removed = _as_int(s.get("dedup_removed", 0))
+    invalid_removed = _as_int(s.get("invalid_after_norm", s.get("invalid", 0)))
+    blocklist_removed = _as_int(s.get("blocklist_removed", 0))
+    cooldown_removed = _as_int(s.get("cooldown_removed", s.get("cooldown_180d", 0)))
+    other_removed = _as_int(s.get("excluded_other", 0))
+    if any([dedup_removed, invalid_removed, blocklist_removed, cooldown_removed, other_removed]):
+        lines.append("🚧 Исключены перед отправкой:")
+        lines.append(f"• Дубликаты (после нормализации): {dedup_removed}")
+        lines.append(f"• Невалидные e-mail: {invalid_removed}")
+        lines.append(f"• В стоп-листе: {blocklist_removed}")
+        lines.append(f"• Под 180 дней: {cooldown_removed}")
+        if other_removed:
+            lines.append(f"• Прочие фильтры/шум: {other_removed}")
+        lines.append("")
+
+    def _fmt_examples(value: object) -> str:
+        if not value:
+            return "—"
+        if isinstance(value, str):
+            candidate = value.strip()
+            return candidate or "—"
+        try:
+            iterable = list(value)
+        except TypeError:
+            return str(value) if str(value).strip() else "—"
+        cleaned = [str(item).strip() for item in iterable if str(item).strip()]
+        if not cleaned:
+            return "—"
+        return ", ".join(cleaned[:3])
+
+    dup_display = _fmt_examples(s.get("dup_examples_display"))
+    invalid_display = _fmt_examples(s.get("invalid_examples_display"))
+    blocklist_display = _fmt_examples(s.get("blocklist_examples_display"))
+    cooldown_display = _fmt_examples(s.get("cooldown_examples_display"))
+    if any(val not in {None, "—"} and val for val in [dup_display, invalid_display, blocklist_display, cooldown_display]):
+        lines.append("Примеры исключений:")
+        lines.append(f"• Дубликаты: {dup_display}")
+        lines.append(f"• Невалидные: {invalid_display}")
+        lines.append(f"• Стоп-лист: {blocklist_display}")
+        lines.append(f"• 180 дней: {cooldown_display}")
+        lines.append("")
+
     def _append_examples(title: str, key: str) -> bool:
         values = s.get(key)
         if not values:
