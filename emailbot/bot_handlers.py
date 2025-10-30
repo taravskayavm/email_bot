@@ -173,6 +173,16 @@ def _message_has_url(message: Message | None, raw_text: str | None) -> bool:
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
 
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _normalize_email(value: str) -> str:
+    return (value or "").strip().lower().lstrip(".")
+
+
+def _head3(arr: list[str]) -> str:
+    return ", ".join(arr[:3]) if arr else "—"
+
 # Состояние для пользовательских запросов отчётов.
 REPORT_STATE: dict[int, dict[str, object]] = {}
 
@@ -1187,6 +1197,7 @@ class SessionState:
     dropped: List[tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
+    preview_ready_count: int = -1
     group: Optional[str] = None
     template: Optional[str] = None
     footnote_dupes: int = 0
@@ -3207,11 +3218,11 @@ async def _compose_report_and_save(
     footnote_dupes: int = 0,
     *,
     blocked_after_parse: int = 0,
+    raw_candidates: Iterable[str] | None = None,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
     state = get_state(context)
-    state.preview_allowed_all = sorted(filtered)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
@@ -3220,18 +3231,64 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = []
     state.cooldown_preview_window = 0
 
+    found_all = [
+        str(item).strip()
+        for item in (raw_candidates if raw_candidates is not None else filtered)
+        if str(item or "").strip()
+    ]
+
+    norm_sequence: list[str] = []
+    norm_to_original: dict[str, list[str]] = {}
+    for raw in found_all:
+        if "@" not in raw:
+            continue
+        norm = _normalize_email(raw)
+        if not norm:
+            continue
+        norm_sequence.append(norm)
+        norm_to_original.setdefault(norm, []).append(raw)
+
+    seen_norm: set[str] = set()
+    unique_norm: list[str] = []
+    for norm in norm_sequence:
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        unique_norm.append(norm)
+
+    dedup_removed = max(len(norm_sequence) - len(unique_norm), 0)
+
+    invalid_norm = [norm for norm in unique_norm if not _EMAIL_RE.match(norm)]
+    invalid_examples = [norm_to_original.get(norm, [norm])[0] for norm in invalid_norm]
+    invalid_count = len(invalid_norm)
+    invalid_norm_set = set(invalid_norm)
+
+    valid_norm = [norm for norm in unique_norm if norm not in invalid_norm_set]
+
+    blocked_lookup = {_normalize_email(addr) for addr in get_blocked_emails()}
+    blocked_norm = [norm for norm in valid_norm if norm in blocked_lookup]
+    blocked_examples = [norm_to_original.get(norm, [norm])[0] for norm in blocked_norm]
+    blocked_norm_set = set(blocked_norm)
+
+    filtered_norm_pairs: list[tuple[str, str]] = []
+    for addr in filtered:
+        norm = _normalize_email(addr)
+        if not norm:
+            continue
+        filtered_norm_pairs.append((norm, addr))
+
     cooldown_blocked = 0
     cooldown_examples: list[tuple[str, str]] = []
+    cooldown_norm_set: set[str] = set()
     ignore_cooldown = _is_ignore_cooldown_enabled(context)
     cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
-    if cooldown_window > 0 and filtered:
-        seen_norm: set[str] = set()
+    if cooldown_window > 0 and filtered_norm_pairs:
+        seen_for_window: set[str] = set()
         group = getattr(state, "group", None)
-        for addr in filtered:
-            norm = normalize_email(addr) or addr.strip().lower()
-            if not norm or norm in seen_norm:
+        for norm, addr in filtered_norm_pairs:
+            if not norm or norm in seen_for_window:
                 continue
-            seen_norm.add(norm)
+            seen_for_window.add(norm)
             try:
                 blocked, reason = check_email(addr, group=group, window=cooldown_window)
             except Exception as exc:  # pragma: no cover - defensive log
@@ -3239,6 +3296,7 @@ async def _compose_report_and_save(
                 blocked, reason = False, ""
             if blocked:
                 cooldown_blocked += 1
+                cooldown_norm_set.add(norm)
                 if len(cooldown_examples) < 3:
                     match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
                     last_seen = match.group(1)[:10] if match else ""
@@ -3248,13 +3306,82 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = cooldown_examples
     state.cooldown_preview_window = cooldown_window
 
-    dom_stats = count_domains(list(filtered))
+    try:
+        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+            messaging.prepare_mass_mailing(
+                list(filtered),
+                getattr(state, "group", None),
+                ignore_cooldown=ignore_cooldown,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive branch
+        logger.warning("prepare_mass_mailing preview failed: %s", exc)
+        ready = list(filtered)
+        blocked_foreign = []
+        blocked_invalid = []
+        skipped_recent = []
+        digest = {"error": str(exc), "ready_final": len(ready)}
+
+    ready_count = len(ready)
+    state.preview_ready_count = ready_count
+    state.to_send = list(ready)
+    state.preview_allowed_all = sorted(ready)
+    state.blocked_after_parse = count_blocked(state.to_send)
+    context.user_data["last_parsed_emails"] = list(state.to_send)
+
+    dom_stats = count_domains(list(state.to_send))
+
+    cooldown_norm_set.update({_normalize_email(addr) for addr in skipped_recent if addr})
+    cooldown_count = len(cooldown_norm_set)
+    cooldown_example_values = [addr for addr in skipped_recent if addr][:3]
+
+    blocked_invalid_norm = {_normalize_email(addr) for addr in blocked_invalid if addr}
+    blocklist_norm_only = blocked_invalid_norm - invalid_norm_set
+    blocklist_count = len(blocklist_norm_only or blocked_norm_set)
+    if blocklist_norm_only:
+        blocked_examples = []
+        seen_block = set()
+        for addr in blocked_invalid:
+            norm = _normalize_email(addr)
+            if norm in blocklist_norm_only and norm not in seen_block:
+                seen_block.add(norm)
+                blocked_examples.append(addr)
+
+    if digest:
+        invalid_count = max(
+            invalid_count,
+            int(digest.get("invalid", invalid_count) or invalid_count),
+        )
+        dedup_removed = max(
+            dedup_removed,
+            int(digest.get("removed_duplicates_in_batch", dedup_removed) or dedup_removed),
+        )
+
+    total_found = len(found_all)
+    excluded_total = max(total_found - ready_count, 0)
+    others = excluded_total - (dedup_removed + invalid_count + blocklist_count + cooldown_count)
+    if others < 0:
+        others = 0
+
+    dup_examples = []
+    if dedup_removed > 0:
+        dup_seen = set()
+        for norm, count in Counter(norm_sequence).items():
+            if count > 1 and norm not in dup_seen:
+                dup_seen.add(norm)
+                dup_examples.append(norm_to_original.get(norm, [norm])[0])
+
+    dup_display = _head3(list(dict.fromkeys(dup_examples)))
+    invalid_display = _head3(list(dict.fromkeys(invalid_examples)))
+    blocklist_display = _head3(list(dict.fromkeys(blocked_examples)))
+    cooldown_display = _head3(list(dict.fromkeys(cooldown_example_values)))
+
     summary = format_parse_summary(
         {
-            "total_found": len(allowed_all),
-            "to_send": max(len(filtered) - cooldown_blocked, 0),
+            "total_found": total_found,
+            "to_send": ready_count,
             "suspicious": len(suspicious_numeric),
-            "cooldown_180d": cooldown_blocked,
+            "cooldown_180d": cooldown_count,
             "foreign_corporate": dom_stats["foreign_corporate"],
             "global_mail": dom_stats["global_mail"],
             "ru_like": dom_stats["ru_like"],
@@ -3263,6 +3390,15 @@ async def _compose_report_and_save(
             "footnote_dupes_removed": footnote_dupes,
             "blocked": blocked_after_parse,
             "blocked_after_parse": blocked_after_parse,
+            "dedup_removed": dedup_removed,
+            "invalid_after_norm": invalid_count,
+            "blocklist_removed": blocklist_count,
+            "cooldown_removed": cooldown_count,
+            "excluded_other": others,
+            "dup_examples_display": dup_display,
+            "invalid_examples_display": invalid_display,
+            "blocklist_examples_display": blocklist_display,
+            "cooldown_examples_display": cooldown_display,
         },
         examples=(),
     )
@@ -3406,6 +3542,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             pass
 
         allowed_all, loose_all = set(), set()
+        raw_candidates: list[str] = []
         extracted_files: List[str] = []
         repairs: List[tuple[str, str]] = []
         footnote_dupes = 0
@@ -3424,6 +3561,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
+                raw_candidates.extend(list(allowed))
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
                 repairs = collect_repairs_from_files(extracted_files)
@@ -3435,6 +3573,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
+                raw_candidates.extend(list(allowed))
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
                 if file_path:
@@ -3533,6 +3672,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
         blocked_after_parse=blocked_after_parse,
+        raw_candidates=raw_candidates,
     )
     await heartbeat()
 
@@ -4392,6 +4532,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 ignore_cooldown=ignore_cooldown,
             )
         )
+        expected_ready = getattr(state, "preview_ready_count", None)
+        if isinstance(expected_ready, int) and expected_ready >= 0:
+            assert len(ready) == expected_ready, (
+                f"Mismatch ready_count({expected_ready}) vs emails_to_send({len(ready)})"
+            )
     except Exception as exc:
         logger.exception(
             "prepare_mass_mailing failed",
@@ -5566,6 +5711,7 @@ async def handle_url_text(
         sorted(foreign_total),
         total_footnote,
         blocked_after_parse=blocked_after_parse,
+        raw_candidates=found,
     )
     await _send_combined_parse_response(message, context, report, state)
     await heartbeat()
