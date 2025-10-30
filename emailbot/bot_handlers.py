@@ -31,6 +31,10 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+
+# Последний счётчик записей без timestamp, отфильтрованных при чтении аудита.
+_LAST_AUDIT_DROP_NO_TS = 0
+
 # Кэш массового отправителя. Инициализируем лениво, чтобы не ловить циклический импорт.
 _LEGACY_MASS_SENDER: Optional[Callable] = None
 # [EBOT-073] Копим описание ошибок импорта, чтобы показать пользователю первопричину.
@@ -2811,8 +2815,12 @@ def _load_audit_records(
 ) -> list[dict]:
     """Load audit records from all ``bulk_audit_*.jsonl`` files."""
 
+    global _LAST_AUDIT_DROP_NO_TS
+
     records: list[dict] = []
+    dropped_no_ts = 0
     if not audit_dir.exists():
+        _LAST_AUDIT_DROP_NO_TS = 0
         return records
 
     for path in sorted(audit_dir.glob("bulk_audit_*.jsonl")):
@@ -2825,14 +2833,29 @@ def _load_audit_records(
                         record = json.loads(line)
                     except Exception:
                         continue
-                    ts = parse_timestamp_any(record.get("timestamp") or record.get("time"))
+                    ts_raw = (
+                        record.get("timestamp")
+                        or record.get("time")
+                        or record.get("ts")
+                    )
+                    ts = parse_timestamp_any(ts_raw)
+                    if (start or end) and ts is None:
+                        dropped_no_ts += 1
+                        continue
                     if start and ts and ts < start:
                         continue
                     if end and ts and ts > end:
                         continue
+                    if ts is not None:
+                        record["_ts_local"] = ts.isoformat()
                     records.append(record)
         except Exception:
             logger.debug("failed to read %s", path, exc_info=True)
+    _LAST_AUDIT_DROP_NO_TS = dropped_no_ts
+    if dropped_no_ts:
+        logger.warning(
+            "audit: %s записей без timestamp отфильтрованы", dropped_no_ts
+        )
     return records
 
 
@@ -2844,19 +2867,54 @@ def _summarize(
     """Return a human-readable summary for ``records``."""
 
     counter: Counter[str] = Counter()
+    classifier = globals().get("classify_outcome")
     for item in records:
-        outcome = str(item.get("outcome", "")).strip().lower()
+        if callable(classifier):
+            try:
+                outcome = classifier(item)
+            except Exception:
+                outcome = str(item.get("outcome", ""))
+        else:
+            outcome = str(item.get("outcome", ""))
+        outcome = (outcome or "").strip().lower()
+        if not outcome:
+            outcome = "unknown"
         counter[outcome] += 1
 
     total = len(records)
     tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
-    lines: list[str] = []
+    header = ""
     if start and end:
-        lines.append(
-            f"📅 Период: {start.strftime('%Y-%m-%d')} — {end.strftime('%Y-%m-%d')} ({tzname})"
+        header = (
+            f"📅 Период: {start.strftime('%Y-%m-%d')} — {end.strftime('%Y-%m-%d')}"
+            f" ({tzname})\n"
         )
-    lines.append(f"Всего записей: {total}")
+    lines: list[str] = [f"{header}Всего записей: {total}"]
+    dropped = _LAST_AUDIT_DROP_NO_TS if (start or end) else 0
+    if dropped:
+        lines.append(f"⏳ Без timestamp: {dropped}")
+
+    order = [
+        "sent",
+        "blocked",
+        "cooldown",
+        "undeliverable",
+        "error",
+        "unchanged",
+        "unknown",
+    ]
+    for key in order:
+        value = counter.get(key, 0)
+        if not value:
+            continue
+        label = key
+        if key == "unknown":
+            label = "unknown (не классифицировано)"
+        lines.append(f"{label}: {value}")
+
     for key, value in sorted(counter.items()):
+        if key in order or not value:
+            continue
         lines.append(f"{key or '—'}: {value}")
 
     parts_sum = sum(counter.values())
@@ -5529,6 +5587,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if uid is not None:
         st = REPORT_STATE.get(uid)
         if isinstance(st, dict) and st.get("await") == "single_date":
+            if not raw_text or not raw_text.strip():
+                return
             try:
                 start_dt, end_dt, ddmmyyyy = parse_user_date_once(raw_text)
             except Exception:

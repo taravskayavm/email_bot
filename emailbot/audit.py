@@ -14,6 +14,8 @@ from typing import Any, Mapping
 
 from utils.paths import expand_path, ensure_parent
 
+from .time_utils import LOCAL_TZ
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_AUDIT_PATH = expand_path("var/audit.csv")
@@ -77,7 +79,12 @@ class AuditWriter:
         if not self.enabled:
             return
         try:
-            payload = json.dumps({str(k): _json_ready(v) for k, v in record.items()}, ensure_ascii=False)
+            prepared = dict(record)
+            if not prepared.get("timestamp"):
+                prepared["timestamp"] = datetime.now(LOCAL_TZ).isoformat()
+            payload = json.dumps(
+                {str(k): _json_ready(v) for k, v in prepared.items()}, ensure_ascii=False
+            )
         except Exception:
             logger.debug("bulk audit json encode failed", exc_info=True)
             return
