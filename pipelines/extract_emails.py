@@ -38,7 +38,15 @@ from utils.name_match import fio_candidates, fio_match_score
 
 from utils.tld_utils import is_allowed_domain, is_foreign_domain
 
+try:  # pragma: no cover - optional aggressive harvesting helper
+    from emailbot.parsing.harvester import harvest_emails as _harvest_emails
+except Exception:  # pragma: no cover - degrade gracefully when unavailable
+    _harvest_emails = None  # type: ignore[assignment]
+
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
+AGGRESSIVE_HARVEST = (
+    str(os.getenv("PARSE_AGGRESSIVE", "1")).lower() in {"1", "true", "yes"}
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -466,6 +474,22 @@ def extract_emails_pipeline(
     return filtered, stats
 
 
+def _harvest_or_parse(text: str) -> set[str]:
+    """Return e-mail candidates using the aggressive harvester when available."""
+
+    if not text:
+        return set()
+    fallback = re.sub(r"(?<=\w)[\r\n]{1,2}(?=[\w@.])", "", text)
+    base = set(parse_emails_unified(fallback))
+    if AGGRESSIVE_HARVEST and _harvest_emails is not None:
+        try:
+            harvested = _harvest_emails(text)
+        except Exception:  # pragma: no cover - defensive fallback
+            harvested = set()
+        base.update(harvested)
+    return base
+
+
 def extract_emails_from_pdf(path: str) -> List[str]:
     """Извлечь e-mail из PDF с условным запуском OCR."""
 
@@ -482,7 +506,7 @@ def extract_emails_from_pdf(path: str) -> List[str]:
         except Exception:
             text = ""
 
-    emails_text = set(parse_emails_unified(text)) if text else set()
+    emails_text = _harvest_or_parse(text)
 
     try:
         force_threshold = int(os.getenv("PDF_FORCE_OCR_IF_FOUND_LT", "25"))
@@ -511,7 +535,7 @@ def extract_emails_from_pdf(path: str) -> List[str]:
                             ocr_text = cleanup_text(ocr_text)
                         except Exception:
                             pass
-                    emails_text.update(parse_emails_unified(ocr_text))
+                    emails_text.update(_harvest_or_parse(ocr_text))
 
     return sorted(emails_text)
 

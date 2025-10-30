@@ -58,6 +58,11 @@ from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
 from .progress_watchdog import heartbeat_now
 
+try:  # pragma: no cover - optional dependency for aggressive harvesting
+    from .parsing.harvester import harvest_emails as _harvest_emails
+except Exception:  # pragma: no cover - degraded environment fallback
+    _harvest_emails = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:  # pragma: no cover
     from .models import EmailEntry
 
@@ -97,6 +102,9 @@ logger = logging.getLogger(__name__)
 
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}")
+_AGGRESSIVE_HARVEST = (
+    str(os.getenv("PARSE_AGGRESSIVE", "1")).lower() in {"1", "true", "yes"}
+)
 
 
 # Анти-катастрофический поиск e-mail
@@ -544,12 +552,22 @@ def _normalize_email_fragments(text: str) -> str:
     cleaned = _BREAK_AFTER_AT_RE.sub("@", cleaned)
     cleaned = _BREAK_AFTER_DOT_RE.sub(".", cleaned)
     cleaned = cleaned.replace(".@", "@")
+    cleaned = re.sub(r"(?<=\w)[\r\n]{1,2}(?=[\w@.])", "", cleaned)
     return cleaned
 
 
 def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
     normalized = _normalize_email_fragments(text)
     hits = EMAIL_RE.findall(normalized) if normalized else []
+    if _AGGRESSIVE_HARVEST and _harvest_emails is not None:
+        try:
+            harvested = _harvest_emails(text)
+        except Exception:  # pragma: no cover - defensive fallback
+            harvested = set()
+        if harvested:
+            for candidate in sorted(harvested):
+                if candidate not in hits:
+                    hits.append(candidate)
     deduped = list(dict.fromkeys(hits))
     if stats is not None:
         stats["total_found"] = stats.get("total_found", 0) + len(deduped)

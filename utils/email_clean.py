@@ -46,6 +46,9 @@ CYR_TO_LAT = {
 _INVISIBLES_RE = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]")
 
 EMAIL_RE = re.compile(r"(?ix)\b[a-z0-9._%+\-]+@(?:[a-z0-9\-]+\.)+[a-z0-9\-]{2,}\b")
+EMAIL_STRICT_VALIDATE_RE = re.compile(
+    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-zА-Яа-яЁё]{2,}$"
+)
 
 # Варианты обфусцированных адресов до окончательной нормализации
 _DOT_LIKE_CHARS = "·•∙‧⸳・"
@@ -626,10 +629,16 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 def is_valid_email(addr: str) -> bool:
-    """Раньше проверяла валидность e-mail; теперь просто проверяем через EMAIL_RE."""
-    if not addr:
+    """Return ``True`` if ``addr`` looks like a syntactically valid e-mail."""
+    if not addr or "@" not in addr:
         return False
-    return bool(EMAIL_RE.fullmatch(addr.strip().lower()))
+    candidate = addr.strip()
+    if not candidate or "@" not in candidate:
+        return False
+    local, _, domain = candidate.rpartition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    return bool(EMAIL_STRICT_VALIDATE_RE.match(candidate))
 
 
 def strict_validate_domain(addr: str) -> bool:

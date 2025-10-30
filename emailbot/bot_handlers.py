@@ -26,7 +26,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
-from .time_utils import LOCAL_TZ, parse_timestamp_any, parse_user_date_once
+from .time_utils import LOCAL_TZ, day_bounds, parse_ts, parse_user_date_once
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -256,6 +256,7 @@ def _extract_emails_loose(text: str) -> list[str]:
     return found
 
 from emailbot.domain_utils import count_domains, classify_email_domain
+from emailbot.reporting.excel_helpers import append_foreign_review_sheet
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -2855,7 +2856,7 @@ def _load_audit_records(
                         or record.get("time")
                         or record.get("ts")
                     )
-                    ts = parse_timestamp_any(ts_raw)
+                    ts = parse_ts(ts_raw)
                     if (start or end) and ts is None:
                         dropped_no_ts += 1
                         continue
@@ -2945,8 +2946,7 @@ def _summarize(
 
 def report_day(audit_dir: Path) -> str:
     now = datetime.now(tz=LOCAL_TZ)
-    start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=LOCAL_TZ)
-    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    start, end = day_bounds(now)
     records = _load_audit_records(audit_dir, start, end)
     return _summarize(records, start, end)
 
@@ -3425,26 +3425,15 @@ def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
     df = pd.DataFrame({"email": list(emails)})
     if "comment" not in df.columns:
         df["comment"] = ""
-    foreign_df: pd.DataFrame | None = None
-    try:
-        foreign_review_rows = []
-        normalized_unique = {
-            e for e in (_normalize_email(addr) for addr in emails) if e
-        }
-        for email in sorted(normalized_unique):
-            dtype = classify_email_domain(email)
-            if dtype in {"global_mail", "foreign_corporate"}:
-                foreign_review_rows.append({"email": email, "domain_type": dtype})
-        if foreign_review_rows:
-            foreign_df = pd.DataFrame(foreign_review_rows, columns=["email", "domain_type"])
-    except Exception as ex:  # pragma: no cover - defensive branch
-        logger.warning("Не удалось добавить лист Foreign_Review в Excel: %s", ex)
-        foreign_df = None
-
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
-        if foreign_df is not None:
-            foreign_df.to_excel(writer, sheet_name="Foreign_Review", index=False)
+    try:
+        normalized = [
+            value for value in (_normalize_email(addr) for addr in emails) if value
+        ]
+        append_foreign_review_sheet(str(path), normalized)
+    except Exception as ex:  # pragma: no cover - defensive branch
+        logger.warning("Не удалось добавить лист Foreign_Review в Excel: %s", ex)
     return path
 
 
