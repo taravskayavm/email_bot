@@ -16,6 +16,7 @@ from pathlib import Path
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     ContextTypes,
     CallbackQueryHandler,
@@ -27,6 +28,8 @@ from telegram.ext import (
 
 logger = logging.getLogger("email_bot.selfcheck")
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+_startup_logger = logging.getLogger(__name__)
 
 
 def _selfcheck_email_clean_exports() -> None:
@@ -76,6 +79,30 @@ from emailbot.selfcheck import startup_selfcheck
 # Default watchdog stall timeout in milliseconds (configurable via env).
 WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
 os.environ.setdefault("WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS))
+
+_raw_admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+try:
+    ADMIN_CHAT_ID = (
+        int(_raw_admin_chat_id) if _raw_admin_chat_id and _raw_admin_chat_id.strip() else None
+    )
+except ValueError:
+    _startup_logger.warning(
+        "Invalid ADMIN_CHAT_ID=%r; startup notifications disabled", _raw_admin_chat_id
+    )
+    ADMIN_CHAT_ID = None
+
+
+async def _notify_admin_startup(app: Application) -> None:
+    """Notify administrators that the bot is ready to serve updates."""
+
+    if ADMIN_CHAT_ID is None:
+        return
+    try:
+        await app.bot.send_message(
+            chat_id=ADMIN_CHAT_ID, text="🤖 Бот запущен и готов к работе."
+        )
+    except Exception:
+        _startup_logger.warning("Cannot notify ADMIN_CHAT_ID on startup", exc_info=True)
 
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
 # штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
@@ -260,7 +287,9 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[BOOT] path diagnostics failed: %s", _e)
 
-    app = ApplicationBuilder().token(token).build()
+    builder = ApplicationBuilder().token(token)
+    builder.post_init(_notify_admin_startup)
+    app = builder.build()
     app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start", bot_handlers.start))
@@ -271,6 +300,10 @@ def main() -> None:
     app.add_handler(CommandHandler("url", bot_handlers.url_command))
     app.add_handler(CommandHandler("crawl", bot_handlers.crawl_command))
     app.add_handler(CommandHandler("drop", bot_handlers.handle_drop))
+
+    app.add_handler(
+        MessageHandler(filters.Document.ALL, bot_handlers.handle_document)
+    )
 
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
@@ -330,8 +363,6 @@ def main() -> None:
         MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
     )
 
-    app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
-
     bulk_delete_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
@@ -349,6 +380,7 @@ def main() -> None:
         fallbacks=[],
         per_chat=True,
         per_user=True,
+        per_message=True,  # PTB 21+: track CallbackQuery transitions reliably
     )
     app.add_handler(bulk_delete_conv, group=-1)
     app.add_handler(
