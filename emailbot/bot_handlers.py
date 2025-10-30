@@ -127,6 +127,12 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+EXCLUDE_GLOBAL_MAIL = str(os.getenv("EXCLUDE_GLOBAL_MAIL", "0")).lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
 
 # Conversation state identifiers
 BULK_DELETE = 101
@@ -249,7 +255,7 @@ def _extract_emails_loose(text: str) -> list[str]:
             found.append(email)
     return found
 
-from emailbot.domain_utils import count_domains
+from emailbot.domain_utils import count_domains, classify_email_domain
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -3322,10 +3328,17 @@ async def _compose_report_and_save(
         skipped_recent = []
         digest = {"error": str(exc), "ready_final": len(ready)}
 
-    ready_count = len(ready)
+    if EXCLUDE_GLOBAL_MAIL:
+        final_ready = [
+            addr for addr in ready if classify_email_domain(addr) != "global_mail"
+        ]
+    else:
+        final_ready = list(ready)
+
+    ready_count = len(final_ready)
     state.preview_ready_count = ready_count
-    state.to_send = list(ready)
-    state.preview_allowed_all = sorted(ready)
+    state.to_send = list(final_ready)
+    state.preview_allowed_all = sorted(final_ready)
     state.blocked_after_parse = count_blocked(state.to_send)
     context.user_data["last_parsed_emails"] = list(state.to_send)
 
@@ -3412,7 +3425,26 @@ def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
     df = pd.DataFrame({"email": list(emails)})
     if "comment" not in df.columns:
         df["comment"] = ""
-    df.to_excel(path, index=False)
+    foreign_df: pd.DataFrame | None = None
+    try:
+        foreign_review_rows = []
+        normalized_unique = {
+            e for e in (_normalize_email(addr) for addr in emails) if e
+        }
+        for email in sorted(normalized_unique):
+            dtype = classify_email_domain(email)
+            if dtype in {"global_mail", "foreign_corporate"}:
+                foreign_review_rows.append({"email": email, "domain_type": dtype})
+        if foreign_review_rows:
+            foreign_df = pd.DataFrame(foreign_review_rows, columns=["email", "domain_type"])
+    except Exception as ex:  # pragma: no cover - defensive branch
+        logger.warning("Не удалось добавить лист Foreign_Review в Excel: %s", ex)
+        foreign_df = None
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+        if foreign_df is not None:
+            foreign_df.to_excel(writer, sheet_name="Foreign_Review", index=False)
     return path
 
 
@@ -3453,8 +3485,9 @@ async def _send_combined_parse_response(
         f"{report}\n\n"
         "Дальнейшие действия:\n"
         "• Выберите направление рассылки\n"
-        "• Или отправьте правки: «старый -> новый» и/или адреса для удаления\n"
-        "• Excel-файл прикреплён к сообщению автоматически\n"
+        "• Для правок используйте: «старый -> новый» и/или список адресов к удалению (текстом)\n"
+        "• В Excel добавлен лист «Foreign_Review» с иностранными адресами для ручной проверки\n"
+        "• Глобальные почтовики не исключаются автоматически\n"
     )
 
     emails = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
