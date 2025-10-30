@@ -380,7 +380,9 @@ def main() -> None:
         fallbacks=[],
         per_chat=True,
         per_user=True,
-        per_message=True,  # PTB 21+: track CallbackQuery transitions reliably
+        # Keep the conversation keyed per chat/user so the text follow-up to the
+        # callback query continues the active bulk-delete flow.
+        per_message=False,
     )
     app.add_handler(bulk_delete_conv, group=-1)
     app.add_handler(
