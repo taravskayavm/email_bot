@@ -663,7 +663,8 @@ async def _download_file(update: Update, download_dir: str) -> str:
 
 
 async def extract_emails_from_zip(path: str, *_, **__):
-    emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
+    loop = asyncio.get_running_loop()
+    emails, stats = await loop.run_in_executor(None, _extraction.extract_any, path)
     emails = set(e.lower().strip() for e in emails)
     extracted_files = [path]
     logger.info(
@@ -3520,12 +3521,14 @@ async def _send_combined_parse_response(
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an uploaded document with potential e-mail addresses."""
 
-    doc = update.message.document
+    message = update.effective_message or getattr(update, "message", None)
+    doc = message.document if isinstance(message, Message) else None
     if not doc:
         return
 
     clear_stop()
     job_name = _build_parse_task_name(update, "file")
+    loop = asyncio.get_running_loop()
     current_task = asyncio.current_task()
     idle_seconds = _watchdog_idle_seconds()
     if current_task:
@@ -3537,7 +3540,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await heartbeat()
-        progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        if isinstance(message, Message):
+            progress_msg = await message.reply_text("📥 Файл получен. Анализирую…")
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -3549,8 +3553,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     await progress_msg.edit_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
-                else:
-                    await update.message.reply_text(
+                elif isinstance(message, Message):
+                    await message.reply_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
             except Exception:
@@ -3589,7 +3593,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 repairs = collect_repairs_from_files(extracted_files)
                 footnote_dupes += stats.get("footnote_pairs_merged", 0)
             else:
-                allowed, loose, stats = await asyncio.to_thread(
+                if not file_path:
+                    raise ValueError("file_path is required for document parsing")
+                allowed, loose, stats = await loop.run_in_executor(
+                    None,
                     extract_from_uploaded_file,
                     file_path,
                 )
@@ -3614,13 +3621,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 if progress_msg:
                     await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
-                else:
-                    await update.message.reply_text("🛑 Ошибка при анализе файла.")
+                elif isinstance(message, Message):
+                    await message.reply_text("🛑 Ошибка при анализе файла.")
             except Exception:
                 pass
-            await update.message.reply_text(
-                "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
-            )
+            if isinstance(message, Message):
+                await message.reply_text(
+                    "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
+                )
             return
 
     except asyncio.CancelledError as exc:
@@ -3641,9 +3649,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 notified = True
             except Exception:
                 pass
-        if not notified:
+        if not notified and isinstance(message, Message):
             try:
-                await update.message.reply_text(cancelled_text)
+                await message.reply_text(cancelled_text)
+            except Exception:
+                pass
+        return
+    except Exception as exc:  # pragma: no cover - defensive handler
+        logger.exception("handle_document failed: %s", exc)
+        error_text = "❌ Ошибка при обработке файла. Подробности в логах."
+        handled = False
+        if progress_msg:
+            try:
+                await progress_msg.edit_text(error_text)
+                handled = True
+            except Exception:
+                handled = False
+        if not handled and isinstance(message, Message):
+            try:
+                await message.reply_text(error_text)
             except Exception:
                 pass
         return
@@ -3679,6 +3703,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
     total_footnote = state.footnote_dupes + footnote_dupes
     blocked_after_parse = count_blocked(state.to_send)
+
+    if isinstance(message, Message):
+        try:
+            await message.reply_text(
+                f"✅ Анализ завершён. Найдено адресов: {len(state.to_send)}"
+            )
+        except Exception:
+            pass
 
     try:
         await progress_msg.edit_text("✅ Готово. Формирую превью…")
