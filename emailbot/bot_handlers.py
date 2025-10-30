@@ -3324,6 +3324,10 @@ async def _compose_report_and_save(
 
     ready_count = len(ready)
     state.preview_ready_count = ready_count
+    state.preview_ready_params = {
+        "group": getattr(state, "group", None),
+        "ignore_cooldown": ignore_cooldown,
+    }
     state.to_send = list(ready)
     state.preview_allowed_all = sorted(ready)
     state.blocked_after_parse = count_blocked(state.to_send)
@@ -4533,10 +4537,31 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         )
         expected_ready = getattr(state, "preview_ready_count", None)
-        if isinstance(expected_ready, int) and expected_ready >= 0:
-            assert len(ready) == expected_ready, (
-                f"Mismatch ready_count({expected_ready}) vs emails_to_send({len(ready)})"
-            )
+        preview_params = getattr(state, "preview_ready_params", None)
+        preview_matches = (
+            isinstance(preview_params, dict)
+            and preview_params.get("group") == group_code_norm
+            and preview_params.get("ignore_cooldown") == ignore_cooldown
+        )
+        if preview_matches and isinstance(expected_ready, int) and expected_ready >= 0:
+            if len(ready) != expected_ready:
+                logger.warning(
+                    "preview/send mismatch",
+                    extra={
+                        "event": "select_group",
+                        "phase": "prepare",
+                        "expected_ready": expected_ready,
+                        "actual_ready": len(ready),
+                        "group": group_code_norm,
+                        "ignore_cooldown": ignore_cooldown,
+                    },
+                )
+        else:
+            state.preview_ready_count = len(ready)
+            state.preview_ready_params = {
+                "group": group_code_norm,
+                "ignore_cooldown": ignore_cooldown,
+            }
     except Exception as exc:
         logger.exception(
             "prepare_mass_mailing failed",
