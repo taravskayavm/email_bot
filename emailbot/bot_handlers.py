@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import imaplib
 import importlib
 import inspect
@@ -26,8 +27,11 @@ from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
+from .extraction_zip import ZIP_MAX_DEPTH, ZIP_MAX_FILES, ZIP_MAX_TOTAL_UNCOMP_MB
 from .time_utils import LOCAL_TZ, day_bounds, parse_ts, parse_user_date_once
 from zoneinfo import ZoneInfo
+
+from .utils.zip_limits import validate_zip_safely
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,11 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
     (BASE_DIR / ".." / "var" / "uploads").resolve()
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+ZIP_PARSE_WORKERS = max(int(os.getenv("ZIP_PARSE_WORKERS", "2")), 1)
+ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
+ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
+_ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
 
 EXCLUDE_GLOBAL_MAIL = str(os.getenv("EXCLUDE_GLOBAL_MAIL", "0")).lower() in {
     "1",
@@ -645,6 +654,63 @@ def collect_repairs_from_files(files):
     return []
 
 
+class ZipValidationError(Exception):
+    """Raised when a ZIP archive violates safety limits."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class ZipProcessingTimeoutError(Exception):
+    """Raised when ZIP parsing exceeds the configured timeout."""
+
+
+async def _edit_progress_message(progress_msg: Message | None, text: str) -> bool:
+    """Try to update ``progress_msg`` text, ignoring minor Telegram errors."""
+
+    if not progress_msg:
+        return False
+    try:
+        await progress_msg.edit_text(text)
+        return True
+    except BadRequest as exc:
+        message = str(getattr(exc, "message", exc))
+        if "message is not modified" in message.lower():
+            return True
+    except Exception as exc:  # pragma: no cover - defensive log
+        logger.debug("progress message update failed: %s", exc)
+    return False
+
+
+async def _zip_status_heartbeat(
+    progress_msg: Message | None, future: asyncio.Future
+) -> None:
+    """Periodically poke the progress message while ``future`` is running."""
+
+    if not progress_msg:
+        return
+    try:
+        while not future.done():
+            await asyncio.sleep(ZIP_HEARTBEAT_SEC)
+            if future.done():
+                break
+            await _edit_progress_message(progress_msg, "🔎 Всё ещё ищу адреса…")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive log
+        logger.debug("zip heartbeat failed: %s", exc)
+
+
+def _safe_unlink(path: str | None) -> None:
+    """Remove a file silently if it exists."""
+
+    if not path:
+        return
+    with suppress(OSError):
+        os.remove(path)
+
+
 async def _download_file(update: Update, download_dir: str) -> str:
     """Download the document from ``update`` into ``download_dir``."""
 
@@ -662,9 +728,38 @@ async def _download_file(update: Update, download_dir: str) -> str:
     return path
 
 
-async def extract_emails_from_zip(path: str, *_, **__):
+async def extract_emails_from_zip(
+    path: str, *_, progress_message: Message | None = None, **__
+):
     loop = asyncio.get_running_loop()
-    emails, stats = await loop.run_in_executor(None, _extraction.extract_any, path)
+    ok, reason = await loop.run_in_executor(
+        None,
+        validate_zip_safely,
+        path,
+        ZIP_MAX_FILES,
+        ZIP_MAX_TOTAL_UNCOMP_MB,
+        ZIP_MAX_DEPTH,
+    )
+    if not ok:
+        raise ZipValidationError(reason or "архив не прошёл проверку")
+
+    future = loop.run_in_executor(_ZIP_PARSE_EXECUTOR, _extraction.extract_any, path)
+    heartbeat_task: asyncio.Task | None = None
+    if progress_message:
+        heartbeat_task = asyncio.create_task(
+            _zip_status_heartbeat(progress_message, future)
+        )
+    try:
+        emails, stats = await asyncio.wait_for(future, timeout=ZIP_JOB_TIMEOUT_SEC)
+    except asyncio.TimeoutError as exc:
+        future.cancel()
+        raise ZipProcessingTimeoutError from exc
+    finally:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+
     emails = set(e.lower().strip() for e in emails)
     extracted_files = [path]
     logger.info(
@@ -3582,9 +3677,35 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 pass
             if (file_path or "").lower().endswith(".zip"):
-                allowed, extracted_files, loose, stats = await extract_emails_from_zip(
-                    file_path
-                )
+                try:
+                    (
+                        allowed,
+                        extracted_files,
+                        loose,
+                        stats,
+                    ) = await extract_emails_from_zip(
+                        file_path, progress_message=progress_msg
+                    )
+                except ZipValidationError as exc:
+                    warning_text = (
+                        f"⚠️ Архив отклонён: {exc.reason}\n"
+                        f"Загрузите более компактный архив (≤{ZIP_MAX_FILES} файлов, "
+                        f"≤{ZIP_MAX_TOTAL_UNCOMP_MB} МБ распаковано, глубина ≤{ZIP_MAX_DEPTH})."
+                    )
+                    handled = await _edit_progress_message(progress_msg, warning_text)
+                    if not handled and isinstance(message, Message):
+                        await message.reply_text(warning_text)
+                    _safe_unlink(file_path)
+                    return
+                except ZipProcessingTimeoutError:
+                    timeout_text = (
+                        "⏱️ Время обработки архива истекло. Попробуйте загрузить меньший архив или разбить его на части."
+                    )
+                    handled = await _edit_progress_message(progress_msg, timeout_text)
+                    if not handled and isinstance(message, Message):
+                        await message.reply_text(timeout_text)
+                    _safe_unlink(file_path)
+                    return
                 await heartbeat()
                 allowed_all.update(allowed)
                 raw_candidates.extend(list(allowed))
