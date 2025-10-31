@@ -16,6 +16,8 @@ from emailbot.timebudget import TimeBudget
 from .extraction_common import filter_invalid_tld
 from .extraction_pdf import extract_text_from_pdf_bytes
 from .reporting import log_extract_digest
+from .utils.timeouts import TimeoutError as _TimeoutError
+from .utils.timeouts import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ ZIP_MAX_TOTAL_UNCOMP_MB = int(os.getenv("ZIP_MAX_TOTAL_UNCOMP_MB", "500"))
 ZIP_MAX_MEMBER_MB = int(os.getenv("ZIP_MAX_MEMBER_MB", "50"))
 ZIP_MAX_DEPTH = int(os.getenv("ZIP_MAX_DEPTH", "2"))
 ZIP_RATIO_LIMIT = float(os.getenv("ZIP_RATIO_LIMIT", "100.0"))
+ZIP_MEMBER_TIMEOUT_SEC = int(os.getenv("ZIP_MEMBER_TIMEOUT_SEC", "25"))
 _XLSX_CELL_LIMIT = int(os.getenv("ZIP_XLSX_CELL_LIMIT", "5000"))
 _PPTX_TEXT_LIMIT = int(os.getenv("ZIP_PPTX_TEXT_LIMIT", "2000"))
 
@@ -356,12 +359,28 @@ def extract_emails_from_zip(
         if ext not in ALLOWED_EXTS:
             continue
         data = z.read(info)
-        inner_hits, inner_stats = extract_any_stream(
-            data,
-            ext,
-            source_ref=f"zip:{path}|{name}",
-            stop_event=stop_event,
+        source_ref = f"zip:{path}|{name}"
+
+        ok, outcome = run_with_timeout(
+            extract_any_stream,
+            args=(data, ext),
+            kwargs={"source_ref": source_ref, "stop_event": stop_event},
+            timeout=ZIP_MEMBER_TIMEOUT_SEC,
         )
+        if not ok:
+            if isinstance(outcome, _TimeoutError):
+                logger.warning(
+                    "zip member timed out", extra={"event": "zip_member_timeout", "entry": source_ref}
+                )
+                stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
+                continue
+            logger.debug(
+                "zip member extraction error", extra={"event": "zip_member_error", "entry": source_ref, "error": repr(outcome)}
+            )
+            stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+            continue
+
+        inner_hits, inner_stats = outcome
         hits.extend(inner_hits)
         key = ext.lstrip(".")
         stats[key] = stats.get(key, 0) + 1
