@@ -38,8 +38,8 @@ def run_with_timeout(
         try:
             return True, future.result(timeout=timeout)
         except _FuturesTimeoutError:
-            shutdown_kwargs = {"wait": False}
-            future.cancel()
+            cancelled = future.cancel()
+            shutdown_kwargs = {"wait": not cancelled}
             return False, TimeoutError(f"Timed out after {timeout}s")
         except Exception as exc:  # pragma: no cover - passthrough
             return False, exc
