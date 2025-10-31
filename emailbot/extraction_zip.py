@@ -8,10 +8,10 @@ import tempfile
 import time
 import zipfile
 from pathlib import PurePosixPath
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from emailbot import settings
-from emailbot.progress_watchdog import heartbeat_now
+from emailbot.progress_watchdog import ProgressTracker, heartbeat_now
 from emailbot.timebudget import TimeBudget
 from .extraction_common import filter_invalid_tld
 from .extraction_pdf import extract_text_from_pdf_bytes
@@ -20,6 +20,9 @@ from .utils.timeouts import TimeoutError as _TimeoutError
 from .utils.timeouts import run_with_timeout
 
 logger = logging.getLogger(__name__)
+
+
+_PROGRESS_KEYS = {"files_total", "files_processed", "files_skipped_timeout", "last_file"}
 
 
 ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
@@ -299,8 +302,12 @@ def _safe_path(name: str) -> bool:
 
 
 def extract_emails_from_zip(
-    path: str, stop_event: Optional[object] = None, *, _depth: int = 0
-) -> tuple[list["EmailHit"], Dict]:
+    path: str,
+    stop_event: Optional[object] = None,
+    *,
+    _depth: int = 0,
+    tracker: ProgressTracker | None = None,
+) -> tuple[list["EmailHit"], Dict[str, Any]]:
     from .extraction import (
         EmailHit,
         extract_any_stream,
@@ -320,21 +327,36 @@ def extract_emails_from_zip(
         return [], {"errors": ["cannot open"]}
 
     hits: List[EmailHit] = []
-    stats: Dict[str, int] = {}
+    stats: Dict[str, Any] = {
+        "files_total": 0,
+        "files_processed": 0,
+        "files_skipped_timeout": 0,
+        "last_file": "",
+    }
 
     try:
         with z:
-            for name in _iter_zip_member_names(z):
+            member_names = list(_iter_zip_member_names(z))
+            stats["files_total"] = len(member_names)
+            if tracker is not None and _depth == 0:
+                tracker.reset_total(len(member_names))
+            for name in member_names:
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     break
+                stats["last_file"] = name
+                processed_tick = False
                 try:
                     info = z.getinfo(name)
                 except KeyError:
                     logger.warning("missing zip entry in %s: %s", path, name)
                     stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=False)
                     continue
                 if info.flag_bits & 0x1:
                     logger.warning("encrypted file skipped in zip %s: %s", path, name)
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=False)
                     continue
                 if not _safe_path(name):
                     logger.warning("unsafe path in zip %s: %s", path, name)
@@ -353,7 +375,10 @@ def extract_emails_from_zip(
                         tmp_path = tmp.name
                     try:
                         inner_hits, inner_stats = extract_emails_from_zip(
-                            tmp_path, stop_event, _depth=_depth + 1
+                            tmp_path,
+                            stop_event,
+                            _depth=_depth + 1,
+                            tracker=tracker,
                         )
                         for h in inner_hits:
                             suffix = ""
@@ -370,13 +395,34 @@ def extract_emails_from_zip(
                                 )
                             )
                         for k, v in inner_stats.items():
+                            if k in _PROGRESS_KEYS:
+                                continue
                             if isinstance(v, int):
                                 stats[k] = stats.get(k, 0) + v
+                        current_total = int(stats.get("files_total", 0))
+                        inner_total = int(inner_stats.get("files_total") or 0)
+                        stats["files_total"] = max(current_total + inner_total - 1, 0)
+                        if tracker is not None and inner_total > 0:
+                            tracker.extend_total(max(inner_total - 1, 0))
+                        stats["files_processed"] = int(stats.get("files_processed", 0)) + int(
+                            inner_stats.get("files_processed") or 0
+                        )
+                        stats["files_skipped_timeout"] = int(
+                            stats.get("files_skipped_timeout", 0)
+                        ) + int(inner_stats.get("files_skipped_timeout") or 0)
+                        last_inner = inner_stats.get("last_file")
+                        if last_inner:
+                            stats["last_file"] = last_inner
+                        processed_tick = True
                     finally:
                         if not _safe_unlink(tmp_path):
                             logger.warning("temp file still locked, skip delete: %s", tmp_path)
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=processed_tick)
                     continue
                 if ext not in ALLOWED_EXTS:
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=False)
                     continue
                 data = z.read(info)
                 source_ref = f"zip:{path}|{name}"
@@ -394,6 +440,11 @@ def extract_emails_from_zip(
                             extra={"event": "zip_member_timeout", "entry": source_ref},
                         )
                         stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
+                        stats["files_skipped_timeout"] = int(
+                            stats.get("files_skipped_timeout", 0)
+                        ) + 1
+                        if tracker is not None:
+                            tracker.tick_file(name, processed=False)
                         continue
                     logger.debug(
                         "zip member extraction error",
@@ -404,6 +455,8 @@ def extract_emails_from_zip(
                         },
                     )
                     stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=False)
                     continue
 
                 inner_hits, inner_stats = outcome
@@ -411,8 +464,14 @@ def extract_emails_from_zip(
                 key = ext.lstrip(".")
                 stats[key] = stats.get(key, 0) + 1
                 for k, v in inner_stats.items():
+                    if k in _PROGRESS_KEYS:
+                        continue
                     if isinstance(v, int):
                         stats[k] = stats.get(k, 0) + v
+                stats["files_processed"] = int(stats.get("files_processed", 0)) + 1
+                processed_tick = True
+                if tracker is not None:
+                    tracker.tick_file(name, processed=True)
     except _ZipLimitError as exc:
         if exc.reason == "too many files":
             logger.warning("zip has too many files: %s", path)
