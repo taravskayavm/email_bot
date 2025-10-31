@@ -136,6 +136,10 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 ZIP_PARSE_WORKERS = max(int(os.getenv("ZIP_PARSE_WORKERS", "2")), 1)
 ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
 ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
+try:
+    ZIP_HEARTBEAT_MIN_SEC = max(1.0, float(os.getenv("ZIP_HEARTBEAT_MIN_SEC", "5")))
+except ValueError:
+    ZIP_HEARTBEAT_MIN_SEC = 5.0
 _ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
 
 _PROGRESS_EDIT_LOCK = asyncio.Lock()
@@ -697,11 +701,11 @@ def _format_elapsed(seconds: float) -> str:
 
 async def _zip_status_heartbeat(
     progress_msg: Message | None,
-    future: asyncio.Future,
+    stop_event: asyncio.Event,
     *,
     started_at: float | None = None,
 ) -> None:
-    """Periodically poke the progress message while ``future`` is running."""
+    """Periodically update ``progress_msg`` until ``stop_event`` is set."""
 
     if not progress_msg:
         return
@@ -712,16 +716,18 @@ async def _zip_status_heartbeat(
     t0 = started_at or time.monotonic()
 
     try:
-        while not future.done():
-            await asyncio.sleep(max(period, 1.0))
-            if future.done():
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(period, 1.0))
                 break
+            except asyncio.TimeoutError:
+                pass
             elapsed = max(0.0, time.monotonic() - t0)
             suffix = next(dots)
             text = f"🔎 Всё ещё ищу адреса{suffix} · {_format_elapsed(elapsed)}"
             await _edit_progress_message(progress_msg, text)
             jitter = math.sin(elapsed) * 2.0
-            period = max(6.0, base_period + jitter)
+            period = max(ZIP_HEARTBEAT_MIN_SEC, base_period + jitter)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # pragma: no cover - defensive log
@@ -771,10 +777,14 @@ async def extract_emails_from_zip(
 
     started_at = time.monotonic()
     future = loop.run_in_executor(_ZIP_PARSE_EXECUTOR, _extraction.extract_any, path)
+    stop_event: asyncio.Event | None = None
     heartbeat_task: asyncio.Task | None = None
     if progress_message:
+        stop_event = asyncio.Event()
         heartbeat_task = asyncio.create_task(
-            _zip_status_heartbeat(progress_message, future, started_at=started_at)
+            _zip_status_heartbeat(
+                progress_message, stop_event, started_at=started_at
+            )
         )
     try:
         emails, stats = await asyncio.wait_for(future, timeout=ZIP_JOB_TIMEOUT_SEC)
@@ -782,8 +792,9 @@ async def extract_emails_from_zip(
         future.cancel()
         raise ZipProcessingTimeoutError from exc
     finally:
+        if stop_event:
+            stop_event.set()
         if heartbeat_task:
-            heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
