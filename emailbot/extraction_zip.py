@@ -8,7 +8,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 from emailbot import settings
 from emailbot.progress_watchdog import heartbeat_now
@@ -268,6 +268,31 @@ MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 MAX_DEPTH = 3
 
 
+class _ZipLimitError(RuntimeError):
+    """Raised when a ZIP archive violates protective limits."""
+
+    def __init__(self, reason: str, *, total_size: int | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.total_size = total_size
+
+
+def _iter_zip_member_names(z: zipfile.ZipFile) -> Iterator[str]:
+    """Yield file member names while enforcing archive limits."""
+
+    total_size = 0
+    for idx, info in enumerate(z.infolist(), 1):
+        if idx > MAX_FILES:
+            raise _ZipLimitError("too many files")
+        file_size = getattr(info, "file_size", 0) or 0
+        total_size += file_size
+        if total_size > MAX_SIZE:
+            raise _ZipLimitError("too big", total_size=total_size)
+        if info.is_dir():
+            continue
+        yield info.filename or ""
+
+
 def _safe_path(name: str) -> bool:
     p = PurePosixPath(name.replace("\\", "/"))
     return not (p.is_absolute() or ".." in p.parts)
@@ -294,101 +319,107 @@ def extract_emails_from_zip(
     except Exception:
         return [], {"errors": ["cannot open"]}
 
-    infos = z.infolist()
-    if len(infos) > MAX_FILES:
-        logger.warning("zip has too many files: %s", path)
-        z.close()
-        return [], {"errors": ["too many files"]}
-
-    total_size = sum(i.file_size for i in infos)
-    if total_size > MAX_SIZE:
-        logger.warning("zip too large: %s (%d bytes)", path, total_size)
-        z.close()
-        return [], {"errors": ["too big"]}
-
     hits: List[EmailHit] = []
     stats: Dict[str, int] = {}
 
-    for info in infos:
-        if stop_event and getattr(stop_event, "is_set", lambda: False)():
-            break
-        name = info.filename
-        if info.flag_bits & 0x1:
-            logger.warning("encrypted file skipped in zip %s: %s", path, name)
-            continue
-        if not _safe_path(name):
-            logger.warning("unsafe path in zip %s: %s", path, name)
-            return [], {"errors": ["unsafe path"]}
-        ext = os.path.splitext(name)[1].lower()
-        if ext in DENY_EXTS:
-            logger.warning("deny-listed extension in zip %s: %s", path, name)
-            return [], {"errors": ["forbidden extension"]}
-        if ext == ".zip":
-            if _depth + 1 > MAX_DEPTH:
-                logger.warning("nested zip depth exceeded in %s: %s", path, name)
-                return [], {"errors": ["max depth exceeded"]}
-            data = z.read(info)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                tmp.write(data)
-                tmp_path = tmp.name
-            try:
-                inner_hits, inner_stats = extract_emails_from_zip(
-                    tmp_path, stop_event, _depth=_depth + 1
-                )
-                for h in inner_hits:
-                    suffix = ""
-                    if "#" in h.source_ref:
-                        suffix = "#" + h.source_ref.split("#", 1)[1]
-                    new_ref = f"zip:{path}|{name}{suffix}"
-                    hits.append(
-                        EmailHit(
-                            email=h.email,
-                            source_ref=new_ref,
-                            origin=h.origin,
-                            pre=h.pre,
-                            post=h.post,
+    try:
+        with z:
+            for name in _iter_zip_member_names(z):
+                if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    break
+                try:
+                    info = z.getinfo(name)
+                except KeyError:
+                    logger.warning("missing zip entry in %s: %s", path, name)
+                    stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                    continue
+                if info.flag_bits & 0x1:
+                    logger.warning("encrypted file skipped in zip %s: %s", path, name)
+                    continue
+                if not _safe_path(name):
+                    logger.warning("unsafe path in zip %s: %s", path, name)
+                    return [], {"errors": ["unsafe path"]}
+                ext = os.path.splitext(name)[1].lower()
+                if ext in DENY_EXTS:
+                    logger.warning("deny-listed extension in zip %s: %s", path, name)
+                    return [], {"errors": ["forbidden extension"]}
+                if ext == ".zip":
+                    if _depth + 1 > MAX_DEPTH:
+                        logger.warning("nested zip depth exceeded in %s: %s", path, name)
+                        return [], {"errors": ["max depth exceeded"]}
+                    data = z.read(info)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                        tmp.write(data)
+                        tmp_path = tmp.name
+                    try:
+                        inner_hits, inner_stats = extract_emails_from_zip(
+                            tmp_path, stop_event, _depth=_depth + 1
                         )
+                        for h in inner_hits:
+                            suffix = ""
+                            if "#" in h.source_ref:
+                                suffix = "#" + h.source_ref.split("#", 1)[1]
+                            new_ref = f"zip:{path}|{name}{suffix}"
+                            hits.append(
+                                EmailHit(
+                                    email=h.email,
+                                    source_ref=new_ref,
+                                    origin=h.origin,
+                                    pre=h.pre,
+                                    post=h.post,
+                                )
+                            )
+                        for k, v in inner_stats.items():
+                            if isinstance(v, int):
+                                stats[k] = stats.get(k, 0) + v
+                    finally:
+                        if not _safe_unlink(tmp_path):
+                            logger.warning("temp file still locked, skip delete: %s", tmp_path)
+                    continue
+                if ext not in ALLOWED_EXTS:
+                    continue
+                data = z.read(info)
+                source_ref = f"zip:{path}|{name}"
+
+                ok, outcome = run_with_timeout(
+                    extract_any_stream,
+                    args=(data, ext),
+                    kwargs={"source_ref": source_ref, "stop_event": stop_event},
+                    timeout=ZIP_MEMBER_TIMEOUT_SEC,
+                )
+                if not ok:
+                    if isinstance(outcome, _TimeoutError):
+                        logger.warning(
+                            "zip member timed out",
+                            extra={"event": "zip_member_timeout", "entry": source_ref},
+                        )
+                        stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
+                        continue
+                    logger.debug(
+                        "zip member extraction error",
+                        extra={
+                            "event": "zip_member_error",
+                            "entry": source_ref,
+                            "error": repr(outcome),
+                        },
                     )
+                    stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                    continue
+
+                inner_hits, inner_stats = outcome
+                hits.extend(inner_hits)
+                key = ext.lstrip(".")
+                stats[key] = stats.get(key, 0) + 1
                 for k, v in inner_stats.items():
                     if isinstance(v, int):
                         stats[k] = stats.get(k, 0) + v
-            finally:
-                if not _safe_unlink(tmp_path):
-                    logger.warning("temp file still locked, skip delete: %s", tmp_path)
-            continue
-        if ext not in ALLOWED_EXTS:
-            continue
-        data = z.read(info)
-        source_ref = f"zip:{path}|{name}"
-
-        ok, outcome = run_with_timeout(
-            extract_any_stream,
-            args=(data, ext),
-            kwargs={"source_ref": source_ref, "stop_event": stop_event},
-            timeout=ZIP_MEMBER_TIMEOUT_SEC,
-        )
-        if not ok:
-            if isinstance(outcome, _TimeoutError):
-                logger.warning(
-                    "zip member timed out", extra={"event": "zip_member_timeout", "entry": source_ref}
-                )
-                stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
-                continue
-            logger.debug(
-                "zip member extraction error", extra={"event": "zip_member_error", "entry": source_ref, "error": repr(outcome)}
-            )
-            stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
-            continue
-
-        inner_hits, inner_stats = outcome
-        hits.extend(inner_hits)
-        key = ext.lstrip(".")
-        stats[key] = stats.get(key, 0) + 1
-        for k, v in inner_stats.items():
-            if isinstance(v, int):
-                stats[k] = stats.get(k, 0) + v
-
-    z.close()
+    except _ZipLimitError as exc:
+        if exc.reason == "too many files":
+            logger.warning("zip has too many files: %s", path)
+        elif exc.reason == "too big":
+            total_size = exc.total_size or 0
+            logger.warning("zip too large: %s (%d bytes)", path, total_size)
+        return [], {"errors": [exc.reason]}
     hits = merge_footnote_prefix_variants(hits, stats)
     hits, fstats = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
     for k, v in fstats.items():
