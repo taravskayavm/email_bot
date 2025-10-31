@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import csv
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 import imaplib
 import importlib
 import inspect
@@ -25,7 +24,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
@@ -34,6 +33,7 @@ from .time_utils import LOCAL_TZ, day_bounds, parse_ts, parse_user_date_once
 from zoneinfo import ZoneInfo
 
 from .utils.zip_limits import validate_zip_safely
+from .worker_archive import run_parse_in_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -133,14 +133,12 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-ZIP_PARSE_WORKERS = max(int(os.getenv("ZIP_PARSE_WORKERS", "2")), 1)
 ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
 ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
 try:
     ZIP_HEARTBEAT_MIN_SEC = max(1.0, float(os.getenv("ZIP_HEARTBEAT_MIN_SEC", "5")))
 except ValueError:
     ZIP_HEARTBEAT_MIN_SEC = 5.0
-_ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
 
 _PROGRESS_EDIT_LOCK = asyncio.Lock()
 
@@ -776,7 +774,11 @@ async def extract_emails_from_zip(
         raise ZipValidationError(reason or "архив не прошёл проверку")
 
     started_at = time.monotonic()
-    future = loop.run_in_executor(_ZIP_PARSE_EXECUTOR, _extraction.extract_any, path)
+
+    def _run_worker() -> tuple[bool, dict[str, Any]]:
+        return run_parse_in_subprocess(path, ZIP_JOB_TIMEOUT_SEC)
+
+    future = loop.run_in_executor(None, _run_worker)
     stop_event: asyncio.Event | None = None
     heartbeat_task: asyncio.Task | None = None
     if progress_message:
@@ -787,7 +789,9 @@ async def extract_emails_from_zip(
             )
         )
     try:
-        emails, stats = await asyncio.wait_for(future, timeout=ZIP_JOB_TIMEOUT_SEC)
+        ok, payload = await asyncio.wait_for(
+            future, timeout=ZIP_JOB_TIMEOUT_SEC + 5
+        )
     except asyncio.TimeoutError as exc:
         future.cancel()
         raise ZipProcessingTimeoutError from exc
@@ -798,7 +802,18 @@ async def extract_emails_from_zip(
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
-    emails = set(e.lower().strip() for e in emails)
+    if not ok:
+        error_message = str(payload.get("error", "unknown error"))
+        traceback_text = payload.get("traceback")
+        if traceback_text:
+            logger.error("ZIP subprocess failed: %s\n%s", error_message, traceback_text)
+        if "timeout" in error_message.lower():
+            raise ZipProcessingTimeoutError(error_message)
+        raise RuntimeError(error_message)
+
+    emails_raw = payload.get("emails") or []
+    stats = payload.get("stats") or {}
+    emails = set(str(e).lower().strip() for e in emails_raw if e)
     extracted_files = [path]
     logger.info(
         "extraction complete",
