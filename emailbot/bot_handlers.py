@@ -10,8 +10,10 @@ import imaplib
 import importlib
 import inspect
 import io
+import itertools
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -135,6 +137,8 @@ ZIP_PARSE_WORKERS = max(int(os.getenv("ZIP_PARSE_WORKERS", "2")), 1)
 ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
 ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
 _ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
+
+_PROGRESS_EDIT_LOCK = asyncio.Lock()
 
 EXCLUDE_GLOBAL_MAIL = str(os.getenv("EXCLUDE_GLOBAL_MAIL", "0")).lower() in {
     "1",
@@ -671,31 +675,53 @@ async def _edit_progress_message(progress_msg: Message | None, text: str) -> boo
 
     if not progress_msg:
         return False
-    try:
-        await progress_msg.edit_text(text)
-        return True
-    except BadRequest as exc:
-        message = str(getattr(exc, "message", exc))
-        if "message is not modified" in message.lower():
+
+    async with _PROGRESS_EDIT_LOCK:
+        try:
+            await progress_msg.edit_text(text)
             return True
-    except Exception as exc:  # pragma: no cover - defensive log
-        logger.debug("progress message update failed: %s", exc)
+        except BadRequest as exc:
+            message = str(getattr(exc, "message", exc)).lower()
+            if "message is not modified" in message or "not found" in message:
+                return True
+        except Exception as exc:  # pragma: no cover - defensive log
+            logger.debug("progress message update failed: %s", exc)
     return False
 
 
+def _format_elapsed(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
 async def _zip_status_heartbeat(
-    progress_msg: Message | None, future: asyncio.Future
+    progress_msg: Message | None,
+    future: asyncio.Future,
+    *,
+    started_at: float | None = None,
 ) -> None:
     """Periodically poke the progress message while ``future`` is running."""
 
     if not progress_msg:
         return
+
+    dots = itertools.cycle(["", ".", "..", "..."])
+    base_period = float(ZIP_HEARTBEAT_SEC) if ZIP_HEARTBEAT_SEC > 0 else 12.0
+    period = base_period
+    t0 = started_at or time.monotonic()
+
     try:
         while not future.done():
-            await asyncio.sleep(ZIP_HEARTBEAT_SEC)
+            await asyncio.sleep(max(period, 1.0))
             if future.done():
                 break
-            await _edit_progress_message(progress_msg, "🔎 Всё ещё ищу адреса…")
+            elapsed = max(0.0, time.monotonic() - t0)
+            suffix = next(dots)
+            text = f"🔎 Всё ещё ищу адреса{suffix} · {_format_elapsed(elapsed)}"
+            await _edit_progress_message(progress_msg, text)
+            jitter = math.sin(elapsed) * 2.0
+            period = max(6.0, base_period + jitter)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # pragma: no cover - defensive log
@@ -743,11 +769,12 @@ async def extract_emails_from_zip(
     if not ok:
         raise ZipValidationError(reason or "архив не прошёл проверку")
 
+    started_at = time.monotonic()
     future = loop.run_in_executor(_ZIP_PARSE_EXECUTOR, _extraction.extract_any, path)
     heartbeat_task: asyncio.Task | None = None
     if progress_message:
         heartbeat_task = asyncio.create_task(
-            _zip_status_heartbeat(progress_message, future)
+            _zip_status_heartbeat(progress_message, future, started_at=started_at)
         )
     try:
         emails, stats = await asyncio.wait_for(future, timeout=ZIP_JOB_TIMEOUT_SEC)
