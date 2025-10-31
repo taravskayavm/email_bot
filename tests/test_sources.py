@@ -103,6 +103,9 @@ def test_extract_emails_from_zip(tmp_path: Path):
         "xlsx@example.com",
         "csv@example.com",
     }
+    assert stats.get("files_total") == 4
+    assert stats.get("files_processed") == 4
+    assert stats.get("files_skipped_timeout") == 0
     assert stats.get("pdf") == 1
     assert stats.get("docx") == 1
     assert stats.get("xlsx") == 1
