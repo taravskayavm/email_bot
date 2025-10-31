@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from multiprocessing import Pipe, Process
 from typing import Any, Dict, Tuple
+from time import monotonic
 import logging
 import traceback
 
@@ -38,20 +39,43 @@ def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict
     process.start()
     child_conn.close()
 
-    process.join(timeout=timeout_sec)
-    if process.is_alive():
-        try:
-            process.terminate()
-        except Exception:  # pragma: no cover - defensive
-            pass
-        process.join(2)
-        return False, {"error": f"timeout after {timeout_sec}s"}
-
+    deadline = monotonic() + timeout_sec
+    data = None
     try:
-        if parent_conn.poll(0.1):
-            data = parent_conn.recv()
-        else:
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+
+            if parent_conn.poll(min(remaining, 0.1)):
+                data = parent_conn.recv()
+                break
+
+            if not process.is_alive():
+                break
+
+        if data is None:
+            if process.is_alive():
+                try:
+                    process.terminate()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                process.join(2)
+                return False, {"error": f"timeout after {timeout_sec}s"}
+
+            process.join()
             return False, {"error": "no result from subprocess"}
+
+        join_timeout = max(0.0, deadline - monotonic())
+        process.join(join_timeout)
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            process.join(2)
+            return False, {"error": f"timeout after {timeout_sec}s"}
+
     finally:
         try:
             parent_conn.close()
