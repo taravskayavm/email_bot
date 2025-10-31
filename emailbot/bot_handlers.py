@@ -6,6 +6,7 @@ import asyncio
 import csv
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import imaplib
 import importlib
 import inspect
@@ -134,7 +135,32 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 ZIP_PARSE_WORKERS = max(int(os.getenv("ZIP_PARSE_WORKERS", "2")), 1)
 ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
 ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
+_ZIP_EXECUTOR_LOCK = threading.Lock()
 _ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
+
+
+def _submit_zip_extraction(
+    loop: asyncio.AbstractEventLoop, path: str
+) -> asyncio.Future:
+    """Run `_extraction.extract_any` in the bounded ZIP executor."""
+
+    with _ZIP_EXECUTOR_LOCK:
+        executor = _ZIP_PARSE_EXECUTOR
+    return loop.run_in_executor(executor, _extraction.extract_any, path)
+
+
+def _reset_zip_executor_after_timeout() -> None:
+    """Replace the ZIP executor so timed-out tasks cannot hog workers."""
+
+    global _ZIP_PARSE_EXECUTOR
+    with _ZIP_EXECUTOR_LOCK:
+        old_executor = _ZIP_PARSE_EXECUTOR
+        _ZIP_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=ZIP_PARSE_WORKERS)
+    old_executor.shutdown(wait=False, cancel_futures=True)
+    logger.warning(
+        "zip extractor timeout: recycled executor to free workers",
+        extra={"event": "zip-executor-reset"},
+    )
 
 EXCLUDE_GLOBAL_MAIL = str(os.getenv("EXCLUDE_GLOBAL_MAIL", "0")).lower() in {
     "1",
@@ -743,7 +769,7 @@ async def extract_emails_from_zip(
     if not ok:
         raise ZipValidationError(reason or "архив не прошёл проверку")
 
-    future = loop.run_in_executor(_ZIP_PARSE_EXECUTOR, _extraction.extract_any, path)
+    future = _submit_zip_extraction(loop, path)
     heartbeat_task: asyncio.Task | None = None
     if progress_message:
         heartbeat_task = asyncio.create_task(
@@ -753,6 +779,7 @@ async def extract_emails_from_zip(
         emails, stats = await asyncio.wait_for(future, timeout=ZIP_JOB_TIMEOUT_SEC)
     except asyncio.TimeoutError as exc:
         future.cancel()
+        _reset_zip_executor_after_timeout()
         raise ZipProcessingTimeoutError from exc
     finally:
         if heartbeat_task:
