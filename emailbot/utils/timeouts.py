@@ -30,11 +30,18 @@ def run_with_timeout(
     call_args = tuple(args or ())
     call_kwargs = dict(kwargs or {})
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future = executor.submit(func, *call_args, **call_kwargs)
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    future = executor.submit(func, *call_args, **call_kwargs)
+    shutdown_kwargs: dict[str, Any] = {"wait": True}
+
+    try:
         try:
             return True, future.result(timeout=timeout)
         except _FuturesTimeoutError:
+            shutdown_kwargs = {"wait": False}
+            future.cancel()
             return False, TimeoutError(f"Timed out after {timeout}s")
         except Exception as exc:  # pragma: no cover - passthrough
             return False, exc
+    finally:
+        executor.shutdown(**shutdown_kwargs)
