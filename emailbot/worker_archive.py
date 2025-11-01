@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Tuple
+import json
 import logging
 import multiprocessing as mp
+import os
 import time
 import traceback
+import uuid
 
 from . import extraction as _extraction
 from .progress_watchdog import ProgressTracker
@@ -15,12 +18,30 @@ from .progress_watchdog import ProgressTracker
 logger = logging.getLogger(__name__)
 
 
-def _worker(zip_path: str, conn) -> None:
+def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    tmp = f"{path}.part"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _remove_quiet(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:  # pragma: no cover - best effort cleanup
+        pass
+
+
+def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> None:
     """Worker process entry point."""
 
     def _emit_progress(snapshot: Dict[str, Any]) -> None:
+        if progress_path is None:
+            return
         try:
-            conn.send({"progress": dict(snapshot)})
+            _atomic_write_json(progress_path, {"progress": dict(snapshot)})
         except Exception:  # pragma: no cover - best effort delivery
             pass
 
@@ -28,21 +49,19 @@ def _worker(zip_path: str, conn) -> None:
 
     try:
         emails, stats = _extraction.extract_any(zip_path, tracker=tracker)
-        try:
-            conn.send({"ok": True, "emails": emails, "stats": stats})
-        except Exception:  # pragma: no cover - best effort delivery
-            pass
+        _atomic_write_json(
+            out_json_path,
+            {"ok": True, "emails": emails, "stats": stats},
+        )
     except Exception as exc:  # pragma: no cover - defensive fallback
         tb = traceback.format_exc()
         logger.warning("zip worker failed: %s", exc)
         try:
-            conn.send({"ok": False, "error": str(exc), "traceback": tb})
+            _atomic_write_json(
+                out_json_path,
+                {"ok": False, "error": str(exc), "traceback": tb},
+            )
         except Exception:  # pragma: no cover - best effort delivery
-            pass
-    finally:
-        try:
-            conn.close()
-        except Exception:  # pragma: no cover - best effort cleanup
             pass
 
 
@@ -55,8 +74,20 @@ def run_parse_in_subprocess(
     """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
 
     ctx = mp.get_context("spawn")
-    parent_conn, child_conn = ctx.Pipe(duplex=False)
-    process = ctx.Process(target=_worker, args=(zip_path, child_conn), daemon=False)
+
+    os.makedirs("var", exist_ok=True)
+    token = uuid.uuid4().hex
+    out_json_path = os.path.join("var", f"worker_result_{token}.json")
+    progress_path = (
+        os.path.join("var", f"worker_progress_{token}.json")
+        if progress_callback is not None
+        else None
+    )
+    process = ctx.Process(
+        target=_worker,
+        args=(zip_path, out_json_path, progress_path),
+        daemon=False,
+    )
 
     def _notify_progress(payload: Dict[str, Any]) -> None:
         if progress_callback is None:
@@ -70,59 +101,51 @@ def run_parse_in_subprocess(
         process.start()
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("failed to start zip worker: %s", exc)
-        try:
-            child_conn.close()
-        except Exception:  # pragma: no cover - best effort cleanup
-            pass
-        try:
-            parent_conn.close()
-        except Exception:  # pragma: no cover - best effort cleanup
-            pass
         return False, {"error": f"failed to start subprocess: {exc}"}
-
-    try:
-        child_conn.close()
-    except Exception:  # pragma: no cover - best effort cleanup
-        pass
 
     deadline = time.monotonic() + timeout_sec
     data: Dict[str, Any] | None = None
-
-    def _recv_message() -> Dict[str, Any] | None:
-        try:
-            message = parent_conn.recv()
-        except (EOFError, OSError):  # pragma: no cover - defensive
-            return None
-        if isinstance(message, dict) and "progress" in message:
-            payload = message.get("progress")
-            if isinstance(payload, dict):
-                _notify_progress(payload)
-            return None
-        return message
+    last_progress_mtime: float | None = None
 
     while time.monotonic() < deadline:
-        try:
-            if parent_conn.poll(0.2):
-                message = _recv_message()
-                if message is not None:
-                    data = message
-                    break
-        except (EOFError, OSError):  # pragma: no cover - defensive
+        if progress_path and os.path.exists(progress_path):
+            try:
+                mtime = os.path.getmtime(progress_path)
+            except OSError:
+                mtime = None
+            if mtime and (last_progress_mtime is None or mtime > last_progress_mtime):
+                try:
+                    with open(progress_path, "r", encoding="utf-8") as fh:
+                        payload = json.load(fh)
+                except Exception:  # pragma: no cover - best effort read
+                    payload = None
+                if isinstance(payload, dict):
+                    snapshot = payload.get("progress")
+                    if isinstance(snapshot, dict):
+                        _notify_progress(snapshot)
+                        last_progress_mtime = mtime
+
+        if os.path.exists(out_json_path):
+            try:
+                with open(out_json_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:  # pragma: no cover - best effort read
+                data = None
             break
 
         if not process.is_alive():
-            drained = False
-            try:
-                while parent_conn.poll(0.1):
-                    message = _recv_message()
-                    if message is not None:
-                        data = message
-                        drained = True
-                        break
-            except Exception:  # pragma: no cover - defensive
-                data = None
-            if drained or data is not None:
-                break
+            for _ in range(10):
+                if os.path.exists(out_json_path):
+                    try:
+                        with open(out_json_path, "r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+                    except Exception:  # pragma: no cover - best effort read
+                        data = None
+                    break
+                time.sleep(0.2)
+            break
+
+        time.sleep(0.2)
 
     if data is None:
         timed_out = time.monotonic() >= deadline
@@ -135,30 +158,27 @@ def run_parse_in_subprocess(
         except Exception:  # pragma: no cover - defensive
             pass
 
-        try:
-            parent_conn.close()
-        except Exception:  # pragma: no cover - best effort cleanup
-            pass
-
         if timed_out:
+            _remove_quiet(progress_path)
+            _remove_quiet(out_json_path)
             return False, {"error": f"timeout after {timeout_sec}s"}
 
         try:
             process.join(timeout=0.0)
         except Exception:  # pragma: no cover - defensive
             pass
+        _remove_quiet(progress_path)
+        _remove_quiet(out_json_path)
         return False, {"error": "no result from subprocess"}
-
-    try:
-        parent_conn.close()
-    except Exception:  # pragma: no cover - best effort cleanup
-        pass
 
     if process.is_alive():
         try:
             process.join(0.1)
         except Exception:  # pragma: no cover - defensive
             pass
+
+    _remove_quiet(progress_path)
+    _remove_quiet(out_json_path)
 
     if not data.get("ok"):
         return False, {
