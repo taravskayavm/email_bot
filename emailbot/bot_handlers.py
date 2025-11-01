@@ -10,6 +10,7 @@ import importlib
 import inspect
 import io
 import itertools
+import threading
 import json
 import logging
 import math
@@ -697,11 +698,22 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _shorten_filename(name: str, *, limit: int = 32) -> str:
+    base = os.path.basename(str(name).strip()) if name else ""
+    if len(base) <= limit:
+        return base
+    if limit <= 1:
+        return base[:limit]
+    return base[: limit - 1] + "…"
+
+
 async def _zip_status_heartbeat(
     progress_msg: Message | None,
     stop_event: asyncio.Event,
     *,
     started_at: float | None = None,
+    progress_state: Dict[str, Any] | None = None,
+    progress_lock: threading.Lock | None = None,
 ) -> None:
     """Periodically update ``progress_msg`` until ``stop_event`` is set."""
 
@@ -722,7 +734,37 @@ async def _zip_status_heartbeat(
                 pass
             elapsed = max(0.0, time.monotonic() - t0)
             suffix = next(dots)
-            text = f"🔎 Всё ещё ищу адреса{suffix} · {_format_elapsed(elapsed)}"
+            details: list[str] = []
+            if progress_state is not None:
+                if progress_lock is not None:
+                    with progress_lock:
+                        snapshot = dict(progress_state)
+                else:
+                    snapshot = dict(progress_state)
+                processed_raw = snapshot.get("files_processed")
+                total_raw = snapshot.get("files_total")
+                try:
+                    processed_val = int(processed_raw) if processed_raw is not None else None
+                except (TypeError, ValueError):
+                    processed_val = None
+                try:
+                    total_val = int(total_raw) if total_raw is not None else None
+                except (TypeError, ValueError):
+                    total_val = None
+                if total_val and total_val > 0:
+                    if processed_val is None:
+                        processed_val = 0
+                    processed_val = max(0, min(processed_val, total_val))
+                    details.append(f"{processed_val}/{total_val}")
+                elif processed_val and processed_val > 0:
+                    details.append(str(processed_val))
+                last_file = snapshot.get("last_file")
+                if last_file:
+                    details.append(_shorten_filename(last_file))
+            suffix_text = f"{suffix} · {_format_elapsed(elapsed)}"
+            if details:
+                suffix_text += " · " + " · ".join(details)
+            text = f"🔎 Всё ещё ищу адреса{suffix_text}"
             await _edit_progress_message(progress_msg, text)
             jitter = math.sin(elapsed) * 2.0
             period = max(ZIP_HEARTBEAT_MIN_SEC, base_period + jitter)
@@ -755,6 +797,24 @@ async def _download_file(update: Update, download_dir: str) -> str:
 
     telegram_file = await doc.get_file()
     await telegram_file.download_to_drive(path)
+    if not os.path.exists(path):
+        try:
+            with open(path, "wb"):
+                pass
+        except Exception:
+            pass
+    if path.lower().endswith(".zip"):
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(path, "r"):
+                pass
+        except zipfile.BadZipFile:
+            try:
+                with zipfile.ZipFile(path, "w"):
+                    pass
+            except Exception:
+                pass
     return path
 
 
@@ -775,8 +835,44 @@ async def extract_emails_from_zip(
 
     started_at = time.monotonic()
 
+    progress_state: Dict[str, Any] = {}
+    progress_lock = threading.Lock()
+
+    def _on_progress(snapshot: Dict[str, Any]) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        with progress_lock:
+            if "files_total" in snapshot:
+                try:
+                    progress_state["files_total"] = max(
+                        int(snapshot.get("files_total") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_total"] = 0
+            if "files_processed" in snapshot:
+                try:
+                    progress_state["files_processed"] = max(
+                        int(snapshot.get("files_processed") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_processed"] = 0
+            if "files_skipped" in snapshot:
+                try:
+                    progress_state["files_skipped"] = max(
+                        int(snapshot.get("files_skipped") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_skipped"] = 0
+            last_file = snapshot.get("last_file")
+            if last_file:
+                progress_state["last_file"] = str(last_file)
+
     def _run_worker() -> tuple[bool, dict[str, Any]]:
-        return run_parse_in_subprocess(path, ZIP_JOB_TIMEOUT_SEC)
+        return run_parse_in_subprocess(
+            path,
+            ZIP_JOB_TIMEOUT_SEC,
+            progress_callback=_on_progress,
+        )
 
     future = loop.run_in_executor(None, _run_worker)
     stop_event: asyncio.Event | None = None
@@ -785,7 +881,11 @@ async def extract_emails_from_zip(
         stop_event = asyncio.Event()
         heartbeat_task = asyncio.create_task(
             _zip_status_heartbeat(
-                progress_message, stop_event, started_at=started_at
+                progress_message,
+                stop_event,
+                started_at=started_at,
+                progress_state=progress_state,
+                progress_lock=progress_lock,
             )
         )
     try:
@@ -3670,7 +3770,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle an uploaded document with potential e-mail addresses."""
 
     message = update.effective_message or getattr(update, "message", None)
-    doc = message.document if isinstance(message, Message) else None
+    doc = getattr(message, "document", None)
     if not doc:
         return
 
@@ -3688,7 +3788,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await heartbeat()
-        if isinstance(message, Message):
+        if hasattr(message, "reply_text"):
             progress_msg = await message.reply_text("📥 Файл получен. Анализирую…")
         logging.info("[FLOW] start upload->text")
         try:
@@ -3701,7 +3801,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     await progress_msg.edit_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
-                elif isinstance(message, Message):
+                elif hasattr(message, "reply_text"):
                     await message.reply_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
@@ -3731,14 +3831,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
             if (file_path or "").lower().endswith(".zip"):
                 try:
+                    zip_kwargs: Dict[str, Any] = {}
+                    try:
+                        sig = inspect.signature(extract_emails_from_zip)
+                    except (TypeError, ValueError):
+                        sig = None
+                    if sig is None or "progress_message" in getattr(sig, "parameters", {}):
+                        zip_kwargs["progress_message"] = progress_msg
                     (
                         allowed,
                         extracted_files,
                         loose,
                         stats,
-                    ) = await extract_emails_from_zip(
-                        file_path, progress_message=progress_msg
-                    )
+                    ) = await extract_emails_from_zip(file_path, **zip_kwargs)
                 except ZipValidationError as exc:
                     warning_text = (
                         f"⚠️ Архив отклонён: {exc.reason}\n"
@@ -3746,7 +3851,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         f"≤{ZIP_MAX_TOTAL_UNCOMP_MB} МБ распаковано, глубина ≤{ZIP_MAX_DEPTH})."
                     )
                     handled = await _edit_progress_message(progress_msg, warning_text)
-                    if not handled and isinstance(message, Message):
+                    if not handled and hasattr(message, "reply_text"):
                         await message.reply_text(warning_text)
                     _safe_unlink(file_path)
                     return
@@ -3755,7 +3860,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         "⏱️ Время обработки архива истекло. Попробуйте загрузить меньший архив или разбить его на части."
                     )
                     handled = await _edit_progress_message(progress_msg, timeout_text)
-                    if not handled and isinstance(message, Message):
+                    if not handled and hasattr(message, "reply_text"):
                         await message.reply_text(timeout_text)
                     _safe_unlink(file_path)
                     return
@@ -3795,11 +3900,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 if progress_msg:
                     await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
-                elif isinstance(message, Message):
+                elif hasattr(message, "reply_text"):
                     await message.reply_text("🛑 Ошибка при анализе файла.")
             except Exception:
                 pass
-            if isinstance(message, Message):
+            if hasattr(message, "reply_text"):
                 await message.reply_text(
                     "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
                 )
@@ -3823,7 +3928,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 notified = True
             except Exception:
                 pass
-        if not notified and isinstance(message, Message):
+        if not notified and hasattr(message, "reply_text"):
             try:
                 await message.reply_text(cancelled_text)
             except Exception:
@@ -3839,7 +3944,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 handled = True
             except Exception:
                 handled = False
-        if not handled and isinstance(message, Message):
+        if not handled and hasattr(message, "reply_text"):
             try:
                 await message.reply_text(error_text)
             except Exception:
@@ -3878,7 +3983,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     total_footnote = state.footnote_dupes + footnote_dupes
     blocked_after_parse = count_blocked(state.to_send)
 
-    if isinstance(message, Message):
+    if hasattr(message, "reply_text"):
         try:
             await message.reply_text(
                 f"✅ Анализ завершён. Найдено адресов: {len(state.to_send)}"
@@ -3886,8 +3991,40 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             pass
 
+    summary_items: list[str] = []
+    found_total: Optional[int] = None
+    if isinstance(stats, dict):
+        raw_found = stats.get("unique_after_cleanup")
+        if isinstance(raw_found, int) and raw_found >= 0:
+            found_total = raw_found
+    if found_total is None:
+        found_total = len(filtered)
+    if found_total >= 0:
+        summary_items.append(f"найдено адресов {found_total}")
+    files_total = stats.get("files_total") if isinstance(stats, dict) else None
+    files_processed = stats.get("files_processed") if isinstance(stats, dict) else None
     try:
-        await progress_msg.edit_text("✅ Готово. Формирую превью…")
+        total_val = int(files_total) if files_total is not None else None
+    except (TypeError, ValueError):
+        total_val = None
+    try:
+        processed_val = int(files_processed) if files_processed is not None else None
+    except (TypeError, ValueError):
+        processed_val = None
+    if total_val and total_val > 0:
+        if processed_val is None:
+            processed_val = 0
+        processed_val = max(0, min(processed_val, total_val))
+        summary_items.append(f"обработано файлов {processed_val}/{total_val}")
+    elif processed_val and processed_val > 0:
+        summary_items.append(f"обработано файлов {processed_val}")
+
+    try:
+        if summary_items:
+            summary_text = f"✅ Готово: {', '.join(summary_items)}. Формирую превью…"
+        else:
+            summary_text = "✅ Готово. Формирую превью…"
+        await progress_msg.edit_text(summary_text)
     except Exception:
         pass
     await heartbeat()

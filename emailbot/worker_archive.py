@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 import logging
 import multiprocessing as mp
 import time
 import traceback
 
 from . import extraction as _extraction
+from .progress_watchdog import ProgressTracker
 
 
 logger = logging.getLogger(__name__)
@@ -17,8 +18,16 @@ logger = logging.getLogger(__name__)
 def _worker(zip_path: str, conn) -> None:
     """Worker process entry point."""
 
+    def _emit_progress(snapshot: Dict[str, Any]) -> None:
+        try:
+            conn.send({"progress": dict(snapshot)})
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
+
+    tracker = ProgressTracker(on_update=_emit_progress)
+
     try:
-        emails, stats = _extraction.extract_any(zip_path)
+        emails, stats = _extraction.extract_any(zip_path, tracker=tracker)
         try:
             conn.send({"ok": True, "emails": emails, "stats": stats})
         except Exception:  # pragma: no cover - best effort delivery
@@ -37,12 +46,25 @@ def _worker(zip_path: str, conn) -> None:
             pass
 
 
-def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict[str, Any]]:
+def run_parse_in_subprocess(
+    zip_path: str,
+    timeout_sec: int,
+    *,
+    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
+) -> Tuple[bool, Dict[str, Any]]:
     """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
 
     ctx = mp.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=False)
     process = ctx.Process(target=_worker, args=(zip_path, child_conn), daemon=False)
+
+    def _notify_progress(payload: Dict[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(dict(payload))
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("progress callback failed", exc_info=True)
 
     try:
         process.start()
@@ -63,30 +85,47 @@ def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict
     except Exception:  # pragma: no cover - best effort cleanup
         pass
 
-    deadline = time.time() + timeout_sec
+    deadline = time.monotonic() + timeout_sec
     data: Dict[str, Any] | None = None
 
-    while time.time() < deadline:
+    def _recv_message() -> Dict[str, Any] | None:
+        try:
+            message = parent_conn.recv()
+        except (EOFError, OSError):  # pragma: no cover - defensive
+            return None
+        if isinstance(message, dict) and "progress" in message:
+            payload = message.get("progress")
+            if isinstance(payload, dict):
+                _notify_progress(payload)
+            return None
+        return message
+
+    while time.monotonic() < deadline:
         try:
             if parent_conn.poll(0.2):
-                try:
-                    data = parent_conn.recv()
-                except (EOFError, OSError):  # pragma: no cover - defensive
-                    data = None
-                break
+                message = _recv_message()
+                if message is not None:
+                    data = message
+                    break
         except (EOFError, OSError):  # pragma: no cover - defensive
             break
 
         if not process.is_alive():
+            drained = False
             try:
-                if parent_conn.poll(0.1):
-                    data = parent_conn.recv()
+                while parent_conn.poll(0.1):
+                    message = _recv_message()
+                    if message is not None:
+                        data = message
+                        drained = True
+                        break
             except Exception:  # pragma: no cover - defensive
                 data = None
-            break
+            if drained or data is not None:
+                break
 
     if data is None:
-        timed_out = time.time() >= deadline
+        timed_out = time.monotonic() >= deadline
         try:
             if process.is_alive():
                 process.terminate()
@@ -127,7 +166,11 @@ def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict
             "traceback": data.get("traceback"),
         }
 
-    return True, {"emails": data["emails"], "stats": data.get("stats", {})}
+    stats = data.get("stats") or {}
+    if isinstance(stats, dict):
+        _notify_progress(stats)
+
+    return True, {"emails": data["emails"], "stats": stats}
 
 
 __all__ = ["run_parse_in_subprocess"]
