@@ -2664,9 +2664,15 @@ async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def send_hang_dump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send the latest hang dump file to the requester if it exists."""
 
+    user = update.effective_user
+    message = update.effective_message or getattr(update, "message", None)
+    if not user or user.id not in ADMIN_IDS:
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text("Команда доступна только администратору.")
+        return
+
     chat = update.effective_chat
     chat_id = chat.id if chat else None
-    message = update.effective_message or getattr(update, "message", None)
     dump_path = Path("var") / "hang_dump.txt"
     if not dump_path.exists():
         if message and hasattr(message, "reply_text"):
