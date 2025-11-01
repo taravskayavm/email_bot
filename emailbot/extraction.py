@@ -1306,24 +1306,58 @@ def extract_any(
             return hits, stats
         return sorted({h.email for h in hits}), stats
 
+    basename = os.path.basename(source) or source
+
+    def _progress_start() -> None:
+        if tracker is not None:
+            tracker.reset(total=1)
+
+    def _progress_finish(processed: bool) -> None:
+        if tracker is not None:
+            tracker.tick_file(basename, processed=processed)
+
     ext = os.path.splitext(source)[1].lower()
     if ext == ".pdf":
-        hits, stats = extract_from_pdf(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_pdf(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".docx":
-        hits, stats = extract_from_docx(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_docx(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".xlsx":
-        hits, stats = extract_from_xlsx(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_xlsx(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext in {".csv", ".txt"}:
-        hits, stats = extract_from_csv_or_text(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_csv_or_text(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
