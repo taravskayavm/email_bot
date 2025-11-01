@@ -93,6 +93,10 @@ def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict
                 process.join(2.0)
                 if process.is_alive() and hasattr(process, "kill"):
                     process.kill()
+                    try:
+                        process.join(0.5)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
         except Exception:  # pragma: no cover - defensive
             pass
 
