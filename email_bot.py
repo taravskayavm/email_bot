@@ -300,6 +300,7 @@ def main() -> None:
     app.add_handler(CommandHandler("url", bot_handlers.url_command))
     app.add_handler(CommandHandler("crawl", bot_handlers.crawl_command))
     app.add_handler(CommandHandler("drop", bot_handlers.handle_drop))
+    app.add_handler(CommandHandler("dump", bot_handlers.send_hang_dump))
 
     app.add_handler(
         MessageHandler(filters.Document.ALL, bot_handlers.handle_document)

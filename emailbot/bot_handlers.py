@@ -134,6 +134,17 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+SUPPORTED_DOCUMENT_EXTENSIONS = {
+    ".zip",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".txt",
+}
+
 ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
 ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
 try:
@@ -2650,6 +2661,48 @@ async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def send_hang_dump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the latest hang dump file to the requester if it exists."""
+
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    message = update.effective_message or getattr(update, "message", None)
+    dump_path = Path("var") / "hang_dump.txt"
+    if not dump_path.exists():
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text("Дамп не найден (var/hang_dump.txt).")
+        elif chat_id is not None:
+            await context.bot.send_message(
+                chat_id=chat_id, text="Дамп не найден (var/hang_dump.txt)."
+            )
+        return
+
+    try:
+        data = dump_path.read_bytes()
+    except OSError as exc:
+        text = f"Не удалось прочитать дамп: {exc}"
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text(text)
+        elif chat_id is not None:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        return
+
+    buf = io.BytesIO(data)
+    buf.name = "hang_dump.txt"
+    if chat_id is None:
+        return
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id, document=buf, filename="hang_dump.txt"
+        )
+    except Exception as exc:
+        text = f"Не удалось отправить дамп: {exc}"
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text(text)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+
+
 async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a short description of the bot."""
 
@@ -3772,6 +3825,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     message = update.effective_message or getattr(update, "message", None)
     doc = getattr(message, "document", None)
     if not doc:
+        return
+
+    filename_raw = doc.file_name or ""
+    ext = os.path.splitext(filename_raw)[1].lower()
+    if ext not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        if hasattr(message, "reply_text"):
+            await message.reply_text(
+                "Поддерживаются: PDF, DOC/DOCX, XLS/XLSX, CSV, TXT и ZIP архивы."
+            )
         return
 
     clear_stop()
@@ -6204,7 +6266,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await handle_url_text(update, context)
         return
     await update.message.reply_text(
-        "❌ Не распознана ссылка. Пришлите полную URL, например: https://site.tld/path"
+        "Пришлите файл (PDF/DOC/DOCX/XLS/XLSX/CSV/TXT/ZIP) или ссылку на сайт."
     )
     return
 
