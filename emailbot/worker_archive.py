@@ -37,31 +37,6 @@ def _worker(zip_path: str, conn) -> None:
             pass
 
 
-def _terminate_process(process: mp.Process) -> None:
-    """Terminate the process as gracefully as possible."""
-
-    try:
-        if process.is_alive():
-            process.terminate()
-    except Exception:  # pragma: no cover - defensive
-        pass
-
-    try:
-        process.join(2.0)
-    except Exception:  # pragma: no cover - defensive
-        pass
-
-    if process.is_alive() and hasattr(process, "kill"):
-        try:
-            process.kill()
-        except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            process.join(1.0)
-        except Exception:  # pragma: no cover - defensive
-            pass
-
-
 def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict[str, Any]]:
     """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
 
@@ -88,46 +63,50 @@ def run_parse_in_subprocess(zip_path: str, timeout_sec: int) -> Tuple[bool, Dict
     except Exception:  # pragma: no cover - best effort cleanup
         pass
 
-    deadline = time.monotonic() + timeout_sec
+    deadline = time.time() + timeout_sec
     data: Dict[str, Any] | None = None
 
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-
-        poll_timeout = min(0.2, max(0.0, remaining))
+    while time.time() < deadline:
         try:
-            if parent_conn.poll(poll_timeout):
-                data = parent_conn.recv()
+            if parent_conn.poll(0.2):
+                try:
+                    data = parent_conn.recv()
+                except (EOFError, OSError):  # pragma: no cover - defensive
+                    data = None
                 break
         except (EOFError, OSError):  # pragma: no cover - defensive
             break
 
         if not process.is_alive():
             try:
-                if parent_conn.poll(0.0):
+                if parent_conn.poll(0.1):
                     data = parent_conn.recv()
             except Exception:  # pragma: no cover - defensive
-                pass
+                data = None
             break
 
     if data is None:
-        if process.is_alive():
-            _terminate_process(process)
-            try:
-                parent_conn.close()
-            except Exception:  # pragma: no cover - best effort cleanup
-                pass
+        timed_out = time.time() >= deadline
+        try:
+            if process.is_alive():
+                process.terminate()
+                process.join(2.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        try:
+            parent_conn.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+
+        if timed_out:
             return False, {"error": f"timeout after {timeout_sec}s"}
 
         try:
             process.join(timeout=0.0)
         except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            parent_conn.close()
-        except Exception:  # pragma: no cover - best effort cleanup
             pass
         return False, {"error": "no result from subprocess"}
 
