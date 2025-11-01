@@ -25,13 +25,29 @@ def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _remove_quiet(path: str | None) -> None:
+def _load_json(path: str) -> Dict[str, Any] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:  # pragma: no cover - best effort read
+        return None
+
+
+def _remove_quiet(path: os.PathLike[str] | str | None) -> None:
     if not path:
         return
     try:
         os.remove(path)
     except OSError:  # pragma: no cover - best effort cleanup
         pass
+
+
+def _cleanup_artifacts(*paths: os.PathLike[str] | str | None) -> None:
+    for path in paths:
+        if not path:
+            continue
+        _remove_quiet(path)
+        _remove_quiet(f"{path}.part")
 
 
 def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> None:
@@ -126,21 +142,14 @@ def run_parse_in_subprocess(
                         last_progress_mtime = mtime
 
         if os.path.exists(out_json_path):
-            try:
-                with open(out_json_path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except Exception:  # pragma: no cover - best effort read
-                data = None
-            break
+            data = _load_json(out_json_path)
+            if data is not None:
+                break
 
         if not process.is_alive():
             for _ in range(10):
                 if os.path.exists(out_json_path):
-                    try:
-                        with open(out_json_path, "r", encoding="utf-8") as fh:
-                            data = json.load(fh)
-                    except Exception:  # pragma: no cover - best effort read
-                        data = None
+                    data = _load_json(out_json_path)
                     break
                 time.sleep(0.2)
             break
@@ -159,16 +168,14 @@ def run_parse_in_subprocess(
             pass
 
         if timed_out:
-            _remove_quiet(progress_path)
-            _remove_quiet(out_json_path)
+            _cleanup_artifacts(progress_path, out_json_path)
             return False, {"error": f"timeout after {timeout_sec}s"}
 
         try:
             process.join(timeout=0.0)
         except Exception:  # pragma: no cover - defensive
             pass
-        _remove_quiet(progress_path)
-        _remove_quiet(out_json_path)
+        _cleanup_artifacts(progress_path, out_json_path)
         return False, {"error": "no result from subprocess"}
 
     if process.is_alive():
@@ -177,8 +184,7 @@ def run_parse_in_subprocess(
         except Exception:  # pragma: no cover - defensive
             pass
 
-    _remove_quiet(progress_path)
-    _remove_quiet(out_json_path)
+    _cleanup_artifacts(progress_path, out_json_path)
 
     if not data.get("ok"):
         return False, {
