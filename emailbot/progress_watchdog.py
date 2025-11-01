@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 import faulthandler
 
@@ -34,6 +34,9 @@ class _ProgressSnapshot(TypedDict, total=False):
     last_file: str
 
 
+logger = logging.getLogger(__name__)
+
+
 class ProgressTracker:
     """Track long-running job progress in a thread-safe way.
 
@@ -43,13 +46,23 @@ class ProgressTracker:
     record progress.  ``reset`` updates counters when a new batch starts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_update: Callable[["_ProgressSnapshot"], None] | None = None) -> None:
         self._lock = threading.Lock()
         self._last_progress = time.monotonic()
         self._files_total = 0
         self._files_processed = 0
         self._files_skipped = 0
         self._last_file = ""
+        self._on_update = on_update
+
+    def _emit_update(self, snapshot: "_ProgressSnapshot") -> None:
+        callback = self._on_update
+        if callback is None:
+            return
+        try:
+            callback(snapshot)
+        except Exception:  # pragma: no cover - best effort notification
+            logger.debug("progress callback failed", exc_info=True)
 
     def reset(self, *, total: int | None = None) -> None:
         """Reset counters for a new batch of work."""
@@ -61,6 +74,14 @@ class ProgressTracker:
             self._files_skipped = 0
             self._last_file = ""
             self._last_progress = time.monotonic()
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
 
     def reset_total(self, total: int) -> None:
         """Reset the known total number of files in the batch."""
@@ -74,6 +95,14 @@ class ProgressTracker:
             return
         with self._lock:
             self._files_total += int(count)
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
 
     def tick_file(self, filename: str, *, processed: bool = True) -> None:
         """Mark ``filename`` as processed and refresh the progress timestamp."""
@@ -86,6 +115,14 @@ class ProgressTracker:
                 self._files_skipped += 1
             self._last_file = filename
             self._last_progress = now
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
 
     def snapshot(self) -> _ProgressSnapshot:
         """Return a shallow copy of the current progress state."""

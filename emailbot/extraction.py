@@ -56,7 +56,7 @@ from .settings_store import get
 from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
-from .progress_watchdog import heartbeat_now
+from .progress_watchdog import ProgressTracker, heartbeat_now
 
 try:  # pragma: no cover - optional dependency for aggressive harvesting
     from .parsing.harvester import harvest_emails as _harvest_emails
@@ -1283,6 +1283,8 @@ def extract_any(
     source: str,
     stop_event: Optional[object] = None,
     _return_hits: bool = False,
+    *,
+    tracker: ProgressTracker | None = None,
 ) -> tuple[list[EmailHit] | list[str], Dict]:
     """Определить тип источника и извлечь e-mail-адреса.
 
@@ -1326,7 +1328,7 @@ def extract_any(
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".zip":
-        hits, stats = extract_emails_from_zip(source, stop_event)
+        hits, stats = extract_emails_from_zip(source, stop_event, tracker=tracker)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
