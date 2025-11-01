@@ -879,6 +879,7 @@ async def extract_emails_from_zip(
                 progress_state["last_file"] = str(last_file)
 
     def _run_worker() -> tuple[bool, dict[str, Any]]:
+        # windows-safe worker IPC: result + progress snapshots via JSON files
         return run_parse_in_subprocess(
             path,
             ZIP_JOB_TIMEOUT_SEC,
