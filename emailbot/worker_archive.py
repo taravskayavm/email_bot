@@ -19,11 +19,17 @@ def _worker(zip_path: str, conn) -> None:
 
     try:
         emails, stats = _extraction.extract_any(zip_path)
-        conn.send({"ok": True, "emails": emails, "stats": stats})
+        try:
+            conn.send({"ok": True, "emails": emails, "stats": stats})
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
     except Exception as exc:  # pragma: no cover - defensive fallback
         tb = traceback.format_exc()
         logger.warning("zip worker failed: %s", exc)
-        conn.send({"ok": False, "error": str(exc), "traceback": tb})
+        try:
+            conn.send({"ok": False, "error": str(exc), "traceback": tb})
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
     finally:
         try:
             conn.close()
