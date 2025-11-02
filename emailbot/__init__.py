@@ -1,4 +1,11 @@
-"""Helpers for the email bot."""
+import multiprocessing
+# предотвращает рекурсивный импорт при spawn
+if multiprocessing.current_process().name != "MainProcess":
+    import sys
+
+    sys.modules["emailbot"] = None
+
+__doc__ = """Helpers for the email bot."""
 
 import importlib
 
