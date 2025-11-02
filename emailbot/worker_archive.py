@@ -12,7 +12,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from .progress_watchdog import ProgressTracker
+from .progress_watchdog import ProgressTracker, heartbeat_now
 
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,12 @@ def run_parse_in_subprocess(
     started = time.monotonic()
     parent_heartbeat_at = 0.0
 
+    # [EB-FIX] сразу дёрнем глобальный «пульс» — watchdog увидит активность
+    try:
+        heartbeat_now()
+    except Exception:
+        pass
+
     while time.monotonic() < deadline:
         if os.path.exists(progress_path):
             try:
@@ -197,9 +203,14 @@ def run_parse_in_subprocess(
                         _notify_progress(snapshot)
                         last_progress_mtime = mtime
 
-        # Родительский heartbeat раз в ~1с, чтобы watchdog видел активность даже при молчаливом воркере.
+        # [EB-FIX] Родительский heartbeat раз в ~1с, чтобы watchdog видел активность
         now = time.monotonic()
         if now - parent_heartbeat_at >= 1.0:
+            # Сначала обновляем глобальный пульс для watchdog
+            try:
+                heartbeat_now()
+            except Exception:
+                pass
             try:
                 payload = _load_json(progress_path) or {}
                 progress_snapshot = payload.get("progress")
@@ -217,9 +228,9 @@ def run_parse_in_subprocess(
                     last_progress_mtime = os.path.getmtime(progress_path)
                 except OSError:
                     pass
-                parent_heartbeat_at = now
             except Exception:
                 pass
+            parent_heartbeat_at = now
 
         if os.path.exists(out_json_path):
             data = _load_json(out_json_path)
