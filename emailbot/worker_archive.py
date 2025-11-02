@@ -53,8 +53,7 @@ def _cleanup_artifacts(*paths: os.PathLike[str] | str | None) -> None:
 def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> None:
     """Worker process entry point."""
 
-    # Лёгкий импорт: тянем «тяжёлое» только внутри подпроцесса,
-    # чтобы избежать падений на уровне импортов пакета при spawn (Windows).
+    # Ленивый импорт тяжёлых модулей, чтобы spawn не падал на импортёрах.
     try:
         from . import extraction as _extraction  # lazy import
     except Exception as exc:  # pragma: no cover - defensive
@@ -78,8 +77,34 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
 
     tracker = ProgressTracker(on_update=_emit_progress)
 
+    # Bootstrap-прогресс: чтобы вотчдог увидел «жизнь» сразу после старта
+    try:
+        _emit_progress({"stage": "boot", "done": 0, "total": None})
+    except Exception:
+        pass
+
     try:
         emails, stats = _extraction.extract_any(zip_path, tracker=tracker)
+
+        # На случай, если парсер ни разу не дёрнул tracker (пустой архив/всё отфильтровано)
+        try:
+            processed = (
+                stats.get("files_processed")
+                or stats.get("processed")
+                or stats.get("done")
+                or 0
+            )
+            total = (
+                stats.get("files_total")
+                or stats.get("total")
+                or stats.get("expected")
+                or None
+            )
+            _emit_progress(
+                {"stage": "finalize", "done": processed, "total": total}
+            )
+        except Exception:
+            pass
         _atomic_write_json(
             out_json_path,
             {"ok": True, "emails": emails, "stats": stats},
