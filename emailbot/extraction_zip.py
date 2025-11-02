@@ -521,6 +521,13 @@ def extract_emails_from_zip(
                     ) + 1
                     if tracker is not None:
                         tracker.tick_file(name, processed=False)
+                    if _depth == 0:
+                        _tracker_update(
+                            stage="process",
+                            current=name,
+                            done=int(stats.get("files_processed", 0)),
+                            total=total_members,
+                        )
                     continue
                 except Exception as exc:  # pragma: no cover - defensive logging
                     logger.debug(
@@ -534,6 +541,13 @@ def extract_emails_from_zip(
                     stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
                     if tracker is not None:
                         tracker.tick_file(name, processed=False)
+                    if _depth == 0:
+                        _tracker_update(
+                            stage="process",
+                            current=name,
+                            done=int(stats.get("files_processed", 0)),
+                            total=total_members,
+                        )
                     continue
 
                 hits.extend(inner_hits)
@@ -548,14 +562,13 @@ def extract_emails_from_zip(
                 processed_tick = True
                 if tracker is not None:
                     tracker.tick_file(name, processed=True)
-                finally:
-                    if _depth == 0:
-                        _tracker_update(
-                            stage="process",
-                            current=name,
-                            done=int(stats.get("files_processed", 0)),
-                            total=total_members,
-                        )
+                if _depth == 0:
+                    _tracker_update(
+                        stage="process",
+                        current=name,
+                        done=int(stats.get("files_processed", 0)),
+                        total=total_members,
+                    )
             if _depth == 0:
                 _tracker_update(
                     stage="done",
