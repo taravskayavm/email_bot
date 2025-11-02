@@ -393,12 +393,20 @@ def extract_emails_from_zip(
     try:
         with z:
             member_names = list(_iter_zip_member_names(z))
-            stats["files_total"] = len(member_names)
+            total_members = len(member_names)
+            stats["files_total"] = total_members
             if tracker is not None and _depth == 0:
-                tracker.reset_total(len(member_names))
-                _tracker_update(stage="scan", done=0, total=len(member_names))
+                tracker.reset_total(total_members)
+                _tracker_update(stage="scan", done=0, total=total_members)
             elif _depth == 0:
-                _tracker_update(stage="scan", done=0, total=len(member_names))
+                _tracker_update(stage="scan", done=0, total=total_members)
+            if _depth == 0 and total_members:
+                _tracker_update(
+                    stage="process",
+                    current=None,
+                    done=int(stats.get("files_processed", 0)),
+                    total=total_members,
+                )
             for name in member_names:
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     break
@@ -409,7 +417,7 @@ def extract_emails_from_zip(
                         stage="process",
                         current=name,
                         done=int(stats.get("files_processed", 0)),
-                        total=len(member_names),
+                        total=total_members,
                     )
                 try:
                     info = z.getinfo(name)
@@ -540,6 +548,14 @@ def extract_emails_from_zip(
                 processed_tick = True
                 if tracker is not None:
                     tracker.tick_file(name, processed=True)
+                finally:
+                    if _depth == 0:
+                        _tracker_update(
+                            stage="process",
+                            current=name,
+                            done=int(stats.get("files_processed", 0)),
+                            total=total_members,
+                        )
             if _depth == 0:
                 _tracker_update(
                     stage="done",
