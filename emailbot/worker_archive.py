@@ -79,7 +79,7 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
 
     # Bootstrap-прогресс: чтобы вотчдог увидел «жизнь» сразу после старта
     try:
-        _emit_progress({"stage": "boot", "done": 0, "total": None})
+        _emit_progress({"stage": "worker_boot", "done": 0, "total": None})
     except Exception:
         pass
 
@@ -143,11 +143,8 @@ def run_parse_in_subprocess(
     var_dir.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
     out_json_path = str(var_dir / f"worker_result_{token}.json")
-    progress_path = (
-        str(var_dir / f"worker_progress_{token}.json")
-        if progress_callback is not None
-        else None
-    )
+    # Прогресс-файл ведём всегда — это источник правды для watchdog.
+    progress_path = str(var_dir / f"worker_progress_{token}.json")
     process = ctx.Process(
         target=_worker,
         args=(zip_path, out_json_path, progress_path),
@@ -177,10 +174,12 @@ def run_parse_in_subprocess(
     deadline = time.monotonic() + timeout_sec
     data: Dict[str, Any] | None = None
     last_progress_mtime: float | None = None
+    last_worker_snapshot: Dict[str, Any] | None = None
     started = time.monotonic()
+    parent_heartbeat_at = 0.0
 
     while time.monotonic() < deadline:
-        if progress_path and os.path.exists(progress_path):
+        if os.path.exists(progress_path):
             try:
                 mtime = os.path.getmtime(progress_path)
             except OSError:
@@ -194,8 +193,33 @@ def run_parse_in_subprocess(
                 if isinstance(payload, dict):
                     snapshot = payload.get("progress")
                     if isinstance(snapshot, dict):
+                        last_worker_snapshot = dict(snapshot)
                         _notify_progress(snapshot)
                         last_progress_mtime = mtime
+
+        # Родительский heartbeat раз в ~1с, чтобы watchdog видел активность даже при молчаливом воркере.
+        now = time.monotonic()
+        if now - parent_heartbeat_at >= 1.0:
+            try:
+                payload = _load_json(progress_path) or {}
+                progress_snapshot = payload.get("progress")
+                if isinstance(progress_snapshot, dict):
+                    snapshot = dict(progress_snapshot)
+                elif isinstance(last_worker_snapshot, dict):
+                    snapshot = dict(last_worker_snapshot)
+                else:
+                    snapshot = {"stage": "parent_wait"}
+                payload["progress"] = snapshot
+                payload["parent"] = {"stage": "parent_wait", "t": now}
+                _atomic_write_json(progress_path, payload)
+                last_worker_snapshot = dict(snapshot)
+                try:
+                    last_progress_mtime = os.path.getmtime(progress_path)
+                except OSError:
+                    pass
+                parent_heartbeat_at = now
+            except Exception:
+                pass
 
         if os.path.exists(out_json_path):
             data = _load_json(out_json_path)
