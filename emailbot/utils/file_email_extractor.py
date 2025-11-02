@@ -7,19 +7,63 @@ import html
 import io
 import re
 import zipfile
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Set, Tuple
 from urllib.parse import unquote
 
 from emailbot.run_control import should_stop
 from emailbot.utils.email_clean import clean_and_normalize_email
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
+SAFE_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}",
+    re.ASCII,
+)
+EMAIL_RE = SAFE_EMAIL_RE
+CHUNK_BYTES = 128 * 1024
+MAX_MATCHES_PER_FILE = 1000
 MAX_BYTES = 25 * 1024 * 1024  # 25 MB per file
 ALLOWED_IN_ZIP = {".txt", ".csv", ".tsv", ".pdf", ".docx", ".xlsx", ".htm", ".html"}
 
 
 class ExtractError(Exception):
     """Raised when we cannot process a file."""
+
+
+def _iter_chunks(text: str, chunk_bytes: int = CHUNK_BYTES) -> Iterable[str]:
+    if not text:
+        return
+    encoded = text.encode("utf-8", errors="ignore")
+    view = memoryview(encoded)
+    for start in range(0, len(view), chunk_bytes):
+        yield view[start : start + chunk_bytes].tobytes().decode("utf-8", errors="ignore")
+
+
+def extract_emails_from_text(text: str) -> Set[str]:
+    """Find potential e-mail addresses inside ``text`` using chunked scanning."""
+
+    found: Set[str] = set()
+    carry = ""
+    for chunk in _iter_chunks(text):
+        if carry:
+            chunk = carry + chunk
+            carry = ""
+        if not chunk:
+            continue
+        parts = chunk.split()
+        if chunk and not chunk[-1].isspace():
+            carry = parts.pop() if parts else chunk
+        for part in parts:
+            if "@" not in part:
+                continue
+            for match in SAFE_EMAIL_RE.finditer(part):
+                found.add(match.group(0))
+                if len(found) >= MAX_MATCHES_PER_FILE:
+                    return found
+    if carry and "@" in carry:
+        for match in SAFE_EMAIL_RE.finditer(carry):
+            found.add(match.group(0))
+            if len(found) >= MAX_MATCHES_PER_FILE:
+                break
+    return found
 
 
 def _norm_and_dedupe(cands: List[str]) -> Tuple[List[str], Dict[str, int]]:
@@ -46,7 +90,8 @@ def _from_text(data: bytes) -> Tuple[List[str], Dict[str, int]]:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("latin-1", errors="ignore")
-    return _norm_and_dedupe(EMAIL_RE.findall(text))
+    emails = extract_emails_from_text(text)
+    return _norm_and_dedupe(list(emails))
 
 
 def _find_obfuscated_emails(text: str) -> List[str]:
@@ -243,6 +288,12 @@ def _from_zip(data: bytes) -> Tuple[List[str], Dict[str, int], List[str]]:
 
     ok_all = list(dict.fromkeys(ok_all))
     return ok_all, rejects, errors
+
+
+def extract_from_plain_text(text: str) -> Set[str]:
+    """Public helper for quickly extracting e-mail addresses from ``text``."""
+
+    return extract_emails_from_text(text)
 
 
 def extract_emails_from_bytes(data: bytes, filename: str) -> Tuple[List[str], Dict[str, int], str | None]:
