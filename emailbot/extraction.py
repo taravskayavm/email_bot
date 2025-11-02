@@ -1308,6 +1308,13 @@ def extract_any(
 
     basename = os.path.basename(source) or source
 
+    if tracker is not None:
+        try:
+            # Маячок роутинга (не ломает старый UI)
+            tracker.update(stage="route", current=basename, processed=0, total=None)
+        except Exception:
+            pass
+
     def _progress_start() -> None:
         if tracker is not None:
             tracker.reset(total=1)
@@ -1362,6 +1369,7 @@ def extract_any(
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".zip":
+        # ⇩ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: используем обработчик, который шлёт пофайловый прогресс
         hits, stats = extract_emails_from_zip(source, stop_event, tracker=tracker)
         if _return_hits:
             return hits, stats

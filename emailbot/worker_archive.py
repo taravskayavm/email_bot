@@ -92,7 +92,23 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
         pass
 
     try:
+        try:
+            _emit_progress({"stage": "route_start", "processed": 0, "total": None})
+        except Exception:
+            pass
+
         emails, stats = _extraction.extract_any(zip_path, tracker=tracker)
+
+        try:
+            _emit_progress(
+                {
+                    "stage": "route_done",
+                    "processed": stats.get("processed", 0),
+                    "total": stats.get("total", None),
+                }
+            )
+        except Exception:
+            pass
 
         # На случай, если парсер ни разу не дёрнул tracker (пустой архив/всё отфильтровано)
         try:
