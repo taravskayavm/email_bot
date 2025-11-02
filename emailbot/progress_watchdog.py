@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Callable, TypedDict
+from typing import Any, Callable, TypedDict, cast
 
 import faulthandler
 
@@ -32,6 +32,10 @@ class _ProgressSnapshot(TypedDict, total=False):
     files_processed: int
     files_skipped: int
     last_file: str
+    stage: str
+    current: str
+    done: int
+    total: int
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +127,25 @@ class ProgressTracker:
                 last_file=self._last_file,
             )
         self._emit_update(snapshot)
+
+    def update(self, **fields: Any) -> None:
+        """Emit an ad-hoc snapshot with additional ``fields``."""
+
+        now = time.monotonic()
+        with self._lock:
+            self._last_progress = now
+            payload: dict[str, Any] = {
+                "last_progress": self._last_progress,
+                "files_total": self._files_total,
+                "files_processed": self._files_processed,
+                "files_skipped": self._files_skipped,
+                "last_file": self._last_file,
+            }
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                payload[key] = value
+        self._emit_update(cast(_ProgressSnapshot, payload))
 
     def snapshot(self) -> _ProgressSnapshot:
         """Return a shallow copy of the current progress state."""

@@ -379,17 +379,38 @@ def extract_emails_from_zip(
         "last_file": "",
     }
 
+    def _tracker_update(**kwargs: Any) -> None:
+        if tracker is None:
+            return
+        updater = getattr(tracker, "update", None)
+        if not callable(updater):
+            return
+        try:
+            updater(**kwargs)
+        except Exception:
+            logger.debug("tracker update failed", exc_info=True)
+
     try:
         with z:
             member_names = list(_iter_zip_member_names(z))
             stats["files_total"] = len(member_names)
             if tracker is not None and _depth == 0:
                 tracker.reset_total(len(member_names))
+                _tracker_update(stage="scan", done=0, total=len(member_names))
+            elif _depth == 0:
+                _tracker_update(stage="scan", done=0, total=len(member_names))
             for name in member_names:
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     break
                 stats["last_file"] = name
                 processed_tick = False
+                if _depth == 0:
+                    _tracker_update(
+                        stage="process",
+                        current=name,
+                        done=int(stats.get("files_processed", 0)),
+                        total=len(member_names),
+                    )
                 try:
                     info = z.getinfo(name)
                 except KeyError:
@@ -519,6 +540,12 @@ def extract_emails_from_zip(
                 processed_tick = True
                 if tracker is not None:
                     tracker.tick_file(name, processed=True)
+            if _depth == 0:
+                _tracker_update(
+                    stage="done",
+                    done=int(stats.get("files_processed", 0)),
+                    total=int(stats.get("files_total", 0)),
+                )
     except _ZipLimitError as exc:
         if exc.reason == "too many files":
             logger.warning("zip has too many files: %s", path)
