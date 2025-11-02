@@ -71,6 +71,7 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
         )
     except Exception as exc:  # pragma: no cover - defensive fallback
         tb = traceback.format_exc()
+        # Ensure we use the standard logging API to avoid deprecated aliases.
         logger.warning("zip worker failed: %s", exc)
         try:
             _atomic_write_json(
@@ -124,6 +125,17 @@ def run_parse_in_subprocess(
     last_progress_mtime: float | None = None
 
     while time.monotonic() < deadline:
+        if not process.is_alive() and not os.path.exists(out_json_path):
+            logger.error(
+                "zip worker exited prematurely without producing output"
+            )
+            try:
+                process.join(timeout=0.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            _cleanup_artifacts(progress_path, out_json_path)
+            return False, {"error": "worker exited prematurely (no output)"}
+
         if progress_path and os.path.exists(progress_path):
             try:
                 mtime = os.path.getmtime(progress_path)
