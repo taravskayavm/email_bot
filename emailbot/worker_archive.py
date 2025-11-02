@@ -105,7 +105,12 @@ def run_parse_in_subprocess(
 ) -> Tuple[bool, Dict[str, Any]]:
     """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
 
-    ctx = mp.get_context("spawn")
+    # На Windows spawn может ломаться из-за инициализации пакета.
+    # Пробуем "forkserver" если доступен, иначе spawn, но через стартовый модуль без import emailbot.*
+    try:
+        ctx = mp.get_context("forkserver")
+    except ValueError:
+        ctx = mp.get_context("spawn")
 
     # Абсолютная директория для артефактов, чтобы не зависеть от CWD подпроцесса
     base_dir = Path(__file__).resolve().parent.parent
@@ -121,8 +126,14 @@ def run_parse_in_subprocess(
     process = ctx.Process(
         target=_worker,
         args=(zip_path, out_json_path, progress_path),
-        daemon=False,
+        daemon=True,
     )
+
+    # Убираем привязку к контексту telegram/logging в подпроцессе
+    process.daemon = False
+    process.authkey = b""
+
+    logger.info("Starting zip worker via %s context", ctx.get_start_method())
 
     def _notify_progress(payload: Dict[str, Any]) -> None:
         if progress_callback is None:
