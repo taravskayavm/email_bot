@@ -387,10 +387,17 @@ def extract_emails_from_zip(
             return
         payload = dict(kwargs)
         done_value = payload.get("done")
-        if done_value is not None and "processed" not in payload:
+        processed_value = payload.get("processed")
+        if done_value is not None and processed_value is None:
             payload["processed"] = done_value
-        elif "processed" not in payload:
-            payload["processed"] = int(stats.get("files_processed", 0))
+        elif processed_value is not None and done_value is None:
+            payload["done"] = processed_value
+        elif processed_value is None:
+            current_processed = int(stats.get("files_processed", 0))
+            payload["processed"] = current_processed
+            payload.setdefault("done", current_processed)
+        if "file" not in payload and payload.get("current") is not None:
+            payload["file"] = payload["current"]
         if "total" not in payload:
             payload["total"] = int(stats.get("files_total", 0))
         try:

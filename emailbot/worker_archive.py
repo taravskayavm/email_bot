@@ -71,7 +71,15 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
         if progress_path is None:
             return
         try:
-            _atomic_write_json(progress_path, {"progress": dict(snapshot)})
+            # [EB-FIX] Нормализуем схему прогресса для обратной совместимости UI.
+            snap = dict(snapshot)
+            if "processed" in snap and "done" not in snap:
+                snap["done"] = snap["processed"]
+            if "done" in snap and "processed" not in snap:
+                snap["processed"] = snap["done"]
+            if "current" in snap and "file" not in snap:
+                snap["file"] = snap["current"]
+            _atomic_write_json(progress_path, {"progress": snap})
         except Exception:  # pragma: no cover - best effort delivery
             pass
 
@@ -212,7 +220,19 @@ def run_parse_in_subprocess(
             try:
                 if not os.path.exists(progress_path):
                     with open(progress_path, "w", encoding="utf-8") as fh:
-                        json.dump({"progress": {"stage": "parent_wait", "t": now}}, fh)
+                        json.dump(
+                            {
+                                "progress": {
+                                    "stage": "parent_wait",
+                                    "t": now,
+                                    # [EB-FIX] добавим done/processed/total, чтобы UI не залипал на 0/3
+                                    "done": 0,
+                                    "processed": 0,
+                                    "total": 0,
+                                }
+                            },
+                            fh,
+                        )
                 else:
                     os.utime(progress_path, None)
             except Exception:
