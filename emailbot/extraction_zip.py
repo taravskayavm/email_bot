@@ -385,8 +385,16 @@ def extract_emails_from_zip(
         updater = getattr(tracker, "update", None)
         if not callable(updater):
             return
+        payload = dict(kwargs)
+        done_value = payload.get("done")
+        if done_value is not None and "processed" not in payload:
+            payload["processed"] = done_value
+        elif "processed" not in payload:
+            payload["processed"] = int(stats.get("files_processed", 0))
+        if "total" not in payload:
+            payload["total"] = int(stats.get("files_total", 0))
         try:
-            updater(**kwargs)
+            updater(**payload)
         except Exception:
             logger.debug("tracker update failed", exc_info=True)
 
@@ -411,164 +419,170 @@ def extract_emails_from_zip(
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
                     break
                 stats["last_file"] = name
+                heartbeat_now()
+                file_start = time.monotonic()
+                last_pulse = file_start
                 processed_tick = False
                 if _depth == 0:
                     _tracker_update(
-                        stage="process",
+                        stage="prepare",
                         current=name,
                         done=int(stats.get("files_processed", 0)),
                         total=total_members,
                     )
-                try:
-                    info = z.getinfo(name)
-                except KeyError:
-                    logger.warning("missing zip entry in %s: %s", path, name)
-                    stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
-                    if tracker is not None:
-                        tracker.tick_file(name, processed=False)
-                    continue
-                if info.flag_bits & 0x1:
-                    logger.warning("encrypted file skipped in zip %s: %s", path, name)
-                    if tracker is not None:
-                        tracker.tick_file(name, processed=False)
-                    continue
-                if not _safe_path(name):
-                    logger.warning("unsafe path in zip %s: %s", path, name)
-                    return [], {"errors": ["unsafe path"]}
-                ext = os.path.splitext(name)[1].lower()
-                if ext in DENY_EXTS:
-                    logger.warning("deny-listed extension in zip %s: %s", path, name)
-                    return [], {"errors": ["forbidden extension"]}
-                if ext == ".zip":
-                    if _depth + 1 > MAX_DEPTH:
-                        logger.warning("nested zip depth exceeded in %s: %s", path, name)
-                        return [], {"errors": ["max depth exceeded"]}
-                    data = z.read(info)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                        tmp.write(data)
-                        tmp_path = tmp.name
-                    try:
-                        inner_hits, inner_stats = extract_emails_from_zip(
-                            tmp_path,
-                            stop_event,
-                            _depth=_depth + 1,
-                            tracker=tracker,
-                        )
-                        for h in inner_hits:
-                            suffix = ""
-                            if "#" in h.source_ref:
-                                suffix = "#" + h.source_ref.split("#", 1)[1]
-                            new_ref = f"zip:{path}|{name}{suffix}"
-                            hits.append(
-                                EmailHit(
-                                    email=h.email,
-                                    source_ref=new_ref,
-                                    origin=h.origin,
-                                    pre=h.pre,
-                                    post=h.post,
-                                )
+
+                def _pulse(stage: str, *, force: bool = False) -> None:
+                    nonlocal last_pulse
+                    now = time.monotonic()
+                    if force or (now - last_pulse) >= 0.3:
+                        heartbeat_now()
+                        if _depth == 0:
+                            _tracker_update(
+                                stage=stage,
+                                current=name,
+                                done=int(stats.get("files_processed", 0)),
+                                total=total_members,
+                                elapsed=round(now - file_start, 3),
                             )
-                        for k, v in inner_stats.items():
-                            if k in _PROGRESS_KEYS:
-                                continue
-                            if isinstance(v, int):
-                                stats[k] = stats.get(k, 0) + v
-                        current_total = int(stats.get("files_total", 0))
-                        inner_total = int(inner_stats.get("files_total") or 0)
-                        stats["files_total"] = max(current_total + inner_total - 1, 0)
-                        if tracker is not None and inner_total > 0:
-                            tracker.extend_total(max(inner_total - 1, 0))
-                        stats["files_processed"] = int(stats.get("files_processed", 0)) + int(
-                            inner_stats.get("files_processed") or 0
+                        last_pulse = now
+
+                try:
+                    try:
+                        info = z.getinfo(name)
+                    except KeyError:
+                        logger.warning("missing zip entry in %s: %s", path, name)
+                        stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                        continue
+
+                    _pulse("processing", force=True)
+
+                    if info.flag_bits & 0x1:
+                        logger.warning("encrypted file skipped in zip %s: %s", path, name)
+                        continue
+                    if not _safe_path(name):
+                        logger.warning("unsafe path in zip %s: %s", path, name)
+                        return [], {"errors": ["unsafe path"]}
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in DENY_EXTS:
+                        logger.warning("deny-listed extension in zip %s: %s", path, name)
+                        return [], {"errors": ["forbidden extension"]}
+                    if ext == ".zip":
+                        if _depth + 1 > MAX_DEPTH:
+                            logger.warning("nested zip depth exceeded in %s: %s", path, name)
+                            return [], {"errors": ["max depth exceeded"]}
+                        data = z.read(info)
+                        _pulse("processing")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                            tmp.write(data)
+                            tmp_path = tmp.name
+                        _pulse("processing")
+                        try:
+                            inner_hits, inner_stats = extract_emails_from_zip(
+                                tmp_path,
+                                stop_event,
+                                _depth=_depth + 1,
+                                tracker=tracker,
+                            )
+                            for h in inner_hits:
+                                suffix = ""
+                                if "#" in h.source_ref:
+                                    suffix = "#" + h.source_ref.split("#", 1)[1]
+                                new_ref = f"zip:{path}|{name}{suffix}"
+                                hits.append(
+                                    EmailHit(
+                                        email=h.email,
+                                        source_ref=new_ref,
+                                        origin=h.origin,
+                                        pre=h.pre,
+                                        post=h.post,
+                                    )
+                                )
+                            for k, v in inner_stats.items():
+                                if k in _PROGRESS_KEYS:
+                                    continue
+                                if isinstance(v, int):
+                                    stats[k] = stats.get(k, 0) + v
+                            current_total = int(stats.get("files_total", 0))
+                            inner_total = int(inner_stats.get("files_total") or 0)
+                            stats["files_total"] = max(current_total + inner_total - 1, 0)
+                            if tracker is not None and inner_total > 0:
+                                tracker.extend_total(max(inner_total - 1, 0))
+                            stats["files_processed"] = int(stats.get("files_processed", 0)) + int(
+                                inner_stats.get("files_processed") or 0
+                            )
+                            stats["files_skipped_timeout"] = int(
+                                stats.get("files_skipped_timeout", 0)
+                            ) + int(inner_stats.get("files_skipped_timeout") or 0)
+                            last_inner = inner_stats.get("last_file")
+                            if last_inner:
+                                stats["last_file"] = last_inner
+                            processed_tick = True
+                        finally:
+                            if not _safe_unlink(tmp_path):
+                                logger.warning("temp file still locked, skip delete: %s", tmp_path)
+                        continue
+                    if ext not in ALLOWED_EXTS:
+                        continue
+                    data = z.read(info)
+                    _pulse("processing")
+                    source_ref = f"zip:{path}|{name}"
+
+                    try:
+                        inner_hits, inner_stats = run_with_timeout(
+                            extract_any_stream,
+                            ZIP_MEMBER_TIMEOUT_SEC,
+                            data,
+                            ext,
+                            source_ref=source_ref,
+                            stop_event=stop_event,
                         )
+                        _pulse("processing")
+                    except TimeoutError:
+                        logger.warning(
+                            "zip member timed out",
+                            extra={"event": "zip_member_timeout", "entry": source_ref},
+                        )
+                        stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
                         stats["files_skipped_timeout"] = int(
                             stats.get("files_skipped_timeout", 0)
-                        ) + int(inner_stats.get("files_skipped_timeout") or 0)
-                        last_inner = inner_stats.get("last_file")
-                        if last_inner:
-                            stats["last_file"] = last_inner
-                        processed_tick = True
-                    finally:
-                        if not _safe_unlink(tmp_path):
-                            logger.warning("temp file still locked, skip delete: %s", tmp_path)
+                        ) + 1
+                        continue
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        logger.debug(
+                            "zip member extraction error",
+                            extra={
+                                "event": "zip_member_error",
+                                "entry": source_ref,
+                                "error": repr(exc),
+                            },
+                        )
+                        stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
+                        continue
+
+                    hits.extend(inner_hits)
+                    key = ext.lstrip(".")
+                    stats[key] = stats.get(key, 0) + 1
+                    for k, v in inner_stats.items():
+                        if k in _PROGRESS_KEYS:
+                            continue
+                        if isinstance(v, int):
+                            stats[k] = stats.get(k, 0) + v
+                    stats["files_processed"] = int(stats.get("files_processed", 0)) + 1
+                    processed_tick = True
+                    if _depth == 0:
+                        _pulse("processing", force=True)
+                finally:
                     if tracker is not None:
                         tracker.tick_file(name, processed=processed_tick)
-                    continue
-                if ext not in ALLOWED_EXTS:
-                    if tracker is not None:
-                        tracker.tick_file(name, processed=False)
-                    continue
-                data = z.read(info)
-                source_ref = f"zip:{path}|{name}"
-
-                try:
-                    inner_hits, inner_stats = run_with_timeout(
-                        extract_any_stream,
-                        ZIP_MEMBER_TIMEOUT_SEC,
-                        data,
-                        ext,
-                        source_ref=source_ref,
-                        stop_event=stop_event,
-                    )
-                except TimeoutError:
-                    logger.warning(
-                        "zip member timed out",
-                        extra={"event": "zip_member_timeout", "entry": source_ref},
-                    )
-                    stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
-                    stats["files_skipped_timeout"] = int(
-                        stats.get("files_skipped_timeout", 0)
-                    ) + 1
-                    if tracker is not None:
-                        tracker.tick_file(name, processed=False)
                     if _depth == 0:
+                        elapsed = round(time.monotonic() - file_start, 3)
                         _tracker_update(
-                            stage="process",
+                            stage="done_file",
                             current=name,
                             done=int(stats.get("files_processed", 0)),
                             total=total_members,
+                            elapsed=elapsed,
                         )
-                    continue
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    logger.debug(
-                        "zip member extraction error",
-                        extra={
-                            "event": "zip_member_error",
-                            "entry": source_ref,
-                            "error": repr(exc),
-                        },
-                    )
-                    stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
-                    if tracker is not None:
-                        tracker.tick_file(name, processed=False)
-                    if _depth == 0:
-                        _tracker_update(
-                            stage="process",
-                            current=name,
-                            done=int(stats.get("files_processed", 0)),
-                            total=total_members,
-                        )
-                    continue
-
-                hits.extend(inner_hits)
-                key = ext.lstrip(".")
-                stats[key] = stats.get(key, 0) + 1
-                for k, v in inner_stats.items():
-                    if k in _PROGRESS_KEYS:
-                        continue
-                    if isinstance(v, int):
-                        stats[k] = stats.get(k, 0) + v
-                stats["files_processed"] = int(stats.get("files_processed", 0)) + 1
-                processed_tick = True
-                if tracker is not None:
-                    tracker.tick_file(name, processed=True)
-                if _depth == 0:
-                    _tracker_update(
-                        stage="process",
-                        current=name,
-                        done=int(stats.get("files_processed", 0)),
-                        total=total_members,
-                    )
             if _depth == 0:
                 _tracker_update(
                     stage="done",

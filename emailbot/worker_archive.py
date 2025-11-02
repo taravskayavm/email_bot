@@ -279,7 +279,24 @@ def run_parse_in_subprocess(
 
     stats = data.get("stats") or {}
     if isinstance(stats, dict):
-        _notify_progress(stats)
+        processed = (
+            stats.get("files_processed")
+            or stats.get("processed")
+            or stats.get("done")
+            or 0
+        )
+        total = (
+            stats.get("files_total")
+            or stats.get("total")
+            or stats.get("expected")
+            or None
+        )
+        snapshot = dict(stats)
+        snapshot.setdefault("stage", "finalize")
+        snapshot.setdefault("processed", processed)
+        if total is not None and "total" not in snapshot:
+            snapshot["total"] = total
+        _notify_progress(snapshot)
 
     return True, {"emails": data["emails"], "stats": stats}
 
