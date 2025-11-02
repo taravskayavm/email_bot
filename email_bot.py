@@ -545,8 +545,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Для Windows: корректная инициализация multiprocessing при spawn
-    import multiprocessing as _mp
+    # ВАЖНО для Windows/multiprocessing: без guard дочерние процессы будут
+    # повторно запускать Telegram-бота вместо выполнения целевой функции воркера.
+    try:
+        import multiprocessing as _mp
 
-    _mp.freeze_support()
+        # На Windows spawn по умолчанию, но явно не помешает.
+        if hasattr(_mp, "set_start_method"):
+            # Не трогаем, если уже установлен в другом месте.
+            try:
+                _mp.set_start_method("spawn")
+            except RuntimeError:
+                pass
+        # Для совместимости с pyinstaller/Windows:
+        if hasattr(_mp, "freeze_support"):
+            _mp.freeze_support()
+    except Exception:
+        # Страховка: не валим основной запуск из-за служебной настройки MP
+        pass
     main()

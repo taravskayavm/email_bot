@@ -154,12 +154,11 @@ def run_parse_in_subprocess(
 ) -> Tuple[bool, Dict[str, Any]]:
     """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
 
-    # На Windows spawn может ломаться из-за инициализации пакета.
-    # Пробуем "forkserver" если доступен, иначе spawn, но через стартовый модуль без import emailbot.*
+    # Явно используем spawn-контекст, чтобы не наследовать состояние родителя.
     try:
-        ctx = mp.get_context("forkserver")
-    except ValueError:
         ctx = mp.get_context("spawn")
+    except ValueError:  # pragma: no cover - spawn обязан быть, но подстрахуемся
+        ctx = mp.get_context()
 
     # Абсолютная директория для артефактов, чтобы не зависеть от CWD подпроцесса
     base_dir = Path(__file__).resolve().parent.parent
@@ -172,11 +171,11 @@ def run_parse_in_subprocess(
     process = ctx.Process(
         target=_worker,
         args=(zip_path, out_json_path, progress_path),
+        name="zip-worker",
         daemon=True,
     )
 
-    # Убираем привязку к контексту telegram/logging в подпроцессе
-    process.daemon = False
+    # Сбрасываем authkey, чтобы подпроцесс не наследовал токен PTB.
     process.authkey = b""
 
     logger.info("Starting zip worker via %s context", ctx.get_start_method())
@@ -305,7 +304,12 @@ def run_parse_in_subprocess(
         except Exception:  # pragma: no cover - defensive
             pass
 
+    exitcode = process.exitcode
+
     _cleanup_artifacts(progress_path, out_json_path)
+
+    if exitcode not in (0, None):
+        return False, {"error": f"zip worker exited with code {exitcode}"}
 
     if not data.get("ok"):
         return False, {
