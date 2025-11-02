@@ -10,8 +10,8 @@ import os
 import time
 import traceback
 import uuid
+from pathlib import Path
 
-from . import extraction as _extraction
 from .progress_watchdog import ProgressTracker
 
 
@@ -53,6 +53,21 @@ def _cleanup_artifacts(*paths: os.PathLike[str] | str | None) -> None:
 def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> None:
     """Worker process entry point."""
 
+    # Лёгкий импорт: тянем «тяжёлое» только внутри подпроцесса,
+    # чтобы избежать падений на уровне импортов пакета при spawn (Windows).
+    try:
+        from . import extraction as _extraction  # lazy import
+    except Exception as exc:  # pragma: no cover - defensive
+        tb = traceback.format_exc()
+        try:
+            _atomic_write_json(
+                out_json_path,
+                {"ok": False, "error": f"import failed: {exc}", "traceback": tb},
+            )
+        except Exception:
+            pass
+        return
+
     def _emit_progress(snapshot: Dict[str, Any]) -> None:
         if progress_path is None:
             return
@@ -92,11 +107,14 @@ def run_parse_in_subprocess(
 
     ctx = mp.get_context("spawn")
 
-    os.makedirs("var", exist_ok=True)
+    # Абсолютная директория для артефактов, чтобы не зависеть от CWD подпроцесса
+    base_dir = Path(__file__).resolve().parent.parent
+    var_dir = base_dir / "var"
+    var_dir.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
-    out_json_path = os.path.join("var", f"worker_result_{token}.json")
+    out_json_path = str(var_dir / f"worker_result_{token}.json")
     progress_path = (
-        os.path.join("var", f"worker_progress_{token}.json")
+        str(var_dir / f"worker_progress_{token}.json")
         if progress_callback is not None
         else None
     )
@@ -123,19 +141,9 @@ def run_parse_in_subprocess(
     deadline = time.monotonic() + timeout_sec
     data: Dict[str, Any] | None = None
     last_progress_mtime: float | None = None
+    started = time.monotonic()
 
     while time.monotonic() < deadline:
-        if not process.is_alive() and not os.path.exists(out_json_path):
-            logger.error(
-                "zip worker exited prematurely without producing output"
-            )
-            try:
-                process.join(timeout=0.0)
-            except Exception:  # pragma: no cover - defensive
-                pass
-            _cleanup_artifacts(progress_path, out_json_path)
-            return False, {"error": "worker exited prematurely (no output)"}
-
         if progress_path and os.path.exists(progress_path):
             try:
                 mtime = os.path.getmtime(progress_path)
@@ -164,6 +172,13 @@ def run_parse_in_subprocess(
                     data = _load_json(out_json_path)
                     break
                 time.sleep(0.2)
+            if data is None:
+                elapsed = max(0.0, time.monotonic() - started)
+                logger.error(
+                    "zip worker exited prematurely (%.2fs) without output", elapsed
+                )
+                _cleanup_artifacts(progress_path, out_json_path)
+                return False, {"error": "worker exited prematurely (no output)"}
             break
 
         time.sleep(0.2)
