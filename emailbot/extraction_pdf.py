@@ -20,6 +20,11 @@ except Exception:  # pragma: no cover - fallback to stdlib ``re``
 
     _REGEX_HAS_TIMEOUT = False
 
+try:  # pragma: no cover - optional dependency for lightweight extraction
+    from PyPDF2 import PdfReader  # type: ignore
+except Exception:  # pragma: no cover - PyPDF2 may be absent
+    PdfReader = None  # type: ignore
+
 # Детект доступности pdfminer.six (и других бэкендов по мере добавления)
 try:  # pragma: no cover - доступность зависит от окружения
     import pdfminer  # type: ignore  # noqa: F401
@@ -79,6 +84,7 @@ def backend_status() -> Dict[str, bool | str]:
 
 from emailbot import settings
 from emailbot.settings_store import get
+from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -692,11 +698,57 @@ def extract_text(
     return ""
 
 
-def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
+def _extract_from_pdf_no_timeout(path: str, max_pages: Optional[int] = None) -> str:
+    if PdfReader is None:
+        logger.warning("PyPDF2 not available; %s -> empty", path)
+        return ""
+    try:
+        reader = PdfReader(path, strict=False)
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        logger.warning("PyPDF2 failed for %s: %s", path, exc)
+        return ""
+    text_parts: List[str] = []
+    pages = getattr(reader, "pages", [])
+    total_pages = len(pages)
+    limit = total_pages if max_pages is None else min(total_pages, max_pages)
+    for idx in range(limit):
+        try:
+            page = pages[idx]
+            text_parts.append(page.extract_text() or "")
+        except Exception as exc:  # pragma: no cover - graceful degradation
+            logger.warning("PDF extract failed %s page %d: %s", path, idx, exc)
+            continue
+    return "\n".join(text_parts)
+
+
+def _extract_from_pdf_with_timeout(
+    path: str,
+    timeout_sec: Optional[int] = None,
+    max_pages: Optional[int] = None,
+) -> str:
+    if timeout_sec is None or timeout_sec <= 0:
+        timeout_sec = DEFAULT_TIMEOUT_SEC
+    try:
+        return run_with_timeout(_extract_from_pdf_no_timeout, timeout_sec, path, max_pages=max_pages)
+    except TimeoutError:
+        logger.warning("PDF parse timeout: %s after %ss", path, timeout_sec)
+        return ""
+
+
+def extract_from_pdf(
+    path: str,
+    stop_event: Optional[object] = None,
+    *,
+    timeout_sec: Optional[int] = None,
+    max_pages: Optional[int] = None,
+) -> tuple[list["EmailHit"], Dict] | str:
     """Extract e-mail addresses from a PDF file (PyMuPDF → pdfminer fallback)."""
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
+
+    if timeout_sec is not None or max_pages is not None:
+        return _extract_from_pdf_with_timeout(path, timeout_sec=timeout_sec, max_pages=max_pages)
 
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)

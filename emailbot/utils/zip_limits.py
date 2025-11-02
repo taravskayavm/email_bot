@@ -6,7 +6,17 @@ import os
 import zipfile
 from typing import Tuple
 
-__all__ = ["validate_zip_safely"]
+__all__ = ["validate_zip_safely", "MAX_FILES_PER_ZIP", "MAX_TOTAL_UNCOMPRESSED_BYTES"]
+
+
+try:
+    MAX_FILES_PER_ZIP
+except NameError:  # pragma: no cover - module attributes may be pre-set
+    MAX_FILES_PER_ZIP = 500
+try:
+    MAX_TOTAL_UNCOMPRESSED_BYTES
+except NameError:  # pragma: no cover
+    MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
 def _iter_zip_infos(zf: zipfile.ZipFile):

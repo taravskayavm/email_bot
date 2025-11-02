@@ -8,7 +8,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import PurePosixPath
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from emailbot import settings
 from emailbot.progress_watchdog import ProgressTracker, heartbeat_now
@@ -16,13 +16,58 @@ from emailbot.timebudget import TimeBudget
 from .extraction_common import filter_invalid_tld
 from .extraction_pdf import extract_text_from_pdf_bytes
 from .reporting import log_extract_digest
-from .utils.timeouts import TimeoutError as _TimeoutError
-from .utils.timeouts import run_with_timeout
+from emailbot.utils import zip_limits as zl
+from .utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout
 
 logger = logging.getLogger(__name__)
 
 
 _PROGRESS_KEYS = {"files_total", "files_processed", "files_skipped_timeout", "last_file"}
+
+
+def _inspect_zip_members(path: str) -> List[Tuple[str, int]]:
+    """Inspect ``path`` and return safe member names with their sizes."""
+
+    max_files = int(getattr(zl, "MAX_FILES_PER_ZIP", 500))
+    max_total = int(getattr(zl, "MAX_TOTAL_UNCOMPRESSED_BYTES", 200 * 1024 * 1024))
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        if len(members) > max_files:
+            raise ValueError(f"ZIP limit: files={len(members)} > {max_files}")
+        total_size = 0
+        safe_members: List[Tuple[str, int]] = []
+        for info in members:
+            if info.is_dir():
+                continue
+            total_size += int(getattr(info, "file_size", 0) or 0)
+            if total_size > max_total:
+                raise ValueError("ZIP limit: total uncompressed size exceeded")
+            normalized = os.path.normpath(info.filename)
+            if normalized.startswith(".."):
+                continue
+            if normalized.startswith(("/", "\\")):
+                continue
+            safe_members.append((normalized, int(getattr(info, "file_size", 0) or 0)))
+        return safe_members
+
+
+def extract_from_zip(path: str, timeout_sec: int = DEFAULT_TIMEOUT_SEC) -> List[str]:
+    """Return a sanitized list of member names for ``path``.
+
+    The inspection is executed inside :func:`run_with_timeout` to prevent hangs on
+    crafted archives.  When a timeout or validation failure occurs an empty list
+    is returned.
+    """
+
+    try:
+        members = run_with_timeout(_inspect_zip_members, timeout_sec, path)
+    except TimeoutError:
+        logger.warning("ZIP inspect timeout: %s after %ss", path, timeout_sec)
+        return []
+    except (ValueError, zipfile.BadZipFile) as exc:
+        logger.warning("ZIP blocked %s: %s", path, exc)
+        return []
+    return [name for name, _size in members]
 
 
 ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
@@ -427,31 +472,34 @@ def extract_emails_from_zip(
                 data = z.read(info)
                 source_ref = f"zip:{path}|{name}"
 
-                ok, outcome = run_with_timeout(
-                    extract_any_stream,
-                    args=(data, ext),
-                    kwargs={"source_ref": source_ref, "stop_event": stop_event},
-                    timeout=ZIP_MEMBER_TIMEOUT_SEC,
-                )
-                if not ok:
-                    if isinstance(outcome, _TimeoutError):
-                        logger.warning(
-                            "zip member timed out",
-                            extra={"event": "zip_member_timeout", "entry": source_ref},
-                        )
-                        stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
-                        stats["files_skipped_timeout"] = int(
-                            stats.get("files_skipped_timeout", 0)
-                        ) + 1
-                        if tracker is not None:
-                            tracker.tick_file(name, processed=False)
-                        continue
+                try:
+                    inner_hits, inner_stats = run_with_timeout(
+                        extract_any_stream,
+                        ZIP_MEMBER_TIMEOUT_SEC,
+                        data,
+                        ext,
+                        source_ref=source_ref,
+                        stop_event=stop_event,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "zip member timed out",
+                        extra={"event": "zip_member_timeout", "entry": source_ref},
+                    )
+                    stats["zip_member_timeout"] = stats.get("zip_member_timeout", 0) + 1
+                    stats["files_skipped_timeout"] = int(
+                        stats.get("files_skipped_timeout", 0)
+                    ) + 1
+                    if tracker is not None:
+                        tracker.tick_file(name, processed=False)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive logging
                     logger.debug(
                         "zip member extraction error",
                         extra={
                             "event": "zip_member_error",
                             "entry": source_ref,
-                            "error": repr(outcome),
+                            "error": repr(exc),
                         },
                     )
                     stats["zip_member_error"] = stats.get("zip_member_error", 0) + 1
@@ -459,7 +507,6 @@ def extract_emails_from_zip(
                         tracker.tick_file(name, processed=False)
                     continue
 
-                inner_hits, inner_stats = outcome
                 hits.extend(inner_hits)
                 key = ext.lstrip(".")
                 stats[key] = stats.get(key, 0) + 1
@@ -530,6 +577,7 @@ def extract_emails_from_zip(
 
 
 __all__ = [
+    "extract_from_zip",
     "extract_emails_from_zip",
     "extract_text_from_zip",
     "extract_text_from_bytes_guess",
