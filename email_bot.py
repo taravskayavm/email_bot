@@ -69,6 +69,11 @@ def _selfcheck_email_clean_exports() -> None:
 
 _selfcheck_email_clean_exports()
 
+# Обеспечиваем, что корень проекта в sys.path при запуске подпроцессов (Windows spawn)
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 from emailbot import bot_handlers, messaging, history_service
 from emailbot import compat  # EBOT-105
 
@@ -540,4 +545,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Для Windows: корректная инициализация multiprocessing при spawn
+    import multiprocessing as _mp
+
+    _mp.freeze_support()
     main()
