@@ -728,6 +728,7 @@ async def _zip_status_heartbeat(
 ) -> None:
     """Periodically update ``progress_msg`` until ``stop_event`` is set."""
 
+    # Если нет куда писать статус — нечего пульсировать
     if not progress_msg:
         return
 
@@ -742,6 +743,15 @@ async def _zip_status_heartbeat(
                 await asyncio.wait_for(stop_event.wait(), timeout=max(period, 1.0))
                 break
             except asyncio.TimeoutError:
+                pass
+
+            # 🔴 ВАЖНО: даём «пульс» сторожу, чтобы он не отменял задачу.
+            # Во время долгого парсинга ZIP прогресс по файлам может идти редко,
+            # а heartbeat обязан дёргаться регулярно.
+            try:
+                await heartbeat()
+            except Exception:
+                # пульс — best-effort, не мешаем основному циклу статуса
                 pass
             elapsed = max(0.0, time.monotonic() - t0)
             suffix = next(dots)
