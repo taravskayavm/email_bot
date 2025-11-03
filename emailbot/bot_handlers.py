@@ -899,6 +899,7 @@ async def extract_emails_from_zip(
     future = loop.run_in_executor(None, _run_worker)
     stop_event: asyncio.Event | None = None
     heartbeat_task: asyncio.Task | None = None
+    pulse_task: asyncio.Task | None = None
     if progress_message:
         stop_event = asyncio.Event()
         heartbeat_task = asyncio.create_task(
@@ -911,6 +912,12 @@ async def extract_emails_from_zip(
             )
         )
     try:
+        from .progress_watchdog import start_heartbeat_pulse
+
+        pulse_task = start_heartbeat_pulse(interval=5.0)
+    except Exception:
+        pulse_task = None
+    try:
         ok, payload = await asyncio.wait_for(
             future, timeout=ZIP_JOB_TIMEOUT_SEC + 5
         )
@@ -918,11 +925,19 @@ async def extract_emails_from_zip(
         future.cancel()
         raise ZipProcessingTimeoutError from exc
     finally:
-        if stop_event:
-            stop_event.set()
-        if heartbeat_task:
+        try:
+            if stop_event is not None:
+                stop_event.set()
+        except Exception:
+            pass
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
+        if pulse_task is not None:
+            pulse_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pulse_task
 
     if not ok:
         error_message = str(payload.get("error", "unknown error"))
