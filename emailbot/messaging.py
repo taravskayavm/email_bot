@@ -87,10 +87,20 @@ from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
+from emailbot.storage import storage_audit_add
 
 _TASK_SEQ = count()
 
 logger = logging.getLogger(__name__)
+
+
+def _storage_audit(email: str, status: str, *, override: bool = False) -> None:
+    if not email:
+        return
+    try:
+        storage_audit_add(email, status, override=override)
+    except Exception:
+        logger.debug("storage_audit_add failed", exc_info=True)
 
 _BULK_COOLDOWN_SERVICE: "CooldownService" | None = None
 _HISTORY_SHIM_WARNED_ONCE = False
@@ -1565,6 +1575,7 @@ def send_email_with_sessions(
     if decision is not Decision.SEND_NOW:
         logger.info("skip %s: reason=%s campaign=%s", recipient, reason, campaign)
         outcome = _outcome_for_decision(decision)
+        _storage_audit(recipient, outcome.value, override=override_180d)
         return outcome, "", None, None
 
     msg, token = build_message(
@@ -1579,10 +1590,12 @@ def send_email_with_sessions(
     subject_norm = subject or ""
     if was_sent_today_same_content(recipient, subject_norm, body_for_hash):
         logger.info("Skipping duplicate content for %s within 24h", recipient)
+        _storage_audit(recipient, SendOutcome.DUPLICATE.value, override=override_180d)
         return SendOutcome.DUPLICATE, "", None, None
 
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+        _storage_audit(recipient, SendOutcome.COOLDOWN.value, override=override_180d)
         return SendOutcome.COOLDOWN, "", None, None
 
     key = canonical_for_history(recipient)
@@ -1667,6 +1680,7 @@ def send_email_with_sessions(
             msg_text,
             exc_info=True,
         )
+        _storage_audit(recipient, SendOutcome.ERROR.value, override=override_180d)
         return SendOutcome.ERROR, "", None, None
 
     # 3) Зафиксировать отправку для кулдауна
@@ -1691,6 +1705,8 @@ def send_email_with_sessions(
         subject=subject_norm,
         content_hash=content_hash,
     )
+
+    _storage_audit(recipient, SendOutcome.SENT.value, override=override_180d)
 
     if return_raw:
         return SendOutcome.SENT, token, log_key, content_hash, raw_bytes
