@@ -1241,14 +1241,17 @@ def _summarize_from_audit(audit_path: str) -> dict[str, int]:
                         totals[OUTCOME["error"]] += 1
         except Exception:
             logger.debug("bulk audit read failed", exc_info=True)
+    undeliverable_count = totals.get(OUTCOME["undeliverable"], 0)
+    error_count = totals.get(OUTCOME["error"], 0)
     return {
         "total": total,
         "sent": totals.get(OUTCOME["sent"], 0),
         "blocked": totals.get(OUTCOME["blocked"], 0),
         "cooldown": totals.get(OUTCOME["cooldown"], 0),
-        "undeliverable_only": totals.get(OUTCOME["undeliverable"], 0),
+        "undeliverable_only": undeliverable_count,
         "unchanged": totals.get(OUTCOME["unchanged"], 0),
-        "errors": totals.get(OUTCOME["error"], 0),
+        "errors": error_count,
+        "not_delivered": undeliverable_count + error_count,
     }
 
 
@@ -7266,6 +7269,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             + undeliverable_only
             + len(duplicates)
         )
+        error_count = len(error_details)
         fallback_metrics = {
             "total": fallback_total,
             "sent": len(sent_ok),
@@ -7273,7 +7277,8 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "cooldown": len(skipped_recent),
             "undeliverable_only": undeliverable_only,
             "unchanged": len(duplicates),
-            "errors": len(error_details),
+            "errors": error_count,
+            "not_delivered": undeliverable_only + error_count,
         }
         audit_path = None
         try:
@@ -7286,6 +7291,11 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if not metrics.get("total") and fallback_metrics["total"]:
                 metrics = fallback_metrics
 
+        not_delivered = metrics.get(
+            "not_delivered",
+            metrics.get("undeliverable_only", 0) + metrics.get("errors", 0),
+        )
+
         summary_lines: list[str] = []
         summary_lines.append("📨 Рассылка завершена.")
         summary_lines.append(f"📊 В очереди было: {metrics['total']}")
@@ -7294,11 +7304,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"⏳ Пропущены (по правилу «180 дней»): {metrics['cooldown']}"
         )
         summary_lines.append(f"🚫 В стоп-листе: {metrics['blocked']}")
-        summary_lines.append(f"ℹ️ Осталось без изменений: {metrics['unchanged']}")
-        summary_lines.append(
-            f"🚫 Недоставляемые (без стоп-листа): {metrics['undeliverable_only']}"
-        )
-        summary_lines.append(f"❌ Ошибок при отправке: {metrics['errors']}")
+        summary_lines.append(f"❌ Не доставлено: {not_delivered}")
         if aborted:
             summary_lines.append("⛔ Рассылка остановлена досрочно.")
         if blocked_foreign:
