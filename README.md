@@ -136,6 +136,14 @@ FILTER_BLOCKLIST=help@x.com,foo@bar.io
 - Файл не коммитьте в публичный репозиторий.
 - В коде уже есть поддержка чтения/дедупликации (см. `emailbot/messaging.py`: функции `get_blocked_emails`, `dedupe_blocked_file` и т.д.).
 
+### Включение SQLite-хранилища (опционально)
+Для хранения блок-листа и аудита в SQLite:
+```powershell
+$env:EMAILBOT_STORAGE="sqlite"
+$env:EMAILBOT_SQLITE_PATH="D:\email_bot\var\emailbot.db"
+```
+База создаётся автоматически при первом запуске.
+
 ## Отправленные (IMAP APPEND)
 После успешной SMTP-отправки бот пытается положить письмо в папку «Отправленные» (через IMAP APPEND).
 Папка определяется автоматически (`detect_sent_folder`) и кешируется в `imap_sent_folder.txt`.

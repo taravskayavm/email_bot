@@ -50,8 +50,10 @@ from emailbot.ui.messages import (
     format_error_details,
     render_dispatch_summary,
 )
+from emailbot.ui.progress import ProgressUI
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
+from emailbot.utils.friendly_errors import to_user_message
 from emailbot.smtp_client import RobustSMTP
 from emailbot.cooldown import build_cooldown_service
 from emailbot.progress_watchdog import heartbeat_now
@@ -534,6 +536,7 @@ async def send_all(
             cooldown_days = 0
 
         cooldown_meta_cache: Dict[str, str] = {}
+        progress_ui: ProgressUI | None = None
 
         def _cooldown_last_iso(email: str) -> str | None:
             if not cooldown_tools:
@@ -886,6 +889,13 @@ async def send_all(
                     )
                 )
 
+            planned_total = len(to_send)
+            if planned_total > 0:
+                try:
+                    progress_ui = ProgressUI(context.bot, chat_id)
+                except Exception:
+                    progress_ui = None
+
             mass_state.save_chat_state(
                 chat_id,
                 {
@@ -924,6 +934,31 @@ async def send_all(
         aborted = False
         smtp = RobustSMTP()
         processed = 0
+        progress_started = False
+
+        try:
+            await asyncio.to_thread(smtp.ensure)
+        except Exception as exc:
+            error_text = to_user_message(exc)
+            await notify(query.message, f"❌ {error_text}", event="error")
+            try:
+                smtp.close()
+            except Exception:
+                pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            return
+
+        if progress_ui and planned_total > 0:
+            try:
+                await progress_ui.start(planned_total)
+                progress_started = True
+            except Exception:
+                progress_ui = None
+                progress_started = False
+
         try:
             while to_send:
                 if should_stop():
@@ -1042,6 +1077,14 @@ async def send_all(
                         reason,
                         {"code": code, "message": msg or str(e)},
                     )
+
+                if progress_ui and progress_started:
+                    try:
+                        await progress_ui.update(min(processed, planned_total))
+                    except Exception:
+                        progress_ui = None
+                        progress_started = False
+
                 mass_state.save_chat_state(
                     chat_id,
                     {
@@ -1058,7 +1101,16 @@ async def send_all(
                     },
                 )
         finally:
-            smtp.close()
+            try:
+                smtp.close()
+            except Exception:
+                pass
+            if progress_ui and progress_started:
+                try:
+                    progress_ui.processed = min(processed, planned_total)
+                    await progress_ui.finish()
+                except Exception:
+                    pass
         imap.logout()
         if not to_send:
             mass_state.clear_chat_state(chat_id)
