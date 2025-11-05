@@ -374,6 +374,23 @@ def _run_parse_via_process(
         logger.error("failed to start zip worker: %s", exc)
         return False, {"error": f"failed to start subprocess: {exc}"}
 
+    # [EBOT-PROGRESS-KICK] Немедленно отдаём «первый пульс» прогресса,
+    # чтобы вотчдог не считал задачу подвисшей, пока воркер прогревает импорты.
+    if progress_path and os.path.exists(progress_path):
+        try:
+            _notify_progress(
+                {
+                    "files_total": 0,
+                    "files_processed": 0,
+                    "files_skipped_timeout": 0,
+                    "last_file": None,
+                    "status": "spawned",
+                    "ts": time.monotonic(),
+                }
+            )
+        except Exception:
+            logger.debug("initial progress notify failed", exc_info=True)
+
     deadline = time.monotonic() + timeout_sec
     data: Dict[str, Any] | None = None
     last_progress_mtime: float | None = None
