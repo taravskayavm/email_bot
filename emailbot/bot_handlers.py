@@ -757,28 +757,36 @@ async def _zip_status_heartbeat(
             suffix = next(dots)
             details: list[str] = []
             if progress_state is not None:
+                # безопасный снимок прогресса
                 if progress_lock is not None:
                     with progress_lock:
                         snapshot = dict(progress_state)
                 else:
                     snapshot = dict(progress_state)
                 processed_raw = snapshot.get("files_processed")
+                skipped_raw = snapshot.get("files_skipped")
                 total_raw = snapshot.get("files_total")
                 try:
-                    processed_val = int(processed_raw) if processed_raw is not None else None
+                    processed_val = int(processed_raw) if processed_raw is not None else 0
                 except (TypeError, ValueError):
-                    processed_val = None
+                    processed_val = 0
+                try:
+                    skipped_val = int(skipped_raw) if skipped_raw is not None else 0
+                except (TypeError, ValueError):
+                    skipped_val = 0
                 try:
                     total_val = int(total_raw) if total_raw is not None else None
                 except (TypeError, ValueError):
                     total_val = None
+
+                # Показываем реальный ход: обработанные + пропущенные по таймауту/ошибке
+                done_val = max(0, processed_val + skipped_val)
                 if total_val and total_val > 0:
-                    if processed_val is None:
-                        processed_val = 0
-                    processed_val = max(0, min(processed_val, total_val))
-                    details.append(f"{processed_val}/{total_val}")
-                elif processed_val and processed_val > 0:
-                    details.append(str(processed_val))
+                    done_val = min(done_val, total_val)
+                    details.append(f"{done_val}/{total_val}")
+                elif done_val > 0:
+                    details.append(str(done_val))
+
                 last_file = snapshot.get("last_file")
                 if last_file:
                     details.append(_shorten_filename(last_file))
