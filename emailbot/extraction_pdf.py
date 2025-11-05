@@ -483,8 +483,11 @@ def _pdfminer_extract_with_stats(
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
-        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
-        return "", 0
+        try:
+            from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+        except Exception:
+            logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
+            return "", 0
 
     if budget:
         budget.checkpoint()
@@ -503,8 +506,11 @@ def _pdfminer_extract_bytes_with_stats(
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
-        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
-        return "", 0
+        try:
+            from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+        except Exception:
+            logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
+            return "", 0
 
     if budget:
         budget.checkpoint()
@@ -590,7 +596,10 @@ def extract_text_from_pdf_bytes(
         try:
             from pdfminer.high_level import extract_text as pdfminer_extract
         except Exception:
-            pdfminer_extract = None
+            try:
+                from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+            except Exception:
+                pdfminer_extract = None
         if pdfminer_extract is not None:
             heartbeat_now()
             if budget:
@@ -680,6 +689,26 @@ def extract_text_from_pdf(path: str | Path) -> str:
     if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
         text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
     return cleanup_text(text)
+
+
+def extract_emails_from_pdf(path: str | Path) -> set[str]:
+    """Extract normalised e-mail addresses from a PDF document."""
+
+    pdf_path = Path(path)
+    try:
+        text = extract_text_from_pdf(pdf_path)
+    except Exception:
+        text = ""
+
+    from emailbot.parsing.extract_from_text import emails_from_text
+
+    emails = emails_from_text(text) if text else set()
+    if emails:
+        return emails
+
+    from emailbot.extraction_ocr import ocr_emails_from_pdf
+
+    return ocr_emails_from_pdf(pdf_path)
 
 
 def extract_text(
@@ -1169,6 +1198,7 @@ __all__ = [
     "separate_around_emails",
     "extract_text_from_pdf_bytes",
     "extract_text_from_pdf",
+    "extract_emails_from_pdf",
     "extract_text",
     "extract_from_pdf",
     "extract_from_pdf_stream",
