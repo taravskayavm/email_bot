@@ -53,6 +53,7 @@ from .cooldown import (
     normalize_email as cooldown_normalize_email,
 )
 from . import settings as settings_module
+from .domain_utils import GLOBAL_MAIL_PROVIDERS
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from .cooldown import CooldownService
@@ -562,6 +563,24 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_GLOBAL_MAIL_PROVIDERS = {domain.lower() for domain in GLOBAL_MAIL_PROVIDERS}
+
+
+def extract_domain(addr: str) -> str:
+    """Return a lower-cased domain part of ``addr`` or an empty string."""
+
+    if not addr:
+        return ""
+    parsed = parseaddr(str(addr))[1]
+    if not parsed or "@" not in parsed:
+        return ""
+    domain = parsed.split("@", 1)[1].strip().lower()
+    if not domain:
+        return ""
+    try:
+        return _to_idna(domain).lower()
+    except Exception:
+        return domain
 
 
 def parse_emails_from_text(text: str) -> list[str]:
@@ -2139,7 +2158,26 @@ def prepare_mass_mailing(
 
         queue_after_foreign: list[str] = []
         block_foreign_enabled = os.getenv("FOREIGN_BLOCK", "1") == "1"
+        policy_metrics = {"ru_count": 0, "global_count": 0}
+        allowlisted_globals = _GLOBAL_MAIL_PROVIDERS | {"gmail.com"}
         for addr in queue_after_block:
+            domain = extract_domain(addr)
+            domain_lower = domain.lower()
+            if domain_lower.endswith(".ru"):
+                policy_metrics["ru_count"] += 1
+            if domain_lower in _GLOBAL_MAIL_PROVIDERS:
+                policy_metrics["global_count"] += 1
+
+            allowlisted = False
+            if domain_lower.endswith(".ru"):
+                allowlisted = True
+            elif domain_lower in allowlisted_globals:
+                allowlisted = True
+
+            if allowlisted:
+                queue_after_foreign.append(addr)
+                continue
+
             try:
                 if block_foreign_enabled and is_foreign(addr):
                     blocked_foreign.append(addr)
@@ -2239,6 +2277,9 @@ def prepare_mass_mailing(
             "removed_invalid": len(blocked_invalid),
             "removed_foreign": len(blocked_foreign),
             "removed_today": 0,
+            "global_excluded": 0,
+            "global_count": policy_metrics["global_count"],
+            "ru_count": policy_metrics["ru_count"],
         }
         return ready, blocked_foreign, blocked_invalid, skipped_recent, digest
     except Exception as exc:
