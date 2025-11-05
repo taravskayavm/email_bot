@@ -9,14 +9,19 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterable, List, Tuple
 
+try:  # pragma: no cover - optional dependency in lightweight deployments
+    import idna
+except Exception:  # pragma: no cover - degrade gracefully when idna is absent
+    idna = None  # type: ignore[assignment]
+
 try:  # pragma: no cover - settings are optional during lightweight imports
     from . import settings  # type: ignore
 except Exception:  # pragma: no cover - degrade gracefully when settings missing
     settings = None  # type: ignore[assignment]
 
-from .history_key import normalize_history_key
 from . import history_store
 from emailbot.services.cooldown import _env_int
+from utils.email_clean import normalize_email_unified
 from utils.paths import expand_path, get_temp_dir
 
 _LOCK = Lock()
@@ -116,9 +121,28 @@ def ensure_initialized() -> None:
 
 def _norm_email(email: str) -> str:
     try:
-        return normalize_history_key(email)
+        base = normalize_email_unified(email)
     except Exception:
-        return (email or "").strip().lower()
+        base = (email or "").strip().lower()
+
+    if not base:
+        return ""
+
+    local, sep, domain = base.partition("@")
+    if not sep:
+        return base
+
+    domain_norm = domain.strip()
+    if idna is not None and domain_norm:
+        try:
+            domain_norm = idna.encode(domain_norm, uts46=True).decode("ascii")
+        except Exception:
+            domain_norm = domain_norm.lower()
+
+    if not domain_norm:
+        return base
+
+    return f"{local}@{domain_norm.lower()}"
 
 
 def _norm_group(group: str) -> str:
