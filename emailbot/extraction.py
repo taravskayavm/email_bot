@@ -18,7 +18,12 @@ import unicodedata
 import time
 from datetime import datetime
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    wait,
+)
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
@@ -99,6 +104,9 @@ _HYPHEN_BREAK_RE = re.compile(r"-\s*\n+\s*")
 
 
 logger = logging.getLogger(__name__)
+
+
+PDF_STREAM_TIMEOUT_SEC = int(os.getenv("PDF_STREAM_TIMEOUT_SEC", "30"))
 
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}")
@@ -1495,7 +1503,25 @@ def extract_any_stream(
 
     ext = ext.lower()
     if ext == ".pdf":
-        return extract_from_pdf_stream(data, source_ref, stop_event)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                extract_from_pdf_stream,
+                data,
+                source_ref,
+                stop_event,
+            )
+            try:
+                return future.result(timeout=PDF_STREAM_TIMEOUT_SEC)
+            except FuturesTimeoutError:
+                logger.warning(
+                    "Timeout parsing PDF stream",
+                    extra={
+                        "event": "pdf_stream_timeout",
+                        "entry": source_ref,
+                        "timeout_sec": PDF_STREAM_TIMEOUT_SEC,
+                    },
+                )
+                return [], {"files_skipped_timeout": 1}
     if ext == ".docx":
         return extract_from_docx_stream(data, source_ref, stop_event)
     if ext == ".xlsx":
