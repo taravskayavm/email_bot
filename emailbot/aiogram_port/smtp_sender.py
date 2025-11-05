@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import smtplib
 import ssl
@@ -85,6 +86,10 @@ class SmtpSender:
         else:
             msg.set_content(body or "")
 
+        self.send_message(msg)
+
+    def send_message(self, msg: EmailMessage) -> None:
+        """Synchronous send (kept for compatibility)."""
         client = self._connect()
         try:
             client.send_message(msg)
@@ -93,3 +98,8 @@ class SmtpSender:
                 client.quit()
             except Exception:
                 pass
+
+    async def send_message_async(self, msg: EmailMessage) -> None:
+        """Async wrapper: run blocking send in executor to avoid blocking event loop."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.send_message, msg)
