@@ -17,9 +17,10 @@ from .extraction_common import filter_invalid_tld
 from .extraction_pdf import extract_text_from_pdf_bytes
 from .reporting import log_extract_digest
 from emailbot.utils import zip_limits as zl
+from emailbot.utils.logging_setup import get_logger
 from .utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 _PROGRESS_KEYS = {"files_total", "files_processed", "files_skipped_timeout", "last_file"}

@@ -7,6 +7,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
+from functools import partial
 from typing import Optional
 
 
@@ -100,6 +101,22 @@ class SmtpSender:
                 pass
 
     async def send_message_async(self, msg: EmailMessage) -> None:
-        """Async wrapper: run blocking send in executor to avoid blocking event loop."""
+        """Run the blocking send in an executor to avoid blocking the event loop."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.send_message, msg)
+
+    async def send_async(
+        self,
+        *,
+        to_addr: str,
+        subject: str,
+        body: str,
+        html: Optional[str] = None,
+    ) -> None:
+        """Asynchronous counterpart for :meth:`send`."""
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            partial(self.send, to_addr=to_addr, subject=subject, body=body, html=html),
+        )

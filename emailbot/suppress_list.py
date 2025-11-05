@@ -11,6 +11,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, Set
 
+from emailbot.utils.logging_setup import get_logger
+
 __all__ = [
     "BLOCKED_EMAILS_PATH",
     "blocklist_path",
@@ -37,6 +39,8 @@ BLOCKED_EMAILS_PATH: Path = _BLOCKLIST_PATH
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
 
+logger = get_logger(__name__)
+
 
 def blocklist_path() -> Path:
     """Return the path of the shared block list file."""
@@ -50,8 +54,20 @@ def _normalize(email: str) -> str:
 
 def _read_blocklist_locked() -> Set[str]:
     if not _BLOCKLIST_PATH.exists():
+        logger.warning("blocked emails file not found: %s", _BLOCKLIST_PATH)
         return set()
-    text = _BLOCKLIST_PATH.read_text(encoding="utf-8")
+    try:
+        text = _BLOCKLIST_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("blocked emails file not found during read: %s", _BLOCKLIST_PATH)
+        return set()
+    except Exception:
+        logger.error(
+            "failed to read blocked emails file: %s",
+            _BLOCKLIST_PATH,
+            exc_info=True,
+        )
+        return set()
     return {
         line.strip().lower()
         for line in text.splitlines()
