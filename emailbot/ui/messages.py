@@ -15,11 +15,8 @@ except Exception:  # pragma: no cover - используем отложенны�
 
 
 def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) -> str:
-    """
-    Ожидаемые ключи s:
-      total_found, to_send, suspicious, cooldown_180d, foreign_domain,
-      pages_skipped, footnote_dupes_removed, blocked, blocked_after_parse
-    """
+    """Собрать текст превью после парсинга."""
+
     def _as_int(value: object) -> int:
         try:
             return int(value or 0)
@@ -29,49 +26,57 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
             except Exception:
                 return 0
 
-    lines = []
-    lines.append("✅ Анализ завершён.")
-    lines.append(f"Найдено адресов: {s.get('total_found', 0)}")
-    lines.append(f"📦 К отправке: {s.get('to_send', 0)}")
-    lines.append(f"🟡 Подозрительные: {s.get('suspicious', 0)}")
-    lines.append(f"⏳ Под кулдауном (180 дней): {s.get('cooldown_180d', 0)}")
-    if "ru_like" in s:
-        ru_like = _as_int(s.get("ru_like", 0))
-        lines.append(f"🇷🇺 RU/РФ/SU: {ru_like}")
-    lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")
-    lines.append(f"♻️ Возможные сносочные дубликаты удалены: {s.get('footnote_dupes_removed', 0)}")
-    try:
-        ocr_total = int(s.get("ocr_fix_total", 0) or 0)
-        ocr_space = int(s.get("ocr_fix_space_tld", 0) or 0)
-        ocr_comma = int(s.get("ocr_fix_comma_tld", 0) or 0)
-    except Exception:
-        ocr_total = ocr_space = ocr_comma = 0
-    if ocr_total > 0:
-        lines.append(
-            "🧹 Исправления OCR: "
-            f"{ocr_total} (восстановлена точка перед зоной "
-            f"(пробел/символ/перенос): {ocr_space}; "
-            f"запятая→точка: {ocr_comma})"
-        )
-    try:
-        blocked_before = int(s.get('blocked', 0) or 0)
-    except Exception:
-        blocked_before = 0
-    try:
-        blocked_after = int(s.get('blocked_after_parse', 0) or 0)
-    except Exception:
-        blocked_after = 0
-    total_blocked = blocked_before + blocked_after
-    if total_blocked > 0:
-        lines.append(f"🚫 В стоп-листе: {total_blocked}")
-    lines.append("")
+    lines = [
+        "✅ Анализ завершён.",
+        f"Найдено адресов: {_as_int(s.get('total_found', 0))}",
+        f"📦 К отправке: {_as_int(s.get('to_send', 0))}",
+        f"🟡 Подозрительные: {_as_int(s.get('suspicious', 0))}",
+    ]
 
-    dedup_removed = _as_int(s.get("dedup_removed", 0))
-    invalid_removed = _as_int(s.get("invalid_after_norm", s.get("invalid", 0)))
-    blocklist_removed = _as_int(s.get("blocklist_removed", 0))
-    cooldown_removed = _as_int(s.get("cooldown_removed", s.get("cooldown_180d", 0)))
-    other_removed = _as_int(s.get("excluded_other", 0))
-    if any([dedup_removed, invalid_removed, blocklist_removed, cooldown_removed, other_removed]):
+    excluded_obj = s.get("excluded")
+    if isinstance(excluded_obj, Mapping):
+        excluded: Mapping[str, object] = excluded_obj
+    else:
+        excluded = {}
+
+    dedup_removed = _as_int(
+        excluded.get("duplicates_after_norm")
+        if isinstance(excluded, Mapping)
+        else 0
+    )
+    if not dedup_removed:
+        dedup_removed = _as_int(s.get("dedup_removed", s.get("duplicates_after_norm", 0)))
+    invalid_removed = _as_int(
+        excluded.get("invalid_after_norm") if isinstance(excluded, Mapping) else 0
+    )
+    if not invalid_removed:
+        invalid_removed = _as_int(s.get("invalid_after_norm", s.get("invalid", 0)))
+    blocklist_removed = _as_int(
+        excluded.get("blocklist_removed") if isinstance(excluded, Mapping) else 0
+    )
+    if not blocklist_removed:
+        blocklist_removed = _as_int(s.get("blocklist_removed", s.get("blocked", 0)))
+    cooldown_removed = _as_int(
+        excluded.get("cooldown_removed") if isinstance(excluded, Mapping) else 0
+    )
+    if not cooldown_removed:
+        cooldown_removed = _as_int(s.get("cooldown_removed", s.get("cooldown_180d", 0)))
+    other_removed = _as_int(
+        excluded.get("other_removed") if isinstance(excluded, Mapping) else 0
+    )
+    if not other_removed:
+        other_removed = _as_int(s.get("excluded_other", 0))
+
+    if any(
+        [
+            dedup_removed,
+            invalid_removed,
+            blocklist_removed,
+            cooldown_removed,
+            other_removed,
+        ]
+    ):
+        lines.append("")
         lines.append("🚧 Исключены перед отправкой:")
         lines.append(f"• Дубликаты (после нормализации): {dedup_removed}")
         lines.append(f"• Невалидные e-mail: {invalid_removed}")
@@ -96,11 +101,31 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
             return "—"
         return ", ".join(cleaned[:3])
 
-    dup_display = _fmt_examples(s.get("dup_examples_display"))
-    invalid_display = _fmt_examples(s.get("invalid_examples_display"))
-    blocklist_display = _fmt_examples(s.get("blocklist_examples_display"))
-    cooldown_display = _fmt_examples(s.get("cooldown_examples_display"))
-    if any(val not in {None, "—"} and val for val in [dup_display, invalid_display, blocklist_display, cooldown_display]):
+    examples_map: Mapping[str, object]
+    if isinstance(excluded, Mapping):
+        raw_examples = excluded.get("examples")
+        examples_map = raw_examples if isinstance(raw_examples, Mapping) else {}
+    else:
+        examples_map = {}
+
+    dup_display = _fmt_examples(
+        examples_map.get("duplicates")
+        or examples_map.get("duplicates_after_norm")
+        or s.get("dup_examples_display")
+    )
+    invalid_display = _fmt_examples(
+        examples_map.get("invalid") or s.get("invalid_examples_display")
+    )
+    blocklist_display = _fmt_examples(
+        examples_map.get("blocklist") or s.get("blocklist_examples_display")
+    )
+    cooldown_display = _fmt_examples(
+        examples_map.get("cooldown") or s.get("cooldown_examples_display")
+    )
+    if any(
+        val not in {None, "—"} and val
+        for val in [dup_display, invalid_display, blocklist_display, cooldown_display]
+    ):
         lines.append("Примеры исключений:")
         lines.append(f"• Дубликаты: {dup_display}")
         lines.append(f"• Невалидные: {invalid_display}")
