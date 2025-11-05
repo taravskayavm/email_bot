@@ -9,7 +9,7 @@ import shutil
 import statistics
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - ``regex`` may be unavailable in runtime
     import regex as re  # type: ignore
@@ -90,6 +90,12 @@ from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
 from emailbot.timebudget import TimeBudget
 from utils.email_text_fix import fix_email_text
+
+_sanitize_for_email: Callable[[str], str] | None
+try:  # pragma: no cover - safety fallback if sanitizer is unavailable
+    from emailbot.sanitizer import sanitize_for_email as _sanitize_for_email
+except Exception:  # pragma: no cover
+    _sanitize_for_email = None
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -613,6 +619,9 @@ def extract_text_from_pdf_bytes(
                 ocr_used = True
                 _ocr_cache_set(key, ocr_text)
 
+    if _sanitize_for_email is not None and text:
+        text = _sanitize_for_email(text)
+
     if stats is not None and pages_with_text:
         stats["pages"] = stats.get("pages", 0) + pages_with_text
 
@@ -785,6 +794,8 @@ def extract_from_pdf(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if _sanitize_for_email is not None:
+            prepared = _sanitize_for_email(prepared)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -983,6 +994,8 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if _sanitize_for_email is not None:
+            prepared = _sanitize_for_email(prepared)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
