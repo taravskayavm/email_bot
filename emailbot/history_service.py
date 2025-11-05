@@ -127,7 +127,7 @@ def get_days_rule_default() -> int:
     """Return the default number of days for the history rule."""
 
     # Keep the default in sync with the global cooldown setting.
-    return _env_int("COOLDOWN_DAYS", 180)
+    return _env_int("COOLDOWN_DAYS", _cooldown_days_default())
 
 
 def mark_sent(
