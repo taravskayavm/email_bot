@@ -530,6 +530,7 @@ def run_parse_in_subprocess(
     """Run ZIP parsing using the most reliable strategy for the platform."""
 
     if os.name == "nt":
+        # --- [EBOT-THREAD-FALLBACK] на Windows используем поток, а не подпроцесс ---
         return _run_parse_via_thread(
             zip_path,
             timeout_sec,
