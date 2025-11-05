@@ -39,6 +39,25 @@ from .worker_archive import run_parse_in_subprocess
 logger = logging.getLogger(__name__)
 
 
+_PREVIEW_SANITIZE_PATTERNS = [
+    re.compile(r"(?m)^\s*🇷🇺.+\n?"),
+    re.compile(r"(?m)^\s*📄\s*Пропущено страниц.*\n?"),
+    re.compile(r"(?m)^\s*♻️\s*Возможные сносочные дубликаты удалены.*\n?"),
+    re.compile(r"(?m)^\s*🚫\s*В стоп-листе:.*\n?"),
+    re.compile(r"(?m)^\s*⏳\s*Под кулдауном.*\n?"),
+]
+
+
+def _sanitize_preview_report(text: str) -> str:
+    """Удалить устаревшие строки из текста превью перед отправкой."""
+
+    cleaned = text
+    for pattern in _PREVIEW_SANITIZE_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
 # Последний счётчик записей без timestamp, отфильтрованных при чтении аудита.
 _LAST_AUDIT_DROP_NO_TS = 0
 
@@ -282,7 +301,7 @@ def _extract_emails_loose(text: str) -> list[str]:
             found.append(email)
     return found
 
-from emailbot.domain_utils import count_domains, classify_email_domain
+from emailbot.domain_utils import classify_email_domain
 from emailbot.reporting.excel_helpers import append_foreign_review_sheet
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
@@ -3706,8 +3725,6 @@ async def _compose_report_and_save(
     state.blocked_after_parse = count_blocked(state.to_send)
     context.user_data["last_parsed_emails"] = list(state.to_send)
 
-    dom_stats = count_domains(list(state.to_send))
-
     cooldown_norm_set.update({_normalize_email(addr) for addr in skipped_recent if addr})
     cooldown_count = len(cooldown_norm_set)
     cooldown_example_values = [addr for addr in skipped_recent if addr][:3]
@@ -3753,33 +3770,26 @@ async def _compose_report_and_save(
     blocklist_display = _head3(list(dict.fromkeys(blocked_examples)))
     cooldown_display = _head3(list(dict.fromkeys(cooldown_example_values)))
 
-    summary = format_parse_summary(
-        {
-            "total_found": total_found,
-            "to_send": ready_count,
-            "suspicious": len(suspicious_numeric),
-            "cooldown_180d": cooldown_count,
-            "foreign_corporate": dom_stats["foreign_corporate"],
-            "global_mail": dom_stats["global_mail"],
-            "ru_like": dom_stats["ru_like"],
-            "foreign_domain": dom_stats["foreign_corporate"],
-            "pages_skipped": 0,
-            "footnote_dupes_removed": footnote_dupes,
-            "blocked": blocked_after_parse,
-            "blocked_after_parse": blocked_after_parse,
-            "dedup_removed": dedup_removed,
+    summary_payload = {
+        "total_found": total_found,
+        "to_send": ready_count,
+        "suspicious": len(suspicious_numeric),
+        "excluded": {
+            "duplicates_after_norm": dedup_removed,
             "invalid_after_norm": invalid_count,
             "blocklist_removed": blocklist_count,
             "cooldown_removed": cooldown_count,
-            "excluded_other": others,
-            "dup_examples_display": dup_display,
-            "invalid_examples_display": invalid_display,
-            "blocklist_examples_display": blocklist_display,
-            "cooldown_examples_display": cooldown_display,
+            "other_removed": others,
+            "examples": {
+                "duplicates": dup_display,
+                "invalid": invalid_display,
+                "blocklist": blocklist_display,
+                "cooldown": cooldown_display,
+            },
         },
-        examples=(),
-    )
-    return summary
+    }
+    summary = format_parse_summary(summary_payload)
+    return _sanitize_preview_report(summary)
 
 
 def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
@@ -7314,7 +7324,12 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if audit_path:
             summary_lines.append(f"📄 Аудит: {audit_path}")
 
-        await query.message.reply_text("\n".join(summary_lines))
+        text_out = "\n".join(summary_lines)
+        text_out = re.sub(r"(?m)^\s*Недоставляемые.*\n?", "", text_out)
+        text_out = re.sub(r"(?m)^\s*Ошиб(?:ок|ки) при отправке.*\n?", "", text_out)
+        text_out = re.sub(r"(?m)^\s*ℹ️\s*Осталось без изменений.*\n?", "", text_out)
+
+        await query.message.reply_text(text_out)
         if error_details:
             summary = format_error_details(error_details)
             if summary:

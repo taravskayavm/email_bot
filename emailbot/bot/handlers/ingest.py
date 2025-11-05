@@ -13,7 +13,6 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hcode
 
-from emailbot.domain_utils import count_domains
 from emailbot.messaging import BLOCKED_FILE
 from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
@@ -101,26 +100,33 @@ def _build_summary(
     deep: bool,
     limit_pages: int | None = None,
 ) -> str:
+    examples_payload: dict[str, object] = {}
+    for stat_key, mapped in (
+        ("dup_examples_display", "duplicates"),
+        ("invalid_examples_display", "invalid"),
+        ("blocklist_examples_display", "blocklist"),
+        ("cooldown_examples_display", "cooldown"),
+    ):
+        value = stats.get(stat_key)
+        if value:
+            examples_payload[mapped] = value
+
+    excluded_payload: dict[str, object] = {
+        "duplicates_after_norm": stats.get("duplicates_after_norm", 0),
+        "invalid_after_norm": stats.get("invalid_after_norm", stats.get("bad", 0)),
+        "blocklist_removed": stats.get("blocked", 0),
+        "cooldown_removed": stats.get("cooldown_removed", 0),
+        "other_removed": stats.get("other_removed", 0),
+    }
+    if examples_payload:
+        excluded_payload["examples"] = examples_payload
+
     summary_payload: dict[str, object] = {
         "total_found": stats.get("total_in", 0),
         "to_send": len(filtered),
         "suspicious": 0,
-        "cooldown_180d": 0,
-        "foreign_domain": 0,
-        "pages_skipped": 0,
-        "footnote_dupes_removed": 0,
-        "blocked": stats.get("blocked", 0),
-        "blocked_after_parse": stats.get("blocked", 0),
+        "excluded": excluded_payload,
     }
-    dom_stats = count_domains(filtered)
-    summary_payload.update(
-        {
-            "foreign_corporate": dom_stats["foreign_corporate"],
-            "global_mail": dom_stats["global_mail"],
-            "ru_like": dom_stats["ru_like"],
-            "foreign_domain": dom_stats["foreign_corporate"],
-        }
-    )
     for key in (
         "invalid_tld_examples",
         "syntax_fail_examples",
