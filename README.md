@@ -232,3 +232,31 @@ OCR_TIME_LIMIT=30  # таймаут распознавания, секунд
 OCR делает обработку медленнее, поэтому по умолчанию флаг выключен. Пределы по
 страницам и времени помогают избежать «зависших» документов — при желании их
 можно ослабить, но имейте в виду увеличение нагрузки.
+
+## Windows (Anaconda PowerShell) — быстрый старт
+
+1. Откройте **Anaconda PowerShell Prompt**.
+2. Перейдите в каталог проекта:
+   ```powershell
+   cd /d D:\email_bot
+   ```
+3. Активируйте окружение:
+   ```powershell
+   conda activate emailbot
+   ```
+4. Установите зависимости:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+5. Очистите кэши и сборочные артефакты (PowerShell):
+   ```powershell
+   .\scripts\cleanup.ps1
+   ```
+   В **cmd.exe** эквивалентная команда:
+   ```cmd
+   rd /s /q __pycache__
+   ```
+6. Запустите тесты:
+   ```powershell
+   pytest -q
+   ```

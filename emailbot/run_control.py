@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from typing import Dict, List, Optional
+
+from .utils.logging_setup import get_logger
 
 _stop_event = asyncio.Event()
 _tasks: Dict[str, asyncio.Task] = {}
+_executors: List[ThreadPoolExecutor] = []
+_executor_lock = Lock()
+
+logger = get_logger(__name__)
 
 
 def should_stop() -> bool:
@@ -19,6 +27,14 @@ def request_stop() -> None:
         if not task.done():
             task.cancel()
     _tasks.clear()
+
+    with _executor_lock:
+        for executor in list(_executors):
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                logger.warning("executor shutdown failed", exc_info=True)
+        _executors.clear()
 
 
 def clear_stop() -> None:
@@ -69,3 +85,27 @@ def stop_and_status() -> dict:
     running = running_tasks()
     request_stop()
     return {"stopped": True, "running": running}
+
+
+def register_executor(executor: ThreadPoolExecutor) -> None:
+    """Track ``executor`` so it can be cancelled on stop."""
+
+    with _executor_lock:
+        _executors.append(executor)
+
+
+def unregister_executor(executor: ThreadPoolExecutor) -> None:
+    """Remove ``executor`` from tracking list if present."""
+
+    with _executor_lock:
+        try:
+            _executors.remove(executor)
+        except ValueError:
+            pass
+
+
+def clear_executors() -> None:
+    """Forget about registered executors without shutting them down."""
+
+    with _executor_lock:
+        _executors.clear()

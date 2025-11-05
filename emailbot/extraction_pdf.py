@@ -84,6 +84,7 @@ def backend_status() -> Dict[str, bool | str]:
 
 from emailbot import settings
 from emailbot.settings_store import get
+from emailbot.utils.logging_setup import get_logger
 from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
@@ -130,7 +131,7 @@ if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
     _pdf_backend_env = "fitz"
 PDF_BACKEND = _pdf_backend_env
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 try:  # pragma: no cover - depends on runtime environment
     _OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
