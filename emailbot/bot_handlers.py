@@ -933,6 +933,23 @@ async def extract_emails_from_zip(
         future.cancel()
         raise ZipProcessingTimeoutError from exc
     finally:
+        cancelled_exc: BaseException | None = None
+        current_task = asyncio.current_task()
+
+        def cancellation_requested(task: asyncio.Task[object] | None) -> bool:
+            if task is None:
+                return False
+            cancelling_method = getattr(task, "cancelling", None)
+            if callable(cancelling_method):
+                try:
+                    return cancelling_method() > 0
+                except TypeError:
+                    # Older Python versions expose "cancelling" as a property.
+                    pass
+            cancel_requested = getattr(task, "_cancel_requested", None)
+            if cancel_requested is not None:
+                return bool(cancel_requested)
+            return task.cancelled()
         try:
             if stop_event is not None:
                 stop_event.set()
@@ -940,12 +957,20 @@ async def extract_emails_from_zip(
             pass
         if heartbeat_task is not None:
             heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
+            try:
                 await heartbeat_task
+            except asyncio.CancelledError as exc:
+                if cancellation_requested(current_task):
+                    cancelled_exc = cancelled_exc or exc
         if pulse_task is not None:
             pulse_task.cancel()
-            with suppress(asyncio.CancelledError):
+            try:
                 await pulse_task
+            except asyncio.CancelledError as exc:
+                if cancellation_requested(current_task):
+                    cancelled_exc = cancelled_exc or exc
+        if cancelled_exc is not None:
+            raise cancelled_exc
 
     if not ok:
         error_message = str(payload.get("error", "unknown error"))
