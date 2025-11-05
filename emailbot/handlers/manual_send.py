@@ -1063,6 +1063,7 @@ async def send_all(
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
+        error_count = len(error_addresses)
         fallback_metrics = {
             "total": len(sent_ok)
             + len(skipped_recent)
@@ -1074,13 +1075,19 @@ async def send_all(
             "cooldown": len(skipped_recent),
             "undeliverable_only": 0,
             "unchanged": len(skipped_duplicates),
-            "errors": len(error_addresses),
+            "errors": error_count,
+            "not_delivered": error_count,
         }
         metrics = fallback_metrics
         if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
             metrics = bot_handlers._summarize_from_audit(str(audit_path))
             if not metrics.get("total") and fallback_metrics["total"]:
                 metrics = fallback_metrics
+
+        not_delivered = metrics.get(
+            "not_delivered",
+            metrics.get("undeliverable_only", 0) + metrics.get("errors", 0),
+        )
 
         summary_lines: list[str] = []
         summary_lines.append("📨 Рассылка завершена.")
@@ -1090,11 +1097,7 @@ async def send_all(
             f"⏳ Пропущены (по правилу «180 дней»): {metrics['cooldown']}"
         )
         summary_lines.append(f"🚫 В стоп-листе: {metrics['blocked']}")
-        summary_lines.append(f"ℹ️ Осталось без изменений: {metrics['unchanged']}")
-        summary_lines.append(
-            f"🚫 Недоставляемые (без стоп-листа): {metrics['undeliverable_only']}"
-        )
-        summary_lines.append(f"❌ Ошибок при отправке: {metrics['errors']}")
+        summary_lines.append(f"❌ Не доставлено: {not_delivered}")
         if aborted:
             summary_lines.append("⛔ Рассылка остановлена досрочно.")
         if blocked_foreign:
