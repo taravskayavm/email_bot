@@ -1503,25 +1503,32 @@ def extract_any_stream(
 
     ext = ext.lower()
     if ext == ".pdf":
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                extract_from_pdf_stream,
-                data,
-                source_ref,
-                stop_event,
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(
+            extract_from_pdf_stream,
+            data,
+            source_ref,
+            stop_event,
+        )
+        shutdown_called = False
+        try:
+            return future.result(timeout=PDF_STREAM_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            logger.warning(
+                "Timeout parsing PDF stream",
+                extra={
+                    "event": "pdf_stream_timeout",
+                    "entry": source_ref,
+                    "timeout_sec": PDF_STREAM_TIMEOUT_SEC,
+                },
             )
-            try:
-                return future.result(timeout=PDF_STREAM_TIMEOUT_SEC)
-            except FuturesTimeoutError:
-                logger.warning(
-                    "Timeout parsing PDF stream",
-                    extra={
-                        "event": "pdf_stream_timeout",
-                        "entry": source_ref,
-                        "timeout_sec": PDF_STREAM_TIMEOUT_SEC,
-                    },
-                )
-                return [], {"files_skipped_timeout": 1}
+            future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            shutdown_called = True
+            return [], {"files_skipped_timeout": 1}
+        finally:
+            if not shutdown_called:
+                pool.shutdown(wait=True, cancel_futures=True)
     if ext == ".docx":
         return extract_from_docx_stream(data, source_ref, stop_event)
     if ext == ".xlsx":
