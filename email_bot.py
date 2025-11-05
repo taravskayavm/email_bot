@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
 import os
 import sys
 import threading
@@ -546,20 +547,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # ВАЖНО для Windows/multiprocessing: без guard дочерние процессы будут
-    # повторно запускать Telegram-бота вместо выполнения целевой функции воркера.
+    # [EBOT-WIN-SPAWN] На Windows при методе запуска "spawn" дочерние процессы
+    # переимпортируют главный модуль. freeze_support() предотвращает
+    # некорректную инициализацию подпроцесса и «зависания» при старте.
     try:
-        import multiprocessing as _mp
-
-        # --- [EBOT-WIN-PATH] защита от повторного запуска в подпроцессах на Windows ---
-        if hasattr(_mp, "freeze_support"):
-            _mp.freeze_support()
-        if os.name == "nt" and hasattr(_mp, "set_start_method"):
-            try:
-                _mp.set_start_method("spawn", force=True)
-            except RuntimeError:
-                pass
+        mp.freeze_support()
     except Exception:
-        # Страховка: не валим основной запуск из-за служебной настройки MP
+        # defensive: на не-Windows просто продолжаем
         pass
     main()
