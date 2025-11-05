@@ -46,7 +46,7 @@ from typing import (
 from threading import RLock
 
 from .extraction import normalize_email, strip_html
-from utils.email_clean import strip_invisibles
+from utils.email_clean import normalize_email_unified, strip_invisibles
 from .cooldown import (
     audit_emails,
     build_cooldown_service,
@@ -668,17 +668,23 @@ def _to_idna(domain: str) -> str:
 
 
 def _normalize_email_for_blocklist(addr: str) -> str:
-    addr = (addr or "").strip().lower()
-    try:
-        local, dom = addr.split("@", 1)
-        dom_idna = _to_idna(dom)
-        return f"{local}@{dom_idna}"
-    except Exception:
-        return addr
+    normalized = normalize_email_unified(addr)
+    if not normalized:
+        return ""
+
+    local, sep, dom = normalized.partition("@")
+    if not sep:
+        return normalized
+
+    dom_idna = _to_idna(dom)
+    if not dom_idna:
+        return normalized
+
+    return f"{local}@{dom_idna}"
 
 
 def _canonical_blocked(email_str: str) -> str:
-    email_norm = normalize_email(email_str)
+    email_norm = normalize_email_unified(email_str)
     email_norm = re.sub(r"^\.+", "", email_norm)
     email_norm = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", email_norm)
     return _normalize_email_for_blocklist(email_norm)
@@ -752,6 +758,70 @@ def _is_blocklisted(email: str) -> bool:
     except Exception:
         logger.debug("blocklist lookup failed", exc_info=True)
         return False
+
+
+def _extend_stoplist_snapshot(snapshot: set[str], values: Iterable[str]) -> None:
+    for raw in values or []:
+        try:
+            canon = _normalize_email_for_blocklist(raw)
+        except Exception:
+            canon = normalize_email_unified(raw)
+        if canon and "@" in canon:
+            snapshot.add(canon)
+
+
+def _extend_snapshot_from_history(snapshot: set[str], attr: str) -> None:
+    loader = getattr(history_service, attr, None)
+    if not callable(loader):
+        return
+    try:
+        entries = loader()
+    except TypeError:
+        # Some legacy helpers might accept unused positional arguments.
+        try:
+            entries = loader([])
+        except Exception:
+            logger.debug("stoplist snapshot: %s() call failed", attr, exc_info=True)
+            return
+    except Exception:
+        logger.debug("stoplist snapshot: %s() call failed", attr, exc_info=True)
+        return
+
+    try:
+        _extend_stoplist_snapshot(snapshot, entries)
+    except Exception:
+        logger.debug("stoplist snapshot: failed to extend from %s", attr, exc_info=True)
+
+
+def load_stoplist_snapshot() -> set[str]:
+    """Collect a unified set of blocked addresses from all available sources."""
+
+    ensure_blocklist_ready()
+
+    snapshot: set[str] = set()
+
+    try:
+        suppress_list.refresh_if_changed()
+        blocked = suppress_list.get_blocked_set()
+    except Exception:
+        logger.debug("stoplist snapshot: failed to load suppress_list", exc_info=True)
+        blocked = set()
+
+    _extend_stoplist_snapshot(snapshot, blocked)
+    _extend_stoplist_snapshot(snapshot, _extra_blocklist())
+
+    try:
+        rules_blocked = rules.load_blocklist()
+    except Exception:
+        logger.debug("stoplist snapshot: failed to load rules blocklist", exc_info=True)
+        rules_blocked = set()
+
+    _extend_stoplist_snapshot(snapshot, rules_blocked)
+
+    for attr in ("iter_unsubscribed", "iter_hard_bounces"):
+        _extend_snapshot_from_history(snapshot, attr)
+
+    return snapshot
 
 
 # HTML templates are stored at the root-level ``templates`` directory.
@@ -1716,12 +1786,7 @@ def process_unsubscribe_requests(
 
 
 def get_blocked_emails() -> Set[str]:
-    ensure_blocklist_ready()
-    canonical = {
-        _canonical_blocked(value)
-        for value in suppress_list.get_blocked_set()
-    }
-    return {item for item in canonical if item and "@" in item}
+    return load_stoplist_snapshot()
 
 
 def dedupe_blocked_file():
@@ -2122,7 +2187,7 @@ def prepare_mass_mailing(
         batch = sanitize_batch(emails)
         cleaned = batch.emails
         dup_skipped = batch.duplicates
-        norm_map = batch.normalized
+        norm_map = {addr: normalize_email_unified(addr) for addr in cleaned}
         if not cleaned:
             return [], [], [], [], {"total": 0, "input_total": 0}
 
@@ -2133,16 +2198,16 @@ def prepare_mass_mailing(
         invalid_basic = [addr for addr in cleaned if not _validate_email_basic(addr)]
         candidates = [addr for addr in cleaned if addr not in invalid_basic]
 
-        blocked_set: set[str] = set()
+        stoplist_snapshot: set[str] = set()
         try:
-            blocked_set = {normalize_email(e) for e in get_blocked_emails()}
+            stoplist_snapshot = load_stoplist_snapshot()
         except Exception as exc:
             logger.warning("blocked list load failed: %s", exc)
 
         queue_after_block: list[str] = []
         for addr in candidates:
-            norm = norm_map.get(addr) or normalize_email(addr)
-            if blocked_set and norm in blocked_set:
+            norm = norm_map.get(addr) or normalize_email_unified(addr)
+            if stoplist_snapshot and norm in stoplist_snapshot:
                 blocked_invalid.append(addr)
                 continue
             if rules.is_blocked(norm):
@@ -2266,6 +2331,7 @@ def prepare_mass_mailing(
             "removed_foreign": len(blocked_foreign),
             "removed_today": 0,
             "global_excluded": 0,
+            "stoplist_snapshot_size": len(stoplist_snapshot),
             # Больше не возвращаем ru_count/global_count и производные,
             # чтобы репорт их не печатал.
         }
