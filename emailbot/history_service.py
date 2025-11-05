@@ -32,7 +32,7 @@ def _cooldown_days_default() -> int:
         return 180
 
 
-COOLDOWN_DAYS = _cooldown_days_default()
+COOLDOWN_DAYS = _env_int("COOLDOWN_DAYS", _cooldown_days_default())
 
 
 _DT_CANDIDATES = (
@@ -261,8 +261,11 @@ def can_send_now(email: str) -> bool:
     last = get_last_sent_dt(email)
     if not last:
         return True
+    window_days = get_days_rule_default()
+    if window_days <= 0:
+        return True
     now = datetime.utcnow()
-    return (now - last) >= timedelta(days=COOLDOWN_DAYS)
+    return (now - last) >= timedelta(days=window_days)
 
 
 def filter_by_days(
