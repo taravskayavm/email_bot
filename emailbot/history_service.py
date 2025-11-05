@@ -88,9 +88,18 @@ def _default_db_path() -> Path:
 
 
 def _resolve_path() -> Path:
+    # 1) Явная переменная окружения
     raw = os.getenv("HISTORY_DB_PATH")
     if raw:
         return expand_path(raw)
+    # 2) Настройки проекта (то, что печатается как HISTORY_DB=...)
+    try:
+        cfg = getattr(settings, "HISTORY_DB", None)
+        if cfg:
+            return expand_path(str(cfg))
+    except Exception:
+        pass
+    # 3) Дефолт
     return _default_db_path()
 
 

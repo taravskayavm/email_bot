@@ -2158,16 +2158,11 @@ def prepare_mass_mailing(
 
         queue_after_foreign: list[str] = []
         block_foreign_enabled = os.getenv("FOREIGN_BLOCK", "1") == "1"
-        policy_metrics = {"ru_count": 0, "global_count": 0}
+        # Бизнес-правило: пропускаем все .ru и gmail.com без отдельной статистики.
         allowlisted_globals = _GLOBAL_MAIL_PROVIDERS | {"gmail.com"}
         for addr in queue_after_block:
             domain = extract_domain(addr)
             domain_lower = domain.lower()
-            if domain_lower.endswith(".ru"):
-                policy_metrics["ru_count"] += 1
-            if domain_lower in _GLOBAL_MAIL_PROVIDERS:
-                policy_metrics["global_count"] += 1
-
             allowlisted = False
             if domain_lower.endswith(".ru"):
                 allowlisted = True
@@ -2216,19 +2211,12 @@ def prepare_mass_mailing(
                 blocked_recent = True
             if not blocked_recent:
                 try:
+                    # Единый источник: локальный лог/аудит (normalize + content-hash).
                     if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
                         skipped_recent.append(addr)
                         blocked_recent = True
-                    elif (
-                        lookback_days > 0
-                        and history_service.was_sent_within_days(
-                            addr, group or "", lookback_days
-                        )
-                    ):
-                        skipped_recent.append(addr)
-                        blocked_recent = True
                 except Exception as exc:
-                    logger.warning("history lookup failed for %s: %s", addr, exc)
+                    logger.warning("recent history check failed for %s: %s", addr, exc)
             if blocked_recent:
                 continue
             canon = norm_key if lookback_days > 0 else addr
@@ -2278,8 +2266,8 @@ def prepare_mass_mailing(
             "removed_foreign": len(blocked_foreign),
             "removed_today": 0,
             "global_excluded": 0,
-            "global_count": policy_metrics["global_count"],
-            "ru_count": policy_metrics["ru_count"],
+            # Больше не возвращаем ru_count/global_count и производные,
+            # чтобы репорт их не печатал.
         }
         return ready, blocked_foreign, blocked_invalid, skipped_recent, digest
     except Exception as exc:
