@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Tuple
+import queue
 import json
 import logging
 import multiprocessing as mp
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -50,6 +52,19 @@ def _cleanup_artifacts(*paths: os.PathLike[str] | str | None) -> None:
         _remove_quiet(f"{path}.part")
 
 
+def _normalize_progress_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize progress snapshot keys for UI/backwards compatibility."""
+
+    snap = dict(snapshot)
+    if "processed" in snap and "done" not in snap:
+        snap["done"] = snap["processed"]
+    if "done" in snap and "processed" not in snap:
+        snap["processed"] = snap["done"]
+    if "current" in snap and "file" not in snap:
+        snap["file"] = snap["current"]
+    return snap
+
+
 def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> None:
     """Worker process entry point."""
 
@@ -71,14 +86,7 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
         if progress_path is None:
             return
         try:
-            # [EB-FIX] Нормализуем схему прогресса для обратной совместимости UI.
-            snap = dict(snapshot)
-            if "processed" in snap and "done" not in snap:
-                snap["done"] = snap["processed"]
-            if "done" in snap and "processed" not in snap:
-                snap["processed"] = snap["done"]
-            if "current" in snap and "file" not in snap:
-                snap["file"] = snap["current"]
+            snap = _normalize_progress_snapshot(snapshot)
             _atomic_write_json(progress_path, {"progress": snap})
         except Exception:  # pragma: no cover - best effort delivery
             pass
@@ -146,13 +154,131 @@ def _worker(zip_path: str, out_json_path: str, progress_path: str | None) -> Non
             pass
 
 
-def run_parse_in_subprocess(
+def _thread_worker(
+    zip_path: str,
+    *,
+    progress_callback: Callable[[Dict[str, Any]], None] | None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Thread worker variant that delivers progress via callbacks."""
+
+    try:
+        from . import extraction as _extraction  # lazy import
+    except Exception as exc:  # pragma: no cover - defensive
+        tb = traceback.format_exc()
+        return False, {"error": f"import failed: {exc}", "traceback": tb}
+
+    def _emit_progress(snapshot: Dict[str, Any]) -> None:
+        try:
+            heartbeat_now()
+        except Exception:  # pragma: no cover - best effort heartbeat
+            pass
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(_normalize_progress_snapshot(snapshot))
+        except Exception:  # pragma: no cover - defensive notification
+            logger.debug("progress callback failed", exc_info=True)
+
+    tracker = ProgressTracker(on_update=_emit_progress)
+
+    try:
+        try:
+            _emit_progress({"stage": "worker_boot", "processed": 0, "total": None})
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
+
+        try:
+            _emit_progress({"stage": "route_start", "processed": 0, "total": None})
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
+
+        emails, stats = _extraction.extract_any(zip_path, tracker=tracker)
+
+        try:
+            _emit_progress(
+                {
+                    "stage": "route_done",
+                    "processed": stats.get("processed", 0),
+                    "total": stats.get("total", None),
+                }
+            )
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
+
+        processed = (
+            stats.get("files_processed")
+            or stats.get("processed")
+            or stats.get("done")
+            or 0
+        )
+        total = (
+            stats.get("files_total")
+            or stats.get("total")
+            or stats.get("expected")
+            or None
+        )
+        try:
+            _emit_progress(
+                {"stage": "finalize", "processed": processed, "total": total}
+            )
+        except Exception:  # pragma: no cover - best effort delivery
+            pass
+
+        return True, {"emails": emails, "stats": stats}
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        tb = traceback.format_exc()
+        logger.warning("zip worker failed: %s", exc)
+        return False, {"error": str(exc), "traceback": tb}
+
+
+def _run_parse_via_thread(
     zip_path: str,
     timeout_sec: int,
     *,
     progress_callback: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Run ZIP parsing in a forked process with a hard timeout (Windows-safe)."""
+    """Run ZIP parsing in a background thread (Windows fallback)."""
+
+    result_queue: "queue.Queue[Tuple[bool, Dict[str, Any]]]" = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        result = _thread_worker(zip_path, progress_callback=progress_callback)
+        try:
+            result_queue.put_nowait(result)
+        except Exception:  # pragma: no cover - best effort delivery
+            logger.debug("thread worker result delivery failed", exc_info=True)
+
+    thread = threading.Thread(target=_target, name="zip-worker-thread", daemon=True)
+    thread.start()
+
+    try:
+        ok, payload = result_queue.get(timeout=timeout_sec)
+        return ok, payload
+    except queue.Empty:
+        try:
+            heartbeat_now()
+        except Exception:  # pragma: no cover - best effort heartbeat
+            pass
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    _normalize_progress_snapshot(
+                        {"stage": "timeout", "processed": 0, "total": 0}
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive notification
+                logger.debug("progress callback failed", exc_info=True)
+        logger.error("zip worker thread timed out after %ss", timeout_sec)
+        return False, {"error": f"timeout after {timeout_sec}s"}
+
+
+def _run_parse_via_process(
+    zip_path: str,
+    timeout_sec: int,
+    *,
+    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Run ZIP parsing in a forked process with a hard timeout."""
 
     # Явно используем spawn-контекст, чтобы не наследовать состояние родителя.
     try:
@@ -339,6 +465,27 @@ def run_parse_in_subprocess(
         _notify_progress(snapshot)
 
     return True, {"emails": data["emails"], "stats": stats}
+
+
+def run_parse_in_subprocess(
+    zip_path: str,
+    timeout_sec: int,
+    *,
+    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Run ZIP parsing using the most reliable strategy for the platform."""
+
+    if os.name == "nt":
+        return _run_parse_via_thread(
+            zip_path,
+            timeout_sec,
+            progress_callback=progress_callback,
+        )
+    return _run_parse_via_process(
+        zip_path,
+        timeout_sec,
+        progress_callback=progress_callback,
+    )
 
 
 __all__ = ["run_parse_in_subprocess"]
