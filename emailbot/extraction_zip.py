@@ -75,7 +75,9 @@ ZIP_MAX_TOTAL_UNCOMP_MB = int(os.getenv("ZIP_MAX_TOTAL_UNCOMP_MB", "500"))
 ZIP_MAX_MEMBER_MB = int(os.getenv("ZIP_MAX_MEMBER_MB", "50"))
 ZIP_MAX_DEPTH = int(os.getenv("ZIP_MAX_DEPTH", "2"))
 ZIP_RATIO_LIMIT = float(os.getenv("ZIP_RATIO_LIMIT", "100.0"))
-ZIP_MEMBER_TIMEOUT_SEC = int(os.getenv("ZIP_MEMBER_TIMEOUT_SEC", "25"))
+# Сколько секунд даём на обработку одного элемента архива (PDF/DOCX/и т.п.)
+# Увеличено по умолчанию до 60 из-за «ложных зависаний» на тяжёлых документах.
+ZIP_MEMBER_TIMEOUT_SEC = int(os.getenv("ZIP_MEMBER_TIMEOUT_SEC", "60"))
 _XLSX_CELL_LIMIT = int(os.getenv("ZIP_XLSX_CELL_LIMIT", "5000"))
 _PPTX_TEXT_LIMIT = int(os.getenv("ZIP_PPTX_TEXT_LIMIT", "2000"))
 
