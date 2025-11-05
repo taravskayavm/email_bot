@@ -239,37 +239,91 @@ def _run_parse_via_thread(
 ) -> Tuple[bool, Dict[str, Any]]:
     """Run ZIP parsing in a background thread (Windows fallback)."""
 
-    result_queue: "queue.Queue[Tuple[bool, Dict[str, Any]]]" = queue.Queue(maxsize=1)
+    result_queue: "queue.SimpleQueue[Tuple[bool, Dict[str, Any]]]" = queue.SimpleQueue()
+    state_lock = threading.Lock()
+    last_snapshot: Dict[str, Any] | None = None
+    heartbeat_interval = 5.0
+    next_heartbeat = time.monotonic() + heartbeat_interval
+
+    def _deliver_progress(snapshot: Dict[str, Any]) -> None:
+        callback = progress_callback
+        if callback is None:
+            return
+        try:
+            callback(snapshot)
+        except Exception:  # pragma: no cover - defensive notification
+            logger.debug("progress callback failed", exc_info=True)
+
+    def _progress_wrapper(snapshot: Dict[str, Any]) -> None:
+        nonlocal last_snapshot, next_heartbeat
+        now = time.monotonic()
+        with state_lock:
+            last_snapshot = dict(snapshot)
+        next_heartbeat = now + heartbeat_interval
+        _deliver_progress(snapshot)
 
     def _target() -> None:
-        result = _thread_worker(zip_path, progress_callback=progress_callback)
+        result = _thread_worker(zip_path, progress_callback=_progress_wrapper)
         try:
-            result_queue.put_nowait(result)
+            result_queue.put(result)
         except Exception:  # pragma: no cover - best effort delivery
             logger.debug("thread worker result delivery failed", exc_info=True)
 
     thread = threading.Thread(target=_target, name="zip-worker-thread", daemon=True)
     thread.start()
 
+    deadline = time.monotonic() + timeout_sec
+
     try:
-        ok, payload = result_queue.get(timeout=timeout_sec)
-        return ok, payload
-    except queue.Empty:
-        try:
-            heartbeat_now()
-        except Exception:  # pragma: no cover - best effort heartbeat
-            pass
-        if progress_callback is not None:
+        while True:
             try:
-                progress_callback(
-                    _normalize_progress_snapshot(
-                        {"stage": "timeout", "processed": 0, "total": 0}
-                    )
+                return result_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+
+            if now >= deadline:
+                try:
+                    heartbeat_now()
+                except Exception:  # pragma: no cover - best effort heartbeat
+                    pass
+                timeout_payload = _normalize_progress_snapshot(
+                    {"stage": "timeout", "processed": 0, "total": 0}
                 )
-            except Exception:  # pragma: no cover - defensive notification
-                logger.debug("progress callback failed", exc_info=True)
-        logger.error("zip worker thread timed out after %ss", timeout_sec)
-        return False, {"error": f"timeout after {timeout_sec}s"}
+                _deliver_progress(timeout_payload)
+                logger.error("zip worker thread timed out after %ss", timeout_sec)
+                return False, {"error": f"timeout after {timeout_sec}s"}
+
+            if now >= next_heartbeat:
+                try:
+                    heartbeat_now()
+                except Exception:  # pragma: no cover - best effort heartbeat
+                    pass
+                heartbeat_snapshot: Dict[str, Any]
+                with state_lock:
+                    heartbeat_snapshot = dict(last_snapshot or {})
+                heartbeat_snapshot["stage"] = "heartbeat"
+                heartbeat_payload = _normalize_progress_snapshot(heartbeat_snapshot)
+                _deliver_progress(heartbeat_payload)
+                next_heartbeat = now + heartbeat_interval
+
+            if not thread.is_alive():
+                break
+
+            time.sleep(0.05)
+    finally:
+        try:
+            if thread.is_alive():
+                thread.join(timeout=0.1)
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        logger.error("zip worker thread finished without returning a result")
+        return False, {"error": "no result from thread"}
 
 
 def _run_parse_via_process(
