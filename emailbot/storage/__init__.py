@@ -13,10 +13,7 @@ if _BACKEND == "sqlite":
     from .sqlite_store import init as init_storage
     from .sqlite_store import is_blocked as storage_is_blocked
     from .sqlite_store import list_blocked as storage_list_blocked
-    try:  # pragma: no cover - defensive initialisation
-        init_storage()
-    except Exception:
-        pass
+    init_storage()
 else:  # pragma: no cover - default lightweight deployments
     def init_storage() -> None:
         return None
