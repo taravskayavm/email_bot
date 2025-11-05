@@ -32,6 +32,12 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 _startup_logger = logging.getLogger(__name__)
 
 
+# --- [EBOT-WIN-PATH] гарантируем, что корень проекта в PYTHONPATH ---
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 def _selfcheck_email_clean_exports() -> None:
     if os.getenv("EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST", "0") == "1":
         logger.warning("Selfcheck skipped by EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST=1")
@@ -68,11 +74,6 @@ def _selfcheck_email_clean_exports() -> None:
 
 
 _selfcheck_email_clean_exports()
-
-# Обеспечиваем, что корень проекта в sys.path при запуске подпроцессов (Windows spawn)
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
 
 from emailbot import bot_handlers, messaging, history_service
 from emailbot import compat  # EBOT-105
@@ -126,7 +127,7 @@ from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = PROJECT_ROOT
 
 
 def _die(msg: str, code: int = 2) -> None:
@@ -550,16 +551,14 @@ if __name__ == "__main__":
     try:
         import multiprocessing as _mp
 
-        # На Windows spawn по умолчанию, но явно не помешает.
-        if hasattr(_mp, "set_start_method"):
-            # Не трогаем, если уже установлен в другом месте.
-            try:
-                _mp.set_start_method("spawn")
-            except RuntimeError:
-                pass
-        # Для совместимости с pyinstaller/Windows:
+        # --- [EBOT-WIN-PATH] защита от повторного запуска в подпроцессах на Windows ---
         if hasattr(_mp, "freeze_support"):
             _mp.freeze_support()
+        if os.name == "nt" and hasattr(_mp, "set_start_method"):
+            try:
+                _mp.set_start_method("spawn", force=True)
+            except RuntimeError:
+                pass
     except Exception:
         # Страховка: не валим основной запуск из-за служебной настройки MP
         pass
