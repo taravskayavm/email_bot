@@ -36,6 +36,8 @@ from zoneinfo import ZoneInfo
 from .utils.zip_limits import validate_zip_safely
 from .worker_archive import run_parse_in_subprocess
 from emailbot.ui.progress import Heartbeat
+from emailbot.ui.progress_state import ParseProgress
+from emailbot.config import PROGRESS_UPDATE_MIN_SEC
 from emailbot.ui.notify import (
     forget_timeout_hint_target,
     remember_timeout_hint_target,
@@ -890,11 +892,13 @@ async def extract_emails_from_zip(
 
     progress_state: Dict[str, Any] = {}
     progress_lock = threading.Lock()
+    progress_last_processed = 0
 
     def _on_progress(snapshot: Dict[str, Any]) -> None:
         if not isinstance(snapshot, dict):
             return
         with progress_lock:
+            nonlocal progress_last_processed
             if "files_total" in snapshot:
                 try:
                     progress_state["files_total"] = max(
@@ -916,9 +920,21 @@ async def extract_emails_from_zip(
                     )
                 except (TypeError, ValueError):
                     progress_state["files_skipped"] = 0
-            last_file = snapshot.get("last_file")
+            last_file = snapshot.get("last_file") or snapshot.get("current")
             if last_file:
                 progress_state["last_file"] = str(last_file)
+            if progress is not None:
+                total_val = int(progress_state.get("files_total") or 0)
+                processed_val = int(progress_state.get("files_processed") or 0)
+                progress.set_phase("ZIP")
+                progress.set_total(total_val)
+                delta = max(0, processed_val - progress_last_processed)
+                if delta:
+                    progress.inc_pages(delta)
+                progress_last_processed = processed_val
+                found_val = snapshot.get("emails_found")
+                if isinstance(found_val, int) and found_val >= 0:
+                    progress.set_found(found_val)
 
     def _run_worker() -> tuple[bool, dict[str, Any]]:
         # windows-safe worker IPC: result + progress snapshots via JSON files
@@ -1013,6 +1029,8 @@ async def extract_emails_from_zip(
         "extraction complete",
         extra={"event": "extract", "source": path, "count": len(emails)},
     )
+    if progress is not None:
+        progress.set_found(len(emails))
     return emails, extracted_files, set(emails), stats
 
 
@@ -1144,11 +1162,11 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-def extract_from_uploaded_file(path: str):
+def extract_from_uploaded_file(path: str, progress: ParseProgress | None = None):
     """Return normalized and raw e-mail candidates from ``path``."""
 
     logging.info("[FLOW] upload->text")
-    hits, stats = _extraction.extract_any(path, _return_hits=True)
+    hits, stats = _extraction.extract_any(path, _return_hits=True, progress=progress)
     stats = stats or {}
 
     allowed: set[str] = set()
@@ -3923,7 +3941,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
 
     progress_msg = None
+    progress: ParseProgress | None = None
+    hb: Heartbeat | None = None
     file_path: str | None = None
+
+    async def _push_progress(force: bool = False) -> None:
+        if not hb or not progress:
+            return
+        text = progress.render_summary() if force else progress.maybe_render_summary(force=True)
+        if text:
+            await hb.force(text)
 
     try:
         await heartbeat()
@@ -3932,12 +3959,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "📥 Файл получен. Анализирую…",
                 reply_markup=_build_stop_markup(),
             )
+        if progress_msg:
+            progress = ParseProgress(phase="подготовка")
+            hb = Heartbeat(
+                progress_msg,
+                interval_sec=max(1.0, float(PROGRESS_UPDATE_MIN_SEC)),
+                supplier=progress.maybe_render_summary,
+            )
+            hb.start()
+            await _push_progress(force=True)
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             file_path = await _download_file(update, DOWNLOAD_DIR)
+            if progress:
+                progress.set_phase("загрузка")
+                await _push_progress(force=True)
             await heartbeat()
         except Exception as e:
+            if hb:
+                hb.stop()
             try:
                 if progress_msg:
                     await progress_msg.edit_text(
@@ -3951,15 +3992,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
             return
 
-        try:
-            if progress_msg:
-                await progress_msg.edit_text(
-                    "📥 Читаю файл…",
-                    reply_markup=_build_stop_markup(),
-                )
-        except Exception:
-            pass
-
         allowed_all, loose_all = set(), set()
         raw_candidates: list[str] = []
         extracted_files: List[str] = []
@@ -3969,14 +4001,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         state = get_state(context)
 
         try:
-            try:
-                if progress_msg:
-                    await progress_msg.edit_text(
-                        "🔎 Ищу адреса…",
-                        reply_markup=_build_stop_markup(),
-                    )
-            except Exception:
-                pass
+            if progress:
+                progress.set_phase("анализ")
+                await _push_progress(force=True)
             if (file_path or "").lower().endswith(".zip"):
                 try:
                     zip_kwargs: Dict[str, Any] = {}
@@ -3986,13 +4013,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         sig = None
                     if sig is None or "progress_message" in getattr(sig, "parameters", {}):
                         zip_kwargs["progress_message"] = progress_msg
+                    if progress:
+                        progress.set_phase("ZIP")
+                        await _push_progress(force=True)
                     (
                         allowed,
                         extracted_files,
                         loose,
                         stats,
-                    ) = await extract_emails_from_zip(file_path, **zip_kwargs)
+                    ) = await extract_emails_from_zip(
+                        file_path,
+                        progress=progress,
+                        **zip_kwargs,
+                    )
                 except ZipValidationError as exc:
+                    if hb:
+                        hb.stop()
                     warning_text = (
                         f"⚠️ Архив отклонён: {exc.reason}\n"
                         f"Загрузите более компактный архив (≤{ZIP_MAX_FILES} файлов, "
@@ -4004,6 +4040,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     _safe_unlink(file_path)
                     return
                 except ZipProcessingTimeoutError:
+                    if hb:
+                        hb.stop()
                     timeout_text = (
                         "⏱️ Время обработки архива истекло. Попробуйте загрузить меньший архив или разбить его на части."
                     )
@@ -4022,10 +4060,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:
                 if not file_path:
                     raise ValueError("file_path is required for document parsing")
+                if progress:
+                    progress.set_phase(os.path.splitext(file_path)[1].upper().lstrip("."))
+                    await _push_progress(force=True)
                 allowed, loose, stats = await loop.run_in_executor(
                     None,
                     extract_from_uploaded_file,
                     file_path,
+                    progress,
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
@@ -4038,14 +4080,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 else:
                     repairs = []
                 footnote_dupes += stats.get("footnote_pairs_merged", 0)
-            try:
-                if progress_msg:
-                    await progress_msg.edit_text("🧹 Чищу дубликаты и нормализую…")
-            except Exception:
-                pass
+            if progress:
+                progress.set_phase("очистка")
+                await _push_progress(force=True)
         except Exception as e:
             log_error(f"handle_document: {file_path}: {e}")
             try:
+                if hb:
+                    hb.stop()
                 if progress_msg:
                     await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
                 elif hasattr(message, "reply_text"):
@@ -4101,6 +4143,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     finally:
         if current_task:
             unregister_task(job_name, current_task)
+        if hb:
+            hb.stop()
+            hb = None
         if file_path:
             forget_timeout_hint_target(file_path)
 

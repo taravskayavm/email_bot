@@ -83,7 +83,13 @@ def backend_status() -> Dict[str, bool | str]:
     return status
 
 from emailbot import settings
-from emailbot.config import PDF_ENGINE, PDF_MAX_PAGES, EMAILBOT_ENABLE_OCR
+from emailbot.config import (
+    PDF_ENGINE,
+    PDF_MAX_PAGES,
+    EMAILBOT_ENABLE_OCR,
+    PARSE_COLLECT_ALL,
+)
+from emailbot.ui.progress_state import ParseProgress
 from emailbot.settings_store import get
 from emailbot.utils.logging_setup import get_logger
 from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
@@ -695,8 +701,19 @@ def extract_text_from_pdf(path: str | Path) -> str:
     return cleanup_text(text)
 
 
-def _extract_emails_core(pdf_path: Path) -> Set[str]:
+def _extract_emails_core(
+    pdf_path: Path,
+    progress: ParseProgress | None = None,
+) -> Set[str]:
     """Core PDF extraction logic executed inside a worker process."""
+
+    if progress is not None:
+        hits, _stats = extract_from_pdf(str(pdf_path), progress=progress)
+        return {
+            normalize_email(hit.email) or hit.email
+            for hit in hits
+            if getattr(hit, "email", "")
+        }
 
     if PDF_ENGINE.lower() == "fitz":
         try:
@@ -726,7 +743,10 @@ def _extract_emails_core(pdf_path: Path) -> Set[str]:
         return set()
 
 
-def extract_emails_from_pdf(path: str | Path) -> set[str]:
+def extract_emails_from_pdf(
+    path: str | Path,
+    progress: ParseProgress | None = None,
+) -> set[str]:
     """Extract normalised e-mail addresses from a PDF document."""
 
     if is_cancelled():
@@ -749,7 +769,10 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
         size_mb if size_mb >= 0 else -1.0,
     )
 
-    found = run_with_timeout_process(_extract_emails_core, timeout, pdf_path)
+    if progress is not None:
+        found = _extract_emails_core(pdf_path, progress=progress)
+    else:
+        found = run_with_timeout_process(_extract_emails_core, timeout, pdf_path)
     if found is None:
         logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
         try:
@@ -785,6 +808,9 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
         len(emails),
         timeout,
     )
+    if progress is not None:
+        progress.set_found(len(emails))
+        progress.set_ocr(False)
     return emails
 
 
@@ -859,6 +885,7 @@ def extract_from_pdf(
     *,
     timeout_sec: Optional[int] = None,
     max_pages: Optional[int] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list["EmailHit"], Dict] | str:
     """Extract e-mail addresses from a PDF file (PyMuPDF → pdfminer fallback)."""
 
@@ -878,6 +905,10 @@ def extract_from_pdf(
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
     stats: Dict[str, int] = {"pages": 0}
+    progress_unique: set[str] = set()
+    if progress:
+        progress.set_phase("PDF")
+        progress.set_found(0)
 
     _fitz = fitz if FITZ_OK else None
 
@@ -932,6 +963,16 @@ def extract_from_pdf(
             extract_emails_document(prepared, stats),
             f"pdf:{path}",
         )
+        if progress:
+            if pages_with_text:
+                progress.set_total(pages_with_text)
+            new_norms = {
+                normalize_email(h.email)
+                for h in hits
+                if getattr(h, "email", "")
+            }
+            progress_unique.update({n for n in new_norms if n})
+            progress.set_found(len(progress_unique))
         return hits, stats
 
     if _fitz is None:
@@ -949,103 +990,130 @@ def extract_from_pdf(
 
     hits: List[EmailHit] = []
     doc = _fitz.open(path)
+    if progress:
+        try:
+            progress.set_total(getattr(doc, "page_count", 0))
+        except Exception:
+            pass
+        progress.set_ocr(False)
     ocr_pages = 0
     ocr_start = time.time()
     ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
+        if is_cancelled():
+            break
         heartbeat_now()
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
             break
-        if layout:
-            try:
-                text = _page_text_layout(page)
-            except Exception:
+        page_new_norms: set[str] = set()
+        text = ""
+        try:
+            if layout:
+                try:
+                    text = _page_text_layout(page)
+                except Exception:
+                    text = page.get_text() or ""
+            else:
                 text = page.get_text() or ""
-        else:
-            text = page.get_text() or ""
-        if not text.strip() and ocr:
-            if (
-                ocr_pages < _OCR_PAGE_LIMIT
-                and time.time() - ocr_start < _OCR_TIME_LIMIT
-            ):
-                if not ocr_marked:
-                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
-                    ocr_marked = True
-                text = _ocr_page(page)
-                if text:
-                    ocr_pages += 1
-                    stats["ocr_pages"] = ocr_pages
-        if not text or not text.strip():
-            continue
-        stats["pages"] = stats.get("pages", 0) + 1
-        text = _maybe_join_pdf_breaks(
-            text,
-            join_hyphen=join_hyphen_breaks,
-            join_email=join_email_breaks,
-        )
-        text = fix_email_text(text)
-        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
-            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-
-        quick_matches = _quick_email_matches(text)
-        fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
-        if fast_mode:
-            fast_norms: set[str] = set()
-            fast_hits: list[EmailHit] = []
-            for raw_email, start, end in quick_matches:
-                norm = normalize_email(raw_email)
-                if not norm or norm in fast_norms:
-                    continue
-                fast_norms.add(norm)
-                pre = text[max(0, start - 16) : start]
-                post = text[end : end + 16]
-                fast_hits.append(
-                    EmailHit(
-                        email=raw_email,
-                        source_ref=f"pdf:{path}#page={page_idx}",
-                        origin="direct_at",
-                        pre=pre,
-                        post=post,
-                    )
-                )
-            if fast_hits:
-                hits.extend(fast_hits)
-            stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
-            stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
-            continue
-
-        fast_norms = {
-            norm
-            for raw_email, _, _ in quick_matches
-            if (norm := normalize_email(raw_email))
-        }
-        text = _legacy_cleanup_text(text)
-        text = preprocess_text(text, stats)
-        low_text = text.lower()
-        for email in extract_emails_document(text, stats):
-            norm = normalize_email(email)
-            if norm and fast_mode and norm in fast_norms:
+            if not text.strip() and ocr:
+                if (
+                    ocr_pages < _OCR_PAGE_LIMIT
+                    and time.time() - ocr_start < _OCR_TIME_LIMIT
+                ):
+                    if not ocr_marked:
+                        stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
+                        ocr_marked = True
+                    if progress:
+                        progress.set_ocr(True)
+                    text = _ocr_page(page)
+                    if text:
+                        ocr_pages += 1
+                        stats["ocr_pages"] = ocr_pages
+            if not text or not text.strip():
                 continue
-            for m in re.finditer(re.escape(email), low_text):
-                start, end = m.span()
-                pre = text[max(0, start - 16) : start]
-                post = text[end : end + 16]
-                hits.append(
-                    EmailHit(
-                        email=email,
-                        source_ref=f"pdf:{path}#page={page_idx}",
-                        origin="direct_at",
-                        pre=pre,
-                        post=post,
+            stats["pages"] = stats.get("pages", 0) + 1
+            text = _maybe_join_pdf_breaks(
+                text,
+                join_hyphen=join_hyphen_breaks,
+                join_email=join_email_breaks,
+            )
+            text = fix_email_text(text)
+            if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+                text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+                stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+
+            quick_matches = _quick_email_matches(text)
+            fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
+            if fast_mode:
+                fast_norms: set[str] = set()
+                fast_hits: list[EmailHit] = []
+                for raw_email, start, end in quick_matches:
+                    norm = normalize_email(raw_email)
+                    if not norm or norm in fast_norms:
+                        continue
+                    fast_norms.add(norm)
+                    pre = text[max(0, start - 16) : start]
+                    post = text[end : end + 16]
+                    fast_hits.append(
+                        EmailHit(
+                            email=raw_email,
+                            source_ref=f"pdf:{path}#page={page_idx}",
+                            origin="direct_at",
+                            pre=pre,
+                            post=post,
+                        )
                     )
-                )
-        if should_stop() or (
-            stop_event and getattr(stop_event, "is_set", lambda: False)()
-        ):
-            break
+                if fast_hits:
+                    hits.extend(fast_hits)
+                    page_new_norms.update(
+                        normalize_email(item.email)
+                        for item in fast_hits
+                        if getattr(item, "email", "")
+                    )
+                stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
+                stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+                continue
+
+            fast_norms = {
+                norm
+                for raw_email, _, _ in quick_matches
+                if (norm := normalize_email(raw_email))
+            }
+            text = _legacy_cleanup_text(text)
+            text = preprocess_text(text, stats)
+            low_text = text.lower()
+            for email in extract_emails_document(text, stats):
+                norm = normalize_email(email)
+                if norm and fast_mode and norm in fast_norms:
+                    continue
+                for m in re.finditer(re.escape(email), low_text):
+                    start, end = m.span()
+                    pre = text[max(0, start - 16) : start]
+                    post = text[end : end + 16]
+                    hits.append(
+                        EmailHit(
+                            email=email,
+                            source_ref=f"pdf:{path}#page={page_idx}",
+                            origin="direct_at",
+                            pre=pre,
+                            post=post,
+                        )
+                    )
+                    if norm:
+                        page_new_norms.add(norm)
+            if should_stop() or (
+                stop_event and getattr(stop_event, "is_set", lambda: False)()
+            ):
+                break
+        finally:
+            if progress:
+                if page_new_norms:
+                    progress_unique.update({n for n in page_new_norms if n})
+                progress.inc_pages(1)
+                progress.set_found(len(progress_unique))
+                progress.set_ocr(False)
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
@@ -1057,11 +1125,24 @@ def extract_from_pdf(
             stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
 
+    if progress is not None:
+        progress.set_found(
+            len(
+                {
+                    normalize_email(hit.email) or hit.email
+                    for hit in hits
+                    if getattr(hit, "email", "")
+                }
+            )
+        )
     return hits, stats
 
 
 def extract_from_pdf_stream(
-    data: bytes, source_ref: str, stop_event: Optional[object] = None
+    data: bytes,
+    source_ref: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 

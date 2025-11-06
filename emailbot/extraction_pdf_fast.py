@@ -5,11 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Set
 
-from emailbot.config import PDF_MAX_PAGES
+from emailbot.config import PDF_MAX_PAGES, PARSE_COLLECT_ALL
 from emailbot.cancel_token import is_cancelled
+from emailbot.ui.progress_state import ParseProgress
 
 
-def extract_emails_fitz(pdf_path: Path) -> Set[str]:
+def extract_emails_fitz(
+    pdf_path: Path,
+    progress: ParseProgress | None = None,
+) -> Set[str]:
     """Extract a handful of e-mails using PyMuPDF if available."""
 
     try:
@@ -28,15 +32,24 @@ def extract_emails_fitz(pdf_path: Path) -> Set[str]:
         for index, page in enumerate(doc):
             if is_cancelled():
                 break
-            if index >= PDF_MAX_PAGES or len(found) >= 10:
+            if PDF_MAX_PAGES and index >= PDF_MAX_PAGES:
                 break
+            if progress:
+                if index == 0:
+                    try:
+                        progress.set_total(getattr(doc, "page_count", 0))
+                    except Exception:
+                        pass
+                progress.inc_pages(1)
             try:
                 text = page.get_text("text") or ""
             except Exception:
                 text = ""
             if text:
                 found |= emails_from_text(text)
-            if len(found) >= 10:
+            if progress:
+                progress.set_found(len(found))
+            if not PARSE_COLLECT_ALL and len(found) >= 10:
                 break
     finally:
         try:
