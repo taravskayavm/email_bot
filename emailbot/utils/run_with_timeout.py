@@ -5,17 +5,33 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeout
 from typing import Any, Callable, Optional
 
-from emailbot.cancel_token import is_cancelled
+from multiprocessing.synchronize import Event as _Event
+
+from emailbot.cancel_token import (
+    get_shared_event,
+    install_shared_event,
+    is_cancelled,
+)
 
 __all__ = ["run_with_timeout"]
 
 _POOL: Optional[ProcessPoolExecutor] = None
 
 
+def _init_cancel_token(event: _Event) -> None:
+    """Initializer for worker processes to install the shared cancellation token."""
+
+    install_shared_event(event)
+
+
 def _get_pool() -> ProcessPoolExecutor:
     global _POOL
     if _POOL is None:
-        _POOL = ProcessPoolExecutor(max_workers=2)
+        _POOL = ProcessPoolExecutor(
+            max_workers=2,
+            initializer=_init_cancel_token,
+            initargs=(get_shared_event(),),
+        )
     return _POOL
 
 
