@@ -602,4 +602,9 @@ if __name__ == "__main__":
     except Exception:
         # defensive: на не-Windows просто продолжаем
         pass
+    if sys.platform.startswith("win"):
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
     main()
