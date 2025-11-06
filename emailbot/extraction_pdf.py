@@ -755,7 +755,11 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
         try:
             from emailbot.ui.notify import notify_timeout_hint
 
-            notify_timeout_hint(pdf_path.name, timeout)
+            notify_timeout_hint(
+                pdf_path.name,
+                timeout,
+                source_path=pdf_path,
+            )
         except Exception:
             logger.debug("Timeout notification failed", exc_info=True)
         return set()
