@@ -127,12 +127,16 @@ _OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
 _OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-_pdf_backend_env = (
-    os.getenv("PDF_BACKEND", config.PDF_ENGINE) or config.PDF_ENGINE
-).strip().lower()
-if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
-    _pdf_backend_env = "fitz"
-PDF_BACKEND = _pdf_backend_env
+def _resolve_pdf_backend() -> str:
+    """Return the currently configured PDF backend preference."""
+
+    backend = os.getenv("PDF_BACKEND")
+    if backend is None or not backend.strip():
+        backend = config.PDF_ENGINE
+    backend = (backend or "fitz").strip().lower()
+    if backend not in {"fitz", "pdfminer", "auto"}:
+        backend = "fitz"
+    return backend
 
 logger = get_logger(__name__)
 
@@ -527,7 +531,7 @@ def _pdfminer_extract_bytes_with_stats(
 
 
 def _backend_order() -> tuple[str, ...]:
-    backend = PDF_BACKEND
+    backend = _resolve_pdf_backend()
     if LEGACY_MODE and backend != "pdfminer":
         backend = "fitz"
     if backend == "auto":
