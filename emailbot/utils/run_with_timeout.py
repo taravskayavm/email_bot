@@ -5,6 +5,8 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeout
 from typing import Any, Callable, Optional
 
+from emailbot.cancel_token import is_cancelled
+
 __all__ = ["run_with_timeout"]
 
 _POOL: Optional[ProcessPoolExecutor] = None
@@ -19,6 +21,9 @@ def _get_pool() -> ProcessPoolExecutor:
 
 def run_with_timeout(func: Callable[..., Any], timeout: int, *args: Any, **kwargs: Any):
     """Execute ``func`` in a background process with a hard timeout."""
+
+    if is_cancelled():
+        return None
 
     pool = _get_pool()
     future = pool.submit(func, *args, **kwargs)

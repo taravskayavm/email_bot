@@ -128,6 +128,7 @@ from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 from emailbot.ptb_profile import register_profile_handlers
+from emailbot.cancel_token import cancel_all, reset_all
 
 SCRIPT_DIR = PROJECT_ROOT
 
@@ -237,6 +238,26 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         pass
 
 
+async def handle_stop_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Stop ongoing processing and notify the user."""
+
+    cancel_all()
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("🛑 Процесс остановлен.")
+
+
+async def handle_start_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reset cancellation state and delegate to the default /start handler."""
+
+    reset_all()
+    await bot_handlers.start(update, context)
+
+
 def main() -> None:
     errs = startup_selfcheck()
     if errs:
@@ -301,7 +322,8 @@ def main() -> None:
     app.add_error_handler(error_handler)
     register_profile_handlers(app)
 
-    app.add_handler(CommandHandler("start", bot_handlers.start))
+    app.add_handler(CommandHandler("start", handle_start_command))
+    app.add_handler(CommandHandler("stop", handle_stop_command))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
     app.add_handler(CommandHandler("features", bot_handlers.features))
