@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 from urllib.parse import unquote
 
+from emailbot.ptb_context import get_current_chat_id
 from emailbot.run_control import should_stop
+from emailbot.ui.notify import (
+    forget_timeout_hint_target,
+    remember_timeout_hint_target,
+)
 from emailbot.utils.email_clean import clean_and_normalize_email
 from emailbot.utils.logging_setup import get_logger
 from emailbot.extraction_pdf import extract_emails_from_pdf as _extract_pdf_file
@@ -251,16 +256,29 @@ def _from_pdf(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     tmp: tempfile.NamedTemporaryFile | None = None
     tmp_path: Path | None = None
     emails: set[str] | None = None
+    timeout_key: Path | None = None
     try:
         tmp = tempfile.NamedTemporaryFile(prefix="ebot_pdf_", suffix=".pdf", delete=False)
         tmp.write(data)
         tmp.flush()
         tmp_path = Path(tmp.name)
         logger.info("PDF bridge: saved stream -> %s", tmp_path.name)
+        try:
+            chat_id = get_current_chat_id()
+        except Exception:
+            chat_id = None
+        if chat_id is not None:
+            remember_timeout_hint_target(tmp_path, chat_id)
+            timeout_key = tmp_path
         emails = _extract_pdf_file(tmp_path)
     except Exception:
         logger.exception("PDF bridge failed")
     finally:
+        if timeout_key is not None:
+            try:
+                forget_timeout_hint_target(timeout_key)
+            except Exception:
+                pass
         if tmp is not None:
             try:
                 tmp.close()
