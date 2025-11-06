@@ -6,12 +6,18 @@ import csv
 import html
 import io
 import re
+import tempfile
 import zipfile
+from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 from urllib.parse import unquote
 
 from emailbot.run_control import should_stop
 from emailbot.utils.email_clean import clean_and_normalize_email
+from emailbot.utils.logging_setup import get_logger
+from emailbot.extraction_pdf import extract_emails_from_pdf as _extract_pdf_file
+
+logger = get_logger(__name__)
 
 SAFE_EMAIL_RE = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}",
@@ -239,6 +245,37 @@ def _from_docx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
 
 
 def _from_pdf(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
+    if not data:
+        return [], {}, None
+
+    tmp: tempfile.NamedTemporaryFile | None = None
+    tmp_path: Path | None = None
+    emails: set[str] | None = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(prefix="ebot_pdf_", suffix=".pdf", delete=False)
+        tmp.write(data)
+        tmp.flush()
+        tmp_path = Path(tmp.name)
+        logger.info("PDF bridge: saved stream -> %s", tmp_path.name)
+        emails = _extract_pdf_file(tmp_path)
+    except Exception:
+        logger.exception("PDF bridge failed")
+    finally:
+        if tmp is not None:
+            try:
+                tmp.close()
+            except Exception:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if emails is not None:
+        ok = sorted(emails)
+        return ok, {}, None
+
     try:
         from pdfminer.high_level import extract_text
     except Exception:

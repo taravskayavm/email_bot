@@ -127,6 +127,7 @@ from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
+from emailbot.ptb_profile import register_profile_handlers
 
 SCRIPT_DIR = PROJECT_ROOT
 
@@ -298,6 +299,7 @@ def main() -> None:
     builder.post_init(_notify_admin_startup)
     app = builder.build()
     app.add_error_handler(error_handler)
+    register_profile_handlers(app)
 
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
