@@ -2,52 +2,282 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import json
+import os
+import sys
+import logging
+from types import SimpleNamespace
+
+from . import settings_store as _store
+
+logger = logging.getLogger(__name__)
+
+# [EBOT-101] Загружаем .env максимально рано, чтобы переменные окружения уже были доступны
 try:
-    settings  # type: ignore[name-defined]
-except NameError:
-    import os
-    from types import SimpleNamespace
+    from dotenv import load_dotenv
 
+    load_dotenv()
+except Exception:
+    pass
+
+
+def __getattr__(name: str):
+    """Provide compatibility values for legacy settings names."""
+
+    if name.startswith("PARSE_"):
+        suffix = name[6:]
+        target = f"SEND_{suffix}"
+        if target in globals():
+            value = globals()[target]
+            globals()[name] = value
+            return value
+
+    alias_targets = {
+        "MAX_WORKERS": "SEND_MAX_WORKERS",
+        "FILE_TIMEOUT": "SEND_FILE_TIMEOUT",
+        "COOLDOWN_DAYS": "SEND_COOLDOWN_DAYS",
+    }
+    target = alias_targets.get(name)
+    if target and target in globals():
+        value = globals()[target]
+        globals()[name] = value
+        return value
+
+    raise AttributeError(name)
+
+
+def _int_env(name: str, default: int) -> int:
     try:
-        # Import all upper-case defaults from config if present
-        from .config import *  # noqa: F401,F403
+        return int(os.getenv(name, str(default)))
     except Exception:
-        pass
+        return default
 
-    def _getenv_int(key: str, default: int) -> int:
-        val = os.getenv(key)
-        try:
-            return int(val) if val is not None and val != "" else default
-        except Exception:
-            return default
 
-    def _getenv_str(key: str, default: str) -> str:
-        val = os.getenv(key)
-        return val if val not in (None, "") else default
+def _tuple_env(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    if raw is None:
+        raw = default
+    items = []
+    for item in str(raw).split(","):
+        cleaned = item.strip()
+        if cleaned:
+            items.append(cleaned)
+    if not items and default:
+        for item in default.split(","):
+            cleaned = item.strip()
+            if cleaned:
+                items.append(cleaned)
+    return tuple(items)
 
-    def _abspath(p: str | None) -> str | None:
-        if not p:
-            return None
-        try:
-            return os.path.abspath(p)
-        except Exception:
-            return p
 
-    # Resolve stoplist path: prefer BLOCKED_EMAILS_PATH, then BLOCKED_LIST_PATH, fallback var/blocked_emails.txt
-    _stoplist = _getenv_str("BLOCKED_EMAILS_PATH", _getenv_str("BLOCKED_LIST_PATH", "var/blocked_emails.txt"))
-    _sent_log = _getenv_str("SENT_LOG_PATH", "var/sent_log.csv")
+# Канонические параметры отправки
+SEND_MAX_WORKERS = _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
+if SEND_MAX_WORKERS < 1:
+    logger.warning("settings: SEND_MAX_WORKERS=%r looks invalid; forcing to 1", SEND_MAX_WORKERS)
+    SEND_MAX_WORKERS = 1
 
-    # Web crawl knobs (fallbacks if not defined in config.py)
+SEND_FILE_TIMEOUT = _int_env("SEND_FILE_TIMEOUT", _int_env("FILE_TIMEOUT", 20))
+SEND_COOLDOWN_DAYS = _int_env("SEND_COOLDOWN_DAYS", 180)
+COOLDOWN_SOURCES = _tuple_env("COOLDOWN_SOURCES", "csv,db")
+HISTORY_DB = os.getenv("HISTORY_DB", "var/send_history.db")
+SENT_LOG_PATH = os.getenv("SENT_LOG_PATH", "var/sent_log.csv")
+ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
+WEB_FETCH_TIMEOUT = _int_env("WEB_FETCH_TIMEOUT", 45)
+WEB_MAX_BYTES = _int_env("WEB_MAX_BYTES", 3_000_000)
+WEB_USER_AGENT = os.getenv(
+    "WEB_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+)
+WEB_HTTP2 = os.getenv("WEB_HTTP2", "1") == "1"
+
+
+# Совместимые экспортируемые значения (чтобы прямые импорты продолжали работать)
+PARSE_MAX_WORKERS = _int_env("PARSE_MAX_WORKERS", SEND_MAX_WORKERS)
+PARSE_FILE_TIMEOUT = _int_env("PARSE_FILE_TIMEOUT", SEND_FILE_TIMEOUT)
+
+
+try:
+    logger.info(
+        "settings: SEND_MAX_WORKERS=%s; PARSE_MAX_WORKERS=%s; SEND_FILE_TIMEOUT=%s; PARSE_FILE_TIMEOUT=%s; SEND_COOLDOWN_DAYS=%s",
+        SEND_MAX_WORKERS,
+        PARSE_MAX_WORKERS,
+        SEND_FILE_TIMEOUT,
+        PARSE_FILE_TIMEOUT,
+        SEND_COOLDOWN_DAYS,
+    )
+except Exception:
+    pass
+
+try:
+    logger.info(
+        "settings: HISTORY_DB=%s; SENT_LOG_PATH=%s; ENABLE_WEB=%s; "
+        "WEB_FETCH_TIMEOUT=%s; WEB_MAX_BYTES=%s; WEB_USER_AGENT=%s; WEB_HTTP2=%s",
+        HISTORY_DB,
+        SENT_LOG_PATH,
+        ENABLE_WEB,
+        WEB_FETCH_TIMEOUT,
+        WEB_MAX_BYTES,
+        WEB_USER_AGENT,
+        WEB_HTTP2,
+    )
+except Exception:
+    pass
+
+
+# Default values
+STRICT_OBFUSCATION: bool = True
+FOOTNOTE_RADIUS_PAGES: int = 1
+PDF_LAYOUT_AWARE: bool = False
+ENABLE_OCR: bool = True
+ENABLE_PROVIDER_CANON: bool = os.getenv("ENABLE_PROVIDER_CANON", "1") == "1"
+CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") == "1"
+CANON_GMAIL_PLUS: bool = os.getenv("CANON_GMAIL_PLUS", "1") == "1"
+CANON_OTHER_PLUS: bool = os.getenv("CANON_OTHER_PLUS", "0") == "1"
+MAX_ASSETS: int = 8
+MAX_SITEMAP_URLS: int = 200
+MAX_DOCS: int = 30
+PER_REQUEST_TIMEOUT: int = 15
+DAILY_SEND_LIMIT: int = 300
+EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
+# UI helpers
+SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
+LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
+# Отчётная временная зона (используется в логах/отчётах)
+REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
+
+
+# ---- Reconcile (IMAP vs CSV) ----
+RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
+
+# ``build_cooldown_service`` and other helpers expect a settings-like object with
+# attribute access.  Expose the module itself as ``SETTINGS`` to provide a stable
+# reference for callers that treat settings as a namespace.
+SETTINGS = sys.modules[__name__]
+
+
+class _SettingsNamespace(SimpleNamespace):
+    """Proxy object exposing module attributes as a namespace."""
+
+    def __init__(self, module):
+        super().__setattr__("_module", module)
+
+    def __getattr__(self, name):  # type: ignore[override]
+        return getattr(self._module, name)
+
+    def __setattr__(self, name, value):  # type: ignore[override]
+        setattr(self._module, name, value)
+
+    def __dir__(self):  # type: ignore[override]
+        return sorted(set(dir(self._module)))
+
+
+settings = _SettingsNamespace(sys.modules[__name__])
+
+# --- Web crawler (deep) defaults ---
+# Разрешённые типы контента для скачивания HTML-страниц
+ALLOWED_CONTENT_TYPES = tuple(
+    cleaned
+    for cleaned in (
+        part.strip()
+        for part in (
+            (os.getenv(
+                "ALLOWED_CONTENT_TYPES",
+                "text/html,application/xhtml+xml,text/plain",
+            )
+            or "")
+            .lower()
+            .split(",")
+        )
+    )
+    if cleaned
+)
+
+# Использовать ли sitemap.xml как источник стартовых URL'ов
+ENABLE_SITEMAP = os.getenv("ENABLE_SITEMAP", "1") == "1"
+
+# Таймауты сетевых запросов
+GET_TIMEOUT = _int_env(
+    "CRAWL_GET_TIMEOUT",
+    _int_env("GET_TIMEOUT", 20),
+)
+HEAD_TIMEOUT = _int_env(
+    "CRAWL_HEAD_TIMEOUT",
+    _int_env("HEAD_TIMEOUT", 10),
+)
+
+# Максимальный размер скачиваемого ответа (байт)
+MAX_CONTENT_LENGTH = _int_env("CRAWL_MAX_CONTENT_LENGTH", 3_000_000)
+
+# Ограничение на количество URL из sitemap
+SITEMAP_MAX_URLS = _int_env("SITEMAP_MAX_URLS", 1000)
+
+# Краулер: бюджеты и кэш
+CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
+CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
+ROBOTS_CACHE_PATH = os.getenv("ROBOTS_CACHE_PATH", "var/robots_cache.json")
+ROBOTS_CACHE_TTL_SECONDS = int(os.getenv("ROBOTS_CACHE_TTL_SECONDS", "86400"))
+
+TPL_DIR = Path("templates")
+LABELS_FILE = TPL_DIR / "_labels.json"
+
+
+def load() -> None:
+    """Load configuration from the persistent store."""
+
+    global STRICT_OBFUSCATION, FOOTNOTE_RADIUS_PAGES, PDF_LAYOUT_AWARE, ENABLE_OCR
+    global ENABLE_PROVIDER_CANON, CANON_GMAIL_DOTS, CANON_GMAIL_PLUS, CANON_OTHER_PLUS
+    global MAX_ASSETS, MAX_SITEMAP_URLS, MAX_DOCS, PER_REQUEST_TIMEOUT
+    global EXTERNAL_SOURCES, DAILY_SEND_LIMIT, SKIPPED_PREVIEW_LIMIT, LAST_SUMMARY_DIR
+    STRICT_OBFUSCATION = bool(_store.get("STRICT_OBFUSCATION", STRICT_OBFUSCATION))
+    FOOTNOTE_RADIUS_PAGES = int(_store.get("FOOTNOTE_RADIUS_PAGES", FOOTNOTE_RADIUS_PAGES))
+    PDF_LAYOUT_AWARE = bool(_store.get("PDF_LAYOUT_AWARE", PDF_LAYOUT_AWARE))
+    ENABLE_OCR = bool(_store.get("ENABLE_OCR", ENABLE_OCR))
+    ENABLE_PROVIDER_CANON = bool(
+        _store.get("ENABLE_PROVIDER_CANON", ENABLE_PROVIDER_CANON)
+    )
+    CANON_GMAIL_DOTS = bool(_store.get("CANON_GMAIL_DOTS", CANON_GMAIL_DOTS))
+    CANON_GMAIL_PLUS = bool(_store.get("CANON_GMAIL_PLUS", CANON_GMAIL_PLUS))
+    CANON_OTHER_PLUS = bool(_store.get("CANON_OTHER_PLUS", CANON_OTHER_PLUS))
+    MAX_ASSETS = int(_store.get("MAX_ASSETS", MAX_ASSETS))
+    MAX_SITEMAP_URLS = int(_store.get("MAX_SITEMAP_URLS", MAX_SITEMAP_URLS))
+    MAX_DOCS = int(_store.get("MAX_DOCS", MAX_DOCS))
+    PER_REQUEST_TIMEOUT = int(_store.get("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT))
+    DAILY_SEND_LIMIT = int(_store.get("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT))
+    EXTERNAL_SOURCES = _store.get("EXTERNAL_SOURCES", EXTERNAL_SOURCES) or {}
+    SKIPPED_PREVIEW_LIMIT = int(
+        _store.get("SKIPPED_PREVIEW_LIMIT", SKIPPED_PREVIEW_LIMIT)
+    )
+    LAST_SUMMARY_DIR = str(_store.get("LAST_SUMMARY_DIR", LAST_SUMMARY_DIR))
+
+
+def save() -> None:
+    """Persist current configuration."""
+
+    _store.set("STRICT_OBFUSCATION", STRICT_OBFUSCATION)
+    _store.set("FOOTNOTE_RADIUS_PAGES", FOOTNOTE_RADIUS_PAGES)
+    _store.set("PDF_LAYOUT_AWARE", PDF_LAYOUT_AWARE)
+    _store.set("ENABLE_OCR", ENABLE_OCR)
+    _store.set("ENABLE_PROVIDER_CANON", ENABLE_PROVIDER_CANON)
+    _store.set("CANON_GMAIL_DOTS", CANON_GMAIL_DOTS)
+    _store.set("CANON_GMAIL_PLUS", CANON_GMAIL_PLUS)
+    _store.set("CANON_OTHER_PLUS", CANON_OTHER_PLUS)
+    _store.set("MAX_ASSETS", MAX_ASSETS)
+    _store.set("MAX_SITEMAP_URLS", MAX_SITEMAP_URLS)
+    _store.set("MAX_DOCS", MAX_DOCS)
+    _store.set("PER_REQUEST_TIMEOUT", PER_REQUEST_TIMEOUT)
+    _store.set("DAILY_SEND_LIMIT", DAILY_SEND_LIMIT)
+    _store.set("EXTERNAL_SOURCES", EXTERNAL_SOURCES)
+    _store.set("SKIPPED_PREVIEW_LIMIT", SKIPPED_PREVIEW_LIMIT)
+    _store.set("LAST_SUMMARY_DIR", LAST_SUMMARY_DIR)
+
+
+def _load_labels() -> dict[str, dict[str, str]]:
+    if not LABELS_FILE.exists():
+        return {}
     try:
-        _crawl_depth = CRAWL_MAX_DEPTH  # type: ignore[name-defined]
-    except Exception:
-        _crawl_depth = _getenv_int("CRAWL_MAX_DEPTH", 2)
-    try:
-        _crawl_pages = CRAWL_MAX_PAGES  # type: ignore[name-defined]
-    except Exception:
-        _crawl_pages = _getenv_int("CRAWL_MAX_PAGES", 50)
-    try:
-        _crawl_budget = CRAWL_TIME_BUDGET_SECONDS  # type: ignore[name-defined]
+        data = json.loads(LABELS_FILE.read_text(encoding="utf-8"))
     except Exception:
         _crawl_budget = _getenv_int("CRAWL_TIME_BUDGET_SECONDS", 90)
 
