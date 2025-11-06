@@ -9,7 +9,7 @@ import shutil
 import statistics
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - ``regex`` may be unavailable in runtime
     import regex as re  # type: ignore
@@ -83,9 +83,12 @@ def backend_status() -> Dict[str, bool | str]:
     return status
 
 from emailbot import settings
+from emailbot.config import PDF_ENGINE, PDF_MAX_PAGES, EMAILBOT_ENABLE_OCR
 from emailbot.settings_store import get
 from emailbot.utils.logging_setup import get_logger
-from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout
+from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
+from emailbot.utils.run_with_timeout import run_with_timeout as run_with_timeout_process
+from emailbot.utils.timeout_policy import compute_pdf_timeout
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -123,10 +126,10 @@ _OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
 _OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
 _OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
-MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "200"))
+MAX_PAGES = PDF_MAX_PAGES
 
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-_pdf_backend_env = (os.getenv("PDF_BACKEND", "fitz") or "fitz").strip().lower()
+_pdf_backend_env = (os.getenv("PDF_BACKEND", PDF_ENGINE) or PDF_ENGINE).strip().lower()
 if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
     _pdf_backend_env = "fitz"
 PDF_BACKEND = _pdf_backend_env
@@ -691,24 +694,84 @@ def extract_text_from_pdf(path: str | Path) -> str:
     return cleanup_text(text)
 
 
-def extract_emails_from_pdf(path: str | Path) -> set[str]:
-    """Extract normalised e-mail addresses from a PDF document."""
+def _extract_emails_core(pdf_path: Path) -> Set[str]:
+    """Core PDF extraction logic executed inside a worker process."""
 
-    pdf_path = Path(path)
+    if PDF_ENGINE.lower() == "fitz":
+        try:
+            from emailbot.extraction_pdf_fast import extract_emails_fitz
+        except Exception:
+            extract_emails_fitz = None  # type: ignore[assignment]
+        if extract_emails_fitz is not None:
+            fast_hits = extract_emails_fitz(pdf_path)
+            if fast_hits:
+                return fast_hits
+
     try:
         text = extract_text_from_pdf(pdf_path)
     except Exception:
         text = ""
+    if not text:
+        return set()
 
-    from emailbot.parsing.extract_from_text import emails_from_text
+    try:
+        from emailbot.parsing.extract_from_text import emails_from_text
+    except Exception:
+        return set()
 
-    emails = emails_from_text(text) if text else set()
-    if emails:
-        return emails
+    try:
+        return emails_from_text(text)
+    except Exception:
+        return set()
 
-    from emailbot.extraction_ocr import ocr_emails_from_pdf
 
-    return ocr_emails_from_pdf(pdf_path)
+def extract_emails_from_pdf(path: str | Path) -> set[str]:
+    """Extract normalised e-mail addresses from a PDF document."""
+
+    pdf_path = Path(path)
+    timeout = compute_pdf_timeout(pdf_path)
+    try:
+        size_bytes = pdf_path.stat().st_size
+        size_mb = size_bytes / (1024.0 * 1024.0)
+    except Exception:
+        size_mb = -1.0
+
+    logger.info(
+        "PDF extract start: %s (engine=%s, max_pages=%d, timeout=%ds, size=%.2fMB)",
+        str(pdf_path),
+        PDF_ENGINE,
+        MAX_PAGES,
+        timeout,
+        size_mb if size_mb >= 0 else -1.0,
+    )
+
+    found = run_with_timeout_process(_extract_emails_core, timeout, pdf_path)
+    if found is None:
+        logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
+        return set()
+
+    emails: Set[str] = set(found)
+
+    if not emails and EMAILBOT_ENABLE_OCR:
+        try:
+            from emailbot.extraction_ocr import ocr_emails_from_pdf
+        except Exception:
+            ocr_emails_from_pdf = None  # type: ignore[assignment]
+        if ocr_emails_from_pdf is not None:
+            try:
+                ocr_hits = ocr_emails_from_pdf(pdf_path)
+            except Exception:
+                ocr_hits = set()
+            if ocr_hits:
+                emails |= ocr_hits
+
+    logger.info(
+        "PDF extract done: %s (found=%d, timeout_used=%ds)",
+        str(pdf_path),
+        len(emails),
+        timeout,
+    )
+    return emails
 
 
 def extract_text(
@@ -768,7 +831,9 @@ def _extract_from_pdf_with_timeout(
     if timeout_sec is None or timeout_sec <= 0:
         timeout_sec = DEFAULT_TIMEOUT_SEC
     try:
-        return run_with_timeout(_extract_from_pdf_no_timeout, timeout_sec, path, max_pages=max_pages)
+        return run_with_timeout_thread(
+            _extract_from_pdf_no_timeout, timeout_sec, path, max_pages=max_pages
+        )
     except TimeoutError:
         logger.warning("PDF parse timeout: %s after %ss", path, timeout_sec)
         return ""

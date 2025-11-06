@@ -241,6 +241,25 @@ OCR делает обработку медленнее, поэтому по ум
 страницам и времени помогают избежать «зависших» документов — при желании их
 можно ослабить, но имейте в виду увеличение нагрузки.
 
+#### Адаптивный таймаут PDF
+По умолчанию включён адаптивный таймаут обработки PDF:
+```
+T = clamp(PDF_TIMEOUT_BASE + PDF_TIMEOUT_PER_MB * size_mb, PDF_TIMEOUT_MIN, PDF_TIMEOUT_MAX)
+```
+Переменные окружения (значения по умолчанию указаны справа):
+```ini
+PDF_ADAPTIVE_TIMEOUT=1
+PDF_TIMEOUT_BASE=15
+PDF_TIMEOUT_PER_MB=0.6
+PDF_TIMEOUT_MIN=15
+PDF_TIMEOUT_MAX=90
+```
+Чтобы вернуться к фиксированному таймауту, отключите адаптивный режим:
+```ini
+PDF_ADAPTIVE_TIMEOUT=0
+PDF_EXTRACT_TIMEOUT=25
+```
+
 ## Windows (Anaconda PowerShell) — быстрый старт
 
 1. Откройте **Anaconda PowerShell Prompt**.
