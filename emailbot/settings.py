@@ -279,66 +279,46 @@ def _load_labels() -> dict[str, dict[str, str]]:
     try:
         data = json.loads(LABELS_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {}
-    if isinstance(data, dict):
-        return data
-    return {}
+        _crawl_budget = _getenv_int("CRAWL_TIME_BUDGET_SECONDS", 90)
 
+    # PDF knobs
+    _pdf_max_pages = _getenv_int("PDF_MAX_PAGES", 0)
+    _pdf_ocr_auto = _getenv_int("PDF_OCR_AUTO", 1)
+    _pdf_ocr_max = _getenv_int("PDF_OCR_MAX_PAGES", 100)
 
-def list_available_directions() -> list[str]:
-    """Return direction labels from templates/_labels.json."""
+    # General
+    _cooldown_days = _getenv_int("SEND_COOLDOWN_DAYS", 180)
+    _enable_web = _getenv_int("ENABLE_WEB", 1)
 
-    labels = _load_labels()
-    return [str(meta.get("label") or slug) for slug, meta in labels.items()]
+    # Provider canonicalisation toggles
+    _enable_provider_canon = _getenv_int("ENABLE_PROVIDER_CANON", 1)
+    _canon_gmail_dots = _getenv_int("CANON_GMAIL_DOTS", 1)
+    _canon_gmail_plus = _getenv_int("CANON_GMAIL_PLUS", 1)
+    _canon_other_plus = _getenv_int("CANON_OTHER_PLUS", 1)
 
+    settings = SimpleNamespace(
+        # Paths
+        BLOCKED_FILE=_abspath(_stoplist),
+        SENT_LOG_PATH=_abspath(_sent_log),
+        # Policy
+        SEND_COOLDOWN_DAYS=_cooldown_days,
+        # PDF/OCR
+        PDF_MAX_PAGES=_pdf_max_pages,
+        PDF_OCR_AUTO=_pdf_ocr_auto,
+        PDF_OCR_MAX_PAGES=_pdf_ocr_max,
+        # WEB
+        ENABLE_WEB=_enable_web,
+        CRAWL_MAX_DEPTH=_crawl_depth,
+        CRAWL_MAX_PAGES=_crawl_pages,
+        CRAWL_TIME_BUDGET_SECONDS=_crawl_budget,
+        # Email canonicalisation
+        ENABLE_PROVIDER_CANON=_enable_provider_canon,
+        CANON_GMAIL_DOTS=_canon_gmail_dots,
+        CANON_GMAIL_PLUS=_canon_gmail_plus,
+        CANON_OTHER_PLUS=_canon_other_plus,
+    )
 
-def resolve_label(label: str) -> str:
-    """Resolve human-readable label back to slug."""
+    _exported = {name: getattr(settings, name) for name in vars(settings) if name.isupper()}
+    globals().update(_exported)
 
-    query = label.strip()
-    for slug, meta in _load_labels().items():
-        stored_label = str(meta.get("label") or "").strip()
-        if stored_label == query:
-            return slug
-    return query
-
-
-# Load settings on module import.
-load()
-
-
-__all__ = [
-    "STRICT_OBFUSCATION",
-    "FOOTNOTE_RADIUS_PAGES",
-    "PDF_LAYOUT_AWARE",
-    "ENABLE_OCR",
-    "ENABLE_PROVIDER_CANON",
-    "CANON_GMAIL_DOTS",
-    "CANON_GMAIL_PLUS",
-    "CANON_OTHER_PLUS",
-    "MAX_ASSETS",
-    "MAX_SITEMAP_URLS",
-    "MAX_DOCS",
-    "PER_REQUEST_TIMEOUT",
-    "DAILY_SEND_LIMIT",
-    "EXTERNAL_SOURCES",
-    "SKIPPED_PREVIEW_LIMIT",
-    "LAST_SUMMARY_DIR",
-    "REPORT_TZ",
-    "RECONCILE_SINCE_DAYS",
-    "CRAWL_MAX_PAGES_PER_DOMAIN",
-    "CRAWL_TIME_BUDGET_SECONDS",
-    "ROBOTS_CACHE_PATH",
-    "ROBOTS_CACHE_TTL_SECONDS",
-    "SEND_MAX_WORKERS",
-    "PARSE_MAX_WORKERS",
-    "SEND_FILE_TIMEOUT",
-    "PARSE_FILE_TIMEOUT",
-    "SEND_COOLDOWN_DAYS",
-    "load",
-    "save",
-    "list_available_directions",
-    "resolve_label",
-    "settings",
-]
-
+__all__ = ["settings", *sorted(name for name in globals() if name.isupper())]
