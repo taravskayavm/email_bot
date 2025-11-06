@@ -690,7 +690,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prefixes = [p.strip() for p in raw_prefixes if p.strip()]
             idx += 2
             continue
-            idx += 1
+        idx += 1
 
     depth_profile = (
         max_depth
