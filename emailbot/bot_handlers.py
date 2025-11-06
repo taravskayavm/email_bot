@@ -329,6 +329,7 @@ from emailbot.run_control import (
     should_stop,
     stop_and_status,
     unregister_task,
+    request_stop,
 )
 
 from . import messaging
@@ -3927,7 +3928,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         await heartbeat()
         if hasattr(message, "reply_text"):
-            progress_msg = await message.reply_text("📥 Файл получен. Анализирую…")
+            progress_msg = await message.reply_text(
+                "📥 Файл получен. Анализирую…",
+                reply_markup=_build_stop_markup(),
+            )
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -3949,7 +3953,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             if progress_msg:
-                await progress_msg.edit_text("📥 Читаю файл…")
+                await progress_msg.edit_text(
+                    "📥 Читаю файл…",
+                    reply_markup=_build_stop_markup(),
+                )
         except Exception:
             pass
 
@@ -3964,7 +3971,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             try:
                 if progress_msg:
-                    await progress_msg.edit_text("🔎 Ищу адреса…")
+                    await progress_msg.edit_text(
+                        "🔎 Ищу адреса…",
+                        reply_markup=_build_stop_markup(),
+                    )
             except Exception:
                 pass
             if (file_path or "").lower().endswith(".zip"):
@@ -7415,6 +7425,7 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     chat_id = query.message.chat.id
     request_cancel(chat_id)
+    request_stop()
     await query.message.reply_text(
         "🛑 Запрос на остановку принят. Завершаю текущую операцию…"
     )

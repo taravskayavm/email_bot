@@ -406,7 +406,8 @@ def main() -> None:
         )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
+        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process),
+        group=0,
     )
 
     bulk_delete_conv = ConversationHandler(
@@ -483,7 +484,8 @@ def main() -> None:
         )
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$")
+        CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$"),
+        group=0,
     )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
