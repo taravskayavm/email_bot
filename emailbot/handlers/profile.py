@@ -62,26 +62,35 @@ def _current_values() -> dict[str, object]:
     return {key: getattr(config, key) for key in PROFILE_KEYS}
 
 
-def _render() -> tuple[str, types.InlineKeyboardMarkup]:
+def _render() -> tuple[str, types.InlineKeyboardMarkup, str]:
     values = _current_values()
     ocr_enabled = bool(values.get("EMAILBOT_ENABLE_OCR"))
     text = (
-        "⚙️ Профиль парсинга PDF\n"
-        f"- Адаптивный таймаут: {values.get('PDF_ADAPTIVE_TIMEOUT')}\n"
-        f"- База: {values.get('PDF_TIMEOUT_BASE')} c\n"
-        f"- + за 1 МБ: {values.get('PDF_TIMEOUT_PER_MB')} c/МБ\n"
-        f"- Диапазон: {values.get('PDF_TIMEOUT_MIN')}–{values.get('PDF_TIMEOUT_MAX')} c\n"
-        f"- PDF_MAX_PAGES: {values.get('PDF_MAX_PAGES')}\n"
-        f"- OCR: {'включён' if ocr_enabled else 'выключен'}\n\n"
-        "Выберите профиль или переключите OCR:"
+        "⚙️ *Профили скорости обработки PDF*\n\n"
+        "Выберите режим, который лучше подходит для текущей рассылки:\n\n"
+        "🚀 *Быстрый* — для коротких статей (до 10–20 стр.).\n"
+        " • Минимальный таймаут, без OCR.\n"
+        " • Максимальная скорость, возможен пропуск малых сканов.\n\n"
+        "⚖️ *Универсальный* — сбалансированный режим (по умолчанию).\n"
+        " • Подходит для большинства научных PDF.\n"
+        " • Средний таймаут, OCR выключен.\n\n"
+        "🧱 *Тяжёлый* — для больших или скан-журналов.\n"
+        " • Увеличенные таймауты, OCR включён.\n"
+        " • Медленнее, но меньше потерь адресов.\n\n"
+        "📄 *Текущие параметры*\n"
+        f" • Таймаут базовый: {values.get('PDF_TIMEOUT_BASE')} с\n"
+        f" • + за 1 МБ: {values.get('PDF_TIMEOUT_PER_MB')} с/МБ\n"
+        f" • Диапазон: {values.get('PDF_TIMEOUT_MIN')}–{values.get('PDF_TIMEOUT_MAX')} с\n"
+        f" • OCR: {'включён' if ocr_enabled else 'выключен'}\n\n"
+        "_Выберите профиль или переключите OCR:_"
     )
-    return text, _kb(ocr_enabled)
+    return text, _kb(ocr_enabled), "Markdown"
 
 
 @router.message(F.text == "/profile")
 async def cmd_profile(message: types.Message):
-    text, markup = _render()
-    await message.answer(text, reply_markup=markup)
+    text, markup, parse_mode = _render()
+    await message.answer(text, reply_markup=markup, parse_mode=parse_mode)
 
 
 @router.callback_query(F.data.startswith("profile:set:"))
@@ -92,9 +101,11 @@ async def cb_set_profile(call: types.CallbackQuery):
         await call.answer("Неизвестный профиль", show_alert=True)
         return
     set_many(cfg)
-    text, markup = _render()
+    text, markup, parse_mode = _render()
     await call.message.edit_text(
-        f"✅ Профиль «{profile}» применён.\n\n{text}", reply_markup=markup
+        f"✅ Профиль «{profile}» применён.\n\n{text}",
+        reply_markup=markup,
+        parse_mode=parse_mode,
     )
     await call.answer()
 
@@ -103,17 +114,18 @@ async def cb_set_profile(call: types.CallbackQuery):
 async def cb_toggle_ocr(call: types.CallbackQuery):
     current = bool(getattr(config, "EMAILBOT_ENABLE_OCR"))
     set_many({"EMAILBOT_ENABLE_OCR": (not current)})
-    text, markup = _render()
-    await call.message.edit_text(text, reply_markup=markup)
+    text, markup, parse_mode = _render()
+    await call.message.edit_text(text, reply_markup=markup, parse_mode=parse_mode)
     await call.answer("OCR переключён.")
 
 
 @router.callback_query(F.data == "profile:reset")
 async def cb_reset(call: types.CallbackQuery):
     clear(list(PROFILE_KEYS))
-    text, markup = _render()
+    text, markup, parse_mode = _render()
     await call.message.edit_text(
         "♻️ Профиль сброшен к значениям по умолчанию (.env).\n\n" + text,
         reply_markup=markup,
+        parse_mode=parse_mode,
     )
     await call.answer()
