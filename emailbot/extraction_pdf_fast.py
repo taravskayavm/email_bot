@@ -25,7 +25,8 @@ def extract_emails_from_pdf_fast_core(
         total = 0
     if progress:
         try:
-            progress.set_total(total)
+            if total:
+                progress.set_total(total)
         except Exception:
             pass
         try:
