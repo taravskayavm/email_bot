@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 from emailbot.runtime_config import get as rc_get
 
 
@@ -20,6 +22,16 @@ def _float(name: str, default: float) -> float:
         return float(raw.strip() or default)
     except Exception:
         return default
+
+
+def _str(name: str, default: str) -> str:
+    """Read string environment variables with stripping."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    return raw if raw else default
 
 
 SEND_COOLDOWN_DAYS = int(os.getenv("SEND_COOLDOWN_DAYS", "180"))
@@ -46,12 +58,14 @@ ALLOW_EDIT_AT_PREVIEW = os.getenv("ALLOW_EDIT_AT_PREVIEW", "0") == "1"
 ENABLE_INLINE_EMAIL_EDITOR = os.getenv("ENABLE_INLINE_EMAIL_EDITOR", "0") == "1"
 
 # PDF extraction tuning
-PDF_ENGINE = os.getenv("EMAILBOT_PDF_ENGINE", "fitz")
+PDF_ENGINE = _str("EMAILBOT_PDF_ENGINE", "fitz")
 PDF_MAX_PAGES = rc_get("PDF_MAX_PAGES", _int("PDF_MAX_PAGES", 40))
 # Фиксированный таймаут остаётся как резервный (если адаптивный выключен)
-PDF_EXTRACT_TIMEOUT = rc_get("PDF_EXTRACT_TIMEOUT", _int("PDF_EXTRACT_TIMEOUT", 25))  # seconds
+PDF_EXTRACT_TIMEOUT = rc_get(
+    "PDF_EXTRACT_TIMEOUT", _int("PDF_EXTRACT_TIMEOUT", 25)
+)  # seconds
 EMAILBOT_ENABLE_OCR = rc_get(
-    "EMAILBOT_ENABLE_OCR", os.getenv("EMAILBOT_ENABLE_OCR", "0") == "1"
+    "EMAILBOT_ENABLE_OCR", _int("EMAILBOT_ENABLE_OCR", 0) == 1
 )
 # -------- PDF / OCR Auto Mode --------
 PDF_OCR_AUTO = rc_get("PDF_OCR_AUTO", _int("PDF_OCR_AUTO", 1))
@@ -62,6 +76,51 @@ PDF_OCR_MIN_TEXT_RATIO = rc_get(
 )
 PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
+
+# -------- OCR / PDF unified knobs --------
+PDF_BACKEND = rc_get(
+    "PDF_BACKEND",
+    (_str("PDF_BACKEND", PDF_ENGINE) or PDF_ENGINE).strip().lower(),
+)
+if PDF_BACKEND not in {"fitz", "pdfminer", "auto"}:
+    PDF_BACKEND = "fitz"
+
+PDF_LEGACY_MODE = rc_get("PDF_LEGACY_MODE", _int("LEGACY_MODE", 0) == 1)
+PDF_FAST_MIN_HITS = rc_get("PDF_FAST_MIN_HITS", _int("PDF_FAST_MIN_HITS", 8))
+PDF_FAST_TIMEOUT_MS = rc_get("PDF_FAST_TIMEOUT_MS", _int("PDF_FAST_TIMEOUT_MS", 60))
+PDF_TEXT_TRUNCATE_LIMIT = rc_get(
+    "PDF_TEXT_TRUNCATE_LIMIT", _int("PDF_TEXT_TRUNCATE_LIMIT", 2_000_000)
+)
+
+PDF_OCR_ENGINE = rc_get(
+    "PDF_OCR_ENGINE",
+    _str("PDF_OCR_ENGINE", _str("OCR_ENGINE", "pytesseract")),
+)
+PDF_OCR_LANG = rc_get(
+    "PDF_OCR_LANG",
+    _str("PDF_OCR_LANG", _str("OCR_LANG", "eng+rus")),
+)
+PDF_OCR_PAGE_LIMIT = rc_get(
+    "PDF_OCR_PAGE_LIMIT",
+    _int("PDF_OCR_PAGE_LIMIT", PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10),
+)
+PDF_OCR_TIME_LIMIT = rc_get("PDF_OCR_TIME_LIMIT", _int("PDF_OCR_TIME_LIMIT", 30))
+PDF_OCR_TIMEOUT_PER_PAGE = rc_get(
+    "PDF_OCR_TIMEOUT_PER_PAGE", _int("PDF_OCR_TIMEOUT_PER_PAGE", 12)
+)
+PDF_OCR_DPI = rc_get("PDF_OCR_DPI", _int("PDF_OCR_DPI", 300))
+PDF_OCR_CACHE_DIR = rc_get(
+    "PDF_OCR_CACHE_DIR",
+    str(Path(_str("PDF_OCR_CACHE_DIR", _str("OCR_CACHE_DIR", "var/ocr_cache")))).strip(),
+)
+PDF_OCR_ALLOW_BEST_EFFORT = rc_get(
+    "PDF_OCR_ALLOW_BEST_EFFORT",
+    _int("PDF_OCR_ALLOW_BEST_EFFORT", 1) == 1,
+)
+PDF_FORCE_OCR_IF_FOUND_LT = rc_get(
+    "PDF_FORCE_OCR_IF_FOUND_LT", _int("PDF_FORCE_OCR_IF_FOUND_LT", 25)
+)
+
 
 # -------- PDF Open Guard / Fallback --------
 PDF_OPEN_TIMEOUT_SEC = rc_get(

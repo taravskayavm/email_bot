@@ -27,7 +27,7 @@ class ParseProgress:
         self.pages_scanned = 0
         self.pages_total = 0
         self.found_count = 0
-        self.ocr_on = False
+        self.ocr_status = "не требуется"
         self.started_at = time.time()
         self.last_render_at = 0.0
         self._last_summary = ""
@@ -71,10 +71,17 @@ class ParseProgress:
             self.found_count = max(0, int(n))
             self._mark_dirty()
 
-    def set_ocr(self, on: bool) -> None:
+    def set_ocr(self, on: bool | str) -> None:
+        if isinstance(on, str):
+            status = on.strip() or "не требуется"
+        else:
+            status = "вкл" if on else "не требуется"
         with self._lock:
-            self.ocr_on = bool(on)
+            self.ocr_status = status
             self._mark_dirty(force=True)
+
+    def set_ocr_status(self, status: str) -> None:
+        self.set_ocr(status)
 
     # ------------------------------------------------------------------
     # Rendering helpers
@@ -84,7 +91,7 @@ class ParseProgress:
         mm, ss = divmod(max(0, elapsed), 60)
         t_str = f"{mm:02d}:{ss:02d}"
         total = self.pages_total or "?"
-        ocr = "вкл" if self.ocr_on else "выкл"
+        ocr = self.ocr_status or "не требуется"
         phase = (self.phase or "парсинг").strip()
         return (
             f"🔎 {phase} · {self.pages_scanned}/{total} стр. · "

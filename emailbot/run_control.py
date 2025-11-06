@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Dict, List, Optional
 
+from emailbot.cancel_token import cancel_all as _cancel_all, reset_all as _reset_all, is_cancelled as _is_cancelled
 from .utils.logging_setup import get_logger
 
 _stop_event = asyncio.Event()
@@ -16,13 +17,14 @@ logger = get_logger(__name__)
 
 
 def should_stop() -> bool:
-    return _stop_event.is_set()
+    return _stop_event.is_set() or _is_cancelled()
 
 
 def request_stop() -> None:
     """Signal cooperative stop and cancel all registered tasks."""
 
     _stop_event.set()
+    _cancel_all()
     for task in list(_tasks.values()):
         if not task.done():
             task.cancel()
@@ -42,6 +44,7 @@ def clear_stop() -> None:
 
     if _stop_event.is_set():
         _stop_event.clear()
+    _reset_all()
 
 
 def register_task(name: str, task: asyncio.Task) -> None:

@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
-import os
+import multiprocessing
+import queue
 import shutil
 import statistics
 import time
+import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -86,24 +88,42 @@ def backend_status() -> Dict[str, bool | str]:
 
 from emailbot import settings
 from emailbot.config import (
-    PDF_ENGINE,
-    PDF_MAX_PAGES,
     EMAILBOT_ENABLE_OCR,
     PARSE_COLLECT_ALL,
+    PDF_BACKEND,
+    PDF_ENGINE,
+    PDF_FAST_MIN_HITS,
+    PDF_FAST_TIMEOUT_MS,
+    PDF_FALLBACK_BACKEND,
+    PDF_LEGACY_MODE,
+    PDF_MAX_PAGES,
+    PDF_OCR_ALLOW_BEST_EFFORT,
+    PDF_OCR_CACHE_DIR,
+    PDF_OCR_DPI,
+    PDF_OCR_ENGINE,
+    PDF_OCR_LANG,
     PDF_OCR_MAX_PAGES,
     PDF_OCR_MIN_CHARS,
     PDF_OCR_MIN_TEXT_RATIO,
+    PDF_OCR_PAGE_LIMIT,
+    PDF_OCR_TIME_LIMIT,
+    PDF_OCR_TIMEOUT_PER_PAGE,
     PDF_OPEN_TIMEOUT_SEC,
-    PDF_FALLBACK_BACKEND,
+    PDF_TEXT_TRUNCATE_LIMIT,
     TESSERACT_CMD,
 )
 from emailbot.ui.progress_state import ParseProgress
 from emailbot.settings_store import get
 from emailbot.utils.logging_setup import get_logger
 from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
-from emailbot.utils.run_with_timeout import run_with_timeout as run_with_timeout_process
 from emailbot.utils.timeout_policy import compute_pdf_timeout
-from emailbot.cancel_token import is_cancelled
+from emailbot.cancel_token import (
+    cancel_all,
+    get_shared_event,
+    install_shared_event,
+    is_cancelled,
+    reset_all,
+)
 from emailbot.utils.ocr_guard import ocr_available as _ocr_guard_available
 from emailbot.utils.pdf_open_safe import open_pdf_with_timeout
 from .extraction_common import normalize_email, preprocess_text
@@ -131,29 +151,26 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
-_OCR_ENGINE = os.getenv("OCR_ENGINE", "pytesseract") or "pytesseract"
-_OCR_LANG = os.getenv("OCR_LANG", "eng+rus") or "eng+rus"
-_default_page_limit = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10
-_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", str(_default_page_limit)))
-_OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
-_OCR_MIN_TEXT_RATIO = float(
-    os.getenv("OCR_MIN_TEXT_RATIO", str(PDF_OCR_MIN_TEXT_RATIO))
-)
-_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", str(PDF_OCR_MIN_CHARS)))
+_OCR_ENGINE = str(PDF_OCR_ENGINE or "pytesseract")
+_OCR_LANG = str(PDF_OCR_LANG or "eng+rus")
+_page_limit_default = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10
+_OCR_PAGE_LIMIT = max(1, int(PDF_OCR_PAGE_LIMIT or _page_limit_default or 10))
+_OCR_TIME_LIMIT = max(0, int(PDF_OCR_TIME_LIMIT))
+_OCR_MIN_TEXT_RATIO = float(PDF_OCR_MIN_TEXT_RATIO)
+_OCR_MIN_CHARS = int(PDF_OCR_MIN_CHARS)
 _default_max_pages = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES >= 0 else _OCR_PAGE_LIMIT
-_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_default_max_pages or _OCR_PAGE_LIMIT)))
-_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
-_OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
-_OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
-_OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
-_PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
-MAX_PAGES = PDF_MAX_PAGES
+_OCR_MAX_PAGES = int(_default_max_pages or _OCR_PAGE_LIMIT)
+_OCR_DPI = int(PDF_OCR_DPI)
+_OCR_TIMEOUT_PER_PAGE = max(1, int(PDF_OCR_TIMEOUT_PER_PAGE))
+_OCR_CACHE_DIR = Path(PDF_OCR_CACHE_DIR)
+_OCR_ALLOW_BEST_EFFORT = bool(PDF_OCR_ALLOW_BEST_EFFORT)
+_PDF_TEXT_TRUNCATE_LIMIT = int(PDF_TEXT_TRUNCATE_LIMIT)
+MAX_PAGES = int(PDF_MAX_PAGES)
 
-LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-_pdf_backend_env = (os.getenv("PDF_BACKEND", PDF_ENGINE) or PDF_ENGINE).strip().lower()
-if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
-    _pdf_backend_env = "fitz"
-PDF_BACKEND = _pdf_backend_env
+LEGACY_MODE = bool(PDF_LEGACY_MODE)
+PDF_BACKEND = (PDF_BACKEND or "fitz").strip().lower()
+if PDF_BACKEND not in {"fitz", "pdfminer", "auto"}:
+    PDF_BACKEND = "fitz"
 
 logger = get_logger(__name__)
 
@@ -171,13 +188,46 @@ BASIC_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 # Быстрый детектор «обычных» e-mail без тяжёлой предобработки
 _QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
 # Порог, начиная с которого страницу считаем «простой» и не гоним через тяжёлый пайплайн
-_PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
-_PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
+_PDF_FAST_MIN_HITS = max(1, int(PDF_FAST_MIN_HITS or 1))
+_PDF_FAST_TIMEOUT_MS = max(10, int(PDF_FAST_TIMEOUT_MS or 60))
 
 
 _ZERO_WIDTH_MAP = dict.fromkeys(map(ord, "\u200B\u200C\u200D\u2060\uFEFF"), None)
 _NBSP_TRANSLATE = str.maketrans({"\u00A0": " ", "\u202F": " "})
 _HARD_HYPHENS_RE = re.compile(r"[‐-‒–—―]")
+
+
+class _QueueProgress:
+    """Lightweight proxy that relays progress updates through a queue."""
+
+    __slots__ = ("_queue",)
+
+    def __init__(self, q: multiprocessing.Queue) -> None:
+        self._queue = q
+
+    def _send(self, method: str, *args, **kwargs) -> None:
+        try:
+            self._queue.put_nowait(("progress", method, args, kwargs))
+        except Exception:
+            pass
+
+    def set_phase(self, phase: str) -> None:
+        self._send("set_phase", phase)
+
+    def set_total(self, total: int) -> None:
+        self._send("set_total", total)
+
+    def inc_pages(self, n: int = 1) -> None:
+        self._send("inc_pages", n)
+
+    def set_found(self, n: int) -> None:
+        self._send("set_found", n)
+
+    def set_ocr(self, value: bool | str) -> None:
+        self._send("set_ocr", value)
+
+    def set_ocr_status(self, status: str) -> None:
+        self._send("set_ocr_status", status)
 
 
 def clean_pdf_text(text: str) -> str:
@@ -725,14 +775,46 @@ def extract_text_from_pdf(path: str | Path) -> str:
     return cleanup_text(text)
 
 
+def _pdf_worker_entry(
+    pdf_path: str,
+    shared_event,
+    q: multiprocessing.Queue,
+    with_progress: bool,
+) -> None:
+    """Worker entry point executed inside a separate process."""
+
+    try:
+        install_shared_event(shared_event)
+    except Exception:
+        pass
+
+    progress = _QueueProgress(q) if with_progress else None
+    try:
+        result = _extract_emails_core(
+            Path(pdf_path),
+            stop_event=shared_event,
+            progress=progress,
+        )
+    except Exception:
+        q.put(("error", traceback.format_exc()))
+        return
+    q.put(("result", list(result or [])))
+
+
 def _extract_emails_core(
     pdf_path: Path,
+    *,
+    stop_event=None,
     progress: ParseProgress | None = None,
 ) -> Set[str]:
     """Core PDF extraction logic executed inside a worker process."""
 
     if progress is not None:
-        hits, _stats = extract_from_pdf(str(pdf_path), progress=progress)
+        hits, _stats = extract_from_pdf(
+            str(pdf_path),
+            stop_event=stop_event,
+            progress=progress,
+        )
         return {
             normalize_email(hit.email) or hit.email
             for hit in hits
@@ -749,6 +831,9 @@ def _extract_emails_core(
             if fast_hits:
                 return fast_hits
 
+    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        return set()
+
     try:
         text = extract_text_from_pdf(pdf_path)
     except Exception:
@@ -759,6 +844,9 @@ def _extract_emails_core(
     try:
         from emailbot.parsing.extract_from_text import emails_from_text
     except Exception:
+        return set()
+
+    if stop_event and getattr(stop_event, "is_set", lambda: False)():
         return set()
 
     try:
@@ -792,13 +880,114 @@ def extract_emails_from_pdf(
         timeout,
         size_mb if size_mb >= 0 else -1.0,
     )
-
     if progress is not None:
-        found = _extract_emails_core(pdf_path, progress=progress)
-    else:
-        found = run_with_timeout_process(_extract_emails_core, timeout, pdf_path)
-    if found is None:
+        try:
+            progress.set_phase("подготовка")
+            progress.set_total(0)
+            progress.set_found(0)
+            progress.set_ocr_status("не требуется")
+        except Exception:
+            pass
+
+    shared_event = get_shared_event()
+    q: multiprocessing.Queue = multiprocessing.Queue()
+    proc = multiprocessing.Process(
+        target=_pdf_worker_entry,
+        args=(str(pdf_path), shared_event, q, bool(progress)),
+        daemon=True,
+    )
+    proc.start()
+
+    deadline = time.monotonic() + timeout
+    result: Set[str] | None = None
+    error_message: str | None = None
+    timed_out = False
+    stop_requested = False
+    cancel_flag = False
+
+    def _apply_progress(method: str, args: tuple, kwargs: dict) -> None:
+        if not progress:
+            return
+        try:
+            getattr(progress, method)(*args, **kwargs)
+        except Exception:
+            pass
+
+    try:
+        while True:
+            if result is not None or error_message is not None:
+                break
+            if timed_out or stop_requested:
+                break
+            if should_stop() and not stop_requested:
+                stop_requested = True
+                cancel_all()
+                cancel_flag = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                cancel_all()
+                cancel_flag = True
+                break
+            wait_time = min(1.0, max(0.1, remaining))
+            try:
+                message = q.get(timeout=wait_time)
+            except queue.Empty:
+                if not proc.is_alive():
+                    break
+                continue
+            if not message:
+                continue
+            kind = message[0]
+            if kind == "progress":
+                _apply_progress(message[1], message[2], message[3])
+            elif kind == "result":
+                result = set(message[1] or [])
+            elif kind == "error":
+                error_message = message[1] or "unknown error"
+            if result is not None or error_message is not None:
+                break
+
+        while True:
+            try:
+                message = q.get_nowait()
+            except queue.Empty:
+                break
+            if not message:
+                continue
+            kind = message[0]
+            if kind == "progress":
+                _apply_progress(message[1], message[2], message[3])
+            elif kind == "result" and result is None:
+                result = set(message[1] or [])
+            elif kind == "error" and error_message is None:
+                error_message = message[1] or "unknown error"
+    finally:
+        try:
+            proc.join(0.1)
+        except Exception:
+            pass
+        if proc.is_alive():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            proc.join(1)
+        try:
+            q.close()
+            q.join_thread()
+        except Exception:
+            pass
+        if cancel_flag:
+            reset_all()
+
+    if timed_out:
         logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
+        if progress is not None:
+            try:
+                progress.set_phase("⏰ истек таймаут")
+            except Exception:
+                pass
         try:
             from emailbot.ui.notify import notify_timeout_hint
 
@@ -811,7 +1000,25 @@ def extract_emails_from_pdf(
             logger.debug("Timeout notification failed", exc_info=True)
         return set()
 
-    emails: Set[str] = set(found)
+    if stop_requested:
+        logger.info("PDF extract stopped by user: %s", str(pdf_path))
+        if progress is not None:
+            try:
+                progress.set_phase("⛔ остановлено")
+            except Exception:
+                pass
+        return result or set()
+
+    if error_message is not None:
+        logger.error("PDF extract failed: %s (%s)", str(pdf_path), error_message)
+        if progress is not None:
+            try:
+                progress.set_phase("⚠️ ошибка PDF")
+            except Exception:
+                pass
+        return result or set()
+
+    emails: Set[str] = result or set()
 
     if not emails and EMAILBOT_ENABLE_OCR:
         try:
@@ -833,8 +1040,18 @@ def extract_emails_from_pdf(
         timeout,
     )
     if progress is not None:
-        progress.set_found(len(emails))
-        progress.set_ocr(False)
+        try:
+            progress.set_found(len(emails))
+        except Exception:
+            pass
+        try:
+            progress.set_phase("готово")
+        except Exception:
+            pass
+        try:
+            progress.set_ocr_status("не требуется")
+        except Exception:
+            pass
     return emails
 
 
@@ -941,7 +1158,7 @@ def extract_from_pdf(
         except Exception:
             pass
         try:
-            progress.set_ocr(False)
+            progress.set_ocr_status("не требуется")
         except Exception:
             pass
 
@@ -1129,9 +1346,11 @@ def extract_from_pdf(
                         stats["ocr_pages"] = ocr_pages
                 elif progress and ocr_unavailable and not reported_ocr_missing:
                     progress.set_phase("OCR недоступен")
+                    progress.set_ocr_status("недоступен")
                     reported_ocr_missing = True
             elif need_page_ocr and progress and ocr_unavailable and not reported_ocr_missing:
                 progress.set_phase("OCR недоступен")
+                progress.set_ocr_status("недоступен")
                 reported_ocr_missing = True
             if not text or not text.strip():
                 continue

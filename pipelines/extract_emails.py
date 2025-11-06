@@ -508,12 +508,9 @@ def extract_emails_from_pdf(path: str) -> List[str]:
 
     emails_text = _harvest_or_parse(text)
 
-    try:
-        force_threshold = int(os.getenv("PDF_FORCE_OCR_IF_FOUND_LT", "25"))
-    except Exception:
-        force_threshold = 25
+    force_threshold = int(C.PDF_FORCE_OCR_IF_FOUND_LT)
 
-    do_ocr = os.getenv("PDF_OCR_ENABLE", "0") == "1"
+    do_ocr = bool(C.EMAILBOT_ENABLE_OCR)
     if do_ocr and len(emails_text) < force_threshold:
         try:
             pdf_bytes = Path(path).read_bytes()
