@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from telegram import Message
 from telegram.error import BadRequest
@@ -14,13 +15,22 @@ from emailbot.cancel_token import is_cancelled
 class Heartbeat:
     """Rate-limit progress message updates to avoid Telegram flood limits."""
 
-    def __init__(self, msg: Message, interval_sec: float = 5.0):
+    def __init__(
+        self,
+        msg: Message,
+        interval_sec: float = 5.0,
+        *,
+        supplier: Optional[Callable[[], Optional[str]]] = None,
+    ):
         self._msg = msg
         self._interval = max(0.0, float(interval_sec))
         self._last_sent = 0.0
         self._last_text: Optional[str] = None
+        self._supplier = supplier
+        self._task: Optional[asyncio.Task[None]] = None
+        self._stopped = False
 
-    async def tick(self, text: str) -> bool:
+    async def tick(self, text: Optional[str]) -> bool:
         """Update ``msg`` with ``text`` if allowed by the interval policy."""
 
         if not text or is_cancelled():
@@ -42,7 +52,7 @@ class Heartbeat:
             pass
         return False
 
-    async def force(self, text: str) -> bool:
+    async def force(self, text: Optional[str]) -> bool:
         """Immediately update the message, bypassing the throttle interval."""
 
         if not text or is_cancelled():
@@ -54,6 +64,40 @@ class Heartbeat:
             return True
         except Exception:
             return False
+
+    def start(self) -> None:
+        """Start background updates using the configured ``supplier``."""
+
+        if self._supplier is None:
+            return
+        if self._task and not self._task.done():
+            return
+        loop = asyncio.get_running_loop()
+        self._stopped = False
+        self._task = loop.create_task(self._run())
+
+    def stop(self) -> None:
+        """Stop background updates."""
+
+        self._stopped = True
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = None
+
+    async def _run(self) -> None:
+        try:
+            while not self._stopped and not is_cancelled():
+                text: Optional[str]
+                try:
+                    text = self._supplier() if self._supplier else None
+                except Exception:
+                    text = None
+                if text:
+                    await self.tick(text)
+                interval = self._interval if self._interval > 0 else 0.5
+                await asyncio.sleep(max(0.5, interval))
+        except asyncio.CancelledError:
+            pass
 
 
 class ProgressUI:

@@ -63,6 +63,7 @@ from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
 from .progress_watchdog import ProgressTracker, heartbeat_now
+from emailbot.ui.progress_state import ParseProgress
 
 try:  # pragma: no cover - optional dependency for aggressive harvesting
     from .parsing.harvester import harvest_emails as _harvest_emails
@@ -781,11 +782,15 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
     return kept
 
 
-def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
+def extract_from_pdf(
+    path: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
+) -> tuple[list[EmailHit], Dict]:
     """Extract e-mail addresses from a PDF file."""
 
     start = time.monotonic()
-    hits, stats = _extract_from_pdf(path, stop_event)
+    hits, stats = _extract_from_pdf(path, stop_event, progress=progress)
     hits = _postprocess_hits(hits, stats)
     stats["mode"] = "file"
     stats["entry"] = path
@@ -795,14 +800,22 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
 
 def extract_from_pdf_stream(
-    data: bytes, source_ref: str, stop_event: Optional[object] = None
+    data: bytes,
+    source_ref: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 
     if is_cancelled():
         return [], {"errors": ["cancelled"]}
 
-    hits, stats = _extract_from_pdf_stream(data, source_ref, stop_event)
+    hits, stats = _extract_from_pdf_stream(
+        data,
+        source_ref,
+        stop_event,
+        progress=progress,
+    )
     hits = _postprocess_hits(hits, stats)
     return hits, stats
 
@@ -1297,6 +1310,7 @@ def extract_any(
     _return_hits: bool = False,
     *,
     tracker: ProgressTracker | None = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit] | list[str], Dict]:
     """Определить тип источника и извлечь e-mail-адреса.
 
@@ -1339,7 +1353,9 @@ def extract_any(
     if ext == ".pdf":
         _progress_start()
         try:
-            hits, stats = extract_from_pdf(source, stop_event)
+            if progress:
+                progress.set_phase("PDF")
+            hits, stats = extract_from_pdf(source, stop_event, progress=progress)
         except Exception:
             _progress_finish(False)
             raise
@@ -1382,6 +1398,8 @@ def extract_any(
         return sorted({h.email for h in hits}), stats
     if ext == ".zip":
         # ⇩ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: используем обработчик, который шлёт пофайловый прогресс
+        if progress:
+            progress.set_phase("ZIP")
         hits, stats = extract_emails_from_zip(source, stop_event, tracker=tracker)
         if _return_hits:
             return hits, stats
@@ -1502,6 +1520,7 @@ def extract_any_stream(
     *,
     source_ref: str,
     stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit], Dict]:
     """Определить тип источника по расширению и извлечь e-mail из байтов."""
 
@@ -1513,6 +1532,7 @@ def extract_any_stream(
                 data,
                 source_ref,
                 stop_event,
+                progress,
             )
             try:
                 return future.result(timeout=PDF_STREAM_TIMEOUT_SEC)

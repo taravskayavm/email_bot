@@ -63,3 +63,15 @@ PDF_TIMEOUT_PER_MB = rc_get("PDF_TIMEOUT_PER_MB", _float("PDF_TIMEOUT_PER_MB", 0
 # минимальный и максимальный пределы, сек
 PDF_TIMEOUT_MIN = rc_get("PDF_TIMEOUT_MIN", _int("PDF_TIMEOUT_MIN", 15))
 PDF_TIMEOUT_MAX = rc_get("PDF_TIMEOUT_MAX", _int("PDF_TIMEOUT_MAX", 90))
+
+# -------- Поведение парсинга --------
+# Если 1 — парсим все страницы PDF (без раннего выхода по "достаточно адресов")
+PARSE_COLLECT_ALL = rc_get("PARSE_COLLECT_ALL", _int("PARSE_COLLECT_ALL", 1))
+
+# Частота обновления прогресса в Telegram
+PROGRESS_UPDATE_EVERY_PAGES = rc_get(
+    "PROGRESS_UPDATE_EVERY_PAGES", _int("PROGRESS_UPDATE_EVERY_PAGES", 10)
+)
+PROGRESS_UPDATE_MIN_SEC = rc_get(
+    "PROGRESS_UPDATE_MIN_SEC", _float("PROGRESS_UPDATE_MIN_SEC", 2.0)
+)
