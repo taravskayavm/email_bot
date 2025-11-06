@@ -60,6 +60,12 @@ except NameError:
     _cooldown_days = _getenv_int("SEND_COOLDOWN_DAYS", 180)
     _enable_web = _getenv_int("ENABLE_WEB", 1)
 
+    # Provider canonicalisation toggles
+    _enable_provider_canon = _getenv_int("ENABLE_PROVIDER_CANON", 1)
+    _canon_gmail_dots = _getenv_int("CANON_GMAIL_DOTS", 1)
+    _canon_gmail_plus = _getenv_int("CANON_GMAIL_PLUS", 1)
+    _canon_other_plus = _getenv_int("CANON_OTHER_PLUS", 1)
+
     settings = SimpleNamespace(
         # Paths
         BLOCKED_FILE=_abspath(_stoplist),
@@ -75,6 +81,14 @@ except NameError:
         CRAWL_MAX_DEPTH=_crawl_depth,
         CRAWL_MAX_PAGES=_crawl_pages,
         CRAWL_TIME_BUDGET_SECONDS=_crawl_budget,
+        # Email canonicalisation
+        ENABLE_PROVIDER_CANON=_enable_provider_canon,
+        CANON_GMAIL_DOTS=_canon_gmail_dots,
+        CANON_GMAIL_PLUS=_canon_gmail_plus,
+        CANON_OTHER_PLUS=_canon_other_plus,
     )
 
-__all__ = ["settings"]
+    _exported = {name: getattr(settings, name) for name in vars(settings) if name.isupper()}
+    globals().update(_exported)
+
+__all__ = ["settings", *sorted(name for name in globals() if name.isupper())]
