@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 from . import report_service
 from . import send_selected as _pkg_send_selected
 from .extraction_zip import ZIP_MAX_DEPTH, ZIP_MAX_FILES, ZIP_MAX_TOTAL_UNCOMP_MB
+from .handlers.diag import build_pdf_ocr_settings_report
 from .time_utils import LOCAL_TZ, day_bounds, parse_ts, parse_user_date_once
 from zoneinfo import ZoneInfo
 
@@ -2740,15 +2741,28 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ENABLE_OCR": settings.ENABLE_OCR,
     }
 
-    lines = [
-        "Versions:",
-        f"  Python: {versions['python']}",
-        f"  telegram: {versions['telegram']}",
-        f"  aiohttp: {versions['aiohttp']}",
-        "Limits:",
-        f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
-        "Flags:",
-    ]
+    pdf_diag = ""
+    try:
+        pdf_diag = build_pdf_ocr_settings_report()
+    except Exception as exc:  # pragma: no cover - defensive
+        pdf_diag = f"PDF/OCR diag error: {exc}"
+
+    lines = []
+    if pdf_diag:
+        lines.append(pdf_diag)
+        lines.append("")
+
+    lines.extend(
+        [
+            "Versions:",
+            f"  Python: {versions['python']}",
+            f"  telegram: {versions['telegram']}",
+            f"  aiohttp: {versions['aiohttp']}",
+            "Limits:",
+            f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
+            "Flags:",
+        ]
+    )
     for k, v in flags.items():
         lines.append(f"  {k}: {v}")
     lines.extend(
@@ -2769,7 +2783,7 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines.extend(
         [
             "",
-            "PDF/OCR:",
+            "PDF/OCR legacy values:",
             f"  PDF_MAX_PAGES: {PDF_MAX_PAGES}",
             f"  PDF_OCR_AUTO: {PDF_OCR_AUTO}",
             f"  PDF_OCR_PROBE_PAGES: {PDF_OCR_PROBE_PAGES}",
