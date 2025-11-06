@@ -10,6 +10,38 @@ from emailbot.cancel_token import is_cancelled
 from emailbot.ui.progress_state import ParseProgress
 
 
+def extract_emails_from_pdf_fast_core(
+    doc,
+    *,
+    progress: ParseProgress | None = None,
+) -> Set[str]:
+    """Iterate over ``doc`` pages and collect e-mails with lightweight parsing."""
+
+    from emailbot.parsing.extract_from_text import emails_from_text
+
+    found: Set[str] = set()
+    for index, page in enumerate(doc):
+        if is_cancelled():
+            break
+        if PDF_MAX_PAGES and index >= PDF_MAX_PAGES:
+            break
+        try:
+            text = page.get_text("text") or ""
+        except Exception:
+            text = ""
+        if text:
+            found |= emails_from_text(text)
+        if progress:
+            try:
+                progress.inc_pages(1)
+                progress.set_found(len(found))
+            except Exception:
+                pass
+        if not PARSE_COLLECT_ALL and len(found) >= 10:
+            break
+    return found
+
+
 def extract_emails_fitz(
     pdf_path: Path,
     progress: ParseProgress | None = None,
@@ -27,30 +59,18 @@ def extract_emails_fitz(
     except Exception:
         return set()
 
-    found: Set[str] = set()
     try:
-        for index, page in enumerate(doc):
-            if is_cancelled():
-                break
-            if PDF_MAX_PAGES and index >= PDF_MAX_PAGES:
-                break
-            if progress:
-                if index == 0:
-                    try:
-                        progress.set_total(getattr(doc, "page_count", 0))
-                    except Exception:
-                        pass
-                progress.inc_pages(1)
+        if progress:
             try:
-                text = page.get_text("text") or ""
+                total = getattr(doc, "page_count", len(doc))
             except Exception:
-                text = ""
-            if text:
-                found |= emails_from_text(text)
-            if progress:
-                progress.set_found(len(found))
-            if not PARSE_COLLECT_ALL and len(found) >= 10:
-                break
+                total = 0
+            if total:
+                try:
+                    progress.set_total(total)
+                except Exception:
+                    pass
+        found = extract_emails_from_pdf_fast_core(doc, progress=progress)
     finally:
         try:
             doc.close()
