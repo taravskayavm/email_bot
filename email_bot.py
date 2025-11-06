@@ -79,6 +79,7 @@ _selfcheck_email_clean_exports()
 
 from emailbot import bot_handlers, messaging, history_service
 from emailbot import compat  # EBOT-105
+from emailbot.boot_check import run_boot_check
 
 compat.apply()  # ранний прогрев совместимости
 
@@ -271,6 +272,8 @@ async def handle_start_command(
 
 
 def main() -> None:
+    # Silent but strict boot checks (dirs/env/ocr availability)
+    run_boot_check(PROJECT_ROOT)
     errs = startup_selfcheck()
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
@@ -410,6 +413,7 @@ def main() -> None:
         group=0,
     )
 
+    # Example: bulk delete conv — avoid per_message=True to keep message handlers working.
     bulk_delete_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
@@ -430,6 +434,9 @@ def main() -> None:
         per_message=False,
     )
     app.add_handler(bulk_delete_conv, group=-1)
+    # NOTE: If other ConversationHandler definitions in this file used per_message=True,
+    # switch them to per_message=False to avoid PTB FAQ pitfall where only CallbackQueryHandler
+    # gets context and MessageHandlers are ignored.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,

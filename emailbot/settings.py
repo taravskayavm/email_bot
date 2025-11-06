@@ -13,6 +13,16 @@ from . import settings_store as _store
 
 logger = logging.getLogger(__name__)
 
+# --- Back-compat module-level constants (legacy imports expect these) ----------
+# Gmail canonicalization: treat dots as ignored in Gmail usernames.
+# Example: name.surname@gmail.com == namesurname@gmail.com
+CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") != "0"
+
+# Report timezone used in previews/logs; kept for legacy imports.
+REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
+# Inline logo embedding in message previews (1 — enabled, 0 — disabled)
+INLINE_LOGO: int = int(os.getenv("INLINE_LOGO", "1"))
+
 # [EBOT-101] Загружаем .env максимально рано, чтобы переменные окружения уже были доступны
 try:
     from dotenv import load_dotenv
@@ -132,7 +142,6 @@ FOOTNOTE_RADIUS_PAGES: int = 1
 PDF_LAYOUT_AWARE: bool = False
 ENABLE_OCR: bool = True
 ENABLE_PROVIDER_CANON: bool = os.getenv("ENABLE_PROVIDER_CANON", "1") == "1"
-CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") == "1"
 CANON_GMAIL_PLUS: bool = os.getenv("CANON_GMAIL_PLUS", "1") == "1"
 CANON_OTHER_PLUS: bool = os.getenv("CANON_OTHER_PLUS", "0") == "1"
 MAX_ASSETS: int = 8
@@ -144,8 +153,6 @@ EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
 # UI helpers
 SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
 LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
-# Отчётная временная зона (используется в логах/отчётах)
-REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
 
 # ---- Reconcile (IMAP vs CSV) ----
