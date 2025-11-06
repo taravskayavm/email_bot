@@ -23,7 +23,7 @@ import uuid
 import calendar
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -37,11 +37,18 @@ from .utils.zip_limits import validate_zip_safely
 from .worker_archive import run_parse_in_subprocess
 from emailbot.ui.progress import Heartbeat
 from emailbot.ui.progress_state import ParseProgress
-from emailbot.config import PROGRESS_UPDATE_MIN_SEC
+from emailbot.config import (
+    CRAWL_MAX_DEPTH,
+    CRAWL_MAX_PAGES,
+    CRAWL_TIME_BUDGET_SECONDS,
+    PROGRESS_UPDATE_MIN_SEC,
+)
 from emailbot.ui.notify import (
     forget_timeout_hint_target,
     remember_timeout_hint_target,
 )
+from emailbot.policy import Decision, decide as policy_decide
+from emailbot.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -577,6 +584,60 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+def _compute_filter_summary(emails: Iterable[str]) -> dict[str, int]:
+    """Summarise policy filter reasons for ``emails``."""
+
+    counts = {"roles": 0, "blocked": 0, "cooldown": 0}
+    seen: set[str] = set()
+    moment = datetime.now(timezone.utc)
+    for raw in emails:
+        email = (raw or "").strip()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        try:
+            decision, _ = policy_decide(email, "crawl_preview", moment)
+        except Exception:
+            continue
+        if decision is Decision.SKIP_ROLE:
+            counts["roles"] += 1
+        elif decision is Decision.SKIP_BLOCKED:
+            counts["blocked"] += 1
+        elif decision is Decision.SKIP_COOLDOWN:
+            counts["cooldown"] += 1
+    return {key: value for key, value in counts.items() if value}
+
+
+async def _send_preview_summary(message: Message, emails: Iterable[str]) -> None:
+    """Send a short preview summary to ``message`` chat."""
+
+    if not message:
+        return
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in emails:
+        email = (raw or "").strip()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        unique.append(email)
+
+    lines = [f"Найдено адресов: {len(unique)}"]
+    summary = _compute_filter_summary(unique)
+    if summary:
+        lines.append("")
+        lines.append("Сводка фильтрации:")
+        if summary.get("roles"):
+            lines.append(f" • роль-адреса: {summary['roles']}")
+        if summary.get("blocked"):
+            lines.append(f" • стоп-лист: {summary['blocked']}")
+        if summary.get("cooldown"):
+            lines.append(f" • кулдаун (180 дней): {summary['cooldown']}")
+
+    await message.reply_text("\n".join(lines))
+
+
 async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Глубокий обход сайта: /crawl <url> [--max-pages N] [--max-depth D] [--prefix /staff,/contacts]"""
 
@@ -629,7 +690,27 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prefixes = [p.strip() for p in raw_prefixes if p.strip()]
             idx += 2
             continue
-        idx += 1
+            idx += 1
+
+    depth_profile = (
+        max_depth
+        if max_depth is not None
+        else getattr(settings, "CRAWL_MAX_DEPTH", CRAWL_MAX_DEPTH)
+    )
+    pages_profile = (
+        max_pages
+        if max_pages is not None
+        else getattr(settings, "CRAWL_MAX_PAGES", CRAWL_MAX_PAGES)
+    )
+    budget_profile = getattr(
+        settings, "CRAWL_TIME_BUDGET_SECONDS", CRAWL_TIME_BUDGET_SECONDS
+    )
+    await msg.reply_text(
+        "🌐 Профиль обхода:\n"
+        f" • глубина: {depth_profile}\n"
+        f" • максимум страниц: {pages_profile}\n"
+        f" • тайм-бюджет: {budget_profile} сек."
+    )
 
     last_report = {"ts": 0.0}
 
@@ -660,6 +741,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     stats_map = stats if isinstance(stats, dict) else {}
     if max_pages is not None and isinstance(stats_map, dict):
+        stats_map["max_pages"] = max_pages
         pages_val = stats_map.get("pages")
         if isinstance(pages_val, int) and pages_val > 0:
             stats_map["pages"] = min(pages_val, max_pages)
@@ -668,19 +750,28 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if prefixes and isinstance(stats_map, dict):
         stats_map.setdefault("path_prefixes", prefixes)
 
-    unique: list[str] = []
-    seen: set[str] = set()
+    deduped: list[str] = []
+    seen_all: set[str] = set()
     for addr in emails:
-        if addr in seen:
+        if not addr or addr in seen_all:
             continue
-        seen.add(addr)
-        if is_blocked(addr):
-            continue
-        unique.append(addr)
+        seen_all.add(addr)
+        deduped.append(addr)
+
+    if not deduped:
+        await msg.reply_text("Адреса не найдены.")
+        return
+
+    await _send_preview_summary(msg, deduped)
+
+    unique: list[str] = [addr for addr in deduped if not is_blocked(addr)]
 
     if not unique:
         await msg.reply_text("Адреса не найдены.")
         return
+
+    if isinstance(stats_map, dict):
+        stats_map.setdefault("unique", len(unique))
 
     await _send_emails_as_file(
         msg,
@@ -688,6 +779,10 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         source=url,
         title="Результат (глубокий обход)",
         stats=stats_map if isinstance(stats_map, dict) else None,
+    )
+
+    await msg.reply_text(
+        "ℹ️ Чтобы собрать больше, можно увеличить глубину/лимиты в профиле обхода."
     )
 
 
@@ -2611,6 +2706,16 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from datetime import datetime
 
     from .messaging_utils import BOUNCE_LOG_PATH
+    from emailbot.utils.ocr_guard import ocr_available
+    from emailbot.config import (
+        PDF_MAX_PAGES,
+        PDF_OCR_AUTO,
+        PDF_OCR_MAX_PAGES,
+        PDF_OCR_MIN_CHARS,
+        PDF_OCR_MIN_TEXT_RATIO,
+        PDF_OCR_PROBE_PAGES,
+        TESSERACT_CMD,
+    )
 
     versions = {
         "python": sys.version.split()[0],
@@ -2651,6 +2756,29 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Counters:",
             f"  sent_today: {count_sent_today()}",
             f"  bounces_today: {bounce_today}",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "Paths:",
+            f"  BLOCKED_LIST: {getattr(messaging, 'BLOCKED_FILE', '?')}",
+            f"  SENT_LOG_PATH: {getattr(messaging, 'LOG_FILE', '?')}",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "PDF/OCR:",
+            f"  PDF_MAX_PAGES: {PDF_MAX_PAGES}",
+            f"  PDF_OCR_AUTO: {PDF_OCR_AUTO}",
+            f"  PDF_OCR_PROBE_PAGES: {PDF_OCR_PROBE_PAGES}",
+            f"  PDF_OCR_MAX_PAGES: {PDF_OCR_MAX_PAGES}",
+            f"  PDF_OCR_MIN_TEXT_RATIO: {PDF_OCR_MIN_TEXT_RATIO}",
+            f"  PDF_OCR_MIN_CHARS: {PDF_OCR_MIN_CHARS}",
+            f"  TESSERACT_CMD: {TESSERACT_CMD or '<auto>'}",
+            f"  OCR_AVAILABLE: {ocr_available()}",
+            f"  WEB_ENABLE: {getattr(settings, 'ENABLE_WEB', None)}",
         ]
     )
     await update.message.reply_text("\n".join(lines))

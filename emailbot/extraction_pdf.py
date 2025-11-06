@@ -55,15 +55,17 @@ def _detect_ocr_status() -> tuple[bool, bool, str]:
     if not enabled:
         _OCR_AVAILABLE = False
         return False, False, ""
-    engine = shutil.which("tesseract")
-    if engine:
+    if _ocr_guard_available():
         _OCR_AVAILABLE = True
         return True, True, ""
     _OCR_AVAILABLE = False
     if not _OCR_LOGGED_MISSING:
         logger.warning("OCR engine not found")
         _OCR_LOGGED_MISSING = True
-    return False, True, "не найден tesseract"
+    reason = "не найден tesseract"
+    if TESSERACT_CMD:
+        reason = f"не найден tesseract ({TESSERACT_CMD})"
+    return False, True, reason
 
 
 def backend_status() -> Dict[str, bool | str]:
@@ -88,6 +90,10 @@ from emailbot.config import (
     PDF_MAX_PAGES,
     EMAILBOT_ENABLE_OCR,
     PARSE_COLLECT_ALL,
+    PDF_OCR_MAX_PAGES,
+    PDF_OCR_MIN_CHARS,
+    PDF_OCR_MIN_TEXT_RATIO,
+    TESSERACT_CMD,
 )
 from emailbot.ui.progress_state import ParseProgress
 from emailbot.settings_store import get
@@ -96,6 +102,7 @@ from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run
 from emailbot.utils.run_with_timeout import run_with_timeout as run_with_timeout_process
 from emailbot.utils.timeout_policy import compute_pdf_timeout
 from emailbot.cancel_token import is_cancelled
+from emailbot.utils.ocr_guard import ocr_available as _ocr_guard_available
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -123,11 +130,15 @@ _SUP_DIGITS = str.maketrans({
 
 _OCR_ENGINE = os.getenv("OCR_ENGINE", "pytesseract") or "pytesseract"
 _OCR_LANG = os.getenv("OCR_LANG", "eng+rus") or "eng+rus"
-_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
+_default_page_limit = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10
+_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", str(_default_page_limit)))
 _OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
-_OCR_MIN_TEXT_RATIO = float(os.getenv("OCR_MIN_TEXT_RATIO", "0.05"))
-_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "150"))
-_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_OCR_PAGE_LIMIT)))
+_OCR_MIN_TEXT_RATIO = float(
+    os.getenv("OCR_MIN_TEXT_RATIO", str(PDF_OCR_MIN_TEXT_RATIO))
+)
+_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", str(PDF_OCR_MIN_CHARS)))
+_default_max_pages = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES >= 0 else _OCR_PAGE_LIMIT
+_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_default_max_pages or _OCR_PAGE_LIMIT)))
 _OCR_DPI = int(os.getenv("OCR_DPI", "300"))
 _OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
 _OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
@@ -361,6 +372,11 @@ def _ocr_page(page) -> str:
             "pytesseract/Pillow are not installed; PDF OCR is disabled"
         )
         return ""
+    if TESSERACT_CMD:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        except Exception:
+            logger.debug("Failed to set explicit Tesseract path", exc_info=True)
     try:
         pix = page.get_pixmap(dpi=_OCR_DPI)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -420,6 +436,11 @@ def _document_ocr(data: bytes, *, budget: TimeBudget | None = None) -> tuple[str
     except Exception:
         logger.warning("pytesseract is not installed; PDF OCR fallback disabled")
         return "", 0
+    if TESSERACT_CMD:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        except Exception:
+            logger.debug("Failed to set explicit Tesseract path", exc_info=True)
 
     try:
         images = convert_from_bytes(data, dpi=_OCR_DPI)

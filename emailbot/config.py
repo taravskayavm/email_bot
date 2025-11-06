@@ -53,6 +53,15 @@ PDF_EXTRACT_TIMEOUT = rc_get("PDF_EXTRACT_TIMEOUT", _int("PDF_EXTRACT_TIMEOUT", 
 EMAILBOT_ENABLE_OCR = rc_get(
     "EMAILBOT_ENABLE_OCR", os.getenv("EMAILBOT_ENABLE_OCR", "0") == "1"
 )
+# -------- PDF / OCR Auto Mode --------
+PDF_OCR_AUTO = rc_get("PDF_OCR_AUTO", _int("PDF_OCR_AUTO", 1))
+PDF_OCR_PROBE_PAGES = rc_get("PDF_OCR_PROBE_PAGES", _int("PDF_OCR_PROBE_PAGES", 5))
+PDF_OCR_MAX_PAGES = rc_get("PDF_OCR_MAX_PAGES", _int("PDF_OCR_MAX_PAGES", 30))
+PDF_OCR_MIN_TEXT_RATIO = rc_get(
+    "PDF_OCR_MIN_TEXT_RATIO", _float("PDF_OCR_MIN_TEXT_RATIO", 0.05)
+)
+PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
 
 # 📈 Адаптивный таймаут (включён по умолчанию)
 PDF_ADAPTIVE_TIMEOUT = rc_get("PDF_ADAPTIVE_TIMEOUT", os.getenv("PDF_ADAPTIVE_TIMEOUT", "1") == "1")
