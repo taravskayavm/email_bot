@@ -874,7 +874,11 @@ async def _download_file(update: Update, download_dir: str) -> str:
 
 
 async def extract_emails_from_zip(
-    path: str, *_, progress_message: Message | None = None, **__
+    path: str,
+    *_: object,
+    progress: ParseProgress | None = None,
+    progress_message: Message | None = None,
+    **__,
 ):
     loop = asyncio.get_running_loop()
     ok, reason = await loop.run_in_executor(
