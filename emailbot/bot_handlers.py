@@ -36,6 +36,10 @@ from zoneinfo import ZoneInfo
 from .utils.zip_limits import validate_zip_safely
 from .worker_archive import run_parse_in_subprocess
 from emailbot.ui.progress import Heartbeat
+from emailbot.ui.notify import (
+    forget_timeout_hint_target,
+    remember_timeout_hint_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -825,6 +829,7 @@ def _safe_unlink(path: str | None) -> None:
 
     if not path:
         return
+    forget_timeout_hint_target(path)
     with suppress(OSError):
         os.remove(path)
 
@@ -861,6 +866,7 @@ async def _download_file(update: Update, download_dir: str) -> str:
                     pass
             except Exception:
                 pass
+    remember_timeout_hint_target(path, chat_id)
     return path
 
 
@@ -4085,6 +4091,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     finally:
         if current_task:
             unregister_task(job_name, current_task)
+        if file_path:
+            forget_timeout_hint_target(file_path)
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
