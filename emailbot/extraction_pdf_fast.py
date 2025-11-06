@@ -25,9 +25,14 @@ def extract_emails_from_pdf_fast_core(
         total = 0
     if progress:
         try:
-            if total:
-                progress.set_total(total)
+            progress.set_total(total)
+        except Exception:
+            pass
+        try:
             progress.set_phase("PDF")
+        except Exception:
+            pass
+        try:
             progress.set_found(len(found))
         except Exception:
             pass
@@ -40,12 +45,14 @@ def extract_emails_from_pdf_fast_core(
             text = page.get_text("text") or ""
         except Exception:
             text = ""
+        before = len(found)
         if text:
             found |= emails_from_text(text)
         if progress:
             try:
                 progress.inc_pages(1)
-                progress.set_found(len(found))
+                if len(found) != before:
+                    progress.set_found(len(found))
             except Exception:
                 pass
         if not PARSE_COLLECT_ALL and len(found) >= 10:

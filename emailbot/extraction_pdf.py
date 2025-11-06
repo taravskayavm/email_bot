@@ -922,6 +922,7 @@ def extract_from_pdf(
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr_available, ocr_configured, _ = _detect_ocr_status()
     ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
+    ocr_unavailable = ocr_configured and not (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
@@ -930,6 +931,7 @@ def extract_from_pdf(
     if progress:
         progress.set_phase("PDF")
         progress.set_found(0)
+        progress.set_ocr(False)
 
     _fitz = fitz if FITZ_OK else None
 
@@ -1017,6 +1019,7 @@ def extract_from_pdf(
         except Exception:
             pass
         progress.set_ocr(False)
+    reported_ocr_missing = False
     ocr_pages = 0
     ocr_start = time.time()
     ocr_marked = False
@@ -1029,6 +1032,7 @@ def extract_from_pdf(
         ):
             break
         page_new_norms: set[str] = set()
+        did_ocr = False
         text = ""
         try:
             if layout:
@@ -1038,7 +1042,8 @@ def extract_from_pdf(
                     text = page.get_text() or ""
             else:
                 text = page.get_text() or ""
-            if not text.strip() and ocr:
+            need_page_ocr = not text.strip()
+            if need_page_ocr and ocr:
                 if (
                     ocr_pages < _OCR_PAGE_LIMIT
                     and time.time() - ocr_start < _OCR_TIME_LIMIT
@@ -1048,10 +1053,18 @@ def extract_from_pdf(
                         ocr_marked = True
                     if progress:
                         progress.set_ocr(True)
+                        progress.set_phase("OCR")
                     text = _ocr_page(page)
+                    did_ocr = True
                     if text:
                         ocr_pages += 1
                         stats["ocr_pages"] = ocr_pages
+                elif progress and ocr_unavailable and not reported_ocr_missing:
+                    progress.set_phase("OCR недоступен")
+                    reported_ocr_missing = True
+            elif need_page_ocr and progress and ocr_unavailable and not reported_ocr_missing:
+                progress.set_phase("OCR недоступен")
+                reported_ocr_missing = True
             if not text or not text.strip():
                 continue
             stats["pages"] = stats.get("pages", 0) + 1
@@ -1134,6 +1147,8 @@ def extract_from_pdf(
                     progress_unique.update({n for n in page_new_norms if n})
                 progress.inc_pages(1)
                 progress.set_found(len(progress_unique))
+                if did_ocr:
+                    progress.set_phase("PDF")
                 progress.set_ocr(False)
     doc.close()
     if ocr:
