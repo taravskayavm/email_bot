@@ -10,6 +10,8 @@ import shutil
 import statistics
 import time
 import traceback
+import threading
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -778,7 +780,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
 def _pdf_worker_entry(
     pdf_path: str,
     shared_event,
-    q: multiprocessing.Queue,
+    q: queue.Queue,
     with_progress: bool,
 ) -> None:
     """Worker entry point executed inside a separate process."""
@@ -799,6 +801,29 @@ def _pdf_worker_entry(
         q.put(("error", traceback.format_exc()))
         return
     q.put(("result", list(result or [])))
+
+
+def _spawn_context() -> multiprocessing.context.BaseContext:
+    if sys.platform.startswith("win"):
+        try:
+            multiprocessing.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+        return multiprocessing.get_context("spawn")
+    try:
+        return multiprocessing.get_context()
+    except ValueError:
+        return multiprocessing.get_context("spawn")
+
+
+def _short_error_reason(message: str, limit: int = 120) -> str:
+    text = (message or "").strip()
+    if not text:
+        return "см. журнал"
+    head = text.splitlines()[0].strip()
+    if len(head) > limit:
+        return head[: limit - 1] + "…"
+    return head
 
 
 def _extract_emails_core(
@@ -890,13 +915,41 @@ def extract_emails_from_pdf(
             pass
 
     shared_event = get_shared_event()
-    q: multiprocessing.Queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(
-        target=_pdf_worker_entry,
-        args=(str(pdf_path), shared_event, q, bool(progress)),
-        daemon=True,
-    )
-    proc.start()
+    ctx = _spawn_context()
+    worker_queue: queue.Queue
+    proc: multiprocessing.Process | None = None
+    thread_worker: threading.Thread | None = None
+    using_thread_fallback = False
+
+    try:
+        worker_queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_pdf_worker_entry,
+            args=(str(pdf_path), shared_event, worker_queue, bool(progress)),
+            daemon=True,
+        )
+        proc.start()
+    except Exception as exc:
+        using_thread_fallback = True
+        worker_queue = queue.Queue()
+        thread_worker = threading.Thread(
+            target=_pdf_worker_entry,
+            args=(str(pdf_path), shared_event, worker_queue, bool(progress)),
+            name="pdf-worker-fallback",
+            daemon=True,
+        )
+        thread_worker.start()
+        logger.warning(
+            "PDF worker fallback to thread mode for %s: %s",
+            str(pdf_path),
+            exc,
+            exc_info=True,
+        )
+        if progress is not None:
+            try:
+                progress.set_phase("⚠️ Потоковый режим (совместимость)")
+            except Exception:
+                pass
 
     deadline = time.monotonic() + timeout
     result: Set[str] | None = None
@@ -904,6 +957,29 @@ def extract_emails_from_pdf(
     timed_out = False
     stop_requested = False
     cancel_flag = False
+
+    hb_stop = threading.Event()
+
+    def _heartbeat_loop() -> None:
+        while not hb_stop.wait(2.5):
+            heartbeat_now()
+            if progress is not None:
+                try:
+                    progress.touch()
+                except AttributeError:
+                    try:
+                        progress.set_phase(progress.phase or "парсинг")
+                    except Exception:
+                        pass
+
+    hb_thread: threading.Thread | None = None
+    if progress is not None:
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name="pdf-progress-heartbeat",
+            daemon=True,
+        )
+        hb_thread.start()
 
     def _apply_progress(method: str, args: tuple, kwargs: dict) -> None:
         if not progress:
@@ -931,9 +1007,14 @@ def extract_emails_from_pdf(
                 break
             wait_time = min(1.0, max(0.1, remaining))
             try:
-                message = q.get(timeout=wait_time)
+                message = worker_queue.get(timeout=wait_time)
             except queue.Empty:
-                if not proc.is_alive():
+                alive = False
+                if using_thread_fallback:
+                    alive = bool(thread_worker and thread_worker.is_alive())
+                elif proc is not None:
+                    alive = proc.is_alive()
+                if not alive:
                     break
                 continue
             if not message:
@@ -950,7 +1031,7 @@ def extract_emails_from_pdf(
 
         while True:
             try:
-                message = q.get_nowait()
+                message = worker_queue.get_nowait()
             except queue.Empty:
                 break
             if not message:
@@ -963,21 +1044,32 @@ def extract_emails_from_pdf(
             elif kind == "error" and error_message is None:
                 error_message = message[1] or "unknown error"
     finally:
-        try:
-            proc.join(0.1)
-        except Exception:
-            pass
-        if proc.is_alive():
+        hb_stop.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=0.5)
+        if proc is not None:
             try:
-                proc.terminate()
+                proc.join(0.1)
             except Exception:
                 pass
-            proc.join(1)
-        try:
-            q.close()
-            q.join_thread()
-        except Exception:
-            pass
+            if proc.is_alive():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                proc.join(1)
+        if thread_worker is not None:
+            thread_worker.join(timeout=1.0)
+        if hasattr(worker_queue, "close"):
+            try:
+                worker_queue.close()  # type: ignore[call-arg]
+            except Exception:
+                pass
+            if hasattr(worker_queue, "join_thread"):
+                try:
+                    worker_queue.join_thread()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
         if cancel_flag:
             reset_all()
 
@@ -985,7 +1077,7 @@ def extract_emails_from_pdf(
         logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
         if progress is not None:
             try:
-                progress.set_phase("⏰ истек таймаут")
+                progress.set_phase("⏱️ Истёк таймаут")
             except Exception:
                 pass
         try:
@@ -1004,16 +1096,18 @@ def extract_emails_from_pdf(
         logger.info("PDF extract stopped by user: %s", str(pdf_path))
         if progress is not None:
             try:
-                progress.set_phase("⛔ остановлено")
+                progress.set_phase("⛔ Остановлено")
             except Exception:
                 pass
         return result or set()
 
     if error_message is not None:
-        logger.error("PDF extract failed: %s (%s)", str(pdf_path), error_message)
+        reason = _short_error_reason(error_message)
+        logger.error("PDF extract failed: %s (%s)", str(pdf_path), reason)
+        logger.debug("PDF worker traceback:\n%s", error_message)
         if progress is not None:
             try:
-                progress.set_phase("⚠️ ошибка PDF")
+                progress.set_phase(f"⚠️ Ошибка парсинга: {reason}")
             except Exception:
                 pass
         return result or set()

@@ -83,6 +83,12 @@ class ParseProgress:
     def set_ocr_status(self, status: str) -> None:
         self.set_ocr(status)
 
+    def touch(self) -> None:
+        """Force an update heartbeat without changing counters."""
+
+        with self._lock:
+            self._mark_dirty(force=True)
+
     # ------------------------------------------------------------------
     # Rendering helpers
     # ------------------------------------------------------------------
