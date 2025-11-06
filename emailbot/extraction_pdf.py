@@ -752,6 +752,12 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
     found = run_with_timeout_process(_extract_emails_core, timeout, pdf_path)
     if found is None:
         logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
+        try:
+            from emailbot.ui.notify import notify_timeout_hint
+
+            notify_timeout_hint(pdf_path.name, timeout)
+        except Exception:
+            logger.debug("Timeout notification failed", exc_info=True)
         return set()
 
     emails: Set[str] = set(found)

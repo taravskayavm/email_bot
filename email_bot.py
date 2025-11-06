@@ -24,6 +24,7 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -129,6 +130,7 @@ from emailbot.messaging_utils import SecretFilter
 from emailbot.utils import load_env
 from emailbot.ptb_profile import register_profile_handlers
 from emailbot.cancel_token import cancel_all, reset_all
+from emailbot.ptb_context import set_application, set_current_chat
 
 SCRIPT_DIR = PROJECT_ROOT
 
@@ -238,11 +240,20 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         pass
 
 
+async def remember_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Track the most recent chat to allow background notifications."""
+
+    del context  # callback signature compatibility
+    if update and update.effective_chat is not None:
+        set_current_chat(update.effective_chat)
+
+
 async def handle_stop_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Stop ongoing processing and notify the user."""
 
+    set_current_chat(update.effective_chat)
     cancel_all()
     message = update.effective_message
     if message is not None:
@@ -254,6 +265,7 @@ async def handle_start_command(
 ) -> None:
     """Reset cancellation state and delegate to the default /start handler."""
 
+    set_current_chat(update.effective_chat)
     reset_all()
     await bot_handlers.start(update, context)
 
@@ -319,9 +331,11 @@ def main() -> None:
     builder = ApplicationBuilder().token(token)
     builder.post_init(_notify_admin_startup)
     app = builder.build()
+    set_application(app)
     app.add_error_handler(error_handler)
     register_profile_handlers(app)
 
+    app.add_handler(TypeHandler(Update, remember_chat), group=-100)
     app.add_handler(CommandHandler("start", handle_start_command))
     app.add_handler(CommandHandler("stop", handle_stop_command))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
@@ -412,7 +426,7 @@ def main() -> None:
         fallbacks=[],
         per_chat=True,
         per_user=True,
-        per_message=True,  # PTB 21+: track CallbackQuery transitions reliably
+        per_message=False,
     )
     app.add_handler(bulk_delete_conv, group=-1)
     app.add_handler(

@@ -1,8 +1,59 @@
-"""Lightweight progress indicator shown in Telegram chats."""
+"""Helpers for editing progress messages in Telegram chats."""
 
 from __future__ import annotations
 
+import time
 from typing import Optional
+
+from telegram import Message
+from telegram.error import BadRequest
+
+from emailbot.cancel_token import is_cancelled
+
+
+class Heartbeat:
+    """Rate-limit progress message updates to avoid Telegram flood limits."""
+
+    def __init__(self, msg: Message, interval_sec: float = 5.0):
+        self._msg = msg
+        self._interval = max(0.0, float(interval_sec))
+        self._last_sent = 0.0
+        self._last_text: Optional[str] = None
+
+    async def tick(self, text: str) -> bool:
+        """Update ``msg`` with ``text`` if allowed by the interval policy."""
+
+        if not text or is_cancelled():
+            return False
+        now = time.monotonic()
+        if text != self._last_text:
+            self._last_text = text
+        elif now - self._last_sent < self._interval:
+            return False
+        self._last_sent = now
+        try:
+            await self._msg.edit_text(text)
+            return True
+        except BadRequest as exc:
+            message = str(getattr(exc, "message", exc)).lower()
+            if "message is not modified" in message or "not found" in message:
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def force(self, text: str) -> bool:
+        """Immediately update the message, bypassing the throttle interval."""
+
+        if not text or is_cancelled():
+            return False
+        self._last_text = text
+        self._last_sent = time.monotonic()
+        try:
+            await self._msg.edit_text(text)
+            return True
+        except Exception:
+            return False
 
 
 class ProgressUI:

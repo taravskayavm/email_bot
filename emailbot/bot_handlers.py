@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 from .utils.zip_limits import validate_zip_safely
 from .worker_archive import run_parse_in_subprocess
+from emailbot.ui.progress import Heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -709,17 +710,14 @@ async def _edit_progress_message(progress_msg: Message | None, text: str) -> boo
     if not progress_msg:
         return False
 
+    heartbeat: Heartbeat | None = getattr(progress_msg, "_emailbot_heartbeat", None)
+    if heartbeat is None:
+        heartbeat = Heartbeat(progress_msg, interval_sec=6.0)
+        setattr(progress_msg, "_emailbot_heartbeat", heartbeat)
+
     async with _PROGRESS_EDIT_LOCK:
-        try:
-            await progress_msg.edit_text(text)
-            return True
-        except BadRequest as exc:
-            message = str(getattr(exc, "message", exc)).lower()
-            if "message is not modified" in message or "not found" in message:
-                return True
-        except Exception as exc:  # pragma: no cover - defensive log
-            logger.debug("progress message update failed: %s", exc)
-    return False
+        updated = await heartbeat.tick(text)
+    return updated
 
 
 def _format_elapsed(seconds: float) -> str:
