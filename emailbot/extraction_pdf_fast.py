@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Set
 
-from emailbot.config import PDF_MAX_PAGES
+import emailbot.config as config
 
 
 def extract_emails_fitz(pdf_path: Path) -> Set[str]:
@@ -25,7 +25,7 @@ def extract_emails_fitz(pdf_path: Path) -> Set[str]:
     found: Set[str] = set()
     try:
         for index, page in enumerate(doc):
-            if index >= PDF_MAX_PAGES or len(found) >= 10:
+            if index >= config.PDF_MAX_PAGES or len(found) >= 10:
                 break
             try:
                 text = page.get_text("text") or ""

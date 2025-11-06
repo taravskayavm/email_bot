@@ -83,7 +83,7 @@ def backend_status() -> Dict[str, bool | str]:
     return status
 
 from emailbot import settings
-from emailbot.config import PDF_ENGINE, PDF_MAX_PAGES, EMAILBOT_ENABLE_OCR
+import emailbot.config as config
 from emailbot.settings_store import get
 from emailbot.utils.logging_setup import get_logger
 from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
@@ -126,10 +126,10 @@ _OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
 _OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
 _OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
-MAX_PAGES = PDF_MAX_PAGES
-
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-_pdf_backend_env = (os.getenv("PDF_BACKEND", PDF_ENGINE) or PDF_ENGINE).strip().lower()
+_pdf_backend_env = (
+    os.getenv("PDF_BACKEND", config.PDF_ENGINE) or config.PDF_ENGINE
+).strip().lower()
 if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
     _pdf_backend_env = "fitz"
 PDF_BACKEND = _pdf_backend_env
@@ -294,7 +294,7 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
         heartbeat_now()
         if budget:
             budget.checkpoint()
-        if i >= MAX_PAGES:
+        if i >= config.PDF_MAX_PAGES:
             break
         try:
             text = page.get_text("text")
@@ -697,7 +697,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
 def _extract_emails_core(pdf_path: Path) -> Set[str]:
     """Core PDF extraction logic executed inside a worker process."""
 
-    if PDF_ENGINE.lower() == "fitz":
+    if config.PDF_ENGINE.lower() == "fitz":
         try:
             from emailbot.extraction_pdf_fast import extract_emails_fitz
         except Exception:
@@ -739,8 +739,8 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
     logger.info(
         "PDF extract start: %s (engine=%s, max_pages=%d, timeout=%ds, size=%.2fMB)",
         str(pdf_path),
-        PDF_ENGINE,
-        MAX_PAGES,
+        config.PDF_ENGINE,
+        config.PDF_MAX_PAGES,
         timeout,
         size_mb if size_mb >= 0 else -1.0,
     )
@@ -752,7 +752,7 @@ def extract_emails_from_pdf(path: str | Path) -> set[str]:
 
     emails: Set[str] = set(found)
 
-    if not emails and EMAILBOT_ENABLE_OCR:
+    if not emails and config.EMAILBOT_ENABLE_OCR:
         try:
             from emailbot.extraction_ocr import ocr_emails_from_pdf
         except Exception:
