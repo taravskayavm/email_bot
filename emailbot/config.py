@@ -63,6 +63,16 @@ PDF_OCR_MIN_TEXT_RATIO = rc_get(
 PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
 
+# -------- PDF Open Guard / Fallback --------
+PDF_OPEN_TIMEOUT_SEC = rc_get(
+    "PDF_OPEN_TIMEOUT_SEC",
+    _int("PDF_OPEN_TIMEOUT_SEC", 10),
+)
+PDF_FALLBACK_BACKEND = rc_get(
+    "PDF_FALLBACK_BACKEND",
+    os.getenv("PDF_FALLBACK_BACKEND", "pdfminer"),
+)
+
 # 📈 Адаптивный таймаут (включён по умолчанию)
 PDF_ADAPTIVE_TIMEOUT = rc_get("PDF_ADAPTIVE_TIMEOUT", os.getenv("PDF_ADAPTIVE_TIMEOUT", "1") == "1")
 # базовая часть таймаута, сек

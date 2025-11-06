@@ -93,6 +93,8 @@ from emailbot.config import (
     PDF_OCR_MAX_PAGES,
     PDF_OCR_MIN_CHARS,
     PDF_OCR_MIN_TEXT_RATIO,
+    PDF_OPEN_TIMEOUT_SEC,
+    PDF_FALLBACK_BACKEND,
     TESSERACT_CMD,
 )
 from emailbot.ui.progress_state import ParseProgress
@@ -103,6 +105,7 @@ from emailbot.utils.run_with_timeout import run_with_timeout as run_with_timeout
 from emailbot.utils.timeout_policy import compute_pdf_timeout
 from emailbot.cancel_token import is_cancelled
 from emailbot.utils.ocr_guard import ocr_available as _ocr_guard_available
+from emailbot.utils.pdf_open_safe import open_pdf_with_timeout
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -929,11 +932,65 @@ def extract_from_pdf(
     stats: Dict[str, int] = {"pages": 0}
     progress_unique: set[str] = set()
     if progress:
-        progress.set_phase("PDF")
-        progress.set_found(0)
-        progress.set_ocr(False)
+        try:
+            progress.set_phase("Подготовка")
+        except Exception:
+            pass
+        try:
+            progress.set_found(0)
+        except Exception:
+            pass
+        try:
+            progress.set_ocr(False)
+        except Exception:
+            pass
 
     _fitz = fitz if FITZ_OK else None
+    fallback_backend = (PDF_FALLBACK_BACKEND or "pdfminer").strip().lower() or "pdfminer"
+    if fallback_backend != "pdfminer":
+        fallback_backend = "pdfminer"
+    backend_order = list(_backend_order())
+    fitz_guard_ok = True
+    guard_pages: int | None = None
+    guard_error: str | None = None
+
+    if (
+        _fitz is not None
+        and "fitz" in backend_order
+        and float(PDF_OPEN_TIMEOUT_SEC) > 0
+    ):
+        try:
+            guard_ok, guard_pages, guard_error = open_pdf_with_timeout(
+                str(path), float(PDF_OPEN_TIMEOUT_SEC)
+            )
+        except Exception:
+            guard_ok, guard_pages, guard_error = False, None, "probe_failed"
+        if guard_ok:
+            fitz_guard_ok = True
+        else:
+            fitz_guard_ok = False
+            backend_order = [b for b in backend_order if b != "fitz"]
+            if fallback_backend not in backend_order and fallback_backend:
+                backend_order.append(fallback_backend)
+            if progress:
+                try:
+                    phase = "Переключение на резервный парсер"
+                    if guard_error == "timeout":
+                        phase = "Переключение: fitz не открыл PDF вовремя"
+                    progress.set_phase(phase)
+                except Exception:
+                    pass
+
+    if progress and guard_pages:
+        try:
+            progress.set_total(guard_pages)
+        except Exception:
+            pass
+    if progress and fitz_guard_ok:
+        try:
+            progress.set_phase("PDF")
+        except Exception:
+            pass
 
     def _finalize_hits(emails: List[str], source_ref: str) -> List[EmailHit]:
         raw_hits = [
@@ -968,10 +1025,15 @@ def extract_from_pdf(
     pdf_path = Path(path)
     text = ""
     pages_with_text = 0
-    for backend in _backend_order():
+    for backend in backend_order:
         if backend == "fitz":
             text, pages_with_text = _fitz_extract_with_stats(pdf_path)
         elif backend == "pdfminer":
+            if progress and not fitz_guard_ok:
+                try:
+                    progress.set_phase(f"Резервный парсер: {fallback_backend}")
+                except Exception:
+                    pass
             text, pages_with_text = _pdfminer_extract_with_stats(pdf_path)
         else:
             text, pages_with_text = "", 0
@@ -998,7 +1060,7 @@ def extract_from_pdf(
             progress.set_found(len(progress_unique))
         return hits, stats
 
-    if _fitz is None:
+    if _fitz is None or not fitz_guard_ok:
         try:
             with open(path, "rb") as f:
                 text = f.read().decode("utf-8", "ignore")
@@ -1015,7 +1077,13 @@ def extract_from_pdf(
     doc = _fitz.open(path)
     if progress:
         try:
-            progress.set_total(getattr(doc, "page_count", 0))
+            total_pages = getattr(doc, "page_count", 0)
+            if total_pages:
+                progress.set_total(total_pages)
+        except Exception:
+            pass
+        try:
+            progress.set_phase("PDF")
         except Exception:
             pass
         progress.set_ocr(False)
