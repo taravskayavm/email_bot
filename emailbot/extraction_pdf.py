@@ -89,6 +89,7 @@ from emailbot.utils.logging_setup import get_logger
 from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
 from emailbot.utils.run_with_timeout import run_with_timeout as run_with_timeout_process
 from emailbot.utils.timeout_policy import compute_pdf_timeout
+from emailbot.cancel_token import is_cancelled
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -727,6 +728,9 @@ def _extract_emails_core(pdf_path: Path) -> Set[str]:
 
 def extract_emails_from_pdf(path: str | Path) -> set[str]:
     """Extract normalised e-mail addresses from a PDF document."""
+
+    if is_cancelled():
+        return set()
 
     pdf_path = Path(path)
     timeout = compute_pdf_timeout(pdf_path)

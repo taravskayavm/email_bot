@@ -58,6 +58,7 @@ from .extraction_pdf import (
 )
 from .extraction_zip import extract_emails_from_zip, extract_text_from_zip
 from .settings_store import get
+from emailbot.cancel_token import is_cancelled
 from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
@@ -797,6 +798,9 @@ def extract_from_pdf_stream(
     data: bytes, source_ref: str, stop_event: Optional[object] = None
 ) -> tuple[list[EmailHit], Dict]:
     """Extract e-mail addresses from PDF bytes."""
+
+    if is_cancelled():
+        return [], {"errors": ["cancelled"]}
 
     hits, stats = _extract_from_pdf_stream(data, source_ref, stop_event)
     hits = _postprocess_hits(hits, stats)

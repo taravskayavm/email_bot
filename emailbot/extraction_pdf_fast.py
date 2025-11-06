@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Set
 
 from emailbot.config import PDF_MAX_PAGES
+from emailbot.cancel_token import is_cancelled
 
 
 def extract_emails_fitz(pdf_path: Path) -> Set[str]:
@@ -25,6 +26,8 @@ def extract_emails_fitz(pdf_path: Path) -> Set[str]:
     found: Set[str] = set()
     try:
         for index, page in enumerate(doc):
+            if is_cancelled():
+                break
             if index >= PDF_MAX_PAGES or len(found) >= 10:
                 break
             try:
