@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
-import multiprocessing as mp
+import multiprocessing
 import os
 import sys
 import threading
@@ -271,7 +271,12 @@ async def handle_start_command(
     await bot_handlers.start(update, context)
 
 
+application: Application | None = None
+
+
 def main() -> None:
+    """Сборка и запуск Telegram-приложения."""
+
     # Silent but strict boot checks (dirs/env/ocr availability)
     run_boot_check(PROJECT_ROOT)
     errs = startup_selfcheck()
@@ -334,6 +339,8 @@ def main() -> None:
     builder = ApplicationBuilder().token(token)
     builder.post_init(_notify_admin_startup)
     app = builder.build()
+    global application
+    application = app
     set_application(app)
     app.add_error_handler(error_handler)
     register_profile_handlers(app)
@@ -597,14 +604,10 @@ if __name__ == "__main__":
     # [EBOT-WIN-SPAWN] На Windows при методе запуска "spawn" дочерние процессы
     # переимпортируют главный модуль. freeze_support() предотвращает
     # некорректную инициализацию подпроцесса и «зависания» при старте.
+    multiprocessing.freeze_support()
     try:
-        mp.freeze_support()
-    except Exception:
-        # defensive: на не-Windows просто продолжаем
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        # Метод уже установлен раньше — это ок
         pass
-    if sys.platform.startswith("win"):
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass
     main()
