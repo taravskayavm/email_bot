@@ -1,7 +1,8 @@
-import os
-from pathlib import Path
+import os  # Читаем переменные окружения
+from pathlib import Path  # Работаем с путями к файлам и каталогам
+from zoneinfo import ZoneInfo  # Поддерживаем часовые пояса стандартными средствами
 
-from emailbot.runtime_config import get as rc_get
+from emailbot.runtime_config import get as rc_get  # Загружаем динамические настройки
 
 
 def _int(name: str, default: int) -> int:
@@ -32,6 +33,23 @@ def _str(name: str, default: str) -> str:
         return default
     raw = raw.strip()
     return raw if raw else default
+
+
+_REPORT_TZ_RAW = os.getenv("REPORT_TZ", "Europe/Moscow")  # Берём исходный часовой пояс
+REPORT_TZ = _REPORT_TZ_RAW.strip() or "Europe/Moscow"  # Обеспечиваем непустой код пояса
+try:
+    REPORT_TZINFO = ZoneInfo(REPORT_TZ)  # Создаём объект ZoneInfo для дат
+except Exception:  # pragma: no cover - защитный путь при неверном поясе
+    REPORT_TZ = "Europe/Moscow"  # Сбрасываемся на безопасный часовой пояс при ошибке
+    REPORT_TZINFO = ZoneInfo(REPORT_TZ)  # Переинициализируем таймзону после отката
+
+HISTORY_DB = (  # Главная база истории отправок
+    os.getenv("HISTORY_DB", "var/send_history.db").strip() or "var/send_history.db"
+)  # Берём путь из окружения либо используем дефолт
+SENT_LOG_PATH = (  # Основной CSV с отправками
+    os.getenv("SENT_LOG_PATH", "var/sent_log.csv").strip() or "var/sent_log.csv"
+)  # Возвращаем путь к sent_log.csv или значение из окружения
+AUDIT_DIR = os.getenv("AUDIT_DIR", "var").strip() or "var"  # Каталог с аудит-логами
 
 
 SEND_COOLDOWN_DAYS = int(os.getenv("SEND_COOLDOWN_DAYS", "180"))

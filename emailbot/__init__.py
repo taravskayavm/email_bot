@@ -47,6 +47,7 @@ __all__ = [
     "messaging",
     "unsubscribe",
     "reporting",
+    "reports_min",  # Экспортируем модуль минимальных отчётов для внешних вызовов
     "EmailEntry",
 ]
 

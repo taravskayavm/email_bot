@@ -328,6 +328,11 @@ def main() -> None:
             getattr(messaging, "SYNC_STATE_PATH", "?"),
             _cooldown._send_history_path(),
         )
+        logger.info(  # Логируем используемую таймзону и путь к базе истории
+            "[BOOT] Report TZ=%s; settings HISTORY_DB=%s",  # Сообщение с плейсхолдерами параметров
+            getattr(settings, "REPORT_TZ", "?"),  # Берём часовой пояс из настроек
+            getattr(settings, "HISTORY_DB", "?"),  # Достаём путь к базе истории из настроек
+        )
         logger.info(
             "[BOOT] bot_handlers at %s; has start_sending=%s",
             getattr(bot_handlers, "__file__", "?"),
