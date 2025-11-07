@@ -74,5 +74,17 @@ def decide(email: str, campaign: str, now: datetime | None) -> tuple[Decision, s
     return Decision.SEND_NOW, "ok"
 
 
-__all__ = ["Decision", "decide", "violates_domain_policy"]
+def decide_with_reason(
+    email: str,  # Рассматриваемый адрес для проверки
+    *,
+    campaign: str = "manual",  # Используем кампанию по умолчанию для ручной отправки
+    now: datetime | None = None,  # Позволяем передать конкретный момент времени
+) -> tuple[bool, str]:
+    """Return boolean decision with textual reason, reusing the detailed pipeline."""
+
+    decision, reason = decide(email, campaign, now)  # Запускаем основной конвейер принятия решения
+    return decision == Decision.SEND_NOW, reason  # Возвращаем булев исход и причину отказа/успеха
+
+
+__all__ = ["Decision", "decide", "decide_with_reason", "violates_domain_policy"]
 
