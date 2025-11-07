@@ -49,6 +49,9 @@ from emailbot.ui.notify import (
     remember_timeout_hint_target,
 )
 from emailbot.policy import Decision, decide as policy_decide
+from emailbot.reports_min import (  # Подключаем минимальные отчёты для быстрой сводки
+    build_minimal_summary_for_today,  # Функция возвращает счётчики за текущие сутки
+)
 from emailbot.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -3120,10 +3123,24 @@ async def force_send_command(
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to select a reporting period."""
 
+    message = update.message  # Сохраняем объект сообщения для повторного использования
+    if message is not None:  # Проверяем, что запрос пришёл через текстовое сообщение
+        sent_today, blocked_today, error_today = build_minimal_summary_for_today()  # Считаем показатели за текущий день
+        mini_lines = [  # Подготавливаем отдельные строки краткого отчёта
+            "Мини-отчёт за сегодня:",  # Строка-заголовок для пользователя
+            f"sent: {sent_today}",  # Количество успешно отправленных писем
+            f"blocked: {blocked_today}",  # Число заблокированных адресов
+            f"error: {error_today}",  # Число попыток, закончившихся ошибкой
+        ]
+        mini_report = "\n".join(mini_lines)  # Объединяем строки в единый текст
+        await message.reply_text(mini_report)  # Отправляем краткую сводку пользователю
+
     user = update.effective_user
     if user:
         REPORT_STATE.pop(user.id, None)
-    await update.message.reply_text(
+    if message is None:  # Если сообщений нет (например, callback), прекращаем обработку
+        return  # Не можем показать меню без объекта Message
+    await message.reply_text(
         (
             "Выберите период отчёта или нажмите «📌 День по дате…», "
             "чтобы построить отчёт за конкретный день."
