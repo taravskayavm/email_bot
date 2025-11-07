@@ -77,6 +77,12 @@ PDF_OCR_MIN_TEXT_RATIO = rc_get(
 PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
 
+# -------- Ранний прогресс / тёплый старт --------
+PDF_WARMUP_PAGES = rc_get("PDF_WARMUP_PAGES", _int("PDF_WARMUP_PAGES", 3))
+PDF_EARLY_HEARTBEAT_SEC = rc_get(
+    "PDF_EARLY_HEARTBEAT_SEC", _float("PDF_EARLY_HEARTBEAT_SEC", 3.0)
+)
+
 # -------- OCR / PDF unified knobs --------
 PDF_BACKEND = rc_get(
     "PDF_BACKEND",
