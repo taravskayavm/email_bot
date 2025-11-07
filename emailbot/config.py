@@ -35,6 +35,56 @@ def _str(name: str, default: str) -> str:
     return raw if raw else default
 
 
+def _env_bool(*keys: str, default: int = 0) -> int:  # Объявляем совместимый парсер булевых флагов
+    """Return 1/0 for the first present boolean environment variable."""  # Описываем предназначение функции
+
+    for key in keys:  # Перебираем возможные имена переменных окружения
+        value = os.getenv(key)  # Считываем значение по текущему ключу
+        if value is not None:  # Проверяем, найдено ли значение
+            try:  # Пытаемся безопасно преобразовать его к булевому виду
+                normalized = str(value).strip().lower()  # Нормализуем строку к нижнему регистру
+                return 1 if normalized in {"1", "true", "on", "yes"} else 0  # Возвращаем 1 только для истинных значений
+            except Exception:  # Отлавливаем любые ошибки преобразования
+                continue  # Пропускаем некорректное значение и проверяем следующий ключ
+    return default  # Возвращаем значение по умолчанию, если ничего не подошло
+
+
+def _env_str(*keys: str, default: str = "") -> str:  # Создаём унифицированный парсер строковых значений
+    """Return the first present string environment variable without stripping semantics."""  # Даём пояснение функции
+
+    for key in keys:  # Итерируем по всем возможным именам
+        value = os.getenv(key)  # Считываем значение по текущему ключу
+        if value is not None:  # Проверяем, что переменная определена
+            return str(value)  # Возвращаем строковое представление найденного значения
+    return default  # Если ничего не найдено, возвращаем дефолт
+
+
+def _env_int(*keys: str, default: int = 0) -> int:  # Вводим парсер целочисленных значений с совместимостью имён
+    """Return the first present integer environment variable."""  # Описываем работу функции
+
+    for key in keys:  # Перебираем допустимые ключи
+        value = os.getenv(key)  # Берём значение переменной окружения
+        if value is not None:  # Проверяем, что значение есть
+            try:  # Пробуем преобразовать к целому числу
+                return int(value)  # Возвращаем успешно сконвертированное число
+            except Exception:  # При ошибке разбора
+                continue  # Пропускаем значение и проверяем следующий ключ
+    return default  # Если ни один ключ не подошёл, отдаём значение по умолчанию
+
+
+def _env_float(*keys: str, default: float = 0.0) -> float:  # Добавляем парсер чисел с плавающей точкой
+    """Return the first present float environment variable."""  # Поясняем назначение функции
+
+    for key in keys:  # Идём по всем кандидатам
+        value = os.getenv(key)  # Считываем значение переменной окружения
+        if value is not None:  # Убеждаемся, что значение существует
+            try:  # Пробуем перевести его во float
+                return float(value)  # Возвращаем результат преобразования
+            except Exception:  # Обрабатываем нечисловой ввод
+                continue  # Переходим к следующему ключу при ошибке
+    return default  # При отсутствии подходящих значений возвращаем дефолт
+
+
 _REPORT_TZ_RAW = os.getenv("REPORT_TZ", "Europe/Moscow")  # Берём исходный часовой пояс
 REPORT_TZ = _REPORT_TZ_RAW.strip() or "Europe/Moscow"  # Обеспечиваем непустой код пояса
 try:
@@ -62,7 +112,7 @@ CRAWL_SAME_DOMAIN = os.getenv("CRAWL_SAME_DOMAIN", "1") == "1"
 CRAWL_DELAY_SEC = float(os.getenv("CRAWL_DELAY_SEC", "0.5"))
 CRAWL_USER_AGENT = os.getenv(
     "CRAWL_USER_AGENT", "EmailBotCrawler/1.0 (+contact@example.com)"
-)
+)  # Завершаем получение строки user-agent для краулера
 CRAWL_HTTP2 = os.getenv("CRAWL_HTTP2", "1") == "1"
 CRAWL_MAX_PAGES_PER_DOMAIN = int(os.getenv("CRAWL_MAX_PAGES_PER_DOMAIN", "50"))
 CRAWL_TIME_BUDGET_SECONDS = int(os.getenv("CRAWL_TIME_BUDGET_SECONDS", "120"))
@@ -76,24 +126,55 @@ ALLOW_EDIT_AT_PREVIEW = os.getenv("ALLOW_EDIT_AT_PREVIEW", "0") == "1"
 ENABLE_INLINE_EMAIL_EDITOR = os.getenv("ENABLE_INLINE_EMAIL_EDITOR", "0") == "1"
 
 # PDF extraction tuning
-PDF_ENGINE = _str("EMAILBOT_PDF_ENGINE", "fitz")
-PDF_MAX_PAGES = rc_get("PDF_MAX_PAGES", _int("PDF_MAX_PAGES", 40))
+PDF_ENGINE = _str("EMAILBOT_PDF_ENGINE", "fitz")  # Выбираем движок PDF из окружения
+PDF_MAX_PAGES = rc_get(  # Настраиваем лимит страниц при прямом чтении PDF
+    "PDF_MAX_PAGES",  # Определяем ключ runtime-конфига
+    _env_int("PDF_MAX_PAGES", "PDF_PAGE_LIMIT", default=40),  # Поддерживаем альтернативные имена переменной окружения
+)  # Задаём лимит страниц по умолчанию
 # Фиксированный таймаут остаётся как резервный (если адаптивный выключен)
 PDF_EXTRACT_TIMEOUT = rc_get(
     "PDF_EXTRACT_TIMEOUT", _int("PDF_EXTRACT_TIMEOUT", 25)
 )  # seconds
-EMAILBOT_ENABLE_OCR = rc_get(
-    "EMAILBOT_ENABLE_OCR", _int("EMAILBOT_ENABLE_OCR", 0) == 1
-)
+_ENABLE_OCR_DEFAULT = _env_bool(  # Формируем дефолт для OCR из нескольких переменных
+    "ENABLE_OCR",  # Учитываем новое общее имя флага
+    "EMAILBOT_ENABLE_OCR",  # Сохраняем поддержку старого флага бота
+    "PDF_OCR_AUTO",  # Добавляем исторический ключ автоматического OCR
+    default=_int("PDF_OCR_AUTO", 1),  # Падаем назад на старый дефолт из окружения
+)  # Завершаем сбор значений по всем совместимым ключам OCR
+EMAILBOT_ENABLE_OCR = rc_get(  # Обновляем флаг включения OCR в runtime-конфиге
+    "EMAILBOT_ENABLE_OCR",  # Используем старое имя ключа для совместимости
+    bool(_ENABLE_OCR_DEFAULT),  # Преобразуем числовой флаг в булево значение
+)  # Фиксируем булевый признак включённого OCR в runtime-конфиге
+ENABLE_OCR = rc_get(  # Даём новое имя параметру для явного включения OCR
+    "ENABLE_OCR",  # Фиксируем ключ для runtime-конфига
+    EMAILBOT_ENABLE_OCR,  # Переносим вычисленное значение по умолчанию
+)  # Объявляем результирующий флаг ENABLE_OCR с учётом runtime-конфига
 # -------- PDF / OCR Auto Mode --------
-PDF_OCR_AUTO = rc_get("PDF_OCR_AUTO", _int("PDF_OCR_AUTO", 1))
-PDF_OCR_PROBE_PAGES = rc_get("PDF_OCR_PROBE_PAGES", _int("PDF_OCR_PROBE_PAGES", 5))
-PDF_OCR_MAX_PAGES = rc_get("PDF_OCR_MAX_PAGES", _int("PDF_OCR_MAX_PAGES", 30))
-PDF_OCR_MIN_TEXT_RATIO = rc_get(
-    "PDF_OCR_MIN_TEXT_RATIO", _float("PDF_OCR_MIN_TEXT_RATIO", 0.05)
-)
-PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
-TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
+PDF_OCR_AUTO = rc_get(  # Загружаем режим автоматического выбора OCR
+    "PDF_OCR_AUTO",  # Используем ключ PDF_OCR_AUTO в runtime-конфиге
+    _ENABLE_OCR_DEFAULT,  # Передаём дефолт, совместимый с новыми переменными окружения
+)  # Подтверждаем итоговый режим автоматического OCR
+PDF_OCR_PROBE_PAGES = rc_get(  # Настраиваем количество страниц для первичной проверки текста
+    "PDF_OCR_PROBE_PAGES",  # Обращаемся к runtime-конфигу по соответствующему ключу
+    _env_int("PDF_OCR_PROBE_PAGES", "OCR_PROBE_PAGES", default=5),  # Поддерживаем альтернативное имя переменной
+)  # Сохраняем лимит страниц для быстрого прогона перед OCR
+PDF_OCR_MAX_PAGES = rc_get(  # Определяем максимум страниц, которые обрабатываем через OCR
+    "PDF_OCR_MAX_PAGES",  # Считываем ключ из runtime-конфига
+    _env_int("PDF_OCR_MAX_PAGES", "OCR_MAX_PAGES", default=300),  # Учитываем новое и старое имя переменной окружения
+)  # Подтверждаем итоговый лимит страниц для OCR-прохода
+PDF_OCR_MIN_TEXT_RATIO = rc_get(  # Устанавливаем минимальную долю текстовых страниц
+    "PDF_OCR_MIN_TEXT_RATIO",  # Забираем значение из runtime-конфига
+    _env_float("PDF_OCR_MIN_TEXT_RATIO", "OCR_MIN_TEXT_RATIO", default=0.05),  # Берём дефолт из совместимого окружения
+)  # Завершаем чтение порога доли текстовых страниц в документе
+PDF_OCR_MIN_CHARS = rc_get(  # Настраиваем минимальное количество символов на странице
+    "PDF_OCR_MIN_CHARS",  # Читаем ключ из runtime-конфига
+    _env_int("PDF_OCR_MIN_CHARS", "OCR_MIN_CHARS", default=150),  # Обрабатываем оба имени переменной окружения
+)  # Подтверждаем порог минимального количества символов на страницу
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()  # Сохраняем исходный путь к Tesseract
+OCR_TESSERACT_CMD = rc_get(  # Переэкспортируем путь к tesseract под новым именем
+    "OCR_TESSERACT_CMD",  # Используем явный ключ в runtime-конфиге
+    _env_str("OCR_TESSERACT_CMD", "TESSERACT_CMD", default=TESSERACT_CMD),  # Поддерживаем оба варианта переменной окружения
+)  # Завершаем экспорт пути к tesseract в runtime-конфиг
 
 # -------- Ранний прогресс / тёплый старт --------
 PDF_WARMUP_PAGES = rc_get(  # Берём число страниц для быстрого прогрева, по умолчанию четыре
@@ -124,23 +205,42 @@ PDF_TEXT_TRUNCATE_LIMIT = rc_get(
     "PDF_TEXT_TRUNCATE_LIMIT", _int("PDF_TEXT_TRUNCATE_LIMIT", 2_000_000)
 )
 
-PDF_OCR_ENGINE = rc_get(
-    "PDF_OCR_ENGINE",
-    _str("PDF_OCR_ENGINE", _str("OCR_ENGINE", "pytesseract")),
-)
-PDF_OCR_LANG = rc_get(
-    "PDF_OCR_LANG",
-    _str("PDF_OCR_LANG", _str("OCR_LANG", "eng+rus")),
-)
-PDF_OCR_PAGE_LIMIT = rc_get(
-    "PDF_OCR_PAGE_LIMIT",
-    _int("PDF_OCR_PAGE_LIMIT", PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10),
-)
-PDF_OCR_TIME_LIMIT = rc_get("PDF_OCR_TIME_LIMIT", _int("PDF_OCR_TIME_LIMIT", 30))
-PDF_OCR_TIMEOUT_PER_PAGE = rc_get(
-    "PDF_OCR_TIMEOUT_PER_PAGE", _int("PDF_OCR_TIMEOUT_PER_PAGE", 12)
-)
-PDF_OCR_DPI = rc_get("PDF_OCR_DPI", _int("PDF_OCR_DPI", 300))
+PDF_OCR_ENGINE = rc_get(  # Определяем движок OCR с поддержкой альтернативных имён
+    "PDF_OCR_ENGINE",  # Ключ runtime-конфига для движка OCR
+    _str("PDF_OCR_ENGINE", _str("OCR_ENGINE", "pytesseract")),  # Объединяем новые и старые переменные окружения
+)  # Завершаем конфигурацию движка OCR с учётом совместимости
+PDF_OCR_LANG = rc_get(  # Указываем языки OCR с учётом совместимости
+    "PDF_OCR_LANG",  # Используем ключ runtime-конфига для списка языков
+    _str("PDF_OCR_LANG", _str("OCR_LANG", "eng+rus")),  # Считаем значения из всех подходящих переменных окружения
+)  # Фиксируем набор языков OCR в runtime-конфиге
+OCR_ENGINE = rc_get(  # Предоставляем сокращённое имя движка OCR
+    "OCR_ENGINE",  # Сохраняем ключ в runtime-конфиге
+    PDF_OCR_ENGINE,  # Переносим рассчитанный ранее дефолт
+)  # Предоставляем синонимичный доступ к движку OCR
+OCR_LANG = rc_get(  # Предоставляем сокращённое имя списка языков
+    "OCR_LANG",  # Регистрируем ключ в runtime-конфиге
+    PDF_OCR_LANG,  # Используем базовое значение из совместимого блока
+)  # Экспортируем языковой набор OCR под укороченным именем
+PDF_OCR_PAGE_LIMIT = rc_get(  # Контролируем лимит страниц в OCR-потоке
+    "PDF_OCR_PAGE_LIMIT",  # Читаем ключ runtime-конфига
+    _env_int(  # Сливаем несколько переменных окружения
+        "PDF_OCR_PAGE_LIMIT",  # Основное имя параметра
+        "OCR_PAGE_LIMIT",  # Альтернативное имя окружения
+        default=PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10,  # Используем дефолт, согласованный с общим лимитом
+    ),
+)  # Утверждаем лимит страниц, которые разрешено гонять через OCR
+PDF_OCR_TIME_LIMIT = rc_get(  # Устанавливаем общий тайм-аут на операцию OCR
+    "PDF_OCR_TIME_LIMIT",  # Берём ключ runtime-конфига
+    _env_int("PDF_OCR_TIME_LIMIT", "OCR_TIME_LIMIT", default=30),  # Поддерживаем старые и новые имена переменных
+)  # Фиксируем суммарный тайм-аут выполнения OCR
+PDF_OCR_TIMEOUT_PER_PAGE = rc_get(  # Настраиваем тайм-аут на страницу при OCR
+    "PDF_OCR_TIMEOUT_PER_PAGE",  # Читаем ключ runtime-конфига
+    _env_int("PDF_OCR_TIMEOUT_PER_PAGE", "OCR_TIMEOUT_PER_PAGE", default=20),  # Сводим все совместимые переменные окружения
+)  # Устанавливаем бюджет времени на обработку одной страницы
+PDF_OCR_DPI = rc_get(  # Определяем DPI рендеринга страниц для OCR
+    "PDF_OCR_DPI",  # Используем ключ runtime-конфига
+    _env_int("PDF_OCR_DPI", "OCR_DPI", default=300),  # Принимаем значения из нескольких переменных окружения
+)  # Подтверждаем разрешение растеризации страницы перед OCR
 PDF_OCR_CACHE_DIR = rc_get(
     "PDF_OCR_CACHE_DIR",
     str(Path(_str("PDF_OCR_CACHE_DIR", _str("OCR_CACHE_DIR", "var/ocr_cache")))).strip(),
