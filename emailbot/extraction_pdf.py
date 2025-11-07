@@ -114,6 +114,7 @@ from emailbot.config import (
     PDF_OPEN_TIMEOUT_SEC,
     PDF_TEXT_TRUNCATE_LIMIT,
     PDF_WARMUP_PAGES,
+    PDF_WARMUP_MIN_FOUND,  # Минимум email-адресов после warmup для решения об OCR
     TESSERACT_CMD,
 )
 from emailbot.ui.progress_state import ParseProgress
@@ -130,6 +131,7 @@ from emailbot.cancel_token import (
 )
 from emailbot.utils.ocr_guard import ocr_available as _ocr_guard_available
 from emailbot.utils.pdf_open_safe import open_pdf_with_timeout
+from emailbot.utils.text_preprocess import normalize_for_email  # Подключаем нормализацию текста под e-mail
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
@@ -267,76 +269,77 @@ def _run_pdf_warmup(
     pdf_path: Path,
     progress: object,
     stop_event: object | None = None,
-) -> int:
+) -> tuple[int, int]:
     """Perform a lightweight pass over first PDF pages to kick-start progress."""
 
     if not progress or not FITZ_OK:
-        return 0
+        return 0, 0  # Без прогресса или PyMuPDF возвращаем нулевые показатели
     try:
-        warm_limit = max(0, int(PDF_WARMUP_PAGES))
+        warm_limit = max(0, int(PDF_WARMUP_PAGES))  # Гарантируем неотрицательный лимит страниц
     except Exception:
-        warm_limit = 0
+        warm_limit = 0  # В случае ошибки парсинга воспринимаем как отсутствие warmup
     if warm_limit <= 0:
-        return 0
+        return 0, 0  # При нулевом лимите ничего не делаем
     try:
-        doc = fitz.open(str(pdf_path))  # type: ignore[attr-defined]
+        doc = fitz.open(str(pdf_path))  # type: ignore[attr-defined]  # Открываем документ PyMuPDF
     except Exception:
-        return 0
+        return 0, 0  # Если открыть файл не удалось, warmup считается не выполненным
     try:
         try:
-            total_pages = getattr(doc, "page_count", 0)
+            total_pages = getattr(doc, "page_count", 0)  # Получаем число страниц документа
         except Exception:
-            total_pages = 0
+            total_pages = 0  # При ошибке считаем количество страниц неизвестным
         if total_pages:
-            warm_limit = min(warm_limit, int(total_pages))
+            warm_limit = min(warm_limit, int(total_pages))  # Не выходим за пределы фактического количества страниц
         if warm_limit <= 0:
-            return 0
+            return 0, 0  # При отсутствии страниц завершаем
         try:
-            getattr(progress, "set_phase")("быстрый старт…")
+            getattr(progress, "set_phase")("быстрый старт…")  # Обновляем фазу прогресса
         except Exception:
-            pass
+            pass  # Игнорируем ошибки обновления прогресса
         try:
-            from emailbot.parsing.extract_from_text import emails_from_text
+            from emailbot.parsing.extract_from_text import emails_from_text  # Импортируем извлечение email на лету
         except Exception:
-            emails_from_text = None  # type: ignore[assignment]
-        found: set[str] = set()
-        processed = 0
+            emails_from_text = None  # type: ignore[assignment]  # При недоступности извлечения продолжаем без него
+        found: set[str] = set()  # Храним найденные адреса
+        processed = 0  # Счётчик обработанных страниц
         for page_index in range(warm_limit):
             if is_cancelled():
-                break
+                break  # Прерываемся при глобальной отмене
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                break
+                break  # Уважаем сигнал остановки из внешнего события
             try:
-                page = doc.load_page(page_index)
+                page = doc.load_page(page_index)  # Загружаем страницу по индексу
             except Exception:
-                continue
+                continue  # Пропускаем страницу при ошибке чтения
             try:
-                text = page.get_text("text") or ""
+                text = page.get_text("text") or ""  # Извлекаем текст страницы, получая пустую строку при None
             except Exception:
-                text = ""
+                text = ""  # При ошибке чтения текста сбрасываем строку
+            text = normalize_for_email(text)  # Нормализуем текст перед поиском адресов
             if text and emails_from_text is not None:
                 try:
-                    found.update(emails_from_text(text))
+                    found.update(emails_from_text(text))  # Обновляем множество найденных адресов
                 except Exception:
-                    pass
+                    pass  # Игнорируем ошибки парсера почты
             try:
-                getattr(progress, "inc_pages")(1)
+                getattr(progress, "inc_pages")(1)  # Сообщаем об обработанной странице
             except Exception:
-                pass
+                pass  # Не прерываем процесс из-за ошибки прогресса
             try:
-                getattr(progress, "set_found")(len(found))
+                getattr(progress, "set_found")(len(found))  # Передаём количество найденных адресов
             except Exception:
-                pass
+                pass  # Игнорируем проблемы при обновлении прогресса
             try:
-                getattr(progress, "touch")()
+                getattr(progress, "touch")()  # Отправляем heartbeat для поддержания UI
             except Exception:
-                pass
-            processed += 1
+                pass  # Ошибки heartbeat не критичны
+            processed += 1  # Увеличиваем счётчик обработанных страниц
         try:
-            getattr(progress, "set_phase")("PDF")
+            getattr(progress, "set_phase")("PDF")  # Возвращаем фазу в стандартный режим парсинга
         except Exception:
-            pass
-        return processed
+            pass  # Игнорируем сбои при смене фазы
+        return processed, len(found)  # Сообщаем количество обработанных страниц и найденных адресов
     finally:
         try:
             doc.close()
@@ -575,7 +578,7 @@ def _ocr_cache_set(key: str, text: str) -> None:
         logger.debug("Failed to write OCR cache entry", exc_info=True)
 
 
-def _should_document_ocr(text: str, data: bytes) -> bool:
+def _should_document_ocr(text: str, data: bytes, *, force: bool = False) -> bool:  # Добавляем флаг принудительного OCR
     if not data:
         return False
     ocr_available, ocr_enabled, _ = _detect_ocr_status()
@@ -583,6 +586,8 @@ def _should_document_ocr(text: str, data: bytes) -> bool:
         return False
     if not (ocr_available or _OCR_ALLOW_BEST_EFFORT):
         return False
+    if force:
+        return True  # При принудительном режиме запускаем OCR невзирая на объём текста
     cleaned = clean_pdf_text(text or "").strip()
     if not cleaned:
         return True
@@ -769,6 +774,7 @@ def extract_text_from_pdf_bytes(
     data: bytes,
     stats: Dict[str, int] | None = None,
     budget: TimeBudget | None = None,
+    force_ocr: bool = False,  # Флаг принудительного включения OCR
 ) -> str:
     """Read PDF bytes directly, using PyMuPDF with pdfminer fallback."""
 
@@ -812,7 +818,7 @@ def extract_text_from_pdf_bytes(
 
     ocr_pages = 0
     ocr_used = False
-    if _should_document_ocr(text, data):
+    if _should_document_ocr(text, data, force=force_ocr):  # Решаем, нужен ли OCR с учётом принудительного режима
         if stats is not None:
             stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
         key = _sha256(data)
@@ -848,7 +854,7 @@ def extract_text_from_pdf_bytes(
     return cleanup_text(text)
 
 
-def extract_text_from_pdf(path: str | Path) -> str:
+def extract_text_from_pdf(path: str | Path, *, force_ocr: bool = False) -> str:  # Позволяет принудительно включить OCR при необходимости
     pdf_path = Path(path)
 
     try:
@@ -871,7 +877,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         fallback = _extract_with_pypdf(pdf_path)
         text = fallback if fallback.strip() else ""
 
-    if pdf_bytes and _should_document_ocr(text, pdf_bytes):
+    if pdf_bytes and _should_document_ocr(text, pdf_bytes, force=force_ocr):  # Решаем, нужен ли OCR для файла, учитывая принудительный режим
         key = _sha256(pdf_bytes)
         cached = _ocr_cache_get(key)
         if cached:
@@ -903,12 +909,18 @@ def _pdf_worker_entry(
         pass
 
     progress = _QueueProgress(q) if with_progress else None
-    warmup_done = 0
+    warmup_done = 0  # Счётчик страниц, обработанных на warmup-этапе
+    warmup_found = 0  # Количество найденных адресов на warmup-этапе
     if progress is not None:
         try:
-            warmup_done = _run_pdf_warmup(Path(pdf_path), progress, shared_event)
+            warmup_done, warmup_found = _run_pdf_warmup(
+                Path(pdf_path),
+                progress,
+                shared_event,
+            )  # Запускаем быстрый прогрев и получаем статистику
         except Exception:
-            warmup_done = 0
+            warmup_done = 0  # При ошибке считаем, что warmup не состоялся
+            warmup_found = 0  # Сбрасываем количество найденных адресов
     progress_for_core: ParseProgress | None
     if progress is not None and warmup_done:
         progress_for_core = _WarmupProgressProxy(progress, warmup_done)  # type: ignore[assignment]
@@ -919,6 +931,7 @@ def _pdf_worker_entry(
             Path(pdf_path),
             stop_event=shared_event,
             progress=progress_for_core,
+            warmup_found=warmup_found,
         )
     except Exception:
         q.put(("error", traceback.format_exc()))
@@ -954,6 +967,7 @@ def _extract_emails_core(
     *,
     stop_event=None,
     progress: ParseProgress | None = None,
+    warmup_found: int | None = None,  # Количество email, найденных при прогреве
 ) -> Set[str]:
     """Core PDF extraction logic executed inside a worker process."""
 
@@ -969,38 +983,46 @@ def _extract_emails_core(
             if getattr(hit, "email", "")
         }
 
+    base_hits: Set[str] = set()  # Храним быстрые находки для последующего объединения
+    low_warmup = (
+        warmup_found is not None and warmup_found < int(PDF_WARMUP_MIN_FOUND)
+    )  # Проверяем, достаточно ли адресов нашли на warmup
     if PDF_ENGINE.lower() == "fitz":
         try:
             from emailbot.extraction_pdf_fast import extract_emails_fitz
         except Exception:
             extract_emails_fitz = None  # type: ignore[assignment]
         if extract_emails_fitz is not None:
-            fast_hits = extract_emails_fitz(pdf_path)
-            if fast_hits:
-                return fast_hits
+            fast_hits = extract_emails_fitz(pdf_path)  # Запускаем быстрый сценарий PyMuPDF
+            if fast_hits:  # Если быстрый проход что-то нашёл
+                base_hits = set(fast_hits)  # Сохраняем быстрые результаты для объединения
+                if not low_warmup:  # Если warmup дал достаточно адресов
+                    return base_hits  # Если warmup уже дал достаточно адресов, завершаем
 
     if stop_event and getattr(stop_event, "is_set", lambda: False)():
-        return set()
+        return base_hits  # При отмене возвращаем уже найденные адреса
 
     try:
-        text = extract_text_from_pdf(pdf_path)
+        text = extract_text_from_pdf(pdf_path, force_ocr=low_warmup)
     except Exception:
         text = ""
     if not text:
-        return set()
+        return base_hits  # При отсутствии текста ограничиваемся быстрыми попаданиями
 
     try:
         from emailbot.parsing.extract_from_text import emails_from_text
     except Exception:
-        return set()
+        return base_hits
 
     if stop_event and getattr(stop_event, "is_set", lambda: False)():
-        return set()
+        return base_hits
 
     try:
-        return emails_from_text(text)
+        normalized_text = normalize_for_email(text)  # Приводим текст к форме, удобной для поиска email
+        slow_hits = emails_from_text(normalized_text)  # Извлекаем адреса из нормализованного текста
+        return base_hits | slow_hits  # Объединяем быстрые и медленные результаты
     except Exception:
-        return set()
+        return base_hits
 
 
 def extract_emails_from_pdf(

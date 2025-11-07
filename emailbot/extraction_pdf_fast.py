@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Set
 
-from emailbot.config import PDF_MAX_PAGES, PARSE_COLLECT_ALL
+from emailbot.config import PDF_MAX_PAGES, PARSE_COLLECT_ALL  # Импортируем лимиты для быстрой обработки
 from emailbot.cancel_token import is_cancelled
+from emailbot.utils.text_preprocess import normalize_for_email  # Подключаем нормализацию текста под e-mail
 
 
 def extract_emails_from_pdf_fast_core(
@@ -43,9 +44,10 @@ def extract_emails_from_pdf_fast_core(
         if PDF_MAX_PAGES and index >= PDF_MAX_PAGES:
             break
         try:
-            text = page.get_text("text") or ""
+            text = page.get_text("text") or ""  # Забираем текст страницы, обрабатывая пустые значения
         except Exception:
-            text = ""
+            text = ""  # При ошибке чтения страницы считаем текст пустым
+        text = normalize_for_email(text)  # Приводим текст к форме, удобной для поиска адресов
         before = len(found)
         if text:
             found |= emails_from_text(text)

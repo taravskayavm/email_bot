@@ -78,9 +78,17 @@ PDF_OCR_MIN_CHARS = rc_get("PDF_OCR_MIN_CHARS", _int("PDF_OCR_MIN_CHARS", 150))
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
 
 # -------- Ранний прогресс / тёплый старт --------
-PDF_WARMUP_PAGES = rc_get("PDF_WARMUP_PAGES", _int("PDF_WARMUP_PAGES", 3))
-PDF_EARLY_HEARTBEAT_SEC = rc_get(
-    "PDF_EARLY_HEARTBEAT_SEC", _float("PDF_EARLY_HEARTBEAT_SEC", 3.0)
+PDF_WARMUP_PAGES = rc_get(  # Берём число страниц для быстрого прогрева, по умолчанию четыре
+    "PDF_WARMUP_PAGES",  # Передаём ключ параметра, чтобы можно было переопределить в runtime
+    _int("PDF_WARMUP_PAGES", 4),  # Считываем значение из окружения с дефолтом 4 страницы
+)
+PDF_EARLY_HEARTBEAT_SEC = rc_get(  # Настраиваем интервал молчания перед ранним heartbeat
+    "PDF_EARLY_HEARTBEAT_SEC",  # Используем читаемый ключ для runtime-конфига
+    _float("PDF_EARLY_HEARTBEAT_SEC", 2.5),  # Берём значение из окружения, дефолт 2.5 секунды
+)
+PDF_WARMUP_MIN_FOUND = rc_get(  # Фиксируем минимальное количество email после warmup
+    "PDF_WARMUP_MIN_FOUND",  # Объявляем ключ для динамического управления
+    _int("PDF_WARMUP_MIN_FOUND", 1),  # Считываем порог из окружения, по умолчанию хотя бы один адрес
 )
 
 # -------- OCR / PDF unified knobs --------
