@@ -93,6 +93,7 @@ from emailbot.config import (
     EMAILBOT_ENABLE_OCR,
     PARSE_COLLECT_ALL,
     PDF_BACKEND,
+    PDF_EARLY_HEARTBEAT_SEC,
     PDF_ENGINE,
     PDF_FAST_MIN_HITS,
     PDF_FAST_TIMEOUT_MS,
@@ -112,6 +113,7 @@ from emailbot.config import (
     PDF_OCR_TIMEOUT_PER_PAGE,
     PDF_OPEN_TIMEOUT_SEC,
     PDF_TEXT_TRUNCATE_LIMIT,
+    PDF_WARMUP_PAGES,
     TESSERACT_CMD,
 )
 from emailbot.ui.progress_state import ParseProgress
@@ -230,6 +232,116 @@ class _QueueProgress:
 
     def set_ocr_status(self, status: str) -> None:
         self._send("set_ocr_status", status)
+
+
+class _WarmupProgressProxy:
+    """Proxy that suppresses first N ``inc_pages`` calls after warmup."""
+
+    __slots__ = ("_inner", "_skip")
+
+    def __init__(self, inner: object, skip: int) -> None:
+        self._inner = inner
+        self._skip = max(0, int(skip))
+
+    def __getattr__(self, item: str):  # pragma: no cover - delegation helper
+        return getattr(self._inner, item)
+
+    def inc_pages(self, n: int = 1) -> None:
+        try:
+            value = int(n)
+        except Exception:
+            getattr(self._inner, "inc_pages")(n)
+            return
+        if value <= 0:
+            getattr(self._inner, "inc_pages")(value)
+            return
+        if self._skip > 0:
+            take = min(self._skip, value)
+            self._skip -= take
+            value -= take
+        if value:
+            getattr(self._inner, "inc_pages")(value)
+
+
+def _run_pdf_warmup(
+    pdf_path: Path,
+    progress: object,
+    stop_event: object | None = None,
+) -> int:
+    """Perform a lightweight pass over first PDF pages to kick-start progress."""
+
+    if not progress or not FITZ_OK:
+        return 0
+    try:
+        warm_limit = max(0, int(PDF_WARMUP_PAGES))
+    except Exception:
+        warm_limit = 0
+    if warm_limit <= 0:
+        return 0
+    try:
+        doc = fitz.open(str(pdf_path))  # type: ignore[attr-defined]
+    except Exception:
+        return 0
+    try:
+        try:
+            total_pages = getattr(doc, "page_count", 0)
+        except Exception:
+            total_pages = 0
+        if total_pages:
+            warm_limit = min(warm_limit, int(total_pages))
+        if warm_limit <= 0:
+            return 0
+        try:
+            getattr(progress, "set_phase")("быстрый старт…")
+        except Exception:
+            pass
+        try:
+            from emailbot.parsing.extract_from_text import emails_from_text
+        except Exception:
+            emails_from_text = None  # type: ignore[assignment]
+        found: set[str] = set()
+        processed = 0
+        for page_index in range(warm_limit):
+            if is_cancelled():
+                break
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                break
+            try:
+                page = doc.load_page(page_index)
+            except Exception:
+                continue
+            try:
+                text = page.get_text("text") or ""
+            except Exception:
+                text = ""
+            if text and emails_from_text is not None:
+                try:
+                    found.update(emails_from_text(text))
+                except Exception:
+                    pass
+            try:
+                getattr(progress, "inc_pages")(1)
+            except Exception:
+                pass
+            try:
+                getattr(progress, "set_found")(len(found))
+            except Exception:
+                pass
+            try:
+                getattr(progress, "touch")()
+            except Exception:
+                pass
+            processed += 1
+        try:
+            getattr(progress, "set_phase")("PDF")
+        except Exception:
+            pass
+        return processed
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
 
 
 def clean_pdf_text(text: str) -> str:
@@ -791,11 +903,22 @@ def _pdf_worker_entry(
         pass
 
     progress = _QueueProgress(q) if with_progress else None
+    warmup_done = 0
+    if progress is not None:
+        try:
+            warmup_done = _run_pdf_warmup(Path(pdf_path), progress, shared_event)
+        except Exception:
+            warmup_done = 0
+    progress_for_core: ParseProgress | None
+    if progress is not None and warmup_done:
+        progress_for_core = _WarmupProgressProxy(progress, warmup_done)  # type: ignore[assignment]
+    else:
+        progress_for_core = progress
     try:
         result = _extract_emails_core(
             Path(pdf_path),
             stop_event=shared_event,
-            progress=progress,
+            progress=progress_for_core,
         )
     except Exception:
         q.put(("error", traceback.format_exc()))
@@ -958,19 +1081,46 @@ def extract_emails_from_pdf(
     stop_requested = False
     cancel_flag = False
 
+    last_progress_event = time.monotonic()
+    first_page_seen = False
     hb_stop = threading.Event()
 
     def _heartbeat_loop() -> None:
-        while not hb_stop.wait(2.5):
+        nonlocal last_progress_event, first_page_seen
+        base_interval = 2.5
+        while not hb_stop.wait(0.5):
+            now = time.monotonic()
+            threshold = PDF_EARLY_HEARTBEAT_SEC if not first_page_seen else base_interval
+            if threshold <= 0:
+                threshold = base_interval
+            if now - last_progress_event < threshold:
+                continue
             heartbeat_now()
             if progress is not None:
+                if not first_page_seen:
+                    try:
+                        current_phase = getattr(progress, "phase", None)
+                    except Exception:
+                        current_phase = None
+                    if not current_phase:
+                        try:
+                            progress.set_phase("подготовка…")
+                        except Exception:
+                            pass
                 try:
                     progress.touch()
                 except AttributeError:
                     try:
-                        progress.set_phase(progress.phase or "парсинг")
+                        phase_value = getattr(progress, "phase", None)
+                    except Exception:
+                        phase_value = None
+                    if not phase_value:
+                        phase_value = "подготовка…" if not first_page_seen else "парсинг"
+                    try:
+                        progress.set_phase(phase_value)
                     except Exception:
                         pass
+            last_progress_event = now
 
     hb_thread: threading.Thread | None = None
     if progress is not None:
@@ -982,12 +1132,23 @@ def extract_emails_from_pdf(
         hb_thread.start()
 
     def _apply_progress(method: str, args: tuple, kwargs: dict) -> None:
+        nonlocal last_progress_event, first_page_seen
         if not progress:
             return
         try:
             getattr(progress, method)(*args, **kwargs)
         except Exception:
             pass
+        last_progress_event = time.monotonic()
+        if method == "inc_pages":
+            inc_value = 1
+            if args:
+                try:
+                    inc_value = int(args[0])
+                except Exception:
+                    inc_value = 0
+            if inc_value and inc_value > 0:
+                first_page_seen = True
 
     try:
         while True:
