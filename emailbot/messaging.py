@@ -623,11 +623,11 @@ from emailbot import ledger
 
 # Data dir: сначала берём EMAILBOT_DATA_DIR, иначе – текущая рабочая директория.
 # Это гарантирует запись в D:\\email_bot\\... при запуске через Anaconda PowerShell.
-DATA_DIR = Path(os.getenv("EMAILBOT_DATA_DIR") or Path.cwd()).resolve()
+DATA_DIR = suppress_list.blocklist_path().parent.resolve()
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = str(DATA_DIR / "downloads")
 LOG_FILE = str(DATA_DIR / "sent_log.csv")
-BLOCKED_FILE = str(DATA_DIR / "blocked_emails.txt")
+BLOCKED_FILE = str(suppress_list.blocklist_path())
 try:
     suppress_list.init_blocked(BLOCKED_FILE)
 except Exception:
