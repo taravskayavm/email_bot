@@ -27,6 +27,7 @@ __all__ = [
     "refresh_if_changed",
     "invalidate_cache",
     "init_blocked",
+    "_set_blocked_path_for_tests",
 ]
 
 
@@ -50,8 +51,8 @@ def _resolve_data_dir() -> Path:
 def _default_blocklist_path() -> Path:
     return _resolve_data_dir() / "blocked_emails.txt"
 
-
-_BLOCKLIST_PATH = _default_blocklist_path()
+_DEFAULT_BLOCKLIST_PATH = _default_blocklist_path()  # Сохраняем путь по умолчанию для возможного отката
+_BLOCKLIST_PATH = _DEFAULT_BLOCKLIST_PATH  # Используем путь по умолчанию как актуальный путь к файлу
 _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 BLOCKED_EMAILS_PATH: Path = _BLOCKLIST_PATH
@@ -236,3 +237,10 @@ def init_blocked(path: str | Path | None = None) -> None:
             _MTIME = _BLOCKLIST_PATH.stat().st_mtime
         except FileNotFoundError:
             _MTIME = None
+
+
+def _set_blocked_path_for_tests(path: str | Path | None) -> None:
+    """Переключить файл блок-листа на альтернативный путь для юнит-тестов."""
+
+    target_path = _DEFAULT_BLOCKLIST_PATH if path is None else Path(path)  # Выбираем путь для инициализации
+    init_blocked(target_path)  # Переинициализируем блок-лист на выбранном пути
