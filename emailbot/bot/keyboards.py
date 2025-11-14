@@ -7,7 +7,8 @@ import os
 import unicodedata
 from pathlib import Path
 
-from aiogram.types import InlineKeyboardMarkup
+# Импортируем типы aiogram для создания кнопок и клавиатур
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def _resolve_icons_path() -> Path:
@@ -94,3 +95,32 @@ def send_flow_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🛑 Стоп", callback_data="stop_all")
     builder.adjust(1)
     return builder.as_markup()
+
+
+def build_examples_entry_kb() -> InlineKeyboardMarkup:
+    """Keyboard with a single button that opens the examples list."""
+
+    builder = InlineKeyboardBuilder()  # Создаём билдер для инлайн-клавиатуры
+    builder.button(text="👀 Показать примеры", callback_data="ex:init")  # Добавляем кнопку запуска примеров
+    builder.adjust(1)  # Располагаем кнопку в одной строке
+    return builder.as_markup()  # Возвращаем готовую клавиатуру
+
+
+def build_examples_paging_kb() -> InlineKeyboardMarkup:
+    """Keyboard with pagination controls for the examples list."""
+
+    builder = InlineKeyboardBuilder()  # Создаём билдер для набора кнопок управления
+    builder.button(
+        text="🔁 Показать ещё 180 дней",  # Подпись для кнопки догрузки кулдауна
+        callback_data="ex:more:cd",  # Привязываем обработчик для догрузки кулдауна
+    )
+    builder.button(
+        text="🔁 Показать ещё иностранные",  # Подпись для кнопки догрузки иностранных адресов
+        callback_data="ex:more:fr",  # Привязываем обработчик для иностранных адресов
+    )
+    builder.button(
+        text="⬅️ Назад к отчёту",  # Подпись для возврата к исходному отчёту
+        callback_data="ex:back",  # Привязываем обработчик возврата
+    )
+    builder.adjust(1)  # Каждая кнопка будет находиться на отдельной строке
+    return builder.as_markup()  # Возвращаем готовую клавиатуру
