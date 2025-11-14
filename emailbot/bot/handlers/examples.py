@@ -46,6 +46,34 @@ def store_examples_context(chat_id: int, ctx: ExamplesContext) -> None:
     put_context(chat_id, ctx)  # Сохраняем контекст в общем кэше
 
 
+@router.callback_query(F.data.startswith("examples_") | (F.data == "show_examples"))
+async def legacy_examples_redirect(callback: CallbackQuery) -> None:
+    """Перехватываем устаревшие колбэки и перенаправляем на актуальный сценарий."""
+
+    chat_id = await _resolve_chat_id(callback)  # Определяем идентификатор чата для сброса контекста
+    if chat_id is None:  # Проверяем, удалось ли извлечь идентификатор
+        # Сообщаем об ошибке пользователю и показываем alert.
+        await callback.answer(
+            "Не удалось определить чат.",  # Сообщение об ошибке определения чата
+            show_alert=True,  # Включаем всплывающее предупреждение для пользователя
+        )
+        return  # Прекращаем обработку, если чат не найден
+
+    ctx = get_context(chat_id)  # Загружаем сохранённый контекст примеров
+    if not ctx:  # Проверяем, существует ли контекст для текущего чата
+        # Просим перезапустить процесс, если контекст отсутствует.
+        await callback.answer(
+            "Нет контекста примеров. Повторите команду.",  # Текст подсказки о повторном запуске
+            show_alert=True,  # Показываем уведомление в виде alert
+        )
+        return  # Завершаем обработку при отсутствии контекста
+
+    ctx.cooldown_pager.idx = 0  # Сбрасываем позицию пагинатора кулдауна на начало
+    ctx.foreign_pager.idx = 0  # Сбрасываем позицию пагинатора иностранных адресов на начало
+
+    await on_examples_init(callback)  # Запускаем основной обработчик, чтобы показать свежий список
+
+
 @router.message(Command("examples_demo"))
 async def examples_demo(message: Message) -> None:
     """Демонстрационная команда, создающая тестовый набор примеров."""

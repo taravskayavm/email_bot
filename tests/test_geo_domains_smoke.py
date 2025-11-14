@@ -1,19 +1,25 @@
-"""Быстрый смоук-тест эвристики определения «иностранных» доменов."""  # Документируем назначение файла
+"""Smoke tests for the geo-domains heuristics."""
+# Описание модуля.
 
-from utils.geo_domains import is_foreign_email  # Импортируем проверяемую функцию
-
-
-def test_com_is_local() -> None:
-    """Адреса в зоне .com считаем локальными по бизнес-правилу."""  # Объясняем суть теста
-
-    assert is_foreign_email("user@x.com") is False  # Проверяем, что .com трактуется как локальный домен
+# Импортируем функцию классификации доменов по географии.
+from utils.geo_domains import is_foreign_email  # Используем целевую функцию в проверках
 
 
-def test_ion_ru_is_foreign(monkeypatch) -> None:
-    """Домены ion.ru считаем иностранными, если .ru исключён из локальных TLD."""  # Объясняем условие теста
+def test_com_is_local() -> None:  # Определяем проверку для домена .com
+    """Ensure ``.com`` domains stay in the local bucket by default."""
+    # Поясняем цель проверки.
 
-    monkeypatch.setattr("config.LOCAL_TLDS", [".рф", ".su"], raising=False)  # Исключаем .ru из списка локальных зон
-    monkeypatch.setattr("config.LOCAL_DOMAINS_EXTRA", set(), raising=False)  # Сбрасываем явный allow-list доменов
-    monkeypatch.setattr("utils.geo_domains.LOCAL_TLDS", [".рф", ".su"], raising=False)  # Обновляем локальный кэш TLD в модуле
-    monkeypatch.setattr("utils.geo_domains.LOCAL_DOMAINS_EXTRA", set(), raising=False)  # Обновляем локальный кэш доменов
-    assert is_foreign_email("user@ion.ru") is True  # Проверяем, что ion.ru становится иностранным
+    # Вызываем целевую функцию для адреса с доменом .com.
+    result = is_foreign_email("user@x.com")  # Получаем результат классификации
+    # Убеждаемся, что адрес признан локальным.
+    assert result is False  # Проверяем, что адрес остаётся локальным
+
+
+def test_ion_ru_is_foreign() -> None:  # Определяем проверку для домена ion.ru
+    """Confirm that ``ion.ru`` is treated as foreign according to the config."""
+    # Поясняем цель проверки.
+
+    # Вызываем функцию для адреса с доменом из списка иностранных доменов.
+    result = is_foreign_email("user@ion.ru")  # Получаем результат классификации
+    # Проверяем, что адрес классифицирован как иностранный.
+    assert result is True  # Проверяем, что адрес отмечен как иностранный
