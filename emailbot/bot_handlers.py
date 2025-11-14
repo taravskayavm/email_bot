@@ -5486,7 +5486,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             imap=imap,
                             sent_folder=sent_folder,
                             chat_id=chat_id,
-                            sleep_between=1.5,
+                            sleep_between=None,  # Используем глобальную задержку отправки из конфигурации
                             cancel_event=cancel_event,
                             should_stop_cb=should_stop,
                             on_sent=on_sent,
@@ -6003,7 +6003,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         imap=imap,
                         sent_folder=sent_folder,
                         chat_id=chat_id,
-                        sleep_between=1.5,
+                        sleep_between=None,  # Используем глобальную задержку отправки из конфигурации
                         cancel_event=cancel_event,
                         should_stop_cb=should_stop,
                         on_sent=on_sent,
