@@ -70,6 +70,18 @@ def _tuple_env(name: str, default: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+def _get_float(name: str, default: float) -> float:
+    """Получить значение переменной окружения как float с безопасным запасным вариантом."""
+
+    raw = os.getenv(name)  # извлекаем строковое значение переменной окружения
+    if raw is None:  # проверяем, задана ли переменная окружения
+        return default  # возвращаем значение по умолчанию, если переменная не определена
+    try:
+        return float(str(raw).strip())  # приводим строку к float после обрезки пробелов
+    except Exception:  # отлавливаем любые ошибки преобразования
+        return default  # при ошибке возвращаем безопасное значение по умолчанию
+
+
 # Канонические параметры отправки
 SEND_MAX_WORKERS = _int_env("SEND_MAX_WORKERS", _int_env("MAX_WORKERS", 4))
 if SEND_MAX_WORKERS < 1:
@@ -95,6 +107,12 @@ WEB_HTTP2 = os.getenv("WEB_HTTP2", "1") == "1"
 # Совместимые экспортируемые значения (чтобы прямые импорты продолжали работать)
 PARSE_MAX_WORKERS = _int_env("PARSE_MAX_WORKERS", SEND_MAX_WORKERS)
 PARSE_FILE_TIMEOUT = _int_env("PARSE_FILE_TIMEOUT", SEND_FILE_TIMEOUT)
+
+# Глобальная задержка между письмами (сек)
+SEND_DELAY_SEC: float = _get_float(  # Читаем задержку между письмами из окружения
+    "EMAILBOT_SEND_DELAY_SEC",  # имя переменной окружения для задержки
+    6.0,  # значение задержки по умолчанию в секундах
+)
 
 
 try:
