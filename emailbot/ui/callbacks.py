@@ -1,38 +1,19 @@
-"""Callback identifiers for the examples pagination menu."""
+"""Utility constants describing callback identifiers for example pagination UI."""  # Предоставляем краткое описание назначения файла
 
-from __future__ import annotations  # Позволяем ссылаться на будущие типы в аннотациях
+from __future__ import annotations  # Обеспечиваем совместимость аннотаций с будущими версиями Python
 
-# Префикс для инициализации показа примеров через инлайн-кнопку
-CB_EXAMPLES_INIT: str = "ex:init"  # Сообщаем обработчику, что нужно открыть оба блока примеров
-# Префикс для возврата к исходному отчёту без примеров
-CB_EXAMPLES_BACK: str = "ex:back"  # Сигнализируем о необходимости восстановить исходный текст отчёта
-# Префикс для запроса следующей порции адресов из кулдауна
-CB_EXAMPLES_MORE_COOLDOWN: str = "ex:more:cd"  # Показываем дополнительные адреса с ограничением 180 дней
-# Префикс для запроса следующей порции адресов с иностранными доменами
-CB_EXAMPLES_MORE_FOREIGN: str = "ex:more:fr"  # Показываем дополнительные адреса с иностранными доменами
+# Callback identifiers for example pagination interactions
+CB_EXAMPLES_INIT: str = "ex:init"  # Callback для открытия блока примеров
+CB_EXAMPLES_BACK: str = "ex:back"  # Callback для возвращения к отчёту
+CB_EXAMPLES_MORE_COOLDOWN: str = "ex:more:cd"  # Callback для загрузки ещё трёх адресов из кулдауна
+CB_EXAMPLES_MORE_FOREIGN: str = "ex:more:fr"  # Callback для загрузки ещё трёх иностранных адресов
 
-# Ключ для сохранения исходного типа отчёта (парсинг или рассылка)
-CTX_SOURCE_KIND: str = "source_kind"  # Храним тип источника примеров: parse или send
-# Ключ для сохранения идентификатора исходного отчёта
-CTX_SOURCE_ID: str = "source_id"  # Идентификатор партии или отчёта, чтобы при необходимости повторить сборку
-# Ключ для списка адресов из кулдауна
-CTX_COOLDOWN_ITEMS: str = "cooldown_items"  # Коллекция пар (email, дата), отображаемых пользователю
-# Ключ для списка адресов с иностранными доменами
-CTX_FOREIGN_ITEMS: str = "foreign_items"  # Коллекция адресов, попавших под фильтр иностранных доменов
-# Ключ для хранения общего количества адресов в кулдауне
-CTX_COOLDOWN_TOTAL: str = "cooldown_total"  # Полное число адресов, попавших под ограничение 180 дней
-# Ключ для хранения общего количества иностранных адресов
-CTX_FOREIGN_TOTAL: str = "foreign_total"  # Полное число адресов с иностранными доменами
+# Backwards-compatible short aliases if потребуются альтернативные имена
+CB_EX_INIT: str = CB_EXAMPLES_INIT  # Сохраняем краткое имя для совместимости
+CB_EX_BACK: str = CB_EXAMPLES_BACK  # Сохраняем краткое имя для совместимости
+CB_EX_MORE_CD: str = CB_EXAMPLES_MORE_COOLDOWN  # Сохраняем краткое имя для совместимости
+CB_EX_MORE_FR: str = CB_EXAMPLES_MORE_FOREIGN  # Сохраняем краткое имя для совместимости
 
-__all__ = [  # Экспортируем доступные константы для других модулей
-    "CB_EXAMPLES_INIT",  # Делимся идентификатором кнопки открытия примеров
-    "CB_EXAMPLES_BACK",  # Делимся идентификатором кнопки возврата
-    "CB_EXAMPLES_MORE_COOLDOWN",  # Делимся идентификатором кнопки прокрутки кулдауна
-    "CB_EXAMPLES_MORE_FOREIGN",  # Делимся идентификатором кнопки прокрутки иностранных адресов
-    "CTX_SOURCE_KIND",  # Экспортируем ключ типа источника
-    "CTX_SOURCE_ID",  # Экспортируем ключ идентификатора источника
-    "CTX_COOLDOWN_ITEMS",  # Экспортируем ключ списка кулдауна
-    "CTX_FOREIGN_ITEMS",  # Экспортируем ключ списка иностранных адресов
-    "CTX_COOLDOWN_TOTAL",  # Экспортируем ключ общего количества кулдауна
-    "CTX_FOREIGN_TOTAL",  # Экспортируем ключ общего количества иностранных адресов
-]
+# Context keys describing the origin of examples
+CTX_SOURCE_KIND: str = "source_kind"  # Ключ контекста: источник данных ("parse" или "send")
+CTX_SOURCE_ID: str = "source_id"  # Ключ контекста: идентификатор источника данных
