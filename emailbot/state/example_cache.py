@@ -1,82 +1,69 @@
-"""In-memory cache for storing paginated examples per chat."""
+"""Caching helpers for storing example pagination context per chat."""  # Краткое описание назначения модуля
 
-from __future__ import annotations  # Разрешаем поздние аннотации для совместимости
+from __future__ import annotations  # Подключаем будущие аннотации для совместимости
 
-import random  # Используем для случайного перемешивания списков после полного обхода
-import time  # Импортируем время для реализации TTL
-from dataclasses import dataclass, field  # Используем dataclass для компактных контейнеров
-from typing import Dict, List, Tuple, TypeVar, Generic  # Импортируем типы для строгой типизации коллекций
+import random  # Используем для перемешивания списков примеров
+import time  # Используем для отслеживания времени жизни кэша
+from dataclasses import dataclass, field  # Используем dataclass для удобного хранения данных
+from typing import Dict, List  # Импортируем типы для статической проверки
 
-# Обозначаем тип элементов списка для пагинатора
-T = TypeVar("T")  # Универсальный параметр типа для списка примеров
-
-# Определяем время жизни кэша в секундах (2 часа)
-TTL_SECONDS: int = 2 * 60 * 60  # Гарантируем, что контекст не будет использоваться слишком долго
+EXAMPLES_TTL_SECONDS: int = 2 * 60 * 60  # 2 часа времени жизни контекста примеров
 
 
-@dataclass
-class ListPager(Generic[T]):  # Создаём универсальный пагинатор для списков
-    items: List[T]  # Храним полный список элементов для выдачи по частям
-    idx: int = 0  # Отслеживаем текущую позицию в списке для цикличного прохода
+@dataclass  # Используем декоратор dataclass для описания пагинатора
+class ListPager:
+    """Stateful pager that returns chunks of three items with reshuffle on wrap."""  # Описываем назначение пагинатора
 
-    def next_chunk(self, size: int = 3) -> List[T]:  # Возвращаем следующую порцию элементов
-        """Return ``size`` items from ``items`` with reshuffle after each cycle."""
+    items: List  # Список элементов для пагинации
+    idx: int = 0  # Текущая позиция в списке
 
-        if not self.items:  # Проверяем, есть ли вообще элементы для вывода
-            return []  # Возвращаем пустой список, если элементы отсутствуют
-        total: int = len(self.items)  # Фиксируем количество элементов для удобства
-        if self.idx >= total:  # Если достигли конца списка, начинаем заново
+    def next_chunk(self) -> List:
+        """Return the next trio of items, reshuffling when the end is reached."""  # Объясняем работу метода
+
+        if not self.items:  # Проверяем, есть ли вообще элементы
+            return []  # Возвращаем пустой список, если элементов нет
+        items_count: int = len(self.items)  # Вычисляем количество элементов в списке
+        if self.idx >= items_count:  # Проверяем, не достигли ли конца списка
             self.idx = 0  # Сбрасываем индекс на начало
-            random.shuffle(self.items)  # Перемешиваем элементы, чтобы примеры не повторялись подряд
-        end: int = min(self.idx + size, total)  # Вычисляем правую границу среза
-        chunk: List[T] = self.items[self.idx:end]  # Получаем нужный фрагмент списка
-        self.idx = end  # Сохраняем новую позицию для следующего вызова
+            random.shuffle(self.items)  # Перемешиваем элементы для разнообразия
+        end_index: int = min(self.idx + 3, items_count)  # Вычисляем индекс окончания выборки
+        chunk = self.items[self.idx:end_index]  # Берём подсписок из трёх элементов
+        self.idx = end_index  # Сдвигаем текущий индекс вперёд
         return chunk  # Возвращаем выбранные элементы
 
 
-@dataclass
-class ExamplesContext:  # Сохраняем информацию о примерах для конкретного чата
-    created_ts: float = field(default_factory=time.time)  # Фиксируем момент создания контекста
-    source_kind: str = "parse"  # Указываем тип источника («parse» или «send»)
-    source_id: str = ""  # Храним идентификатор отчёта, чтобы можно было восстановить контекст
-    cooldown_total: int = 0  # Общее количество адресов с ограничением 180 дней
-    foreign_total: int = 0  # Общее количество адресов с иностранными доменами
-    cooldown_pager: ListPager[Tuple[str, str]] = field(  # Пагинатор для пар (email, дата)
-        default_factory=lambda: ListPager([])
-    )
-    foreign_pager: ListPager[str] = field(  # Пагинатор для списка иностранных адресов
-        default_factory=lambda: ListPager([])
-    )
+@dataclass  # Используем dataclass для хранения полного контекста примеров
+class ExamplesContext:
+    """Container storing pagination state and metadata for examples."""  # Объясняем назначение структуры
 
-    def is_expired(self) -> bool:  # Проверяем, истёк ли срок действия контекста
-        """Return ``True`` if the context lifetime exceeded ``TTL_SECONDS``."""
+    created_ts: float = field(default_factory=lambda: time.time())  # Фиксируем время создания контекста
+    source_kind: str = "parse"  # Источник данных: "parse" или "send"
+    source_id: str = ""  # Произвольный идентификатор источника
+    cooldown_total: int = 0  # Количество адресов в кулдауне
+    foreign_total: int = 0  # Количество иностранных адресов
+    cooldown_pager: ListPager = field(default_factory=lambda: ListPager([]))  # Пагинатор для кулдауна
+    foreign_pager: ListPager = field(default_factory=lambda: ListPager([]))  # Пагинатор для иностранных адресов
 
-        return (time.time() - self.created_ts) > TTL_SECONDS  # Сравниваем прошедшее время с лимитом
+    def expired(self) -> bool:
+        """Return True when the context exceeds the allowed time-to-live."""  # Объясняем смысл функции
+
+        return (time.time() - self.created_ts) > EXAMPLES_TTL_SECONDS  # Сравниваем возраст контекста с TTL
 
 
-_CACHE: Dict[int, ExamplesContext] = {}  # Храним контексты по идентификатору чата
+_CACHE: Dict[int, ExamplesContext] = {}  # Глобальное хранилище контекстов по идентификатору чата
 
 
-def put_context(chat_id: int, ctx: ExamplesContext) -> None:  # Сохраняем контекст для чата
-    """Store ``ctx`` for ``chat_id`` replacing previous value."""
+def put_context(chat_id: int, ctx: ExamplesContext) -> None:
+    """Store the provided context for the given chat identifier."""  # Описываем назначение функции
 
-    _CACHE[chat_id] = ctx  # Запоминаем контекст в словаре
-
-
-def get_context(chat_id: int) -> ExamplesContext | None:  # Получаем контекст, если он ещё валиден
-    """Return stored context if present and not expired."""
-
-    ctx = _CACHE.get(chat_id)  # Пытаемся извлечь контекст из кэша
-    if ctx and ctx.is_expired():  # Проверяем наличие и актуальность контекста
-        _CACHE.pop(chat_id, None)  # Удаляем просроченный контекст, чтобы не расходовать память
-        return None  # Возвращаем None, поскольку данные устарели
-    return ctx  # Возвращаем найденный контекст или None, если его не было
+    _CACHE[chat_id] = ctx  # Сохраняем контекст в кэш
 
 
-__all__ = [  # Экспортируем публичные элементы модуля
-    "TTL_SECONDS",  # Делимся значением TTL для внешнего использования
-    "ListPager",  # Предоставляем класс пагинатора
-    "ExamplesContext",  # Предоставляем контейнер контекста примеров
-    "put_context",  # Экспортируем функцию записи контекста
-    "get_context",  # Экспортируем функцию чтения контекста
-]
+def get_context(chat_id: int) -> ExamplesContext | None:
+    """Retrieve the context for a chat identifier, removing expired entries."""  # Объясняем назначение функции
+
+    ctx = _CACHE.get(chat_id)  # Извлекаем контекст из кэша
+    if ctx and ctx.expired():  # Проверяем, существует ли контекст и не устарел ли он
+        _CACHE.pop(chat_id, None)  # Удаляем просроченный контекст
+        return None  # Возвращаем None для обозначения отсутствия данных
+    return ctx  # Возвращаем актуальный контекст
