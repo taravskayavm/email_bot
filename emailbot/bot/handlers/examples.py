@@ -45,7 +45,7 @@ def store_examples_context(chat_id: int, ctx: ExamplesContext) -> None:
 
     put_context(chat_id, ctx)  # Сохраняем контекст в общем кэше
 
-
+# Глушим легаси: перенаправляем любые устаревшие колбэки на актуальный сценарий примеров
 @router.callback_query(F.data.startswith("examples_") | (F.data == "show_examples"))
 async def legacy_examples_redirect(callback: CallbackQuery) -> None:
     """Перехватываем устаревшие колбэки и перенаправляем на актуальный сценарий."""

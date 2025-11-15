@@ -9,6 +9,8 @@ guarantees.
 from __future__ import annotations
 
 import os
+import re  # Используем регулярные выражения для валидации адресов e-mail
+import tempfile  # Применяем временные файлы для атомарной записи блок-листа
 from pathlib import Path
 from threading import RLock
 from typing import Iterable, Set
@@ -59,6 +61,9 @@ BLOCKED_EMAILS_PATH: Path = _BLOCKLIST_PATH
 
 _CACHE: Set[str] = set()
 _MTIME: float | None = None
+EMAIL_VALIDATION_RE = re.compile(  # Регулярное выражение для базовой проверки адреса без пробелов
+    r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+)  # Разрешаем любые символы кроме пробелов и повторных @, поддерживая Unicode
 
 
 def blocklist_path() -> Path:
@@ -83,13 +88,23 @@ def _read_blocklist_locked() -> Set[str]:
 
 
 def _write_blocklist_locked(items: Iterable[str]) -> None:
-    _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    values = [value.rstrip("\n") for value in items]
-    if values:
-        data = "\n".join(values) + "\n"
-    else:
-        data = ""
-    _BLOCKLIST_PATH.write_text(data, encoding="utf-8")
+    _BLOCKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)  # Убеждаемся, что каталог существует
+    fd, tmp_path = tempfile.mkstemp(  # Создаём временный файл для атомарной записи списка
+        prefix="blocked_",
+        suffix=".tmp",
+        dir=str(_BLOCKLIST_PATH.parent),
+    )
+    os.close(fd)  # Закрываем файловый дескриптор, чтобы писать в текстовом режиме
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:  # Открываем временный файл для записи
+            for value in items:  # Перебираем нормализованные адреса
+                handle.write(value.rstrip("\n") + "\n")  # Записываем каждый адрес отдельной строкой
+        os.replace(tmp_path, _BLOCKLIST_PATH)  # Атомарно заменяем основной файл временным
+    finally:
+        try:
+            os.remove(tmp_path)  # Удаляем временный файл, если он ещё существует
+        except FileNotFoundError:
+            pass  # Игнорируем отсутствие файла — это штатная ситуация после os.replace
 
 
 def _ensure_loaded_locked() -> None:
@@ -162,27 +177,42 @@ def _add_items_locked(items: Iterable[str]) -> int:
 def add_blocked(emails: Iterable[str], reason: str | None = None) -> int:
     """Add multiple emails to the block list."""
 
-    del reason  # retained for compatibility with older callers
-    with _LOCK:
-        return _add_items_locked(emails)
+    del reason  # Параметр поддерживается для совместимости со старыми вызовами
+    added_total = 0  # Счётчик успешно добавленных адресов
+    for email in emails:  # Перебираем переданную коллекцию адресов
+        success, status = add_blocked_email(email)  # Переиспользуем основную функцию добавления
+        if success and status == "added":  # Засчитываем только реальные добавления
+            added_total += 1  # Увеличиваем счётчик на единицу
+    return added_total  # Возвращаем количество новых адресов
 
 
-def add_blocked_email(email: str, reason: str | None = None) -> bool:
-    """Compatibility wrapper that adds a single email to the block list."""
+def add_blocked_email(email: str, reason: str | None = None) -> tuple[bool, str]:
+    """Добавить e-mail в блок-лист с пояснением результата."""
 
-    return add_to_blocklist(email, reason=reason)
+    del reason  # Параметр сохранён для обратной совместимости, но не используется
+    normalized = _normalize(email)  # Нормализуем адрес: тримминг и перевод в нижний регистр
+    if not normalized or not EMAIL_VALIDATION_RE.match(normalized):  # Проверяем базовую валидность адреса
+        return False, "invalid"  # Сообщаем вызывающему коду о некорректном формате
+    with _LOCK:  # Гарантируем потокобезопасность при чтении и записи файла
+        global _CACHE, _MTIME  # Указываем на изменение глобальных структур кэша
+        _ensure_loaded_locked()  # Загружаем актуальное состояние блок-листа при необходимости
+        if normalized in _CACHE:  # Проверяем, добавлялся ли адрес ранее
+            return False, "exists"  # Возвращаем информацию о наличии адреса без записи
+        updated = sorted(_CACHE | {normalized})  # Формируем отсортированное множество с новым адресом
+        _write_blocklist_locked(updated)  # Перезаписываем файл блок-листа через временный файл
+        _CACHE = set(updated)  # Обновляем кэш актуальным набором адресов
+        try:
+            _MTIME = _BLOCKLIST_PATH.stat().st_mtime  # Фиксируем новое время модификации файла
+        except FileNotFoundError:
+            _MTIME = None  # Если файл внезапно исчез, сбрасываем отметку времени
+    return True, "added"  # Сообщаем об успешном добавлении адреса
 
 
 def add_to_blocklist(email: str, reason: str | None = None) -> bool:
     """Add ``email`` to the block list if it is non-empty and absent."""
 
-    del reason  # compatibility placeholder
-    normalized = _normalize(email)
-    if not normalized:
-        return False
-    with _LOCK:
-        added = _add_items_locked([normalized])
-        return added > 0
+    result, _ = add_blocked_email(email, reason=reason)  # Переиспользуем новую функцию и игнорируем текстовый статус
+    return result  # Возвращаем только булево значение для старых вызовов
 
 
 def is_blocked(email: str) -> bool:
