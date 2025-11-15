@@ -21,7 +21,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
@@ -113,6 +113,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     Update,
 )
+from telegram.constants import ChatAction  # Специальное действие «бот печатает», которым пингуем чат во время heartbeat
 from telegram.error import BadRequest
 from telegram.ext import ApplicationHandlerStop, ContextTypes, ConversationHandler
 
@@ -168,6 +169,164 @@ def _message_has_url(message: Message | None, raw_text: str | None) -> bool:
 
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
+
+
+# ===== Heartbeat для долгих задач =====
+class _Heartbeat:
+    """Лёгкий «пульс» для длинных операций, удерживающий пользователя в курсе."""
+
+    def __init__(self, bot, chat_id: int) -> None:
+        self.bot = bot  # Сохраняем ссылку на телеграм-бота для отправки сигналов
+        self.chat_id = chat_id  # Запоминаем идентификатор чата, куда нужно отправлять действия
+        self.status_message: Message | None = None  # Держим текущий статус для ненавязчивых обновлений
+        self._base_status_text: str = ""  # Запоминаем исходный текст сообщения, чтобы не накапливать «шум»
+        self._stop_event = asyncio.Event()  # Асинхронное событие, сообщающее о завершении heartbeat
+        self._task: asyncio.Task[None] | None = None  # Фоновая задача, испускающая heartbeat-сигналы
+        self._last_progress = time.monotonic()  # Запоминаем момент последнего прогресса по таймеру
+        self._dot_cycle = ("·", "··", "···")  # Набор точек для простого визуального индикатора
+        self._dot_index = 0  # Индекс текущего значения в цикле точек
+
+    def touch(self) -> None:
+        """Зарегистрировать факт прогресса операции, сбрасывая таймер ожидания."""
+
+        self._last_progress = time.monotonic()  # Обновляем отметку, подтверждая активность долгой задачи
+
+    def set_status_message(self, message: Message | None) -> None:
+        """Запомнить сообщение статуса, чтобы при необходимости обновлять его текст."""
+
+        self.status_message = message  # Сохраняем сообщение, которым можно делиться с пользователем
+        self._base_status_text = (message.text or "") if message else ""  # Фиксируем исходный текст для перерисовки
+
+    async def start(self) -> None:
+        """Запустить фоновую корутину, периодически отправляющую действия в чат."""
+
+        if self._task and not self._task.done():  # Если задача уже активна, повторно не запускаем
+            return
+        self._stop_event.clear()  # Сбрасываем событие остановки перед новым запуском
+
+        async def _runner() -> None:
+            while not self._stop_event.is_set():  # Цикл работает, пока нас явно не остановили
+                now = time.monotonic()  # Фиксируем текущее время
+                elapsed = now - self._last_progress  # Считаем длительность без прогресса
+                try:
+                    await self.bot.send_chat_action(  # Посылаем действие «печатает», чтобы Telegram продлевал ожидание
+                        chat_id=self.chat_id,
+                        action=ChatAction.TYPING,
+                    )
+                    if elapsed > settings.HEARTBEAT_SEC and self.status_message:
+                        await self._refresh_status_message()  # Обновляем статус, если долго нет новостей
+                    if elapsed > settings.TASK_NOPROGRESS_TIMEOUT_SEC:
+                        self._last_progress = time.monotonic()  # Сбрасываем таймер, избегая накопления задержки
+                except Exception:
+                    pass  # Любые ошибки heartbeat не должны обрывать основной процесс
+                await asyncio.sleep(max(settings.HEARTBEAT_SEC, 1.0))  # Засыпаем до следующего тика heartbeat
+
+        self._task = asyncio.create_task(  # Создаём фоновую асинхронную задачу с петлёй heartbeat
+            _runner(),
+            name="emailbot-heartbeat",
+        )
+
+    async def _refresh_status_message(self) -> None:
+        """Обновить текст статусного сообщения, добавив ненавязчивый индикатор активности."""
+
+        message = self.status_message  # Берём текущий объект сообщения
+        if not message:
+            return
+        dot = self._dot_cycle[self._dot_index % len(self._dot_cycle)]  # Выбираем очередное сочетание точек
+        self._dot_index += 1  # Увеличиваем индекс, чтобы индикатор «двигался»
+        base_text = self._base_status_text  # Получаем исходный текст сообщения, если он был
+        new_text = f"{base_text}\n{dot}" if base_text else dot  # Формируем обновлённый текст
+        try:
+            self.status_message = await message.edit_text(new_text)  # Редактируем сообщение и запоминаем новое
+        except Exception:
+            pass  # Если редактирование не удалось, просто игнорируем ошибку
+
+    async def stop(self) -> None:
+        """Остановить фоновый heartbeat и дождаться завершения задачи."""
+
+        self._stop_event.set()  # Сигнализируем задаче, что пора завершаться
+        if self._task:
+            self._task.cancel()  # Инициируем отмену, чтобы корутина вышла быстрее
+            with suppress(Exception):
+                await self._task  # Дожидаемся закрытия задачи, не продлевая её жизнь
+
+
+async def _with_heartbeat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    runner: Callable[[Callable[[], None]], Awaitable[object | None]],
+    *,
+    status_message: str | None = None,
+) -> object | None:
+    """Обёртка для длительных операций: запускает heartbeat и передаёт коллбек прогресса."""
+
+    bot = context.bot  # Извлекаем объект бота, чтобы отправлять сообщения и действия
+    chat = update.effective_chat  # Получаем чат, где нужно поддерживать пользователя
+    if not chat:
+        return await runner(lambda: None)  # Без чата просто выполняем операцию напрямую
+    chat_id = chat.id  # Определяем целевой идентификатор чата для heartbeat
+    heartbeat = _Heartbeat(bot, chat_id)  # Создаём heartbeat для текущего чата
+
+    if status_message is not None:
+        try:
+            status = await bot.send_message(
+                chat_id=chat_id,
+                text=status_message,
+            )  # Отправляем первичное сообщение, объясняющее, что идёт обработка
+        except Exception:
+            status = None  # Если отправка не удалась, продолжаем без статуса
+        heartbeat.set_status_message(status)  # Запоминаем сообщение статуса для будущих обновлений
+
+    await heartbeat.start()  # Запускаем heartbeat до начала длительной операции
+    try:
+        result = await runner(heartbeat.touch)  # Выполняем пользовательский код, передавая способ отмечать прогресс
+        return result  # Возвращаем результат выполнения, чтобы сохранить совместимость
+    finally:
+        await heartbeat.stop()  # Независимо от исхода останавливаем heartbeat, чтобы не держать задачу навечно
+
+
+async def _handle_pdf_long(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    file_path: str,
+    parse_pdf: Callable[[str, Callable[[], None]], Awaitable[object | None]],
+) -> object | None:
+    """Обработать загрузку PDF, передавая коллбек прогресса в функцию парсинга."""
+
+    async def _runner(progress_cb: Callable[[], None]) -> object | None:
+        return await parse_pdf(  # Вызываем фактический парсер, прокидывая сигнал о прогрессе
+            file_path,
+            progress_cb,
+        )
+
+    return await _with_heartbeat(
+        update,
+        context,
+        _runner,
+        status_message="🔎 Обрабатываю PDF…",
+    )  # Оборачиваем обработку PDF, чтобы пользователь видел heartbeat
+
+
+async def _handle_zip_long(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    file_path: str,
+    parse_zip: Callable[[str, Callable[[], None]], Awaitable[object | None]],
+) -> object | None:
+    """Обработать загрузку ZIP, сообщая пользователю о ходе работы через heartbeat."""
+
+    async def _runner(progress_cb: Callable[[], None]) -> object | None:
+        return await parse_zip(  # Делегируем реальную работу обработчику архива
+            file_path,
+            progress_cb,
+        )
+
+    return await _with_heartbeat(
+        update,
+        context,
+        _runner,
+        status_message="🗂️ Обрабатываю архив…",
+    )  # Запускаем heartbeat для парсинга архива
 
 
 def _extract_emails_loose(text: str) -> list[str]:
@@ -2685,7 +2844,10 @@ async def _compose_report_and_save(
         {
             "total_found": len(allowed_all),
             "to_send": max(len(filtered) - cooldown_blocked, 0),
-            "suspicious": len(suspicious_numeric),
+            "suspicious": len(suspicious_numeric),  # Сохраняем прежний ключ для обратной совместимости
+            "suspicious_numeric_localpart": len(  # Продублируем метрику для отчёта render_summary
+                suspicious_numeric
+            ),
             "cooldown_180d": cooldown_blocked,
             "foreign_domain": len(foreign),
             "pages_skipped": 0,
@@ -2795,6 +2957,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not doc:
         return
 
+    chat = update.effective_chat  # Получаем чат, в котором нужно поддерживать heartbeat
+    bot = getattr(context, "bot", None)  # Забираем бота из контекста, если он предоставлен инфраструктурой
+    if chat and bot:  # Проверяем, доступны ли и чат, и объект бота
+        heartbeat_controller = _Heartbeat(  # Создаём heartbeat-контроллер для текущего чата
+            bot,  # Передаём объект бота для отправки действий
+            chat.id,  # Используем идентификатор чата, чтобы адресовать heartbeat
+        )
+    else:  # Если чат или бот недоступны (например, в тестовой среде)
+        heartbeat_controller = None  # Для отсутствующего чата heartbeat не запускаем
+
+    if heartbeat_controller:
+        await heartbeat_controller.start()  # Запускаем heartbeat заранее, чтобы пользователь видел активность
+
+    async def _heartbeat_progress() -> None:
+        """Отметить прогресс долгой операции и обновить watchdog-и."""
+
+        if heartbeat_controller:
+            heartbeat_controller.touch()  # Обновляем отметку активности для визуального heartbeat
+        await heartbeat()  # Сообщаем watch-dog'у, что задача не зависла
+
     clear_stop()
     job_name = _build_parse_task_name(update, "file")
     current_task = asyncio.current_task()
@@ -2807,13 +2989,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_path: str | None = None
 
     try:
-        await heartbeat()
+        await _heartbeat_progress()  # Сообщаем, что начали скачивание файла
         progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        if heartbeat_controller:
+            heartbeat_controller.set_status_message(progress_msg)  # Привязываем статусное сообщение к heartbeat
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             file_path = await _download_file(update, DOWNLOAD_DIR)
-            await heartbeat()
+            await _heartbeat_progress()  # Фиксируем прогресс после успешной загрузки файла
         except Exception as e:
             try:
                 if progress_msg:
@@ -2851,7 +3035,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 allowed, extracted_files, loose, stats = await extract_emails_from_zip(
                     file_path
                 )
-                await heartbeat()
+                await _heartbeat_progress()  # Отмечаем прогресс после разбора архива
                 allowed_all.update(allowed)
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
@@ -2862,7 +3046,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     extract_from_uploaded_file,
                     file_path,
                 )
-                await heartbeat()
+                await _heartbeat_progress()  # Обновляем пульс после анализа файла
                 allowed_all.update(allowed)
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
@@ -2918,6 +3102,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     finally:
         if current_task:
             unregister_task(job_name, current_task)
+        if heartbeat_controller:
+            await heartbeat_controller.stop()  # Останавливаем heartbeat, чтобы не оставлять фоновые задачи
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
@@ -2952,7 +3138,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_msg.edit_text("✅ Готово. Формирую превью…")
     except Exception:
         pass
-    await heartbeat()
+    await _heartbeat_progress()  # Сообщаем о прогрессе перед построением отчёта
 
     report = await _compose_report_and_save(
         context,
@@ -2963,7 +3149,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         total_footnote,
         blocked_after_parse=blocked_after_parse,
     )
-    await heartbeat()
+    await _heartbeat_progress()  # Фиксируем, что отчёт сформирован
 
     filename = (doc.file_name or "").lower()
     if filename.endswith(".pdf"):
@@ -2991,7 +3177,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     logging.info("[FLOW] done")
     await _send_combined_parse_response(update.message, context, report, state)
-    await heartbeat()
+    await _heartbeat_progress()  # Сообщаем об успешном завершении обработки
 
 
 async def refresh_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
