@@ -25,6 +25,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
+from emailbot.reporting import summarize_period_stats  # Импортируем подсчёт статистики отправок из AUDIT-логов
+from emailbot.ui.messages import format_period_report  # Импортируем форматирование текстового отчёта по периодам
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -2472,72 +2474,31 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def get_report(period: str = "day") -> dict[str, object]:
-    """Return statistics of sent e-mails for the given period in REPORT_TZ."""
+    """Получить агрегированные показатели отправок за указанный период."""
 
-    stats: dict[str, object] = {
-        "sent": 0,
-        "errors": 0,
-        "tz": REPORT_TZ,
-        "period": period,
+    try:
+        period_stats = summarize_period_stats(period)  # Получаем агрегированные данные из AUDIT-логов
+    except Exception as exc:  # Защищаемся от неожиданных ошибок доступа к журналу
+        logger.exception("summarize_period_stats failed: %s", exc)  # Логируем исключение для диагностики
+        return {
+            "period": period,  # Возвращаем исходный период для контекста
+            "sent": 0,  # Нулевое значение успешных отправок при ошибке
+            "errors": 0,  # Нулевое значение ошибок при ошибке
+            "tz": REPORT_TZ,  # Сообщаем используемую временную зону
+            "message": "Не удалось сформировать отчёт.",  # Возвращаем понятное сообщение пользователю
+        }
+
+    report_text = format_period_report(period_stats)  # Формируем текстовый отчёт для пользователя
+
+    return {
+        "period": period_stats.period,  # Фиксируем фактический период из агрегатора
+        "sent": period_stats.total_success,  # Количество успешных отправок за период
+        "errors": period_stats.total_failed,  # Количество ошибок отправки за период
+        "tz": REPORT_TZ,  # Используемую временную зону оставляем прежней для совместимости
+        "message": report_text,  # Готовый текст отчёта для отображения
+        "date_start": period_stats.date_start.isoformat(),  # Добавляем дату начала периода в ISO-формате
+        "date_end": period_stats.date_end.isoformat(),  # Добавляем дату завершения периода в ISO-формате
     }
-
-    if period == "day":
-        ok, err = report_service.summarize_day_local()
-        stats.update({
-            "sent": ok,
-            "errors": err,
-            "tz": report_service.REPORT_TZ_NAME,
-        })
-        if ok == 0 and err == 0:
-            stats["message"] = "Нет данных о рассылках."
-        return stats
-
-    if not os.path.exists(LOG_FILE):
-        stats["message"] = "Нет данных о рассылках."
-        return stats
-
-    tz = ZoneInfo(REPORT_TZ)
-    now_local = datetime.now(tz)
-    if period == "day":
-        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        delta_days = {"week": 7, "month": 30, "year": 365}.get(period, 1)
-        start_local = now_local - timedelta(days=delta_days)
-    end_local = now_local
-
-    cnt_ok = 0
-    cnt_err = 0
-    with open(LOG_FILE, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if not row:
-                continue
-            ts_raw = (row.get("last_sent_at") or "").strip()
-            if not ts_raw:
-                continue
-            try:
-                dt = datetime.fromisoformat(ts_raw)
-            except Exception:
-                continue
-            if dt.tzinfo is None:
-                dt_local = dt.replace(tzinfo=tz)
-            else:
-                dt_local = dt.astimezone(tz)
-            if period == "day":
-                include = start_local <= dt_local <= end_local and dt_local.date() == now_local.date()
-            else:
-                include = start_local <= dt_local <= end_local
-            if not include:
-                continue
-            st = (row.get("status") or "").strip().lower()
-            if st in {"ok", "sent", "success"}:
-                cnt_ok += 1
-            else:
-                cnt_err += 1
-
-    stats["sent"] = cnt_ok
-    stats["errors"] = cnt_err
-    return stats
 
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2553,15 +2514,12 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "year": "Отчёт за год",
     }
     report = get_report(period)
-    message = report.get("message")
-    if message:
-        body = str(message)
-    else:
-        body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
+    message_text = str(report.get("message") or "Нет данных о рассылках.")  # Получаем текст отчёта или запасное сообщение
     title = mapping.get(period, period)
-    if period == "day":
-        title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
-    await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
+    await _safe_edit_message(  # Обновляем сообщение в чатe готовым отчётом
+        query,
+        text=f"📊 {title}\n\n{message_text}",  # Добавляем визуальное оформление и сам отчёт
+    )
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

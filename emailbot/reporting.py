@@ -11,17 +11,19 @@ import os
 # Поддерживаем как текущие отметки времени, так и вычисления периодов отчётности.
 from dataclasses import dataclass
 # Работаем с датами и временными диапазонами отчётов.
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta  # Импортируем базовые классы дат и периодов
 # Оперируем путями к файлам статистики и конфигурации.
 from pathlib import Path
 # Используем расширенные типы аннотаций для повышения читаемости кода.
-from typing import Dict, Iterable, List, Mapping, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, TYPE_CHECKING, Tuple  # Добавляем тип Any для произвольных полей аудита
 
 # Задаём тайм-зону Москвы для корректного сопоставления событий.
 from zoneinfo import ZoneInfo
 
 # Импортируем утилиту для преобразования кодов направлений в названия.
 from emailbot.directions import resolve_direction_title
+# Подтягиваем глобальные настройки для доступа к каталогу аудита отправок.
+from emailbot import settings
 # Используем проверку блок-листа для подсчёта заблокированных адресов.
 from emailbot.suppress_list import is_blocked
 # Пишем статистику отправок в JSONL-файл атомарно.
@@ -268,43 +270,42 @@ def _parse_event_timestamp(event: Mapping[str, object]) -> datetime | None:
       "timestamp", "ts", "time"
     """
 
-    # Пытаемся найти значение временной отметки в поддерживаемых полях.
-    raw = event.get("timestamp") or event.get("ts") or event.get("time")
+    # Пытаемся найти значение временной отметки во всех известных полях аудита.
+    raw = (
+        event.get("timestamp")  # Каноническое поле timestamp
+        or event.get("ts")  # Сокращённый вариант ts
+        or event.get("time")  # Историческое поле time
+        or event.get("sent_at")  # Дополнительное поле sent_at в AUDIT-логах
+    )
     # Если ничего не найдено, возвращаем None.
     if not raw:
         return None
-    # Приводим значение к строке и удаляем пробелы.
-    text = str(raw).strip()
-    # Проверяем, что после очистки строка не пуста.
-    if not text:
-        return None
-    # Рассматриваем вариант строки с символом 'Z' для обозначения UTC.
-    if text.endswith("Z"):
-        # Удаляем символ 'Z', потому что fromisoformat не поддерживает его напрямую.
-        text = text[:-1]
-        # Пытаемся разобрать строку с учётом удалённого индикатора UTC.
+    # Поддерживаем числовые отметки времени (Unix timestamp).
+    if isinstance(raw, (int, float)):  # Проверяем, является ли значение числом
         try:
-            # Пробуем разобрать строку как ISO 8601.
-            dt_obj = datetime.fromisoformat(text)
-            # Если временная зона не указана, явно присваиваем UTC.
-            if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+            return datetime.fromtimestamp(float(raw), tz=MOSCOW_TZ)  # Конвертируем секунды в datetime в московской зоне
         except Exception:
-            # При любой ошибке парсинга возвращаем None.
-            return None
-    else:
-        # Аналогично выполняем попытку парсинга строки без символа 'Z'.
-        try:
-            # Аналогично разбираем строку без символа 'Z'.
-            dt_obj = datetime.fromisoformat(text)
-            # Если временная зона отсутствует, считаем отметку UTC.
-            if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=timezone.utc)
-        except Exception:
-            # При ошибке возвращаем None для пропуска события.
-            return None
-    # Возвращаем нормализованное значение даты и времени.
-    return dt_obj
+            return None  # При ошибке преобразования возвращаем None
+
+    # Преобразуем значение к строке и удаляем пробелы вокруг.
+    text = str(raw).strip()  # Приводим значение к строке для разбора
+    # Проверяем, что после очистки строка не стала пустой.
+    if not text:  # Если строка пуста, дальнейший разбор невозможен
+        return None  # Возвращаем None, чтобы пропустить событие
+
+    # Преобразуем суффикс 'Z' в совместимый формат с offset.
+    if text.endswith("Z"):  # Проверяем, указывает ли строка на UTC через 'Z'
+        text = f"{text[:-1]}+00:00"  # Заменяем 'Z' на явное смещение для fromisoformat
+
+    try:
+        dt_obj = datetime.fromisoformat(text)  # Пытаемся распарсить ISO-строку
+    except Exception:
+        return None  # При ошибке парсинга игнорируем событие
+
+    if dt_obj.tzinfo is None:  # Если временная зона не указана
+        dt_obj = dt_obj.replace(tzinfo=MOSCOW_TZ)  # Присваиваем московский часовой пояс
+
+    return dt_obj.astimezone(MOSCOW_TZ)  # Возвращаем отметку времени, нормализованную к московской зоне
 
 
 def _event_direction_code(event: Mapping[str, object]) -> str | None:
@@ -314,8 +315,8 @@ def _event_direction_code(event: Mapping[str, object]) -> str | None:
     Каноническое поле — "group". Если его нет или оно пустое, направление не учитываем.
     """
 
-    # Получаем значение поля group, если оно присутствует.
-    value = event.get("group")
+    # Получаем значение кода направления из нескольких возможных полей.
+    value = event.get("group") or event.get("direction")  # Поддерживаем старое поле group и новое поле direction
     # Если значение пустое, прекращаем обработку.
     if not value:
         return None
@@ -336,17 +337,17 @@ def _event_success_failed(event: Mapping[str, object]) -> Tuple[int, int]:
     """
 
     # Извлекаем поле со статусом обработки отправки.
-    raw = event.get("result") or event.get("status")
+    raw = event.get("result") or event.get("status") or event.get("state")  # Учитываем несколько полей статуса
     # Если поле отсутствует, возвращаем нулевые счётчики.
     if not raw:
         return 0, 0
     # Приводим значение к нижнему регистру для сопоставления.
     value = str(raw).strip().lower()
     # Для позитивных значений считаем событие успешным.
-    if value in {"sent", "success", "ok"}:
+    if value in {"sent", "success", "ok", "done"}:  # Расширяем набор успешных статусов
         return 1, 0
     # Для негативных значений считаем событие ошибочным.
-    if value in {"failed", "error", "bounce"}:
+    if value in {"failed", "error", "bounce", "err"}:  # Учитываем сокращённый статус ошибки
         return 0, 1
     # Во всех остальных случаях событие не учитываем.
     return 0, 0
@@ -405,52 +406,54 @@ def _period_bounds(period: str, now: datetime | None = None) -> Tuple[datetime, 
 
 def _default_send_stats_path() -> Path:
     """
-    Путь к send_stats.jsonl относительно корня проекта.
+    Получить каталог с AUDIT-логами отправок из глобальных настроек.
 
-    При необходимости можно заменить на конфиг из config.py.
+    Функция сохраняет историческое имя, чтобы не менять внешние вызовы.
     """
 
-    # Определяем корень проекта по положению текущего файла.
-    project_root = Path(__file__).resolve().parent.parent
-    # Формируем полный путь к файлу статистики отправок.
-    return project_root / "send_stats.jsonl"
+    return Path(settings.AUDIT_DIR).expanduser()  # Преобразуем путь из настроек к объекту Path
 
 
 def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, object]]:
     """
-    Пройти по событиям отправки из send_stats.jsonl.
+    Пройти по событиям отправки из AUDIT-логов формата JSONL.
 
-    Формат: JSON Lines, по одному объекту на строку.
+    Поддерживаются как конкретные файлы, так и директории с множеством файлов.
     """
 
-    # Приводим аргумент пути к объекту Path, используя значение по умолчанию при необходимости.
-    stats_path = Path(path) if path is not None else _default_send_stats_path()
-    # Проверяем наличие файла и сразу возвращаем пустой генератор при его отсутствии.
-    if not stats_path.exists():
-        # Возвращаем пустой список, если файл не найден.
-        return []
+    audit_root = Path(path) if path is not None else _default_send_stats_path()  # Определяем источник данных аудита
+    if not audit_root.exists():  # Проверяем, существует ли путь
+        return []  # Возвращаем пустой список, если путь недоступен
 
-    # Определяем вложенную функцию-генератор для ленивой обработки строк файла.
+    files: List[Path] = []  # Готовим список файлов аудита для чтения
+    if audit_root.is_file():  # Если передан конкретный файл
+        files = [audit_root.resolve()]  # Используем только этот файл
+    elif audit_root.is_dir():  # Если передана директория
+        candidates: List[Path] = []  # Временный список найденных файлов
+        for pattern in ("*.jsonl", "*audit*.jsonl"):  # Перебираем типовые маски файлов аудита
+            candidates.extend(sorted(audit_root.glob(pattern)))  # Добавляем найденные файлы по каждой маске
+        files = sorted({candidate.resolve() for candidate in candidates})  # Убираем дубликаты и сортируем файлы
+    else:  # Для остальных типов путей (например, FIFO) данных нет
+        return []  # Завершаем без результатов
+
     def _gen() -> Iterable[Mapping[str, object]]:
-        # Открываем файл в кодировке UTF-8 для корректного чтения русских символов.
-        with stats_path.open("r", encoding="utf-8") as file_obj:
-            for line in file_obj:
-                # Удаляем перевод строки и пропускаем пустые строки.
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    # Преобразуем строку JSON в объект Python.
-                    obj = json.loads(stripped)
-                except Exception:
-                    # При ошибке парсинга пропускаем конкретную строку.
-                    continue
-                # Убеждаемся, что получили словарь, прежде чем отдавать результат.
-                if isinstance(obj, dict):
-                    yield obj
+        for file_path in files:  # Перебираем все подготовленные файлы
+            try:
+                with file_path.open("r", encoding="utf-8") as file_obj:  # Открываем файл в UTF-8
+                    for line in file_obj:  # Итерируем строки файла
+                        stripped = line.strip()  # Удаляем перевод строки и пробелы
+                        if not stripped:  # Пропускаем пустые строки
+                            continue  # Переходим к следующей строке
+                        try:
+                            obj: Any = json.loads(stripped)  # Преобразуем строку JSON в Python-объект
+                        except Exception:
+                            continue  # Игнорируем строки с ошибками парсинга
+                        if isinstance(obj, dict):  # Проверяем, что распарсили словарь
+                            yield obj  # Возвращаем событие вызывающему коду
+            except Exception:
+                continue  # Игнорируем ошибки чтения отдельных файлов, чтобы обработать остальные
 
-    # Возвращаем генератор для последующей итерации вне функции.
-    return _gen()
+    return _gen()  # Возвращаем ленивый генератор событий
 
 
 def summarize_period_stats(period: str) -> PeriodStats:
@@ -493,10 +496,9 @@ def summarize_period_stats(period: str) -> PeriodStats:
             continue
 
         # Получаем название направления по коду.
-        title = resolve_direction_title(code)
-        # Игнорируем направления, не известные в справочнике.
-        if not title:
-            continue
+        title = resolve_direction_title(code)  # Пробуем найти человеко-читаемое название направления
+        if not title:  # Если направление неизвестно справочнику
+            title = code  # Используем код направления как название по умолчанию
 
         # Определяем, успешна ли отправка.
         success, failed = _event_success_failed(event)
