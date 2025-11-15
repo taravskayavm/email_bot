@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-import os
+import os  # Работаем с переменными окружения и путями
+from typing import Set  # Тип множества для читаемых аннотаций
 import sys
 import logging
 
@@ -114,11 +115,30 @@ SEND_DELAY_SEC: float = _get_float(  # Читаем задержку между 
     6.0,  # Значение задержки по умолчанию в секундах
 )
 
-# Каталог с AUDIT-логами отправок (jsonl)
 AUDIT_DIR: str = os.getenv(  # Извлекаем путь к каталогу аудита из окружения
     "EMAILBOT_AUDIT_DIR",  # Имя переменной окружения с путём к каталогу аудита
     "var",  # Значение по умолчанию — локальный каталог var
 )
+
+LOCAL_TLDS: Set[str] = {  # Множество «локальных» доменных зон верхнего уровня
+    s.strip().lower()  # Нормализуем каждое значение: удаляем пробелы, приводим к нижнему регистру
+    for s in os.getenv("LOCAL_TLDS", ".ru,.рф,.su,.com").split(",")  # Получаем список TLD из окружения или используем дефолт
+    if s.strip()  # Исключаем пустые элементы
+}
+
+LOCAL_DOMAINS_EXTRA: Set[str] = {  # Множество дополнительных доменов, которые считаем «локальными»
+    s.strip().lower()  # Приводим доменное имя к удобному для сравнения виду
+    for s in os.getenv("LOCAL_DOMAINS_EXTRA", "gmail.com").split(",")  # Читаем список доменов из окружения
+    if s.strip()  # Пропускаем пустые значения
+}
+
+FORCE_FOREIGN_DOMAINS: Set[str] = {  # Домены, которые всегда считаем иностранными независимо от TLD
+    s.strip().lower()  # Нормализуем домен для корректного сравнения
+    for s in os.getenv("FORCE_FOREIGN_DOMAINS", "ion.ru").split(",")  # Загружаем список доменов из окружения с дефолтом
+    if s.strip()  # Игнорируем пустые элементы
+}
+
+TEST_MODE: bool = os.getenv("EMAILBOT_TEST_MODE", "0") == "1"  # Флаг для облегчённого тестового режима
 
 
 try:
