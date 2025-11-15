@@ -17,6 +17,7 @@ from aiogram.types import BotCommand
 from emailbot.run_control import clear_stop, request_stop
 from emailbot.utils import warn_duplicate_env_keys
 from emailbot.utils.single_instance import single_instance_lock
+from emailbot.bot import app_lifecycle  # Управляем внутренними сервисами (watchdog и др.)
 
 try:  # pragma: no cover - optional dependency
     from dotenv import load_dotenv
@@ -194,7 +195,8 @@ async def main() -> None:
     except Exception as exc:
         logger.info("Webhook reset skipped: %s", exc)
 
-    stop_event = asyncio.Event()
+    await app_lifecycle.on_app_start()  # Инициализируем фоновые сервисы перед запуском поллинга
+    stop_event = asyncio.Event()  # Событие, сигнализирующее о необходимости остановки бота
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -210,15 +212,16 @@ async def main() -> None:
                 allowed_updates=None,
                 polling_timeout=polling_timeout,
             )
-        )
-        polling.add_done_callback(lambda _: (request_stop(), stop_event.set()))
-        await stop_event.wait()
+        )  # Запускаем основной поллинг aiogram в отдельной задаче
+        polling.add_done_callback(lambda _: (request_stop(), stop_event.set()))  # Останавливаем цикл при завершении задачи
+        await stop_event.wait()  # Ждём внешнего сигнала остановки
         if not polling.done():
-            polling.cancel()
+            polling.cancel()  # При необходимости мягко завершаем задачу поллинга
         try:
-            await polling
+            await polling  # Дожидаемся корректного завершения задачи
         except asyncio.CancelledError:
-            pass
+            pass  # Игнорируем штатное прерывание при отмене
+    await app_lifecycle.on_app_stop()  # Завершаем фоновые сервисы после выхода из поллинга
 
 
 if __name__ == "__main__":
