@@ -72,6 +72,10 @@ from emailbot import compat  # EBOT-105
 compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
+try:  # Загружаем watchdog-touch ранним импортом, чтобы не было гонок при запуске
+    from emailbot.progress_watchdog import touch as watchdog_touch  # Позволяем пометить старт процесса
+except Exception:  # Не прерываем загрузку, даже если модуль недоступен
+    watchdog_touch = None  # В тестовом окружении watchdog может отсутствовать
 
 # Default watchdog stall timeout in milliseconds (configurable via env).
 WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
@@ -500,6 +504,11 @@ def main() -> None:
     )
     t.start()
     try:
+        if watchdog_touch is not None:  # Перед запуском поллинга делаем явный взмах watchdog'а
+            try:
+                watchdog_touch("app-start")  # Фиксируем начало работы, чтобы сторож не срабатывал сразу
+            except Exception:
+                pass  # Лишние ошибки не должны мешать старту бота
         app.run_polling()
     finally:
         stop_event.set()
