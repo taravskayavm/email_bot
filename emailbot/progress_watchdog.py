@@ -9,7 +9,28 @@ from pathlib import Path
 
 import faulthandler
 
-__all__ = ["heartbeat", "heartbeat_now", "start_watchdog", "start_heartbeat_pulse"]
+from emailbot import runtime_progress  # Повторно используем глобальный маркер прогресса
+
+__all__ = [  # Чётко объявляем публичные символы, чтобы облегчить импорт вызывающим модулям
+    "heartbeat",  # Экспортируем корутину обновления отметки из async-контекста
+    "heartbeat_now",  # Оставляем синхронную версию для to_thread/IO-кода
+    "start_watchdog",  # Позволяем запускать сторож для отдельных задач
+    "start_heartbeat_pulse",  # Отдаём вспомогательную корутину периодического heartbeat
+    "touch",  # Новая обёртка для глобального прогресса
+    "last_touch",  # Экспонируем чтение таймштампа глобального прогресса
+]
+
+
+def touch(reason: str = "heartbeat") -> None:  # Объявляем обёртку для обновления прогресса
+    """Проксируем обновление прогресса в общий потокобезопасный маркер."""
+
+    runtime_progress.touch(reason)  # Доверяем глобальному helper'у вести таймштамп
+
+
+def last_touch() -> float:  # Объявляем функцию для получения момента последней активности
+    """Возвращаем время последней активности, зафиксированной runtime_progress."""
+
+    return runtime_progress.last_touch()  # Забираем сохранённый таймштамп без дублирования состояния
 
 _last_beat: float = 0.0
 _lock = asyncio.Lock()
