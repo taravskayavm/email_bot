@@ -31,6 +31,7 @@ from emailbot.utils.file_email_extractor import ExtractError, extract_emails_fro
 from emailbot.ui.messages import format_parse_summary
 from emailbot.suppress_list import refresh_if_changed, is_blocked as suppress_is_blocked
 from emailbot.bot.heartbeat import Heartbeat  # Управляем пульсом длительных операций
+from emailbot import runtime_progress  # Делимся состоянием с внутренним watchdog
 
 router = Router()
 URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
@@ -321,6 +322,7 @@ async def _process_url_callback(
     )
     await heartbeat.start()  # Начинаем регулярно отправлять действие «typing»
     try:
+        runtime_progress.touch("ingest-url-start")  # Фиксируем начало длительной операции URL-инжеста
         ok, stats = await ingest_url(url, deep=deep, limit_pages=limit_pages)
     except Exception as exc:  # pragma: no cover - network errors are variable
         await callback.message.answer(
@@ -329,6 +331,7 @@ async def _process_url_callback(
         await callback.answer()
         return
     finally:
+        runtime_progress.touch("ingest-url-stop")  # Фиксируем завершение операции URL-инжеста
         await heartbeat.stop()  # В любом случае завершаем heartbeat
     filtered = _prepare_filtered(ok)
     summary = _build_summary(filtered, stats, deep=deep, limit_pages=limit_pages)
@@ -440,6 +443,7 @@ async def handle_document(msg: types.Message) -> None:
     )
     await heartbeat.start()  # Запускаем регулярные chat action «typing»
     try:
+        runtime_progress.touch("ingest-file-start")  # Сообщаем о запуске CPU-связанного разбора файла
         ok, rejects, warn = await asyncio.to_thread(
             extract_emails_from_bytes,
             data,
@@ -452,6 +456,7 @@ async def handle_document(msg: types.Message) -> None:
         await ack.edit_text("Произошла ошибка при разборе файла.")
         return
     finally:
+        runtime_progress.touch("ingest-file-stop")  # Фиксируем завершение разбора файла
         await heartbeat.stop()  # Останавливаем heartbeat даже при ошибках
 
     ok = list(dict.fromkeys(_filter_stoplists(ok)))

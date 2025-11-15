@@ -5,6 +5,7 @@ from __future__ import annotations  # Поддерживаем отложенн�
 import asyncio  # Работаем с асинхронными задачами
 import time  # Фиксируем время последних пингов
 from aiogram import Bot  # Используем Telegram Bot API
+from emailbot import runtime_progress  # Сообщаем глобальному watchdog о прогрессе
 
 
 class Heartbeat:
@@ -42,6 +43,10 @@ class Heartbeat:
                 await self.bot.send_chat_action(chat_id=self.chat_id, action="typing")  # Отправляем признак «печатаю»
             except Exception:
                 pass  # Игнорируем любые сетевые ошибки, чтобы не прерывать цикл
+            try:
+                runtime_progress.touch("heartbeat")  # Отмечаем прогресс для внутреннего watchdog
+            except Exception:
+                pass  # Не позволяем вспомогательным ошибкам нарушать heartbeat
             if (now - self._last_touch) > self.force_after:  # Проверяем, не наступил ли таймаут молчания
                 self._last_touch = now  # Сбрасываем таймер активности после форс-пинга
             try:
