@@ -229,7 +229,72 @@ def write_preview_stats(data: "PreviewData", *, stats_path: str | None = None) -
 
 
 # Фиксируем тайм-зону Москвы для приведения отметок времени событий.
-MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")  # Фиксируем часовой пояс Москвы для нормализации времени
+
+# Перечисляем поддерживаемые ключи временных отметок в событиях аудита.
+TIMESTAMP_KEYS: Tuple[str, ...] = (  # Сохраняем кортеж строковых ключей меток времени
+    "timestamp",  # Каноническое поле timestamp
+    "ts",  # Сокращённый ключ ts
+    "time",  # Исторический ключ time
+    "sent_at",  # Дополнительное поле sent_at из логов рассылок
+    "created_at",  # Альтернативное поле created_at
+    "dt",  # Короткий вариант dt
+    "date",  # Поле date, встречающееся в старых логах
+)
+
+# Определяем набор возможных ключей, в которых хранится направление рассылки.
+DIRECTION_KEYS: Tuple[str, ...] = (  # Кортеж допустимых ключей направления
+    "group",  # Основное поле group
+    "group_code",  # Альтернативное поле group_code
+    "direction",  # Современное поле direction
+    "dir",  # Сокращение dir
+    "dir_code",  # Сокращённый код направления
+    "pipeline",  # Поле pipeline из некоторых источников
+    "topic",  # Поле topic для семантических групп
+    "category",  # Поле category из внешних интеграций
+)
+
+# Собираем ключи, описывающие статус отправки.
+STATUS_KEYS: Tuple[str, ...] = (  # Кортеж полей для чтения статуса события
+    "status",  # Основное поле status
+    "result",  # Альтернативное поле result
+    "state",  # Поле state в некоторых логах
+    "send_status",  # Поле send_status из сервисов отправки
+    "outcome",  # Поле outcome для итогового результата
+)
+
+# Фиксируем набор значений, означающих успешную отправку.
+SUCCESS_VALUES = {  # Множество текстовых статусов успеха
+    "ok",  # Статус ok
+    "success",  # Статус success
+    "sent",  # Статус sent
+    "delivered",  # Статус delivered
+    "done",  # Статус done
+}
+
+# Фиксируем набор значений, сигнализирующих об ошибке отправки.
+ERROR_VALUES = {  # Множество текстовых статусов ошибок
+    "err",  # Статус err
+    "error",  # Статус error
+    "fail",  # Статус fail
+    "failed",  # Статус failed
+    "bounce",  # Статус bounce от почтового сервера
+    "undelivered",  # Статус undelivered
+}
+
+
+def _pick_first(data: Mapping[str, object], keys: Iterable[str]) -> object | None:
+    """Вернуть первое непустое значение по указанным ключам."""
+
+    # Перебираем ключи в заданном порядке.
+    for key in keys:
+        # Получаем значение из словаря по текущему ключу.
+        value = data.get(key)
+        # Проверяем, что значение существует и не равно None.
+        if value not in (None, ""):
+            return value  # Возвращаем найденное значение
+    # Если ничего не найдено, возвращаем None.
+    return None
 
 
 # Описываем счётчики по отдельному направлению отправок.
@@ -266,26 +331,21 @@ def _parse_event_timestamp(event: Mapping[str, object]) -> datetime | None:
     """
     Попробовать извлечь метку времени события в UTC и привести к aware datetime.
 
-    Поддерживаем несколько возможных ключей для совместимости:
-      "timestamp", "ts", "time"
+    Поддерживаем несколько возможных ключей для совместимости.
     """
 
     # Пытаемся найти значение временной отметки во всех известных полях аудита.
-    raw = (
-        event.get("timestamp")  # Каноническое поле timestamp
-        or event.get("ts")  # Сокращённый вариант ts
-        or event.get("time")  # Историческое поле time
-        or event.get("sent_at")  # Дополнительное поле sent_at в AUDIT-логах
-    )
+    raw = _pick_first(event, TIMESTAMP_KEYS)  # Берём первую непустую метку времени
     # Если ничего не найдено, возвращаем None.
     if not raw:
         return None
     # Поддерживаем числовые отметки времени (Unix timestamp).
     if isinstance(raw, (int, float)):  # Проверяем, является ли значение числом
         try:
-            return datetime.fromtimestamp(float(raw), tz=MOSCOW_TZ)  # Конвертируем секунды в datetime в московской зоне
-        except Exception:
+            timestamp = float(raw)  # Преобразуем значение к float для fromtimestamp
+        except (TypeError, ValueError):
             return None  # При ошибке преобразования возвращаем None
+        return datetime.fromtimestamp(timestamp, tz=MOSCOW_TZ)  # Формируем datetime в московской зоне
 
     # Преобразуем значение к строке и удаляем пробелы вокруг.
     text = str(raw).strip()  # Приводим значение к строке для разбора
@@ -316,7 +376,7 @@ def _event_direction_code(event: Mapping[str, object]) -> str | None:
     """
 
     # Получаем значение кода направления из нескольких возможных полей.
-    value = event.get("group") or event.get("direction")  # Поддерживаем старое поле group и новое поле direction
+    value = _pick_first(event, DIRECTION_KEYS)  # Берём первое непустое направление
     # Если значение пустое, прекращаем обработку.
     if not value:
         return None
@@ -330,25 +390,55 @@ def _event_success_failed(event: Mapping[str, object]) -> Tuple[int, int]:
     """
     Определить, считается ли событие успешным или ошибочным.
 
-    Ожидается поле result или status с текстовыми значениями:
-      sent / success / ok     -> успех
-      failed / error / bounce -> ошибка
-    Всё остальное игнорируется.
+    Поддерживаются поля из STATUS_KEYS, а также вспомогательные признаки.
+
+    Текстовые значения из SUCCESS_VALUES трактуются как успех, из ERROR_VALUES —
+    как ошибка. Булевые, числовые и поля ok/error дополнительно уточняют исход.
     """
 
     # Извлекаем поле со статусом обработки отправки.
-    raw = event.get("result") or event.get("status") or event.get("state")  # Учитываем несколько полей статуса
-    # Если поле отсутствует, возвращаем нулевые счётчики.
-    if not raw:
-        return 0, 0
-    # Приводим значение к нижнему регистру для сопоставления.
-    value = str(raw).strip().lower()
-    # Для позитивных значений считаем событие успешным.
-    if value in {"sent", "success", "ok", "done"}:  # Расширяем набор успешных статусов
+    raw_status = _pick_first(event, STATUS_KEYS)  # Берём первое непустое поле статуса
+    # Инициализируем флаги успешного и неуспешного исхода.
+    success_flag = False  # Предполагаем отсутствие успеха
+    error_flag = False  # Предполагаем отсутствие ошибки
+
+    # Обрабатываем строковые статусы.
+    if isinstance(raw_status, str):
+        normalized = raw_status.strip().lower()  # Приводим к нормализованной строке
+        if normalized in SUCCESS_VALUES:  # Проверяем наличие в множестве успехов
+            success_flag = True
+        if normalized in ERROR_VALUES:  # Проверяем наличие в множестве ошибок
+            error_flag = True
+    elif isinstance(raw_status, bool):  # Для булевых значений статуса
+        success_flag = bool(raw_status)  # True означает успех
+        error_flag = not bool(raw_status)  # False трактуем как ошибку
+
+    # Учитываем числовые статусы (1 — успех, 0 — ошибка).
+    if isinstance(raw_status, (int, float)) and not isinstance(raw_status, bool):
+        if int(raw_status) == 1:  # Проверяем признак успеха
+            success_flag = True
+        if int(raw_status) == 0:  # Проверяем признак ошибки
+            error_flag = True
+
+    # Анализируем вспомогательное поле ok.
+    ok_field = event.get("ok")  # Берём поле ok, если присутствует
+    if ok_field in (True, "true", 1):  # Значения, эквивалентные успеху
+        success_flag = True
+    if ok_field in (False, "false", 0):  # Значения, эквивалентные ошибке
+        error_flag = True
+
+    # Если присутствует явное описание ошибки, помечаем событие как неуспешное.
+    if event.get("error") or event.get("exception"):  # Проверяем поля error и exception
+        error_flag = True
+
+    # Разрешаем конфликт флагов: при одновременном успехе и ошибке считаем ошибкой.
+    if success_flag and not error_flag:  # Только успешное событие
         return 1, 0
-    # Для негативных значений считаем событие ошибочным.
-    if value in {"failed", "error", "bounce", "err"}:  # Учитываем сокращённый статус ошибки
+    if error_flag and not success_flag:  # Только ошибочное событие
         return 0, 1
+    if success_flag and error_flag:  # Конфликтные данные трактуем как ошибку
+        return 0, 1
+
     # Во всех остальных случаях событие не учитываем.
     return 0, 0
 
