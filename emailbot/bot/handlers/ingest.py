@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio  # Используем асинхронные утилиты для неблокирующего кода
 import io
 import re
 from pathlib import Path
@@ -18,13 +19,18 @@ from emailbot.messaging_utils import is_blocked, is_suppressed
 from emailbot.pipelines.ingest import ingest_emails
 from emailbot.pipelines.ingest_url import ingest_url
 from emailbot.reporting import count_blocked
-from emailbot.settings import resolve_label
+from emailbot.settings import (
+    HEARTBEAT_SEC,  # Интервал между heartbeat-сообщениями
+    TASK_NOPROGRESS_TIMEOUT_SEC,  # Максимальная пауза без прогресса
+    resolve_label,  # Утилита для нормализации групп рассылки
+)
 from emailbot.web_extract import fetch_and_extract
 from emailbot.crawl import crawl_emails
 from emailbot import settings
 from emailbot.utils.file_email_extractor import ExtractError, extract_emails_from_bytes
 from emailbot.ui.messages import format_parse_summary
 from emailbot.suppress_list import refresh_if_changed, is_blocked as suppress_is_blocked
+from emailbot.bot.heartbeat import Heartbeat  # Управляем пульсом длительных операций
 
 router = Router()
 URL_RE = re.compile(r"""(?ix)\b((?:https?://)?(?:www\.)?[^\s<>()]+?\.[^\s<>()]{2,}[^\s<>()]*)(?=$|[\s,;:!?)}\]])""")
@@ -307,6 +313,13 @@ async def _process_url_callback(
         await callback.message.answer(status_text)
     if deep and limit_pages is not None:
         _get_limit_store(callback.message.bot)[user_id] = limit_pages
+    heartbeat = Heartbeat(  # Запускаем пульс, пока краулер собирает данные
+        callback.message.bot,  # Используем того же бота, что и в обработчике
+        callback.message.chat.id,  # Пинг отправляется в текущий чат
+        interval_sec=HEARTBEAT_SEC,  # Читаем интервал heartbeat из настроек
+        force_after_sec=TASK_NOPROGRESS_TIMEOUT_SEC,  # Указываем допустимую паузу без прогресса
+    )
+    await heartbeat.start()  # Начинаем регулярно отправлять действие «typing»
     try:
         ok, stats = await ingest_url(url, deep=deep, limit_pages=limit_pages)
     except Exception as exc:  # pragma: no cover - network errors are variable
@@ -315,6 +328,8 @@ async def _process_url_callback(
         )
         await callback.answer()
         return
+    finally:
+        await heartbeat.stop()  # В любом случае завершаем heartbeat
     filtered = _prepare_filtered(ok)
     summary = _build_summary(filtered, stats, deep=deep, limit_pages=limit_pages)
     await callback.message.answer(summary)
@@ -417,14 +432,27 @@ async def handle_document(msg: types.Message) -> None:
     buffer = io.BytesIO()
     await msg.bot.download(doc, destination=buffer)
     data = buffer.getvalue()
+    heartbeat = Heartbeat(  # Создаём heartbeat на период тяжёлого разбора файла
+        msg.bot,  # Передаём активного бота для отправки chat action
+        msg.chat.id,  # Указываем идентификатор чата пользователя
+        interval_sec=HEARTBEAT_SEC,  # Конфигурируем интервал пингов из настроек
+        force_after_sec=TASK_NOPROGRESS_TIMEOUT_SEC,  # Задаём максимальную тишину до форс-пинга
+    )
+    await heartbeat.start()  # Запускаем регулярные chat action «typing»
     try:
-        ok, rejects, warn = extract_emails_from_bytes(data, doc.file_name or "file")
+        ok, rejects, warn = await asyncio.to_thread(
+            extract_emails_from_bytes,
+            data,
+            doc.file_name or "file",
+        )  # Выносим CPU-нагрузку из event loop
     except ExtractError as exc:
         await ack.edit_text(f"Не удалось обработать файл: {exc}")
         return
     except Exception:  # pragma: no cover - unexpected decoding errors
         await ack.edit_text("Произошла ошибка при разборе файла.")
         return
+    finally:
+        await heartbeat.stop()  # Останавливаем heartbeat даже при ошибках
 
     ok = list(dict.fromkeys(_filter_stoplists(ok)))
     text = f"Готово.\nНайдено адресов: {len(ok)}"
