@@ -950,10 +950,52 @@ def is_numeric_localpart(email_addr: str) -> bool:
 
 
 def sample_preview(items, k: int):
+    """Вернуть первые ``k`` уникальных элементов, сохранив исходный порядок."""
+
+    # Преобразуем вход в список уникальных значений
     lst = list(dict.fromkeys(items))
+    # Если элементов мало, возвращаем их все без усечения
     if len(lst) <= k:
+        # Возвращаем короткий список как есть
         return lst
+    # Иначе возвращаем первые ``k`` элементов
     return lst[:k]
+
+
+def _normalize_repairs(raw_repairs):
+    """Преобразовать список исправлений в последовательность пар ``(bad, good)``."""
+
+    # Итоговый список пар с нормализованными значениями
+    normalized_repairs = []
+
+    # Перебираем исходные элементы, защищаясь от ``None``
+    for item in raw_repairs or []:
+        # Обрабатываем кортежи вида (bad, good)
+        if isinstance(item, tuple) and len(item) == 2:
+            # Распаковываем значения из кортежа
+            bad, good = item
+            # Приводим каждое значение к строке
+            normalized_repairs.append((str(bad), str(good)))
+        # Обрабатываем строковые записи формата "bad → good"
+        elif isinstance(item, str):
+            # Проверяем наличие юникод-стрелки
+            if "→" in item:
+                # Делим строку и убираем пробелы
+                parts = [p.strip() for p in item.split("→", 1)]
+            # Проверяем ASCII-стрелку
+            elif "->" in item:
+                # Делим строку по ASCII-стрелке
+                parts = [p.strip() for p in item.split("->", 1)]
+            else:
+                # Игнорируем строки без ожидаемого разделителя
+                continue
+            # Проверяем, что обе части непусты
+            if len(parts) == 2 and parts[0] and parts[1]:
+                # Добавляем нормализованную пару
+                normalized_repairs.append((parts[0], parts[1]))
+
+    # Убираем дубликаты, сохраняя порядок
+    return list(dict.fromkeys(normalized_repairs))
 
 
 from .messaging import (
@@ -3134,7 +3176,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     current.update(filtered)
     state.to_send = sorted(current)
     context.user_data["last_parsed_emails"] = list(state.to_send)
-    state.repairs = list(dict.fromkeys((state.repairs or []) + repairs))
+    # Собираем и выравниваем исправления
+    state.repairs = _normalize_repairs((state.repairs or []) + (repairs or []))
+    # Ограничиваем предпросмотр исправлений
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
     foreign_total = set(state.foreign) | set(foreign)
