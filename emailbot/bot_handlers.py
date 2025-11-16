@@ -17,7 +17,7 @@ import secrets
 import time
 import urllib.parse
 import uuid
-from contextlib import suppress
+from contextlib import suppress, nullcontext  # Дополняем suppress пустым контекстом для heartbeat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +27,7 @@ from . import report_service
 from . import send_selected as _pkg_send_selected
 from emailbot.reporting import summarize_period_stats  # Импортируем подсчёт статистики отправок из AUDIT-логов
 from emailbot.ui.messages import format_period_report  # Импортируем форматирование текстового отчёта по периодам
+from emailbot.bot.heartbeat_ptb import jobqueue_heartbeat  # Добавляем PTB JobQueue heartbeat для длительных задач
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -266,6 +267,12 @@ async def _with_heartbeat(
         return await runner(lambda: None)  # Без чата просто выполняем операцию напрямую
     chat_id = chat.id  # Определяем целевой идентификатор чата для heartbeat
     heartbeat = _Heartbeat(bot, chat_id)  # Создаём heartbeat для текущего чата
+    app = getattr(context, "application", None)  # Забираем PTB Application для JobQueue heartbeat
+    heartbeat_cm = (
+        jobqueue_heartbeat(app, chat_id)
+        if app is not None
+        else nullcontext()
+    )  # Подготавливаем контекст, который обеспечит chat action и watchdog через JobQueue
 
     if status_message is not None:
         try:
@@ -277,12 +284,13 @@ async def _with_heartbeat(
             status = None  # Если отправка не удалась, продолжаем без статуса
         heartbeat.set_status_message(status)  # Запоминаем сообщение статуса для будущих обновлений
 
-    await heartbeat.start()  # Запускаем heartbeat до начала длительной операции
-    try:
-        result = await runner(heartbeat.touch)  # Выполняем пользовательский код, передавая способ отмечать прогресс
-        return result  # Возвращаем результат выполнения, чтобы сохранить совместимость
-    finally:
-        await heartbeat.stop()  # Независимо от исхода останавливаем heartbeat, чтобы не держать задачу навечно
+    with heartbeat_cm:  # Включаем JobQueue heartbeat на период длительной операции
+        await heartbeat.start()  # Запускаем heartbeat до начала длительной операции
+        try:
+            result = await runner(heartbeat.touch)  # Выполняем пользовательский код, передавая способ отмечать прогресс
+            return result  # Возвращаем результат выполнения, чтобы сохранить совместимость
+        finally:
+            await heartbeat.stop()  # Независимо от исхода останавливаем heartbeat, чтобы не держать задачу навечно
 
 
 async def _handle_pdf_long(

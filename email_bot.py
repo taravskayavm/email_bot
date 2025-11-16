@@ -22,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -72,10 +73,14 @@ from emailbot import compat  # EBOT-105
 compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
-try:  # Загружаем watchdog-touch ранним импортом, чтобы не было гонок при запуске
-    from emailbot.progress_watchdog import touch as watchdog_touch  # Позволяем пометить старт процесса
+try:  # Загружаем watchdog-touch и установщик ранним импортом, чтобы не было гонок при запуске
+    from emailbot.progress_watchdog import (  # Импортируем PTB-интеграцию watchdog одним блоком
+        install as install_watchdog,
+        touch as watchdog_touch,
+    )
 except Exception:  # Не прерываем загрузку, даже если модуль недоступен
-    watchdog_touch = None  # В тестовом окружении watchdog может отсутствовать
+    install_watchdog = None  # В тестовом окружении watchdog может отсутствовать
+    watchdog_touch = None  # Сохраняем совместимость при отсутствии watchdog
 
 # Default watchdog stall timeout in milliseconds (configurable via env).
 WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
@@ -266,6 +271,28 @@ def main() -> None:
 
     app = ApplicationBuilder().token(token).build()
     app.add_error_handler(error_handler)
+
+    async def _touch_all(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Fix watchdog heartbeat for every update to avoid false positives."""
+
+        if watchdog_touch is None:  # Без watchdog обновлять нечего
+            return  # Выходим сразу, чтобы не тратить время
+        try:
+            watchdog_touch("update")  # Регистрируем поступление любого апдейта
+        except Exception:
+            pass  # Лишние ошибки не должны мешать обработке апдейта
+
+    if watchdog_touch is not None:  # Подключаем ранний TypeHandler только если watchdog активен
+        app.add_handler(  # Регистрируем системный обработчик, работающий раньше остальных
+            TypeHandler(Update, _touch_all),
+            group=-9999,
+        )
+
+    if install_watchdog is not None:  # Конфигурируем фоновые проверки JobQueue, если они доступны
+        try:
+            install_watchdog(app)  # Запускаем мягкий watchdog поверх PTB JobQueue
+        except Exception:
+            logging.getLogger(__name__).warning("Watchdog install failed", exc_info=True)
 
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
