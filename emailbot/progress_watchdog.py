@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
+from pathlib import Path  # Работаем с путями для дампов зависших задач
+from telegram.ext import Application, ContextTypes  # Интегрируем watchdog в PTB JobQueue
 
 import faulthandler
 
 from emailbot import runtime_progress  # Повторно используем глобальный маркер прогресса
+from emailbot import settings  # Читаем пользовательские таймауты и флаги watchdog
 
 __all__ = [  # Чётко объявляем публичные символы, чтобы облегчить импорт вызывающим модулям
     "heartbeat",  # Экспортируем корутину обновления отметки из async-контекста
@@ -18,6 +20,7 @@ __all__ = [  # Чётко объявляем публичные символы, 
     "start_heartbeat_pulse",  # Отдаём вспомогательную корутину периодического heartbeat
     "touch",  # Новая обёртка для глобального прогресса
     "last_touch",  # Экспонируем чтение таймштампа глобального прогресса
+    "install",  # Добавляем функцию подключения watchdog к PTB JobQueue
 ]
 
 
@@ -103,3 +106,47 @@ async def start_watchdog(
             break
     except asyncio.CancelledError:  # pragma: no cover - defensive cleanup
         pass
+
+
+async def _jobqueue_watchdog(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PTB JobQueue callback: отслеживает глобальные heartbeat и реагирует на тишину."""
+
+    idle = time.time() - last_touch()  # Вычисляем длительность тишины по глобальному таймштампу
+    if idle <= settings.WATCHDOG_TIMEOUT_SEC:  # Если прогресс укладывается в допустимый интервал
+        return  # Ничего не делаем, давая задаче продолжить работу
+    if settings.WATCHDOG_ENFORCE_CANCEL:  # При включённом жёстком режиме пытаемся остановить приложение
+        logging.error(
+            "Watchdog: no progress for %.1fs, cancelling task…",
+            idle,
+        )  # Сообщаем о превышении таймаута перед остановкой
+        try:
+            await context.application.stop()  # Просим PTB завершить обработку апдейтов
+        except Exception:
+            pass  # Игнорируем ошибки, чтобы watchdog не падал сам
+    else:  # В мягком режиме только предупреждаем и обновляем отметку
+        logging.warning(
+            "Watchdog: no progress for %.1fs (soft mode, no cancel).",
+            idle,
+        )  # Фиксируем предупреждение в журнале
+        touch("watchdog-soft")  # Обновляем таймштамп, чтобы избежать спама одинаковыми предупреждениями
+
+
+def install(app: Application) -> None:
+    """Подключить PTB watchdog к ``app.job_queue`` с подходящим интервалом проверок."""
+
+    if not settings.WATCHDOG_ENABLED:  # Проверяем, разрешён ли watchdog в конфигурации
+        logging.info("Watchdog disabled by config.")  # Сообщаем в лог о намеренном отключении
+        return  # Завершаем функцию без добавления задач в JobQueue
+    period = max(1.0, min(5.0, settings.WATCHDOG_TIMEOUT_SEC / 10.0))  # Подбираем период проверок
+    app.job_queue.run_repeating(
+        _jobqueue_watchdog,
+        interval=period,
+        first=period,
+        name="emailbot-watchdog",
+    )  # Регистрируем периодическую задачу в JobQueue
+    logging.info(
+        "Watchdog installed: timeout=%.1fs, period=%.1fs, enforce=%s",
+        settings.WATCHDOG_TIMEOUT_SEC,
+        period,
+        settings.WATCHDOG_ENFORCE_CANCEL,
+    )  # Логируем параметры watchdog для диагностики
