@@ -1,76 +1,64 @@
-"""Проверки нормализации списка исправлений."""
+"""Тесты нормализации списка исправлений."""
 
-import pytest  # type: ignore  # Импортируем Pytest для написания тестов
-
-from emailbot.bot_handlers import _normalize_repairs  # Импортируем тестируемую функцию
+from emailbot.bot_handlers import _normalize_repairs  # Импортируем целевую функцию, чтобы проверять её поведение
 
 
 def test_normalize_repairs_keeps_tuples_and_casts_to_str():
-    """Убеждаемся, что кортежи сохраняются и приводятся к строкам."""
+    """Проверяем, что кортежи сохраняются и элементы приводятся к строкам."""
 
-    raw = [  # Список входных исправлений
-        ("old@example.com", "new@example.com"),  # Базовый кортеж для проверки
-        ("old@example.com", "new@example.com"),  # Повторный кортеж должен исчезнуть
-        ("foo", 123),  # Значение, требующее приведения к строке
+    raw = [  # Формируем исходный набор данных с повторами
+        ("old@example.com", "new@example.com"),  # Первая валидная пара
+        ("old@example.com", "new@example.com"),  # Дубликат предыдущей пары
+        ("foo", 123),  # Второй элемент не строка и должен быть приведён
     ]
-
-    result = _normalize_repairs(raw)  # Выполняем нормализацию
-
-    assert result.count(("old@example.com", "new@example.com")) == 1  # Проверяем, что дубликат удалён
-    assert ("foo", "123") in result  # Убеждаемся, что значения приведены к строкам
+    result = _normalize_repairs(raw)  # Запускаем нормализацию
+    assert result.count(("old@example.com", "new@example.com")) == 1  # Дубликаты должны исчезнуть
+    assert ("foo", "123") in result  # Числовое значение должно стать строкой
 
 
 def test_normalize_repairs_parses_arrow_string_with_unicode_arrow():
-    """Проверяем поддержку строкового формата с юникод-стрелкой."""
+    """Убеждаемся, что записи с юникод-стрелкой разбираются корректно."""
 
-    raw = [  # Список входных исправлений
-        " bad@example.com  \t→  good@example.com ",  # Строка с лишними пробелами и стрелкой
+    raw = [  # Формируем строку с юникод-стрелкой
+        " bad@example.com  \t→  good@example.com ",  # Набор лишних пробелов имитирует реальные данные
     ]
-
-    result = _normalize_repairs(raw)  # Выполняем нормализацию
-
-    assert ("bad@example.com", "good@example.com") in result  # Проверяем корректность парсинга
+    result = _normalize_repairs(raw)  # Получаем нормализованный список
+    assert ("bad@example.com", "good@example.com") in result  # Проверяем, что пара распознана
 
 
 def test_normalize_repairs_parses_arrow_string_with_ascii_arrow():
-    """Проверяем поддержку строкового формата с ASCII-стрелкой."""
+    """Проверяем поддержку ASCII-стрелки."""
 
-    raw = [  # Список входных исправлений
-        " bad2@example.com  ->  good2@example.com ",  # Строка с ASCII-стрелкой
+    raw = [  # Создаём данные с ASCII-стрелкой
+        " bad2@example.com  ->  good2@example.com ",  # Добавляем лишние пробелы для устойчивости
     ]
-
-    result = _normalize_repairs(raw)  # Выполняем нормализацию
-
-    assert ("bad2@example.com", "good2@example.com") in result  # Проверяем корректность парсинга
+    result = _normalize_repairs(raw)  # Нормализуем данные
+    assert ("bad2@example.com", "good2@example.com") in result  # Проверяем успешный разбор
 
 
 def test_normalize_repairs_ignores_invalid_strings():
-    """Убеждаемся, что некорректные строки пропускаются."""
+    """Удостоверяемся, что некорректные строки не попадают в результат."""
 
-    raw = [  # Список входных исправлений
+    raw = [  # Перечисляем проблемные записи
         "no arrow here",  # Строка без стрелки
-        "one-side only → ",  # Строка без правой части
-        " → missing-left@example.com",  # Строка без левой части
+        "one-side only → ",  # Отсутствует правая часть
+        " → missing-left@example.com",  # Отсутствует левая часть
     ]
-
-    result = _normalize_repairs(raw)  # Выполняем нормализацию
-
-    assert result == []  # Ждём пустой результат
+    result = _normalize_repairs(raw)  # Применяем нормализацию
+    assert result == []  # Список должен оказаться пустым
 
 
 def test_normalize_repairs_preserves_first_occurrence_order_and_uniqueness():
     """Проверяем сохранение порядка первого появления элементов."""
 
-    raw = [  # Список входных исправлений
-        "a@example.com → b@example.com",  # Первая уникальная пара
-        ("c@example.com", "d@example.com"),  # Вторая уникальная пара
-        "a@example.com → b@example.com",  # Дубликат первой пары
-        ("c@example.com", "d@example.com"),  # Дубликат второй пары
+    raw = [  # Собираем повторяющиеся записи
+        "a@example.com → b@example.com",  # Строковая запись
+        ("c@example.com", "d@example.com"),  # Кортежная запись
+        "a@example.com → b@example.com",  # Повтор строки
+        ("c@example.com", "d@example.com"),  # Повтор кортежа
     ]
-
-    result = _normalize_repairs(raw)  # Выполняем нормализацию
-
-    assert result == [  # Сравниваем с ожидаемым порядком
-        ("a@example.com", "b@example.com"),  # Ожидаем первую уникальную пару
-        ("c@example.com", "d@example.com"),  # Ожидаем вторую уникальную пару
+    result = _normalize_repairs(raw)  # Нормализуем
+    assert result == [  # Ожидаем сохранить только первые упоминания
+        ("a@example.com", "b@example.com"),  # Итоговая первая пара
+        ("c@example.com", "d@example.com"),  # Итоговая вторая пара
     ]

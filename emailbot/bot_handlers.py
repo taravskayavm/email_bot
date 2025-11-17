@@ -418,19 +418,47 @@ def apply_numeric_truncation_removal(allowed):
 
 
 def _watchdog_idle_seconds() -> float:
+    """Определить тайм-аут watchdog на основе окружения и глобальных настроек."""
+
+    # Считываем устаревшую переменную окружения, задающую тайм-аут в миллисекундах
     stalled_raw = (os.getenv("WATCHDOG_STALLED_MS", "") or "").strip()
+    # Проверяем, что значение действительно передано
     if stalled_raw:
+        # Оборачиваем преобразование в защитный блок, чтобы не упасть на неверном формате
         try:
+            # Пробуем привести строку к числу с плавающей точкой
             value = float(stalled_raw)
+            # Убеждаемся, что указан положительный тайм-аут
             if value > 0:
+                # Переводим миллисекунды в секунды и сразу возвращаем
                 return value / 1000.0
-        except Exception:
+        except Exception:  # pragma: no cover - защитный путь
+            # Игнорируем ошибки преобразования, переходя к следующему источнику настроек
             pass
+    # Читаем актуальную переменную окружения с тайм-аутом в секундах
     raw = (os.getenv("WD_IDLE_SECONDS", "") or "").strip()
+    # Проверяем, что значение присутствует
+    if raw:
+        # Повторяем аккуратную обработку, чтобы не остановить бота из-за неверного ввода
+        try:
+            # Возвращаем пользовательский тайм-аут, если он корректен
+            return float(raw)
+        except Exception:  # pragma: no cover - защитный путь
+            # Продолжаем искать подходящее значение
+            pass
+    # Пытаемся достать значение из настроек, но не считаем их критическими
     try:
-        return float(raw) if raw else 90.0
-    except Exception:
-        return 90.0
+        # Получаем значение из глобальных настроек, задаём разумный дефолт
+        timeout = float(getattr(settings, "WATCHDOG_TIMEOUT_SEC", 300.0))
+        # Проверяем, что тайм-аут положительный
+        if timeout > 0:
+            # Возвращаем значение настроек, если всё в порядке
+            return timeout
+    except Exception:  # pragma: no cover - защитный путь
+        # На случай, если модуль настроек недоступен
+        pass
+    # Последняя страховка, чтобы watchdog всегда имел тайм-аут
+    return 300.0
 
 
 def _snapshot_mass_digest(
@@ -3176,10 +3204,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     current.update(filtered)
     state.to_send = sorted(current)
     context.user_data["last_parsed_emails"] = list(state.to_send)
+    # Подготавливаем исходный список исправлений из накопленного состояния и свежих данных
+    raw_repairs = (state.repairs or []) + (repairs or [])  # Объединяем накопленные и новые пары
     # Собираем и выравниваем исправления
-    state.repairs = _normalize_repairs((state.repairs or []) + (repairs or []))
-    # Ограничиваем предпросмотр исправлений
-    state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
+    state.repairs = _normalize_repairs(raw_repairs)  # Приводим записи к устойчивому виду
+    # Оборачиваем построение предпросмотра в защитный блок
+    try:
+        # Ограничиваем предпросмотр исправлений для вывода пользователю
+        state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
+    except Exception as exc:  # pragma: no cover - защитный путь
+        # Логируем неудачу и продолжаем без предпросмотра, чтобы не прервать основной сценарий
+        logger.warning("Failed to build repairs_sample: %s", exc)
+        # Сбрасываем предпросмотр, чтобы не отображать устаревшие данные
+        state.repairs_sample = []
     all_allowed = state.all_emails
     foreign_total = set(state.foreign) | set(foreign)
     suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
