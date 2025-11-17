@@ -115,18 +115,31 @@ def _die(msg: str, code: int = 2) -> None:
 
 
 class JsonFormatter(logging.Formatter):
-    """Format logs as JSON objects."""
+    """Format logs as JSON objects with resilient message handling."""
 
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        # Safely render the log message with graceful fallback on formatting errors
+        try:  # Attempt to use the logger's standard %-style formatting machinery
+            message = record.getMessage()  # Apply formatting arguments supplied with the log call
+        except Exception:  # Catch formatting failures that would otherwise crash logging
+            message = (
+                f"{record.msg} | args={record.args}"  # Manually join raw message and arguments
+            )
+
+        # Compose the base JSON payload with timestamps and metadata
         data = {
-            "time": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
-            "level": record.levelname,
-            "name": record.name,
-            "message": record.getMessage(),
+            "time": datetime.utcfromtimestamp(record.created).isoformat() + "Z",  # UTC time
+            "level": record.levelname,  # String name of the log level
+            "name": record.name,  # Logger name (module or custom identifier)
+            "message": message,  # Resiliently formatted message text
         }
+
+        # Copy optional contextual fields when they are present on the record
         for key in ("event", "email", "source", "code", "phase", "count"):
-            if key in record.__dict__:
-                data[key] = record.__dict__[key]
+            if key in record.__dict__:  # Only include keys that actually exist on the record
+                data[key] = record.__dict__[key]  # Preserve the contextual value in the payload
+
+        # Serialize the structured payload to JSON without escaping non-ASCII symbols
         return json.dumps(data, ensure_ascii=False)
 
 
