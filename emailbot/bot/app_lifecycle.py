@@ -22,7 +22,7 @@ async def _watchdog_runner() -> None:
         last = runtime_progress.last_touch()  # Читаем время последнего прогресса
         gap = time.time() - last  # Вычисляем длительность простоя
         if gap > timeout:  # Если тишина превышает порог
-            log.warning("Watchdog: no progress for %.1fs (internal). Waiting…", gap)  # Фиксируем предупреждение
+            log.warning(f"Watchdog: no progress for {gap:.1f}s (internal). Waiting…")  # Фиксируем предупреждение
             runtime_progress.touch("watchdog-poke")  # Деликатно помечаем активность
         try:
             await asyncio.wait_for(_stop_event.wait(), timeout=period)  # Ждём сигнал или тайм-аут
