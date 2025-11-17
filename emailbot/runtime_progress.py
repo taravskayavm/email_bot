@@ -15,7 +15,7 @@ def touch(reason: str = "heartbeat") -> None:
     with _lock:  # Гарантируем атомарность обновления таймштампа
         _last_touch = time.time()  # Запоминаем текущее время как момент прогресса
     try:
-        _logger.info("Progress %s at %.3f", reason, _last_touch)  # Пишем отметку в лог
+        _logger.info(f"Progress {reason} at {_last_touch:.3f}")  # Формируем понятное сообщение в лог через f-string
     except Exception:  # Не позволяем логированию прерывать основной поток
         pass
 

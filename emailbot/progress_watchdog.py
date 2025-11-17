@@ -145,7 +145,7 @@ def install(app: Application) -> None:
         name="emailbot-watchdog",
     )  # Регистрируем периодическую задачу в JobQueue
     logging.info(
-        "Watchdog installed: timeout=%.1fs, period=%.1fs, enforce=%s",
+        "Watchdog installed: timeout=%ss, period=%ss, enforce=%s",
         settings.WATCHDOG_TIMEOUT_SEC,
         period,
         settings.WATCHDOG_ENFORCE_CANCEL,
