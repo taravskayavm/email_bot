@@ -8,9 +8,31 @@ pre-commit run -a
 ```
 
 Этот проект настраивается через локальный файл `.env` (не коммитится в репозиторий).
-Все переменные читаются через `os.getenv`, поэтому **код править не нужно** — достаточно отредактировать `.env`.
+Все переменные читаются через `os.getenv`, поэтому **код править не нужно** — достаточно отредактировать `.env`. Основной и рекомендуемый способ работы бота — запуск aiogram-версии через `python -m emailbot.bot`.
 
-## Запуск (legacy, python-telegram-bot)
+## Запуск (aiogram, новая версия)
+
+### Кроссплатформенный запуск
+
+```bash
+python -m emailbot.bot
+```
+
+### Windows / Anaconda (PowerShell)
+
+```powershell
+cd D:\email_bot
+./run_bot.ps1
+```
+
+```powershell
+cd D:\email_bot
+./run_bot_aiogram.ps1
+```
+
+Оба PowerShell-скрипта ожидают, что проект размещён в `D:\email_bot`, перед запуском активируется окружение `emailbot` (например, `conda activate emailbot`), а файл `.env` находится в корне репозитория.
+
+## Запуск (legacy, python-telegram-bot) *(устаревший режим для совместимости)*
 
 ```bash
 pip install -r requirements.txt
