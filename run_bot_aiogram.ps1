@@ -13,7 +13,7 @@ Set-Location "D:\email_bot" # Переключаемся в каталог, гд
 Write-Host "Активация окружения conda 'emailbot'..." # Уведомляем о запуске conda-окружения emailbot
 conda activate emailbot # Активируем подготовленное conda-окружение
 
-Write-Host "Запуск aiogram-бота (python -m emailbot.bot)..." # Информируем о старте aiogram-бота через модульную точку входа
-python -m emailbot.bot # Запускаем основной модуль aiogram-бота
+Write-Host "Запуск aiogram-бота (python -m emailbot.bot)..." # Информируем о старте aiogram-бота через модульную точку входа emailbot.bot.__main__
+python -m emailbot.bot # Запускаем основной модуль aiogram-бота, определённый в emailbot.bot.__main__
 
 Write-Host "Процесс бота завершён." # Сообщаем об окончании выполнения скрипта
