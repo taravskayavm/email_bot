@@ -16,6 +16,8 @@ from aiogram import Bot, Dispatcher
 # Импортируем существующие хендлеры /start и /stop.
 from emailbot.bot.handlers import start as start_handlers
 from emailbot.bot.handlers import stop as stop_handlers
+# Импортируем диагностические хендлеры для команды /diag.
+from emailbot.bot.handlers import diag as diag_handlers
 
 
 # Имя переменной окружения с токеном Telegram-бота.
@@ -50,6 +52,8 @@ async def main() -> None:
     dp.include_router(start_handlers.router)
     # Подключаем роутер с командами /stop и связанными обработчиками.
     dp.include_router(stop_handlers.router)
+    # Подключаем роутер с командой /diag для вывода диагностических сведений.
+    dp.include_router(diag_handlers.router)
 
     # Логируем, что бот запускается через long polling.
     logging.getLogger(__name__).info(
