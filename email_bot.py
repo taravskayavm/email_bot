@@ -28,6 +28,26 @@ from telegram.ext import (
 logger = logging.getLogger("email_bot.selfcheck")
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+# Абсолютный путь до каталога проекта для поиска .env.
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Загружаем переменные окружения из .env как можно раньше,
+# чтобы они были доступны всем внутренним модулям emailbot.
+from emailbot.utils import load_env
+
+load_env(SCRIPT_DIR)  # Раннее чтение .env.
+
+# Default watchdog stall timeout in milliseconds (configurable via env).
+# Увеличено по умолчанию до 5 минут, чтобы не прерывать долгие задачи
+# (например, парсинг больших PDF), при этом остаётся возможность
+# переопределить значение через .env (WATCHDOG_STALLED_MS).
+WATCHDOG_STALLED_MS = int(  # Значение по умолчанию 5 минут.
+    os.getenv("WATCHDOG_STALLED_MS", "300000")
+)
+os.environ.setdefault(
+    "WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS)
+)  # Фиксируем значение в окружении.
+
 
 def _selfcheck_email_clean_exports() -> None:
     if os.getenv("EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST", "0") == "1":
@@ -73,10 +93,6 @@ compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
 
-# Default watchdog stall timeout in milliseconds (configurable via env).
-WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
-os.environ.setdefault("WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS))
-
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
 # штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
 # сразу получил корректный обработчик без хрупких динамических импортов.
@@ -92,9 +108,6 @@ from emailbot.services import cooldown as _cooldown
 from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
-from emailbot.utils import load_env
-
-SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def _die(msg: str, code: int = 2) -> None:
@@ -206,8 +219,6 @@ def main() -> None:
     errs = startup_selfcheck()
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
-
-    load_env(SCRIPT_DIR)
 
     try:
         history_service.ensure_initialized()
