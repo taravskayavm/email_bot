@@ -45,7 +45,12 @@ CYR_TO_LAT = {
 
 _INVISIBLES_RE = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]")
 
+LOCAL_PLUS_TAG_RE = re.compile(r"\+[^@]+$")
+
 EMAIL_RE = re.compile(r"(?ix)\b[a-z0-9._%+\-]+@(?:[a-z0-9\-]+\.)+[a-z0-9\-]{2,}\b")
+EMAIL_STRICT_VALIDATE_RE = re.compile(
+    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-zА-Яа-яЁё]{2,}$"
+)
 
 # Варианты обфусцированных адресов до окончательной нормализации
 _DOT_LIKE_CHARS = "·•∙‧⸳・"
@@ -356,6 +361,36 @@ _PLUS_TAG_PROVIDERS = {
     "live.com",
 }
 
+_GMAIL_EQUIV_DOMAINS = {"gmail.com", "googlemail.com"}
+
+
+def normalize_email_unified(addr: str) -> str:
+    """Return an address normalised consistently for stop-list handling.
+
+    Policy:
+    - strip surrounding whitespace and lowercase the value;
+    - for Gmail domains remove dots in the local part and drop ``+tag``
+      suffixes (treating ``googlemail.com`` as an alias);
+    - for other domains preserve dots and ``+`` suffixes to avoid expanding
+      the stop list with overly aggressive canonicalisation.
+    """
+
+    a = (addr or "").strip().lower()
+    if not a or "@" not in a:
+        return a
+
+    local, domain = a.split("@", 1)
+    domain = domain.strip()
+    if not domain:
+        return local
+
+    if domain in _GMAIL_EQUIV_DOMAINS:
+        local = local.replace(".", "")
+        local = LOCAL_PLUS_TAG_RE.sub("", local)
+        domain = "gmail.com"
+
+    return f"{local}@{domain}"
+
 _IGNORE_DOTS_PROVIDERS = {
     # Gmail/Googlemail игнорируют точки в local-part
     "gmail.com",
@@ -626,10 +661,16 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 def is_valid_email(addr: str) -> bool:
-    """Раньше проверяла валидность e-mail; теперь просто проверяем через EMAIL_RE."""
-    if not addr:
+    """Return ``True`` if ``addr`` looks like a syntactically valid e-mail."""
+    if not addr or "@" not in addr:
         return False
-    return bool(EMAIL_RE.fullmatch(addr.strip().lower()))
+    candidate = addr.strip()
+    if not candidate or "@" not in candidate:
+        return False
+    local, _, domain = candidate.rpartition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    return bool(EMAIL_STRICT_VALIDATE_RE.match(candidate))
 
 
 def strict_validate_domain(addr: str) -> bool:

@@ -7,10 +7,21 @@ import json
 import os
 import sys
 import logging
+from types import SimpleNamespace
 
 from . import settings_store as _store
 
 logger = logging.getLogger(__name__)
+
+# --- Back-compat module-level constants (legacy imports expect these) ----------
+# Gmail canonicalization: treat dots as ignored in Gmail usernames.
+# Example: name.surname@gmail.com == namesurname@gmail.com
+CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") != "0"
+
+# Report timezone used in previews/logs; kept for legacy imports.
+REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
+# Inline logo embedding in message previews (1 — enabled, 0 — disabled)
+INLINE_LOGO: int = int(os.getenv("INLINE_LOGO", "1"))
 
 # [EBOT-101] Загружаем .env максимально рано, чтобы переменные окружения уже были доступны
 try:
@@ -149,7 +160,6 @@ FOOTNOTE_RADIUS_PAGES: int = 1
 PDF_LAYOUT_AWARE: bool = False
 ENABLE_OCR: bool = True
 ENABLE_PROVIDER_CANON: bool = os.getenv("ENABLE_PROVIDER_CANON", "1") == "1"
-CANON_GMAIL_DOTS: bool = os.getenv("CANON_GMAIL_DOTS", "1") == "1"
 CANON_GMAIL_PLUS: bool = os.getenv("CANON_GMAIL_PLUS", "1") == "1"
 CANON_OTHER_PLUS: bool = os.getenv("CANON_OTHER_PLUS", "0") == "1"
 MAX_ASSETS: int = 8
@@ -161,8 +171,6 @@ EXTERNAL_SOURCES: dict[str, dict[str, dict[str, str]]] = {}
 # UI helpers
 SKIPPED_PREVIEW_LIMIT: int = int(os.getenv("SKIPPED_PREVIEW_LIMIT", "10"))
 LAST_SUMMARY_DIR: str = os.getenv("LAST_SUMMARY_DIR", "var/last_summaries")
-# Отчётная временная зона (используется в логах/отчётах)
-REPORT_TZ: str = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
 
 
 # ---- Reconcile (IMAP vs CSV) ----
@@ -172,6 +180,25 @@ RECONCILE_SINCE_DAYS: int = int(os.getenv("RECONCILE_SINCE_DAYS", "7"))
 # attribute access.  Expose the module itself as ``SETTINGS`` to provide a stable
 # reference for callers that treat settings as a namespace.
 SETTINGS = sys.modules[__name__]
+
+
+class _SettingsNamespace(SimpleNamespace):
+    """Proxy object exposing module attributes as a namespace."""
+
+    def __init__(self, module):
+        super().__setattr__("_module", module)
+
+    def __getattr__(self, name):  # type: ignore[override]
+        return getattr(self._module, name)
+
+    def __setattr__(self, name, value):  # type: ignore[override]
+        setattr(self._module, name, value)
+
+    def __dir__(self):  # type: ignore[override]
+        return sorted(set(dir(self._module)))
+
+
+settings = _SettingsNamespace(sys.modules[__name__])
 
 # --- Web crawler (deep) defaults ---
 # Разрешённые типы контента для скачивания HTML-страниц
@@ -277,65 +304,46 @@ def _load_labels() -> dict[str, dict[str, str]]:
     try:
         data = json.loads(LABELS_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {}
-    if isinstance(data, dict):
-        return data
-    return {}
+        _crawl_budget = _getenv_int("CRAWL_TIME_BUDGET_SECONDS", 90)
 
+    # PDF knobs
+    _pdf_max_pages = _getenv_int("PDF_MAX_PAGES", 0)
+    _pdf_ocr_auto = _getenv_int("PDF_OCR_AUTO", 1)
+    _pdf_ocr_max = _getenv_int("PDF_OCR_MAX_PAGES", 100)
 
-def list_available_directions() -> list[str]:
-    """Return direction labels from templates/_labels.json."""
+    # General
+    _cooldown_days = _getenv_int("SEND_COOLDOWN_DAYS", 180)
+    _enable_web = _getenv_int("ENABLE_WEB", 1)
 
-    labels = _load_labels()
-    return [str(meta.get("label") or slug) for slug, meta in labels.items()]
+    # Provider canonicalisation toggles
+    _enable_provider_canon = _getenv_int("ENABLE_PROVIDER_CANON", 1)
+    _canon_gmail_dots = _getenv_int("CANON_GMAIL_DOTS", 1)
+    _canon_gmail_plus = _getenv_int("CANON_GMAIL_PLUS", 1)
+    _canon_other_plus = _getenv_int("CANON_OTHER_PLUS", 1)
 
+    settings = SimpleNamespace(
+        # Paths
+        BLOCKED_FILE=_abspath(_stoplist),
+        SENT_LOG_PATH=_abspath(_sent_log),
+        # Policy
+        SEND_COOLDOWN_DAYS=_cooldown_days,
+        # PDF/OCR
+        PDF_MAX_PAGES=_pdf_max_pages,
+        PDF_OCR_AUTO=_pdf_ocr_auto,
+        PDF_OCR_MAX_PAGES=_pdf_ocr_max,
+        # WEB
+        ENABLE_WEB=_enable_web,
+        CRAWL_MAX_DEPTH=_crawl_depth,
+        CRAWL_MAX_PAGES=_crawl_pages,
+        CRAWL_TIME_BUDGET_SECONDS=_crawl_budget,
+        # Email canonicalisation
+        ENABLE_PROVIDER_CANON=_enable_provider_canon,
+        CANON_GMAIL_DOTS=_canon_gmail_dots,
+        CANON_GMAIL_PLUS=_canon_gmail_plus,
+        CANON_OTHER_PLUS=_canon_other_plus,
+    )
 
-def resolve_label(label: str) -> str:
-    """Resolve human-readable label back to slug."""
+    _exported = {name: getattr(settings, name) for name in vars(settings) if name.isupper()}
+    globals().update(_exported)
 
-    query = label.strip()
-    for slug, meta in _load_labels().items():
-        stored_label = str(meta.get("label") or "").strip()
-        if stored_label == query:
-            return slug
-    return query
-
-
-# Load settings on module import.
-load()
-
-
-__all__ = [
-    "STRICT_OBFUSCATION",
-    "FOOTNOTE_RADIUS_PAGES",
-    "PDF_LAYOUT_AWARE",
-    "ENABLE_OCR",
-    "ENABLE_PROVIDER_CANON",
-    "CANON_GMAIL_DOTS",
-    "CANON_GMAIL_PLUS",
-    "CANON_OTHER_PLUS",
-    "MAX_ASSETS",
-    "MAX_SITEMAP_URLS",
-    "MAX_DOCS",
-    "PER_REQUEST_TIMEOUT",
-    "DAILY_SEND_LIMIT",
-    "EXTERNAL_SOURCES",
-    "SKIPPED_PREVIEW_LIMIT",
-    "LAST_SUMMARY_DIR",
-    "REPORT_TZ",
-    "RECONCILE_SINCE_DAYS",
-    "CRAWL_MAX_PAGES_PER_DOMAIN",
-    "CRAWL_TIME_BUDGET_SECONDS",
-    "ROBOTS_CACHE_PATH",
-    "ROBOTS_CACHE_TTL_SECONDS",
-    "SEND_MAX_WORKERS",
-    "PARSE_MAX_WORKERS",
-    "SEND_FILE_TIMEOUT",
-    "PARSE_FILE_TIMEOUT",
-    "SEND_COOLDOWN_DAYS",
-    "load",
-    "save",
-    "list_available_directions",
-    "resolve_label",
-]
-
+__all__ = ["settings", *sorted(name for name in globals() if name.isupper())]

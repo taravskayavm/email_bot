@@ -4,15 +4,211 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
+from typing import Any, Callable, TypedDict, cast
 
 import faulthandler
 
-__all__ = ["heartbeat", "heartbeat_now", "start_watchdog", "start_heartbeat_pulse"]
+__all__ = [
+    "heartbeat",
+    "heartbeat_now",
+    "start_watchdog",
+    "start_heartbeat_pulse",
+    "ProgressTracker",
+    "ProgressWatchdog",
+]
 
 _last_beat: float = 0.0
 _lock = asyncio.Lock()
+
+
+class _ProgressSnapshot(TypedDict, total=False):
+    """Typed representation of :class:`ProgressTracker` snapshots."""
+
+    last_progress: float
+    files_total: int
+    files_processed: int
+    files_skipped: int
+    last_file: str
+    stage: str
+    current: str
+    done: int
+    total: int
+
+
+logger = logging.getLogger(__name__)
+
+
+class ProgressTracker:
+    """Track long-running job progress in a thread-safe way.
+
+    The tracker is intended to be shared between worker threads that process
+    files and watchdogs that monitor for stalls.  ``tick_file`` should be
+    called once a file processing attempt finishes (regardless of success) to
+    record progress.  ``reset`` updates counters when a new batch starts.
+    """
+
+    def __init__(self, *, on_update: Callable[["_ProgressSnapshot"], None] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._last_progress = time.monotonic()
+        self._files_total = 0
+        self._files_processed = 0
+        self._files_skipped = 0
+        self._last_file = ""
+        self._on_update = on_update
+
+    def _emit_update(self, snapshot: "_ProgressSnapshot") -> None:
+        callback = self._on_update
+        if callback is None:
+            return
+        try:
+            callback(snapshot)
+        except Exception:  # pragma: no cover - best effort notification
+            logger.debug("progress callback failed", exc_info=True)
+
+    def reset(self, *, total: int | None = None) -> None:
+        """Reset counters for a new batch of work."""
+
+        with self._lock:
+            if total is not None:
+                self._files_total = max(int(total), 0)
+            self._files_processed = 0
+            self._files_skipped = 0
+            self._last_file = ""
+            self._last_progress = time.monotonic()
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
+
+    def reset_total(self, total: int) -> None:
+        """Reset the known total number of files in the batch."""
+
+        self.reset(total=total)
+
+    def extend_total(self, count: int) -> None:
+        """Increase the total number of files without resetting progress."""
+
+        if count <= 0:
+            return
+        with self._lock:
+            self._files_total += int(count)
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
+
+    def tick_file(self, filename: str, *, processed: bool = True) -> None:
+        """Mark ``filename`` as processed and refresh the progress timestamp."""
+
+        now = time.monotonic()
+        with self._lock:
+            if processed:
+                self._files_processed += 1
+            else:
+                self._files_skipped += 1
+            self._last_file = filename
+            self._last_progress = now
+            snapshot = _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+        self._emit_update(snapshot)
+
+    def update(self, **fields: Any) -> None:
+        """Emit an ad-hoc snapshot with additional ``fields``."""
+
+        now = time.monotonic()
+        with self._lock:
+            self._last_progress = now
+            payload: dict[str, Any] = {
+                "last_progress": self._last_progress,
+                "files_total": self._files_total,
+                "files_processed": self._files_processed,
+                "files_skipped": self._files_skipped,
+                "last_file": self._last_file,
+            }
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                payload[key] = value
+        self._emit_update(cast(_ProgressSnapshot, payload))
+
+    def snapshot(self) -> _ProgressSnapshot:
+        """Return a shallow copy of the current progress state."""
+
+        with self._lock:
+            return _ProgressSnapshot(
+                last_progress=self._last_progress,
+                files_total=self._files_total,
+                files_processed=self._files_processed,
+                files_skipped=self._files_skipped,
+                last_file=self._last_file,
+            )
+
+
+class ProgressWatchdog:
+    """Synchronous watchdog that inspects :class:`ProgressTracker` state."""
+
+    def __init__(
+        self,
+        tracker: ProgressTracker,
+        *,
+        idle_seconds: float = 90.0,
+        dump_path: str = "var/hang_dump.txt",
+    ) -> None:
+        self._tracker = tracker
+        self._idle_seconds = float(idle_seconds)
+        self._dump_path = dump_path
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Disable the watchdog."""
+
+        self._stopped = True
+
+    def check_or_raise(self) -> None:
+        """Raise ``TimeoutError`` if no progress has been observed recently."""
+
+        if self._stopped:
+            return
+        snapshot = self._tracker.snapshot()
+        last_progress = snapshot.get("last_progress", 0.0) or 0.0
+        if time.monotonic() - float(last_progress) <= self._idle_seconds:
+            return
+        try:
+            Path(self._dump_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self._dump_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"no file progress for >{self._idle_seconds:.0f}s\n"
+                )
+                files_total = int(snapshot.get("files_total") or 0)
+                files_processed = int(snapshot.get("files_processed") or 0)
+                files_skipped = int(snapshot.get("files_skipped") or 0)
+                fh.write(
+                    f"files_processed={files_processed}/{files_total}" "\n"
+                )
+                if files_skipped:
+                    fh.write(f"files_skipped={files_skipped}\n")
+                last_file = snapshot.get("last_file")
+                if last_file:
+                    fh.write(f"last_file={last_file}\n")
+        except Exception:  # pragma: no cover - best effort logging
+            pass
+        raise TimeoutError("no progress")
 
 
 async def heartbeat() -> None:
@@ -53,6 +249,7 @@ async def start_watchdog(
     *,
     idle_seconds: float = 45.0,
     dump_path: str = "var/hang_dump.txt",
+    tracker: ProgressTracker | None = None,
 ) -> None:
     """Monitor ``task`` and cancel it if no heartbeat is observed."""
 
@@ -74,6 +271,21 @@ async def start_watchdog(
                 with open(dump_path, "w", encoding="utf-8") as fh:
                     fh.write(f"=== HANG DUMP (idle {idle:.1f}s) ===\n")
                     fh.write(f"Task: {task!r}\n")
+                    if tracker is not None:
+                        snapshot = tracker.snapshot()
+                        files_total = int(snapshot.get("files_total") or 0)
+                        files_processed = int(snapshot.get("files_processed") or 0)
+                        files_skipped = int(snapshot.get("files_skipped") or 0)
+                        fh.write(
+                            "Progress: "
+                            f"{files_processed}/{files_total} processed"
+                        )
+                        if files_skipped:
+                            fh.write(f", {files_skipped} skipped")
+                        fh.write("\n")
+                        last_file = snapshot.get("last_file")
+                        if last_file:
+                            fh.write(f"Last file: {last_file}\n")
                     # Dump *all* threads to help investigate deadlocks.
                     faulthandler.dump_traceback(file=fh, all_threads=True)
             except Exception as exc:  # pragma: no cover - best effort logging

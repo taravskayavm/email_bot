@@ -4,12 +4,16 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
-import os
+import multiprocessing
+import queue
 import shutil
 import statistics
 import time
+import traceback
+import threading
+import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - ``regex`` may be unavailable in runtime
     import regex as re  # type: ignore
@@ -19,6 +23,11 @@ except Exception:  # pragma: no cover - fallback to stdlib ``re``
     import re  # type: ignore
 
     _REGEX_HAS_TIMEOUT = False
+
+try:  # pragma: no cover - optional dependency for lightweight extraction
+    from PyPDF2 import PdfReader  # type: ignore
+except Exception:  # pragma: no cover - PyPDF2 may be absent
+    PdfReader = None  # type: ignore
 
 # Детект доступности pdfminer.six (и других бэкендов по мере добавления)
 try:  # pragma: no cover - доступность зависит от окружения
@@ -50,15 +59,17 @@ def _detect_ocr_status() -> tuple[bool, bool, str]:
     if not enabled:
         _OCR_AVAILABLE = False
         return False, False, ""
-    engine = shutil.which("tesseract")
-    if engine:
+    if _ocr_guard_available():
         _OCR_AVAILABLE = True
         return True, True, ""
     _OCR_AVAILABLE = False
     if not _OCR_LOGGED_MISSING:
         logger.warning("OCR engine not found")
         _OCR_LOGGED_MISSING = True
-    return False, True, "не найден tesseract"
+    reason = "не найден tesseract"
+    if TESSERACT_CMD:
+        reason = f"не найден tesseract ({TESSERACT_CMD})"
+    return False, True, reason
 
 
 def backend_status() -> Dict[str, bool | str]:
@@ -78,12 +89,60 @@ def backend_status() -> Dict[str, bool | str]:
     return status
 
 from emailbot import settings
+from emailbot.config import (
+    EMAILBOT_ENABLE_OCR,
+    PARSE_COLLECT_ALL,
+    PDF_BACKEND,
+    PDF_EARLY_HEARTBEAT_SEC,
+    PDF_ENGINE,
+    PDF_FAST_MIN_HITS,
+    PDF_FAST_TIMEOUT_MS,
+    PDF_FALLBACK_BACKEND,
+    PDF_LEGACY_MODE,
+    PDF_MAX_PAGES,
+    PDF_OCR_ALLOW_BEST_EFFORT,
+    PDF_OCR_CACHE_DIR,
+    PDF_OCR_DPI,
+    PDF_OCR_ENGINE,
+    PDF_OCR_LANG,
+    PDF_OCR_MAX_PAGES,
+    PDF_OCR_MIN_CHARS,
+    PDF_OCR_MIN_TEXT_RATIO,
+    PDF_OCR_PAGE_LIMIT,
+    PDF_OCR_TIME_LIMIT,
+    PDF_OCR_TIMEOUT_PER_PAGE,
+    PDF_OPEN_TIMEOUT_SEC,
+    PDF_TEXT_TRUNCATE_LIMIT,
+    PDF_WARMUP_PAGES,
+    PDF_WARMUP_MIN_FOUND,  # Минимум email-адресов после warmup для решения об OCR
+    TESSERACT_CMD,
+)
+from emailbot.ui.progress_state import ParseProgress
 from emailbot.settings_store import get
+from emailbot.utils.logging_setup import get_logger
+from emailbot.utils.timeouts import DEFAULT_TIMEOUT_SEC, run_with_timeout as run_with_timeout_thread
+from emailbot.utils.timeout_policy import compute_pdf_timeout
+from emailbot.cancel_token import (
+    cancel_all,
+    get_shared_event,
+    install_shared_event,
+    is_cancelled,
+    reset_all,
+)
+from emailbot.utils.ocr_guard import ocr_available as _ocr_guard_available
+from emailbot.utils.pdf_open_safe import open_pdf_with_timeout
+from emailbot.utils.text_preprocess import normalize_for_email  # Подключаем нормализацию текста под e-mail
 from .extraction_common import normalize_email, preprocess_text
 from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
 from emailbot.timebudget import TimeBudget
 from utils.email_text_fix import fix_email_text
+
+_sanitize_for_email: Callable[[str], str] | None
+try:  # pragma: no cover - safety fallback if sanitizer is unavailable
+    from emailbot.sanitizer import sanitize_for_email as _sanitize_for_email
+except Exception:  # pragma: no cover
+    _sanitize_for_email = None
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -98,27 +157,28 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
-_OCR_ENGINE = os.getenv("OCR_ENGINE", "pytesseract") or "pytesseract"
-_OCR_LANG = os.getenv("OCR_LANG", "eng+rus") or "eng+rus"
-_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
-_OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
-_OCR_MIN_TEXT_RATIO = float(os.getenv("OCR_MIN_TEXT_RATIO", "0.05"))
-_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "150"))
-_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_OCR_PAGE_LIMIT)))
-_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
-_OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
-_OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
-_OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
-_PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
-MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "200"))
+_OCR_ENGINE = str(PDF_OCR_ENGINE or "pytesseract")
+_OCR_LANG = str(PDF_OCR_LANG or "eng+rus")
+_page_limit_default = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES > 0 else 10
+_OCR_PAGE_LIMIT = max(1, int(PDF_OCR_PAGE_LIMIT or _page_limit_default or 10))
+_OCR_TIME_LIMIT = max(0, int(PDF_OCR_TIME_LIMIT))
+_OCR_MIN_TEXT_RATIO = float(PDF_OCR_MIN_TEXT_RATIO)
+_OCR_MIN_CHARS = int(PDF_OCR_MIN_CHARS)
+_default_max_pages = PDF_OCR_MAX_PAGES if PDF_OCR_MAX_PAGES >= 0 else _OCR_PAGE_LIMIT
+_OCR_MAX_PAGES = int(_default_max_pages or _OCR_PAGE_LIMIT)
+_OCR_DPI = int(PDF_OCR_DPI)
+_OCR_TIMEOUT_PER_PAGE = max(1, int(PDF_OCR_TIMEOUT_PER_PAGE))
+_OCR_CACHE_DIR = Path(PDF_OCR_CACHE_DIR)
+_OCR_ALLOW_BEST_EFFORT = bool(PDF_OCR_ALLOW_BEST_EFFORT)
+_PDF_TEXT_TRUNCATE_LIMIT = int(PDF_TEXT_TRUNCATE_LIMIT)
+MAX_PAGES = int(PDF_MAX_PAGES)
 
-LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
-_pdf_backend_env = (os.getenv("PDF_BACKEND", "fitz") or "fitz").strip().lower()
-if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
-    _pdf_backend_env = "fitz"
-PDF_BACKEND = _pdf_backend_env
+LEGACY_MODE = bool(PDF_LEGACY_MODE)
+PDF_BACKEND = (PDF_BACKEND or "fitz").strip().lower()
+if PDF_BACKEND not in {"fitz", "pdfminer", "auto"}:
+    PDF_BACKEND = "fitz"
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 try:  # pragma: no cover - depends on runtime environment
     _OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -134,13 +194,157 @@ BASIC_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 # Быстрый детектор «обычных» e-mail без тяжёлой предобработки
 _QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
 # Порог, начиная с которого страницу считаем «простой» и не гоним через тяжёлый пайплайн
-_PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
-_PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
+_PDF_FAST_MIN_HITS = max(1, int(PDF_FAST_MIN_HITS or 1))
+_PDF_FAST_TIMEOUT_MS = max(10, int(PDF_FAST_TIMEOUT_MS or 60))
 
 
 _ZERO_WIDTH_MAP = dict.fromkeys(map(ord, "\u200B\u200C\u200D\u2060\uFEFF"), None)
 _NBSP_TRANSLATE = str.maketrans({"\u00A0": " ", "\u202F": " "})
 _HARD_HYPHENS_RE = re.compile(r"[‐-‒–—―]")
+
+
+class _QueueProgress:
+    """Lightweight proxy that relays progress updates through a queue."""
+
+    __slots__ = ("_queue",)
+
+    def __init__(self, q: multiprocessing.Queue) -> None:
+        self._queue = q
+
+    def _send(self, method: str, *args, **kwargs) -> None:
+        try:
+            self._queue.put_nowait(("progress", method, args, kwargs))
+        except Exception:
+            pass
+
+    def set_phase(self, phase: str) -> None:
+        self._send("set_phase", phase)
+
+    def set_total(self, total: int) -> None:
+        self._send("set_total", total)
+
+    def inc_pages(self, n: int = 1) -> None:
+        self._send("inc_pages", n)
+
+    def set_found(self, n: int) -> None:
+        self._send("set_found", n)
+
+    def set_ocr(self, value: bool | str) -> None:
+        self._send("set_ocr", value)
+
+    def set_ocr_status(self, status: str) -> None:
+        self._send("set_ocr_status", status)
+
+
+class _WarmupProgressProxy:
+    """Proxy that suppresses first N ``inc_pages`` calls after warmup."""
+
+    __slots__ = ("_inner", "_skip")
+
+    def __init__(self, inner: object, skip: int) -> None:
+        self._inner = inner
+        self._skip = max(0, int(skip))
+
+    def __getattr__(self, item: str):  # pragma: no cover - delegation helper
+        return getattr(self._inner, item)
+
+    def inc_pages(self, n: int = 1) -> None:
+        try:
+            value = int(n)
+        except Exception:
+            getattr(self._inner, "inc_pages")(n)
+            return
+        if value <= 0:
+            getattr(self._inner, "inc_pages")(value)
+            return
+        if self._skip > 0:
+            take = min(self._skip, value)
+            self._skip -= take
+            value -= take
+        if value:
+            getattr(self._inner, "inc_pages")(value)
+
+
+def _run_pdf_warmup(
+    pdf_path: Path,
+    progress: object,
+    stop_event: object | None = None,
+) -> tuple[int, int]:
+    """Perform a lightweight pass over first PDF pages to kick-start progress."""
+
+    if not progress or not FITZ_OK:
+        return 0, 0  # Без прогресса или PyMuPDF возвращаем нулевые показатели
+    try:
+        warm_limit = max(0, int(PDF_WARMUP_PAGES))  # Гарантируем неотрицательный лимит страниц
+    except Exception:
+        warm_limit = 0  # В случае ошибки парсинга воспринимаем как отсутствие warmup
+    if warm_limit <= 0:
+        return 0, 0  # При нулевом лимите ничего не делаем
+    try:
+        doc = fitz.open(str(pdf_path))  # type: ignore[attr-defined]  # Открываем документ PyMuPDF
+    except Exception:
+        return 0, 0  # Если открыть файл не удалось, warmup считается не выполненным
+    try:
+        try:
+            total_pages = getattr(doc, "page_count", 0)  # Получаем число страниц документа
+        except Exception:
+            total_pages = 0  # При ошибке считаем количество страниц неизвестным
+        if total_pages:
+            warm_limit = min(warm_limit, int(total_pages))  # Не выходим за пределы фактического количества страниц
+        if warm_limit <= 0:
+            return 0, 0  # При отсутствии страниц завершаем
+        try:
+            getattr(progress, "set_phase")("быстрый старт…")  # Обновляем фазу прогресса
+        except Exception:
+            pass  # Игнорируем ошибки обновления прогресса
+        try:
+            from emailbot.parsing.extract_from_text import emails_from_text  # Импортируем извлечение email на лету
+        except Exception:
+            emails_from_text = None  # type: ignore[assignment]  # При недоступности извлечения продолжаем без него
+        found: set[str] = set()  # Храним найденные адреса
+        processed = 0  # Счётчик обработанных страниц
+        for page_index in range(warm_limit):
+            if is_cancelled():
+                break  # Прерываемся при глобальной отмене
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                break  # Уважаем сигнал остановки из внешнего события
+            try:
+                page = doc.load_page(page_index)  # Загружаем страницу по индексу
+            except Exception:
+                continue  # Пропускаем страницу при ошибке чтения
+            try:
+                text = page.get_text("text") or ""  # Извлекаем текст страницы, получая пустую строку при None
+            except Exception:
+                text = ""  # При ошибке чтения текста сбрасываем строку
+            text = normalize_for_email(text)  # Нормализуем текст перед поиском адресов
+            if text and emails_from_text is not None:
+                try:
+                    found.update(emails_from_text(text))  # Обновляем множество найденных адресов
+                except Exception:
+                    pass  # Игнорируем ошибки парсера почты
+            try:
+                getattr(progress, "inc_pages")(1)  # Сообщаем об обработанной странице
+            except Exception:
+                pass  # Не прерываем процесс из-за ошибки прогресса
+            try:
+                getattr(progress, "set_found")(len(found))  # Передаём количество найденных адресов
+            except Exception:
+                pass  # Игнорируем проблемы при обновлении прогресса
+            try:
+                getattr(progress, "touch")()  # Отправляем heartbeat для поддержания UI
+            except Exception:
+                pass  # Ошибки heartbeat не критичны
+            processed += 1  # Увеличиваем счётчик обработанных страниц
+        try:
+            getattr(progress, "set_phase")("PDF")  # Возвращаем фазу в стандартный режим парсинга
+        except Exception:
+            pass  # Игнорируем сбои при смене фазы
+        return processed, len(found)  # Сообщаем количество обработанных страниц и найденных адресов
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
 
 
 def clean_pdf_text(text: str) -> str:
@@ -338,6 +542,11 @@ def _ocr_page(page) -> str:
             "pytesseract/Pillow are not installed; PDF OCR is disabled"
         )
         return ""
+    if TESSERACT_CMD:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        except Exception:
+            logger.debug("Failed to set explicit Tesseract path", exc_info=True)
     try:
         pix = page.get_pixmap(dpi=_OCR_DPI)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -369,7 +578,7 @@ def _ocr_cache_set(key: str, text: str) -> None:
         logger.debug("Failed to write OCR cache entry", exc_info=True)
 
 
-def _should_document_ocr(text: str, data: bytes) -> bool:
+def _should_document_ocr(text: str, data: bytes, *, force: bool = False) -> bool:  # Добавляем флаг принудительного OCR
     if not data:
         return False
     ocr_available, ocr_enabled, _ = _detect_ocr_status()
@@ -377,6 +586,8 @@ def _should_document_ocr(text: str, data: bytes) -> bool:
         return False
     if not (ocr_available or _OCR_ALLOW_BEST_EFFORT):
         return False
+    if force:
+        return True  # При принудительном режиме запускаем OCR невзирая на объём текста
     cleaned = clean_pdf_text(text or "").strip()
     if not cleaned:
         return True
@@ -397,6 +608,11 @@ def _document_ocr(data: bytes, *, budget: TimeBudget | None = None) -> tuple[str
     except Exception:
         logger.warning("pytesseract is not installed; PDF OCR fallback disabled")
         return "", 0
+    if TESSERACT_CMD:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        except Exception:
+            logger.debug("Failed to set explicit Tesseract path", exc_info=True)
 
     try:
         images = convert_from_bytes(data, dpi=_OCR_DPI)
@@ -470,8 +686,11 @@ def _pdfminer_extract_with_stats(
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
-        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
-        return "", 0
+        try:
+            from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+        except Exception:
+            logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
+            return "", 0
 
     if budget:
         budget.checkpoint()
@@ -490,8 +709,11 @@ def _pdfminer_extract_bytes_with_stats(
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
     except Exception:
-        logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
-        return "", 0
+        try:
+            from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+        except Exception:
+            logger.warning("pdfminer.six is not installed; PDF text extraction disabled")
+            return "", 0
 
     if budget:
         budget.checkpoint()
@@ -552,6 +774,7 @@ def extract_text_from_pdf_bytes(
     data: bytes,
     stats: Dict[str, int] | None = None,
     budget: TimeBudget | None = None,
+    force_ocr: bool = False,  # Флаг принудительного включения OCR
 ) -> str:
     """Read PDF bytes directly, using PyMuPDF with pdfminer fallback."""
 
@@ -577,7 +800,10 @@ def extract_text_from_pdf_bytes(
         try:
             from pdfminer.high_level import extract_text as pdfminer_extract
         except Exception:
-            pdfminer_extract = None
+            try:
+                from pdfminer_high_level import extract_text as pdfminer_extract  # type: ignore
+            except Exception:
+                pdfminer_extract = None
         if pdfminer_extract is not None:
             heartbeat_now()
             if budget:
@@ -592,7 +818,7 @@ def extract_text_from_pdf_bytes(
 
     ocr_pages = 0
     ocr_used = False
-    if _should_document_ocr(text, data):
+    if _should_document_ocr(text, data, force=force_ocr):  # Решаем, нужен ли OCR с учётом принудительного режима
         if stats is not None:
             stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
         key = _sha256(data)
@@ -606,6 +832,9 @@ def extract_text_from_pdf_bytes(
                 text = ocr_text
                 ocr_used = True
                 _ocr_cache_set(key, ocr_text)
+
+    if _sanitize_for_email is not None and text:
+        text = _sanitize_for_email(text)
 
     if stats is not None and pages_with_text:
         stats["pages"] = stats.get("pages", 0) + pages_with_text
@@ -625,7 +854,7 @@ def extract_text_from_pdf_bytes(
     return cleanup_text(text)
 
 
-def extract_text_from_pdf(path: str | Path) -> str:
+def extract_text_from_pdf(path: str | Path, *, force_ocr: bool = False) -> str:  # Позволяет принудительно включить OCR при необходимости
     pdf_path = Path(path)
 
     try:
@@ -648,7 +877,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         fallback = _extract_with_pypdf(pdf_path)
         text = fallback if fallback.strip() else ""
 
-    if pdf_bytes and _should_document_ocr(text, pdf_bytes):
+    if pdf_bytes and _should_document_ocr(text, pdf_bytes, force=force_ocr):  # Решаем, нужен ли OCR для файла, учитывая принудительный режим
         key = _sha256(pdf_bytes)
         cached = _ocr_cache_get(key)
         if cached:
@@ -664,6 +893,443 @@ def extract_text_from_pdf(path: str | Path) -> str:
     if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
         text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
     return cleanup_text(text)
+
+
+def _pdf_worker_entry(
+    pdf_path: str,
+    shared_event,
+    q: queue.Queue,
+    with_progress: bool,
+) -> None:
+    """Worker entry point executed inside a separate process."""
+
+    try:
+        install_shared_event(shared_event)
+    except Exception:
+        pass
+
+    progress = _QueueProgress(q) if with_progress else None
+    warmup_done = 0  # Счётчик страниц, обработанных на warmup-этапе
+    warmup_found = 0  # Количество найденных адресов на warmup-этапе
+    if progress is not None:
+        try:
+            warmup_done, warmup_found = _run_pdf_warmup(
+                Path(pdf_path),
+                progress,
+                shared_event,
+            )  # Запускаем быстрый прогрев и получаем статистику
+        except Exception:
+            warmup_done = 0  # При ошибке считаем, что warmup не состоялся
+            warmup_found = 0  # Сбрасываем количество найденных адресов
+    progress_for_core: ParseProgress | None
+    if progress is not None and warmup_done:
+        progress_for_core = _WarmupProgressProxy(progress, warmup_done)  # type: ignore[assignment]
+    else:
+        progress_for_core = progress
+    try:
+        result = _extract_emails_core(
+            Path(pdf_path),
+            stop_event=shared_event,
+            progress=progress_for_core,
+            warmup_found=warmup_found,
+        )
+    except Exception:
+        q.put(("error", traceback.format_exc()))
+        return
+    q.put(("result", list(result or [])))
+
+
+def _spawn_context() -> multiprocessing.context.BaseContext:
+    if sys.platform.startswith("win"):
+        try:
+            multiprocessing.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+        return multiprocessing.get_context("spawn")
+    try:
+        return multiprocessing.get_context()
+    except ValueError:
+        return multiprocessing.get_context("spawn")
+
+
+def _short_error_reason(message: str, limit: int = 120) -> str:
+    text = (message or "").strip()
+    if not text:
+        return "см. журнал"
+    head = text.splitlines()[0].strip()
+    if len(head) > limit:
+        return head[: limit - 1] + "…"
+    return head
+
+
+def _extract_emails_core(
+    pdf_path: Path,
+    *,
+    stop_event=None,
+    progress: ParseProgress | None = None,
+    warmup_found: int | None = None,  # Количество email, найденных при прогреве
+) -> Set[str]:
+    """Core PDF extraction logic executed inside a worker process."""
+
+    if progress is not None:
+        hits, _stats = extract_from_pdf(
+            str(pdf_path),
+            stop_event=stop_event,
+            progress=progress,
+        )
+        return {
+            normalize_email(hit.email) or hit.email
+            for hit in hits
+            if getattr(hit, "email", "")
+        }
+
+    base_hits: Set[str] = set()  # Храним быстрые находки для последующего объединения
+    low_warmup = (
+        warmup_found is not None and warmup_found < int(PDF_WARMUP_MIN_FOUND)
+    )  # Проверяем, достаточно ли адресов нашли на warmup
+    if PDF_ENGINE.lower() == "fitz":
+        try:
+            from emailbot.extraction_pdf_fast import extract_emails_fitz
+        except Exception:
+            extract_emails_fitz = None  # type: ignore[assignment]
+        if extract_emails_fitz is not None:
+            fast_hits = extract_emails_fitz(pdf_path)  # Запускаем быстрый сценарий PyMuPDF
+            if fast_hits:  # Если быстрый проход что-то нашёл
+                base_hits = set(fast_hits)  # Сохраняем быстрые результаты для объединения
+                if not low_warmup:  # Если warmup дал достаточно адресов
+                    return base_hits  # Если warmup уже дал достаточно адресов, завершаем
+
+    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        return base_hits  # При отмене возвращаем уже найденные адреса
+
+    try:
+        text = extract_text_from_pdf(pdf_path, force_ocr=low_warmup)
+    except Exception:
+        text = ""
+    if not text:
+        return base_hits  # При отсутствии текста ограничиваемся быстрыми попаданиями
+
+    try:
+        from emailbot.parsing.extract_from_text import emails_from_text
+    except Exception:
+        return base_hits
+
+    if stop_event and getattr(stop_event, "is_set", lambda: False)():
+        return base_hits
+
+    try:
+        normalized_text = normalize_for_email(text)  # Приводим текст к форме, удобной для поиска email
+        slow_hits = emails_from_text(normalized_text)  # Извлекаем адреса из нормализованного текста
+        return base_hits | slow_hits  # Объединяем быстрые и медленные результаты
+    except Exception:
+        return base_hits
+
+
+def extract_emails_from_pdf(
+    path: str | Path,
+    progress: ParseProgress | None = None,
+) -> set[str]:
+    """Extract normalised e-mail addresses from a PDF document."""
+
+    if is_cancelled():
+        return set()
+
+    pdf_path = Path(path)
+    timeout = compute_pdf_timeout(pdf_path)
+    try:
+        size_bytes = pdf_path.stat().st_size
+        size_mb = size_bytes / (1024.0 * 1024.0)
+    except Exception:
+        size_mb = -1.0
+
+    logger.info(
+        "PDF extract start: %s (engine=%s, max_pages=%d, timeout=%ds, size=%.2fMB)",
+        str(pdf_path),
+        PDF_ENGINE,
+        MAX_PAGES,
+        timeout,
+        size_mb if size_mb >= 0 else -1.0,
+    )
+    if progress is not None:
+        try:
+            progress.set_phase("подготовка")
+            progress.set_total(0)
+            progress.set_found(0)
+            progress.set_ocr_status("не требуется")
+        except Exception:
+            pass
+
+    shared_event = get_shared_event()
+    ctx = _spawn_context()
+    worker_queue: queue.Queue
+    proc: multiprocessing.Process | None = None
+    thread_worker: threading.Thread | None = None
+    using_thread_fallback = False
+
+    try:
+        worker_queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_pdf_worker_entry,
+            args=(str(pdf_path), shared_event, worker_queue, bool(progress)),
+            daemon=True,
+        )
+        proc.start()
+    except Exception as exc:
+        using_thread_fallback = True
+        worker_queue = queue.Queue()
+        thread_worker = threading.Thread(
+            target=_pdf_worker_entry,
+            args=(str(pdf_path), shared_event, worker_queue, bool(progress)),
+            name="pdf-worker-fallback",
+            daemon=True,
+        )
+        thread_worker.start()
+        logger.warning(
+            "PDF worker fallback to thread mode for %s: %s",
+            str(pdf_path),
+            exc,
+            exc_info=True,
+        )
+        if progress is not None:
+            try:
+                progress.set_phase("⚠️ Потоковый режим (совместимость)")
+            except Exception:
+                pass
+
+    deadline = time.monotonic() + timeout
+    result: Set[str] | None = None
+    error_message: str | None = None
+    timed_out = False
+    stop_requested = False
+    cancel_flag = False
+
+    last_progress_event = time.monotonic()
+    first_page_seen = False
+    hb_stop = threading.Event()
+
+    def _heartbeat_loop() -> None:
+        nonlocal last_progress_event, first_page_seen
+        base_interval = 2.5
+        while not hb_stop.wait(0.5):
+            now = time.monotonic()
+            threshold = PDF_EARLY_HEARTBEAT_SEC if not first_page_seen else base_interval
+            if threshold <= 0:
+                threshold = base_interval
+            if now - last_progress_event < threshold:
+                continue
+            heartbeat_now()
+            if progress is not None:
+                if not first_page_seen:
+                    try:
+                        current_phase = getattr(progress, "phase", None)
+                    except Exception:
+                        current_phase = None
+                    if not current_phase:
+                        try:
+                            progress.set_phase("подготовка…")
+                        except Exception:
+                            pass
+                try:
+                    progress.touch()
+                except AttributeError:
+                    try:
+                        phase_value = getattr(progress, "phase", None)
+                    except Exception:
+                        phase_value = None
+                    if not phase_value:
+                        phase_value = "подготовка…" if not first_page_seen else "парсинг"
+                    try:
+                        progress.set_phase(phase_value)
+                    except Exception:
+                        pass
+            last_progress_event = now
+
+    hb_thread: threading.Thread | None = None
+    if progress is not None:
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name="pdf-progress-heartbeat",
+            daemon=True,
+        )
+        hb_thread.start()
+
+    def _apply_progress(method: str, args: tuple, kwargs: dict) -> None:
+        nonlocal last_progress_event, first_page_seen
+        if not progress:
+            return
+        try:
+            getattr(progress, method)(*args, **kwargs)
+        except Exception:
+            pass
+        last_progress_event = time.monotonic()
+        if method == "inc_pages":
+            inc_value = 1
+            if args:
+                try:
+                    inc_value = int(args[0])
+                except Exception:
+                    inc_value = 0
+            if inc_value and inc_value > 0:
+                first_page_seen = True
+
+    try:
+        while True:
+            if result is not None or error_message is not None:
+                break
+            if timed_out or stop_requested:
+                break
+            if should_stop() and not stop_requested:
+                stop_requested = True
+                cancel_all()
+                cancel_flag = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                cancel_all()
+                cancel_flag = True
+                break
+            wait_time = min(1.0, max(0.1, remaining))
+            try:
+                message = worker_queue.get(timeout=wait_time)
+            except queue.Empty:
+                alive = False
+                if using_thread_fallback:
+                    alive = bool(thread_worker and thread_worker.is_alive())
+                elif proc is not None:
+                    alive = proc.is_alive()
+                if not alive:
+                    break
+                continue
+            if not message:
+                continue
+            kind = message[0]
+            if kind == "progress":
+                _apply_progress(message[1], message[2], message[3])
+            elif kind == "result":
+                result = set(message[1] or [])
+            elif kind == "error":
+                error_message = message[1] or "unknown error"
+            if result is not None or error_message is not None:
+                break
+
+        while True:
+            try:
+                message = worker_queue.get_nowait()
+            except queue.Empty:
+                break
+            if not message:
+                continue
+            kind = message[0]
+            if kind == "progress":
+                _apply_progress(message[1], message[2], message[3])
+            elif kind == "result" and result is None:
+                result = set(message[1] or [])
+            elif kind == "error" and error_message is None:
+                error_message = message[1] or "unknown error"
+    finally:
+        hb_stop.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=0.5)
+        if proc is not None:
+            try:
+                proc.join(0.1)
+            except Exception:
+                pass
+            if proc.is_alive():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                proc.join(1)
+        if thread_worker is not None:
+            thread_worker.join(timeout=1.0)
+        if hasattr(worker_queue, "close"):
+            try:
+                worker_queue.close()  # type: ignore[call-arg]
+            except Exception:
+                pass
+            if hasattr(worker_queue, "join_thread"):
+                try:
+                    worker_queue.join_thread()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        if cancel_flag:
+            reset_all()
+
+    if timed_out:
+        logger.error("PDF extract timeout: %s (>%ds)", str(pdf_path), timeout)
+        if progress is not None:
+            try:
+                progress.set_phase("⏱️ Истёк таймаут")
+            except Exception:
+                pass
+        try:
+            from emailbot.ui.notify import notify_timeout_hint
+
+            notify_timeout_hint(
+                pdf_path.name,
+                timeout,
+                source_path=pdf_path,
+            )
+        except Exception:
+            logger.debug("Timeout notification failed", exc_info=True)
+        return set()
+
+    if stop_requested:
+        logger.info("PDF extract stopped by user: %s", str(pdf_path))
+        if progress is not None:
+            try:
+                progress.set_phase("⛔ Остановлено")
+            except Exception:
+                pass
+        return result or set()
+
+    if error_message is not None:
+        reason = _short_error_reason(error_message)
+        logger.error("PDF extract failed: %s (%s)", str(pdf_path), reason)
+        logger.debug("PDF worker traceback:\n%s", error_message)
+        if progress is not None:
+            try:
+                progress.set_phase(f"⚠️ Ошибка парсинга: {reason}")
+            except Exception:
+                pass
+        return result or set()
+
+    emails: Set[str] = result or set()
+
+    if not emails and EMAILBOT_ENABLE_OCR:
+        try:
+            from emailbot.extraction_ocr import ocr_emails_from_pdf
+        except Exception:
+            ocr_emails_from_pdf = None  # type: ignore[assignment]
+        if ocr_emails_from_pdf is not None:
+            try:
+                ocr_hits = ocr_emails_from_pdf(pdf_path)
+            except Exception:
+                ocr_hits = set()
+            if ocr_hits:
+                emails |= ocr_hits
+
+    logger.info(
+        "PDF extract done: %s (found=%d, timeout_used=%ds)",
+        str(pdf_path),
+        len(emails),
+        timeout,
+    )
+    if progress is not None:
+        try:
+            progress.set_found(len(emails))
+        except Exception:
+            pass
+        try:
+            progress.set_phase("готово")
+        except Exception:
+            pass
+        try:
+            progress.set_ocr_status("не требуется")
+        except Exception:
+            pass
+    return emails
 
 
 def extract_text(
@@ -692,11 +1358,60 @@ def extract_text(
     return ""
 
 
-def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list["EmailHit"], Dict]:
+def _extract_from_pdf_no_timeout(path: str, max_pages: Optional[int] = None) -> str:
+    if PdfReader is None:
+        logger.warning("PyPDF2 not available; %s -> empty", path)
+        return ""
+    try:
+        reader = PdfReader(path, strict=False)
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        logger.warning("PyPDF2 failed for %s: %s", path, exc)
+        return ""
+    text_parts: List[str] = []
+    pages = getattr(reader, "pages", [])
+    total_pages = len(pages)
+    limit = total_pages if max_pages is None else min(total_pages, max_pages)
+    for idx in range(limit):
+        try:
+            page = pages[idx]
+            text_parts.append(page.extract_text() or "")
+        except Exception as exc:  # pragma: no cover - graceful degradation
+            logger.warning("PDF extract failed %s page %d: %s", path, idx, exc)
+            continue
+    return "\n".join(text_parts)
+
+
+def _extract_from_pdf_with_timeout(
+    path: str,
+    timeout_sec: Optional[int] = None,
+    max_pages: Optional[int] = None,
+) -> str:
+    if timeout_sec is None or timeout_sec <= 0:
+        timeout_sec = DEFAULT_TIMEOUT_SEC
+    try:
+        return run_with_timeout_thread(
+            _extract_from_pdf_no_timeout, timeout_sec, path, max_pages=max_pages
+        )
+    except TimeoutError:
+        logger.warning("PDF parse timeout: %s after %ss", path, timeout_sec)
+        return ""
+
+
+def extract_from_pdf(
+    path: str,
+    stop_event: Optional[object] = None,
+    *,
+    timeout_sec: Optional[int] = None,
+    max_pages: Optional[int] = None,
+    progress: ParseProgress | None = None,
+) -> tuple[list["EmailHit"], Dict] | str:
     """Extract e-mail addresses from a PDF file (PyMuPDF → pdfminer fallback)."""
 
     from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
     from .extraction import EmailHit, extract_emails_document, _dedupe
+
+    if timeout_sec is not None or max_pages is not None:
+        return _extract_from_pdf_with_timeout(path, timeout_sec=timeout_sec, max_pages=max_pages)
 
     settings.load()
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
@@ -704,12 +1419,72 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
     ocr_available, ocr_configured, _ = _detect_ocr_status()
     ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
+    ocr_unavailable = ocr_configured and not (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
     stats: Dict[str, int] = {"pages": 0}
+    progress_unique: set[str] = set()
+    if progress:
+        try:
+            progress.set_phase("Подготовка")
+        except Exception:
+            pass
+        try:
+            progress.set_found(0)
+        except Exception:
+            pass
+        try:
+            progress.set_ocr_status("не требуется")
+        except Exception:
+            pass
 
     _fitz = fitz if FITZ_OK else None
+    fallback_backend = (PDF_FALLBACK_BACKEND or "pdfminer").strip().lower() or "pdfminer"
+    if fallback_backend != "pdfminer":
+        fallback_backend = "pdfminer"
+    backend_order = list(_backend_order())
+    fitz_guard_ok = True
+    guard_pages: int | None = None
+    guard_error: str | None = None
+
+    if (
+        _fitz is not None
+        and "fitz" in backend_order
+        and float(PDF_OPEN_TIMEOUT_SEC) > 0
+    ):
+        try:
+            guard_ok, guard_pages, guard_error = open_pdf_with_timeout(
+                str(path), float(PDF_OPEN_TIMEOUT_SEC)
+            )
+        except Exception:
+            guard_ok, guard_pages, guard_error = False, None, "probe_failed"
+        if guard_ok:
+            fitz_guard_ok = True
+        else:
+            fitz_guard_ok = False
+            backend_order = [b for b in backend_order if b != "fitz"]
+            if fallback_backend not in backend_order and fallback_backend:
+                backend_order.append(fallback_backend)
+            if progress:
+                try:
+                    phase = "Переключение на резервный парсер"
+                    if guard_error == "timeout":
+                        phase = "Переключение: fitz не открыл PDF вовремя"
+                    progress.set_phase(phase)
+                except Exception:
+                    pass
+
+    if progress and guard_pages:
+        try:
+            progress.set_total(guard_pages)
+        except Exception:
+            pass
+    if progress and fitz_guard_ok:
+        try:
+            progress.set_phase("PDF")
+        except Exception:
+            pass
 
     def _finalize_hits(emails: List[str], source_ref: str) -> List[EmailHit]:
         raw_hits = [
@@ -733,6 +1508,8 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if _sanitize_for_email is not None:
+            prepared = _sanitize_for_email(prepared)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -742,10 +1519,15 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     pdf_path = Path(path)
     text = ""
     pages_with_text = 0
-    for backend in _backend_order():
+    for backend in backend_order:
         if backend == "fitz":
             text, pages_with_text = _fitz_extract_with_stats(pdf_path)
         elif backend == "pdfminer":
+            if progress and not fitz_guard_ok:
+                try:
+                    progress.set_phase(f"Резервный парсер: {fallback_backend}")
+                except Exception:
+                    pass
             text, pages_with_text = _pdfminer_extract_with_stats(pdf_path)
         else:
             text, pages_with_text = "", 0
@@ -760,9 +1542,19 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             extract_emails_document(prepared, stats),
             f"pdf:{path}",
         )
+        if progress:
+            if pages_with_text:
+                progress.set_total(pages_with_text)
+            new_norms = {
+                normalize_email(h.email)
+                for h in hits
+                if getattr(h, "email", "")
+            }
+            progress_unique.update({n for n in new_norms if n})
+            progress.set_found(len(progress_unique))
         return hits, stats
 
-    if _fitz is None:
+    if _fitz is None or not fitz_guard_ok:
         try:
             with open(path, "rb") as f:
                 text = f.read().decode("utf-8", "ignore")
@@ -777,103 +1569,151 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     hits: List[EmailHit] = []
     doc = _fitz.open(path)
+    if progress:
+        try:
+            total_pages = getattr(doc, "page_count", 0)
+            if total_pages:
+                progress.set_total(total_pages)
+        except Exception:
+            pass
+        try:
+            progress.set_phase("PDF")
+        except Exception:
+            pass
+        progress.set_ocr(False)
+    reported_ocr_missing = False
     ocr_pages = 0
     ocr_start = time.time()
     ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
+        if is_cancelled():
+            break
         heartbeat_now()
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
         ):
             break
-        if layout:
-            try:
-                text = _page_text_layout(page)
-            except Exception:
+        page_new_norms: set[str] = set()
+        did_ocr = False
+        text = ""
+        try:
+            if layout:
+                try:
+                    text = _page_text_layout(page)
+                except Exception:
+                    text = page.get_text() or ""
+            else:
                 text = page.get_text() or ""
-        else:
-            text = page.get_text() or ""
-        if not text.strip() and ocr:
-            if (
-                ocr_pages < _OCR_PAGE_LIMIT
-                and time.time() - ocr_start < _OCR_TIME_LIMIT
-            ):
-                if not ocr_marked:
-                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
-                    ocr_marked = True
-                text = _ocr_page(page)
-                if text:
-                    ocr_pages += 1
-                    stats["ocr_pages"] = ocr_pages
-        if not text or not text.strip():
-            continue
-        stats["pages"] = stats.get("pages", 0) + 1
-        text = _maybe_join_pdf_breaks(
-            text,
-            join_hyphen=join_hyphen_breaks,
-            join_email=join_email_breaks,
-        )
-        text = fix_email_text(text)
-        if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
-            text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
-            stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
-
-        quick_matches = _quick_email_matches(text)
-        fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
-        if fast_mode:
-            fast_norms: set[str] = set()
-            fast_hits: list[EmailHit] = []
-            for raw_email, start, end in quick_matches:
-                norm = normalize_email(raw_email)
-                if not norm or norm in fast_norms:
-                    continue
-                fast_norms.add(norm)
-                pre = text[max(0, start - 16) : start]
-                post = text[end : end + 16]
-                fast_hits.append(
-                    EmailHit(
-                        email=raw_email,
-                        source_ref=f"pdf:{path}#page={page_idx}",
-                        origin="direct_at",
-                        pre=pre,
-                        post=post,
-                    )
-                )
-            if fast_hits:
-                hits.extend(fast_hits)
-            stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
-            stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
-            continue
-
-        fast_norms = {
-            norm
-            for raw_email, _, _ in quick_matches
-            if (norm := normalize_email(raw_email))
-        }
-        text = _legacy_cleanup_text(text)
-        text = preprocess_text(text, stats)
-        low_text = text.lower()
-        for email in extract_emails_document(text, stats):
-            norm = normalize_email(email)
-            if norm and fast_mode and norm in fast_norms:
+            need_page_ocr = not text.strip()
+            if need_page_ocr and ocr:
+                if (
+                    ocr_pages < _OCR_PAGE_LIMIT
+                    and time.time() - ocr_start < _OCR_TIME_LIMIT
+                ):
+                    if not ocr_marked:
+                        stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
+                        ocr_marked = True
+                    if progress:
+                        progress.set_ocr(True)
+                        progress.set_phase("OCR")
+                    text = _ocr_page(page)
+                    did_ocr = True
+                    if text:
+                        ocr_pages += 1
+                        stats["ocr_pages"] = ocr_pages
+                elif progress and ocr_unavailable and not reported_ocr_missing:
+                    progress.set_phase("OCR недоступен")
+                    progress.set_ocr_status("недоступен")
+                    reported_ocr_missing = True
+            elif need_page_ocr and progress and ocr_unavailable and not reported_ocr_missing:
+                progress.set_phase("OCR недоступен")
+                progress.set_ocr_status("недоступен")
+                reported_ocr_missing = True
+            if not text or not text.strip():
                 continue
-            for m in re.finditer(re.escape(email), low_text):
-                start, end = m.span()
-                pre = text[max(0, start - 16) : start]
-                post = text[end : end + 16]
-                hits.append(
-                    EmailHit(
-                        email=email,
-                        source_ref=f"pdf:{path}#page={page_idx}",
-                        origin="direct_at",
-                        pre=pre,
-                        post=post,
+            stats["pages"] = stats.get("pages", 0) + 1
+            text = _maybe_join_pdf_breaks(
+                text,
+                join_hyphen=join_hyphen_breaks,
+                join_email=join_email_breaks,
+            )
+            text = fix_email_text(text)
+            if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
+                text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
+                stats["pdf_text_truncated"] = stats.get("pdf_text_truncated", 0) + 1
+
+            quick_matches = _quick_email_matches(text)
+            fast_mode = len(quick_matches) >= _PDF_FAST_MIN_HITS
+            if fast_mode:
+                fast_norms: set[str] = set()
+                fast_hits: list[EmailHit] = []
+                for raw_email, start, end in quick_matches:
+                    norm = normalize_email(raw_email)
+                    if not norm or norm in fast_norms:
+                        continue
+                    fast_norms.add(norm)
+                    pre = text[max(0, start - 16) : start]
+                    post = text[end : end + 16]
+                    fast_hits.append(
+                        EmailHit(
+                            email=raw_email,
+                            source_ref=f"pdf:{path}#page={page_idx}",
+                            origin="direct_at",
+                            pre=pre,
+                            post=post,
+                        )
                     )
-                )
-        if should_stop() or (
-            stop_event and getattr(stop_event, "is_set", lambda: False)()
-        ):
-            break
+                if fast_hits:
+                    hits.extend(fast_hits)
+                    page_new_norms.update(
+                        normalize_email(item.email)
+                        for item in fast_hits
+                        if getattr(item, "email", "")
+                    )
+                stats["pdf_fast_pages"] = stats.get("pdf_fast_pages", 0) + 1
+                stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(fast_hits)
+                continue
+
+            fast_norms = {
+                norm
+                for raw_email, _, _ in quick_matches
+                if (norm := normalize_email(raw_email))
+            }
+            text = _legacy_cleanup_text(text)
+            text = preprocess_text(text, stats)
+            low_text = text.lower()
+            for email in extract_emails_document(text, stats):
+                norm = normalize_email(email)
+                if norm and fast_mode and norm in fast_norms:
+                    continue
+                for m in re.finditer(re.escape(email), low_text):
+                    start, end = m.span()
+                    pre = text[max(0, start - 16) : start]
+                    post = text[end : end + 16]
+                    hits.append(
+                        EmailHit(
+                            email=email,
+                            source_ref=f"pdf:{path}#page={page_idx}",
+                            origin="direct_at",
+                            pre=pre,
+                            post=post,
+                        )
+                    )
+                    if norm:
+                        page_new_norms.add(norm)
+            if should_stop() or (
+                stop_event and getattr(stop_event, "is_set", lambda: False)()
+            ):
+                break
+        finally:
+            if progress:
+                if page_new_norms:
+                    progress_unique.update({n for n in page_new_norms if n})
+                progress.inc_pages(1)
+                progress.set_found(len(progress_unique))
+                if did_ocr:
+                    progress.set_phase("PDF")
+                progress.set_ocr(False)
     doc.close()
     if ocr:
         logger.debug("ocr_pages=%d", ocr_pages)
@@ -885,11 +1725,24 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             stats[k] = stats.get(k, 0) + v
     hits = _dedupe(hits)
 
+    if progress is not None:
+        progress.set_found(
+            len(
+                {
+                    normalize_email(hit.email) or hit.email
+                    for hit in hits
+                    if getattr(hit, "email", "")
+                }
+            )
+        )
     return hits, stats
 
 
 def extract_from_pdf_stream(
-    data: bytes, source_ref: str, stop_event: Optional[object] = None
+    data: bytes,
+    source_ref: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list["EmailHit"], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 
@@ -931,6 +1784,8 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        if _sanitize_for_email is not None:
+            prepared = _sanitize_for_email(prepared)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -1103,6 +1958,7 @@ __all__ = [
     "separate_around_emails",
     "extract_text_from_pdf_bytes",
     "extract_text_from_pdf",
+    "extract_emails_from_pdf",
     "extract_text",
     "extract_from_pdf",
     "extract_from_pdf_stream",

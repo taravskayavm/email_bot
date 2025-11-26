@@ -1,4 +1,4 @@
-"""Helpers for the email bot."""
+__doc__ = """Helpers for the email bot."""
 
 import importlib
 
@@ -47,6 +47,7 @@ __all__ = [
     "messaging",
     "unsubscribe",
     "reporting",
+    "reports_min",  # Экспортируем модуль минимальных отчётов для внешних вызовов
     "EmailEntry",
 ]
 

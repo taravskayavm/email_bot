@@ -1,5 +1,4 @@
 import copy
-import logging
 import os
 import smtplib
 import time
@@ -17,6 +16,7 @@ from emailbot.history_service import cancel_send_attempt, register_send_attempt
 from emailbot.policy import decide, Decision
 from emailbot import ledger
 from utils.send_stats import log_error, log_success
+from emailbot.utils.logging_setup import get_logger
 from config import BLOCKED_EMAILS_PATH
 from utils.blocked_store import BlockedStore
 from utils.email_normalize import normalize_email
@@ -28,7 +28,7 @@ def _extract_group(msg: EmailMessage) -> str:
 
 PORT = int(os.getenv("SMTP_PORT", "587"))
 USE_SSL = os.getenv("SMTP_SSL", "0") == "1"
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 try:
     TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "30"))
 except Exception:

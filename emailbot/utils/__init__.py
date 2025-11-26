@@ -4,7 +4,23 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import constants
+try:
+    # В подпроцессе при spawn импорт пакета может происходить в «урезанном» окружении.
+    # Если telegram недоступен, не валим импорт целиком — подставим минимум по месту.
+    from telegram import constants  # type: ignore
+except Exception:  # pragma: no cover - light fallback
+    class _LightMessageLimit:
+        MAX_TEXT_LENGTH = 4096
+
+
+    class _LightConstants:
+        # Используется только для разбиения длинных сообщений/ограничений длины.
+        # Подберите реальные значения из PTB, если библиотека установлена.
+        MessageLimit = _LightMessageLimit()
+        # Совместимость: некоторые места ожидают именованный атрибут MAX_MESSAGE_LENGTH
+        MAX_MESSAGE_LENGTH = 4096
+
+    constants = _LightConstants()  # type: ignore
 
 
 logger = logging.getLogger(__name__)

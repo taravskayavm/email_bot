@@ -9,25 +9,75 @@ import imaplib
 import importlib
 import inspect
 import io
+import itertools
+import threading
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import time
 import urllib.parse
 import uuid
+import calendar
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from . import report_service
 from . import send_selected as _pkg_send_selected
+from .extraction_zip import ZIP_MAX_DEPTH, ZIP_MAX_FILES, ZIP_MAX_TOTAL_UNCOMP_MB
+from .handlers.diag import build_pdf_ocr_settings_report
+from .time_utils import LOCAL_TZ, day_bounds, parse_ts, parse_user_date_once
 from zoneinfo import ZoneInfo
 
+from .utils.zip_limits import validate_zip_safely
+from .worker_archive import run_parse_in_subprocess
+from emailbot.ui.progress import Heartbeat
+from emailbot.ui.progress_state import ParseProgress
+from emailbot.config import (
+    CRAWL_MAX_DEPTH,
+    CRAWL_MAX_PAGES,
+    CRAWL_TIME_BUDGET_SECONDS,
+    PROGRESS_UPDATE_MIN_SEC,
+)
+from emailbot.ui.notify import (
+    forget_timeout_hint_target,
+    remember_timeout_hint_target,
+)
+from emailbot.policy import Decision, decide as policy_decide
+from emailbot.reports_min import (  # Подключаем минимальные отчёты для быстрой сводки
+    build_minimal_summary_for_today,  # Функция возвращает счётчики за текущие сутки
+)
+from emailbot.settings import settings
+
 logger = logging.getLogger(__name__)
+
+
+_PREVIEW_SANITIZE_PATTERNS = [
+    re.compile(r"(?m)^\s*🇷🇺.+\n?"),
+    re.compile(r"(?m)^\s*📄\s*Пропущено страниц.*\n?"),
+    re.compile(r"(?m)^\s*♻️\s*Возможные сносочные дубликаты удалены.*\n?"),
+    re.compile(r"(?m)^\s*🚫\s*В стоп-листе:.*\n?"),
+    re.compile(r"(?m)^\s*⏳\s*Под кулдауном.*\n?"),
+]
+
+
+def _sanitize_preview_report(text: str) -> str:
+    """Удалить устаревшие строки из текста превью перед отправкой."""
+
+    cleaned = text
+    for pattern in _PREVIEW_SANITIZE_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
+# Последний счётчик записей без timestamp, отфильтрованных при чтении аудита.
+_LAST_AUDIT_DROP_NO_TS = 0
 
 # Кэш массового отправителя. Инициализируем лениво, чтобы не ловить циклический импорт.
 _LEGACY_MASS_SENDER: Optional[Callable] = None
@@ -121,6 +171,32 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR") or str(
 )
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+SUPPORTED_DOCUMENT_EXTENSIONS = {
+    ".zip",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".txt",
+}
+
+ZIP_JOB_TIMEOUT_SEC = int(os.getenv("ZIP_JOB_TIMEOUT_SEC", "600"))
+ZIP_HEARTBEAT_SEC = int(os.getenv("ZIP_HEARTBEAT_SEC", "12"))
+try:
+    ZIP_HEARTBEAT_MIN_SEC = max(1.0, float(os.getenv("ZIP_HEARTBEAT_MIN_SEC", "5")))
+except ValueError:
+    ZIP_HEARTBEAT_MIN_SEC = 5.0
+
+_PROGRESS_EDIT_LOCK = asyncio.Lock()
+
+EXCLUDE_GLOBAL_MAIL = str(os.getenv("EXCLUDE_GLOBAL_MAIL", "0")).lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
 
 # Conversation state identifiers
 BULK_DELETE = 101
@@ -167,6 +243,67 @@ def _message_has_url(message: Message | None, raw_text: str | None) -> bool:
 EMAIL_CORE = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}"
 EMAIL_ANYWHERE_RE = re.compile(EMAIL_CORE)
 
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _normalize_email(value: str) -> str:
+    return (value or "").strip().lower().lstrip(".")
+
+
+def _head3(arr: list[str]) -> str:
+    return ", ".join(arr[:3]) if arr else "—"
+
+# Состояние для пользовательских запросов отчётов.
+REPORT_STATE: dict[int, dict[str, object]] = {}
+
+
+def _report_menu_kb() -> InlineKeyboardMarkup:
+    """Построить клавиатуру выбора периода отчёта."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📆 День", callback_data="report:day"),
+                InlineKeyboardButton("🗓 Неделя", callback_data="report:week"),
+            ],
+            [
+                InlineKeyboardButton("📆 Месяц", callback_data="report:month"),
+                InlineKeyboardButton("📈 Год", callback_data="report:year"),
+            ],
+            [InlineKeyboardButton("📌 День по дате…", callback_data="report:single")],
+        ]
+    )
+
+
+def _confirm_period_kb() -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения периода отчёта."""
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data="report:confirm"),
+                InlineKeyboardButton("❌ Отмена", callback_data="report:cancel"),
+            ]
+        ]
+    )
+
+
+def _format_period_label(start_iso: str, end_iso: str) -> str:
+    """Вернуть человеко-читаемое описание периода."""
+
+    try:
+        start_dt = datetime.strptime(start_iso, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_iso, "%Y-%m-%d")
+    except ValueError:
+        return f"{start_iso} — {end_iso}" if start_iso != end_iso else start_iso
+
+    start_label = start_dt.strftime("%d.%m.%Y")
+    end_label = end_dt.strftime("%d.%m.%Y")
+    return start_label if start_iso == end_iso else f"{start_label} — {end_label}"
+
+
+_DATE_TOKEN_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
+
 
 def _extract_emails_loose(text: str) -> list[str]:
     """Return unique e-mail addresses extracted from ``text``."""
@@ -182,6 +319,8 @@ def _extract_emails_loose(text: str) -> list[str]:
             found.append(email)
     return found
 
+from emailbot.domain_utils import classify_email_domain
+from emailbot.reporting.excel_helpers import append_foreign_review_sheet
 from emailbot.ui.keyboards import (
     build_after_parse_combined_kb,
     build_bulk_edit_kb,
@@ -191,7 +330,6 @@ from emailbot.ui.keyboards import (
 )
 from emailbot.notify import notify
 from emailbot.ui.messages import (
-    format_dispatch_result,
     format_dispatch_start,
     format_error_details,
     format_parse_summary,
@@ -204,6 +342,7 @@ from emailbot.run_control import (
     should_stop,
     stop_and_status,
     unregister_task,
+    request_stop,
 )
 
 from . import messaging
@@ -449,6 +588,60 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+def _compute_filter_summary(emails: Iterable[str]) -> dict[str, int]:
+    """Summarise policy filter reasons for ``emails``."""
+
+    counts = {"roles": 0, "blocked": 0, "cooldown": 0}
+    seen: set[str] = set()
+    moment = datetime.now(timezone.utc)
+    for raw in emails:
+        email = (raw or "").strip()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        try:
+            decision, _ = policy_decide(email, "crawl_preview", moment)
+        except Exception:
+            continue
+        if decision is Decision.SKIP_ROLE:
+            counts["roles"] += 1
+        elif decision is Decision.SKIP_BLOCKED:
+            counts["blocked"] += 1
+        elif decision is Decision.SKIP_COOLDOWN:
+            counts["cooldown"] += 1
+    return {key: value for key, value in counts.items() if value}
+
+
+async def _send_preview_summary(message: Message, emails: Iterable[str]) -> None:
+    """Send a short preview summary to ``message`` chat."""
+
+    if not message:
+        return
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in emails:
+        email = (raw or "").strip()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        unique.append(email)
+
+    lines = [f"Найдено адресов: {len(unique)}"]
+    summary = _compute_filter_summary(unique)
+    if summary:
+        lines.append("")
+        lines.append("Сводка фильтрации:")
+        if summary.get("roles"):
+            lines.append(f" • роль-адреса: {summary['roles']}")
+        if summary.get("blocked"):
+            lines.append(f" • стоп-лист: {summary['blocked']}")
+        if summary.get("cooldown"):
+            lines.append(f" • кулдаун (180 дней): {summary['cooldown']}")
+
+    await message.reply_text("\n".join(lines))
+
+
 async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Глубокий обход сайта: /crawl <url> [--max-pages N] [--max-depth D] [--prefix /staff,/contacts]"""
 
@@ -501,7 +694,27 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prefixes = [p.strip() for p in raw_prefixes if p.strip()]
             idx += 2
             continue
-        idx += 1
+            idx += 1
+
+    depth_profile = (
+        max_depth
+        if max_depth is not None
+        else getattr(settings, "CRAWL_MAX_DEPTH", CRAWL_MAX_DEPTH)
+    )
+    pages_profile = (
+        max_pages
+        if max_pages is not None
+        else getattr(settings, "CRAWL_MAX_PAGES", CRAWL_MAX_PAGES)
+    )
+    budget_profile = getattr(
+        settings, "CRAWL_TIME_BUDGET_SECONDS", CRAWL_TIME_BUDGET_SECONDS
+    )
+    await msg.reply_text(
+        "🌐 Профиль обхода:\n"
+        f" • глубина: {depth_profile}\n"
+        f" • максимум страниц: {pages_profile}\n"
+        f" • тайм-бюджет: {budget_profile} сек."
+    )
 
     last_report = {"ts": 0.0}
 
@@ -532,6 +745,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     stats_map = stats if isinstance(stats, dict) else {}
     if max_pages is not None and isinstance(stats_map, dict):
+        stats_map["max_pages"] = max_pages
         pages_val = stats_map.get("pages")
         if isinstance(pages_val, int) and pages_val > 0:
             stats_map["pages"] = min(pages_val, max_pages)
@@ -540,19 +754,28 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if prefixes and isinstance(stats_map, dict):
         stats_map.setdefault("path_prefixes", prefixes)
 
-    unique: list[str] = []
-    seen: set[str] = set()
+    deduped: list[str] = []
+    seen_all: set[str] = set()
     for addr in emails:
-        if addr in seen:
+        if not addr or addr in seen_all:
             continue
-        seen.add(addr)
-        if is_blocked(addr):
-            continue
-        unique.append(addr)
+        seen_all.add(addr)
+        deduped.append(addr)
+
+    if not deduped:
+        await msg.reply_text("Адреса не найдены.")
+        return
+
+    await _send_preview_summary(msg, deduped)
+
+    unique: list[str] = [addr for addr in deduped if not is_blocked(addr)]
 
     if not unique:
         await msg.reply_text("Адреса не найдены.")
         return
+
+    if isinstance(stats_map, dict):
+        stats_map.setdefault("unique", len(unique))
 
     await _send_emails_as_file(
         msg,
@@ -562,6 +785,10 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         stats=stats_map if isinstance(stats_map, dict) else None,
     )
 
+    await msg.reply_text(
+        "ℹ️ Чтобы собрать больше, можно увеличить глубину/лимиты в профиле обхода."
+    )
+
 
 def collapse_footnote_variants(emails):
     return emails
@@ -569,6 +796,144 @@ def collapse_footnote_variants(emails):
 
 def collect_repairs_from_files(files):
     return []
+
+
+class ZipValidationError(Exception):
+    """Raised when a ZIP archive violates safety limits."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class ZipProcessingTimeoutError(Exception):
+    """Raised when ZIP parsing exceeds the configured timeout."""
+
+
+async def _edit_progress_message(progress_msg: Message | None, text: str) -> bool:
+    """Try to update ``progress_msg`` text, ignoring minor Telegram errors."""
+
+    if not progress_msg:
+        return False
+
+    heartbeat: Heartbeat | None = getattr(progress_msg, "_emailbot_heartbeat", None)
+    if heartbeat is None:
+        heartbeat = Heartbeat(progress_msg, interval_sec=6.0)
+        setattr(progress_msg, "_emailbot_heartbeat", heartbeat)
+
+    async with _PROGRESS_EDIT_LOCK:
+        updated = await heartbeat.tick(text)
+    return updated
+
+
+def _format_elapsed(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _shorten_filename(name: str, *, limit: int = 32) -> str:
+    base = os.path.basename(str(name).strip()) if name else ""
+    if len(base) <= limit:
+        return base
+    if limit <= 1:
+        return base[:limit]
+    return base[: limit - 1] + "…"
+
+
+async def _zip_status_heartbeat(
+    progress_msg: Message | None,
+    stop_event: asyncio.Event,
+    *,
+    started_at: float | None = None,
+    progress_state: Dict[str, Any] | None = None,
+    progress_lock: threading.Lock | None = None,
+) -> None:
+    """Periodically update ``progress_msg`` until ``stop_event`` is set."""
+
+    # Если нет куда писать статус — нечего пульсировать
+    if not progress_msg:
+        return
+
+    dots = itertools.cycle(["", ".", "..", "..."])
+    base_period = float(ZIP_HEARTBEAT_SEC) if ZIP_HEARTBEAT_SEC > 0 else 12.0
+    period = base_period
+    t0 = started_at or time.monotonic()
+
+    try:
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(period, 1.0))
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            # 🔴 ВАЖНО: даём «пульс» сторожу, чтобы он не отменял задачу.
+            # Во время долгого парсинга ZIP прогресс по файлам может идти редко,
+            # а heartbeat обязан дёргаться регулярно.
+            try:
+                await heartbeat()
+            except Exception:
+                # пульс — best-effort, не мешаем основному циклу статуса
+                pass
+            elapsed = max(0.0, time.monotonic() - t0)
+            suffix = next(dots)
+            details: list[str] = []
+            if progress_state is not None:
+                # безопасный снимок прогресса
+                if progress_lock is not None:
+                    with progress_lock:
+                        snapshot = dict(progress_state)
+                else:
+                    snapshot = dict(progress_state)
+                processed_raw = snapshot.get("files_processed")
+                skipped_raw = snapshot.get("files_skipped")
+                total_raw = snapshot.get("files_total")
+                try:
+                    processed_val = int(processed_raw) if processed_raw is not None else 0
+                except (TypeError, ValueError):
+                    processed_val = 0
+                try:
+                    skipped_val = int(skipped_raw) if skipped_raw is not None else 0
+                except (TypeError, ValueError):
+                    skipped_val = 0
+                try:
+                    total_val = int(total_raw) if total_raw is not None else None
+                except (TypeError, ValueError):
+                    total_val = None
+
+                # Показываем реальный ход: обработанные + пропущенные по таймауту/ошибке
+                done_val = max(0, processed_val + skipped_val)
+                if total_val and total_val > 0:
+                    done_val = min(done_val, total_val)
+                    details.append(f"{done_val}/{total_val}")
+                elif done_val > 0:
+                    details.append(str(done_val))
+
+                last_file = snapshot.get("last_file")
+                if last_file:
+                    details.append(_shorten_filename(last_file))
+            suffix_text = f"{suffix} · {_format_elapsed(elapsed)}"
+            if details:
+                suffix_text += " · " + " · ".join(details)
+            text = f"🔎 Всё ещё ищу адреса{suffix_text}"
+            await _edit_progress_message(progress_msg, text)
+            jitter = math.sin(elapsed) * 2.0
+            period = max(ZIP_HEARTBEAT_MIN_SEC, base_period + jitter)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive log
+        logger.debug("zip heartbeat failed: %s", exc)
+
+
+def _safe_unlink(path: str | None) -> None:
+    """Remove a file silently if it exists."""
+
+    if not path:
+        return
+    forget_timeout_hint_target(path)
+    with suppress(OSError):
+        os.remove(path)
 
 
 async def _download_file(update: Update, download_dir: str) -> str:
@@ -585,17 +950,186 @@ async def _download_file(update: Update, download_dir: str) -> str:
 
     telegram_file = await doc.get_file()
     await telegram_file.download_to_drive(path)
+    if not os.path.exists(path):
+        try:
+            with open(path, "wb"):
+                pass
+        except Exception:
+            pass
+    if path.lower().endswith(".zip"):
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(path, "r"):
+                pass
+        except zipfile.BadZipFile:
+            try:
+                with zipfile.ZipFile(path, "w"):
+                    pass
+            except Exception:
+                pass
+    remember_timeout_hint_target(path, chat_id)
     return path
 
 
-async def extract_emails_from_zip(path: str, *_, **__):
-    emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
-    emails = set(e.lower().strip() for e in emails)
+async def extract_emails_from_zip(
+    path: str, *_, progress_message: Message | None = None, **__
+):
+    loop = asyncio.get_running_loop()
+    ok, reason = await loop.run_in_executor(
+        None,
+        validate_zip_safely,
+        path,
+        ZIP_MAX_FILES,
+        ZIP_MAX_TOTAL_UNCOMP_MB,
+        ZIP_MAX_DEPTH,
+    )
+    if not ok:
+        raise ZipValidationError(reason or "архив не прошёл проверку")
+
+    started_at = time.monotonic()
+
+    progress_state: Dict[str, Any] = {}
+    progress_lock = threading.Lock()
+    progress_last_processed = 0
+
+    def _on_progress(snapshot: Dict[str, Any]) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        with progress_lock:
+            nonlocal progress_last_processed
+            if "files_total" in snapshot:
+                try:
+                    progress_state["files_total"] = max(
+                        int(snapshot.get("files_total") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_total"] = 0
+            if "files_processed" in snapshot:
+                try:
+                    progress_state["files_processed"] = max(
+                        int(snapshot.get("files_processed") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_processed"] = 0
+            if "files_skipped" in snapshot:
+                try:
+                    progress_state["files_skipped"] = max(
+                        int(snapshot.get("files_skipped") or 0), 0
+                    )
+                except (TypeError, ValueError):
+                    progress_state["files_skipped"] = 0
+            last_file = snapshot.get("last_file") or snapshot.get("current")
+            if last_file:
+                progress_state["last_file"] = str(last_file)
+            if progress is not None:
+                total_val = int(progress_state.get("files_total") or 0)
+                processed_val = int(progress_state.get("files_processed") or 0)
+                progress.set_phase("ZIP")
+                progress.set_total(total_val)
+                delta = max(0, processed_val - progress_last_processed)
+                if delta:
+                    progress.inc_pages(delta)
+                progress_last_processed = processed_val
+                found_val = snapshot.get("emails_found")
+                if isinstance(found_val, int) and found_val >= 0:
+                    progress.set_found(found_val)
+
+    def _run_worker() -> tuple[bool, dict[str, Any]]:
+        # windows-safe worker IPC: result + progress snapshots via JSON files
+        return run_parse_in_subprocess(
+            path,
+            ZIP_JOB_TIMEOUT_SEC,
+            progress_callback=_on_progress,
+        )
+
+    future = loop.run_in_executor(None, _run_worker)
+    stop_event: asyncio.Event | None = None
+    heartbeat_task: asyncio.Task | None = None
+    pulse_task: asyncio.Task | None = None
+    if progress_message:
+        stop_event = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            _zip_status_heartbeat(
+                progress_message,
+                stop_event,
+                started_at=started_at,
+                progress_state=progress_state,
+                progress_lock=progress_lock,
+            )
+        )
+    try:
+        from .progress_watchdog import start_heartbeat_pulse
+
+        pulse_task = start_heartbeat_pulse(interval=5.0)
+    except Exception:
+        pulse_task = None
+    try:
+        ok, payload = await asyncio.wait_for(
+            future, timeout=ZIP_JOB_TIMEOUT_SEC + 5
+        )
+    except asyncio.TimeoutError as exc:
+        future.cancel()
+        raise ZipProcessingTimeoutError from exc
+    finally:
+        cancelled_exc: BaseException | None = None
+        current_task = asyncio.current_task()
+
+        def cancellation_requested(task: asyncio.Task[object] | None) -> bool:
+            if task is None:
+                return False
+            cancelling_method = getattr(task, "cancelling", None)
+            if callable(cancelling_method):
+                try:
+                    return cancelling_method() > 0
+                except TypeError:
+                    # Older Python versions expose "cancelling" as a property.
+                    pass
+            cancel_requested = getattr(task, "_cancel_requested", None)
+            if cancel_requested is not None:
+                return bool(cancel_requested)
+            return task.cancelled()
+        try:
+            if stop_event is not None:
+                stop_event.set()
+        except Exception:
+            pass
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError as exc:
+                if cancellation_requested(current_task):
+                    cancelled_exc = cancelled_exc or exc
+        if pulse_task is not None:
+            pulse_task.cancel()
+            try:
+                await pulse_task
+            except asyncio.CancelledError as exc:
+                if cancellation_requested(current_task):
+                    cancelled_exc = cancelled_exc or exc
+        if cancelled_exc is not None:
+            raise cancelled_exc
+
+    if not ok:
+        error_message = str(payload.get("error", "unknown error"))
+        traceback_text = payload.get("traceback")
+        if traceback_text:
+            logger.error("ZIP subprocess failed: %s\n%s", error_message, traceback_text)
+        if "timeout" in error_message.lower():
+            raise ZipProcessingTimeoutError(error_message)
+        raise RuntimeError(error_message)
+
+    emails_raw = payload.get("emails") or []
+    stats = payload.get("stats") or {}
+    emails = set(str(e).lower().strip() for e in emails_raw if e)
     extracted_files = [path]
     logger.info(
         "extraction complete",
         extra={"event": "extract", "source": path, "count": len(emails)},
     )
+    if progress is not None:
+        progress.set_found(len(emails))
     return emails, extracted_files, set(emails), stats
 
 
@@ -727,11 +1261,11 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-def extract_from_uploaded_file(path: str):
+def extract_from_uploaded_file(path: str, progress: ParseProgress | None = None):
     """Return normalized and raw e-mail candidates from ``path``."""
 
     logging.info("[FLOW] upload->text")
-    hits, stats = _extraction.extract_any(path, _return_hits=True)
+    hits, stats = _extraction.extract_any(path, _return_hits=True, progress=progress)
     stats = stats or {}
 
     allowed: set[str] = set()
@@ -788,6 +1322,7 @@ def sample_preview(items, k: int):
 
 
 from .messaging import (
+    OUTCOME,
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
     TEMPLATE_MAP,
@@ -820,6 +1355,45 @@ from .messaging_utils import (
     BOUNCE_LOG_PATH,
 )
 from .cancel import start_cancel, request_cancel, is_cancelled, clear_cancel
+
+
+def _summarize_from_audit(audit_path: str) -> dict[str, int]:
+    """Return aggregated counters derived from the bulk audit jsonl file."""
+
+    totals: Counter[str] = Counter()
+    total = 0
+    path = Path(audit_path)
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as handler:
+                for line in handler:
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    record_type = str(record.get("type", "")).strip().lower()
+                    if record_type == "meta":
+                        continue
+                    outcome = str(record.get("outcome", "")).strip().lower()
+                    total += 1
+                    if outcome in OUTCOME.values():
+                        totals[outcome] += 1
+                    else:
+                        totals[OUTCOME["error"]] += 1
+        except Exception:
+            logger.debug("bulk audit read failed", exc_info=True)
+    undeliverable_count = totals.get(OUTCOME["undeliverable"], 0)
+    error_count = totals.get(OUTCOME["error"], 0)
+    return {
+        "total": total,
+        "sent": totals.get(OUTCOME["sent"], 0),
+        "blocked": totals.get(OUTCOME["blocked"], 0),
+        "cooldown": totals.get(OUTCOME["cooldown"], 0),
+        "undeliverable_only": undeliverable_count,
+        "unchanged": totals.get(OUTCOME["unchanged"], 0),
+        "errors": error_count,
+        "not_delivered": undeliverable_count + error_count,
+    }
 
 
 def _diag_bulk_line(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -1093,6 +1667,7 @@ class SessionState:
     dropped: List[tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
     repairs_sample: List[str] = field(default_factory=list)
+    preview_ready_count: int = -1
     group: Optional[str] = None
     template: Optional[str] = None
     footnote_dupes: int = 0
@@ -2135,6 +2710,16 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from datetime import datetime
 
     from .messaging_utils import BOUNCE_LOG_PATH
+    from emailbot.utils.ocr_guard import ocr_available
+    from emailbot.config import (
+        PDF_MAX_PAGES,
+        PDF_OCR_AUTO,
+        PDF_OCR_MAX_PAGES,
+        PDF_OCR_MIN_CHARS,
+        PDF_OCR_MIN_TEXT_RATIO,
+        PDF_OCR_PROBE_PAGES,
+        TESSERACT_CMD,
+    )
 
     versions = {
         "python": sys.version.split()[0],
@@ -2159,15 +2744,28 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ENABLE_OCR": settings.ENABLE_OCR,
     }
 
-    lines = [
-        "Versions:",
-        f"  Python: {versions['python']}",
-        f"  telegram: {versions['telegram']}",
-        f"  aiohttp: {versions['aiohttp']}",
-        "Limits:",
-        f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
-        "Flags:",
-    ]
+    pdf_diag = ""
+    try:
+        pdf_diag = build_pdf_ocr_settings_report()
+    except Exception as exc:  # pragma: no cover - defensive
+        pdf_diag = f"PDF/OCR diag error: {exc}"
+
+    lines = []
+    if pdf_diag:
+        lines.append(pdf_diag)
+        lines.append("")
+
+    lines.extend(
+        [
+            "Versions:",
+            f"  Python: {versions['python']}",
+            f"  telegram: {versions['telegram']}",
+            f"  aiohttp: {versions['aiohttp']}",
+            "Limits:",
+            f"  MAX_EMAILS_PER_DAY: {MAX_EMAILS_PER_DAY}",
+            "Flags:",
+        ]
+    )
     for k, v in flags.items():
         lines.append(f"  {k}: {v}")
     lines.extend(
@@ -2175,6 +2773,29 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Counters:",
             f"  sent_today: {count_sent_today()}",
             f"  bounces_today: {bounce_today}",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "Paths:",
+            f"  BLOCKED_LIST: {getattr(messaging, 'BLOCKED_FILE', '?')}",
+            f"  SENT_LOG_PATH: {getattr(messaging, 'LOG_FILE', '?')}",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "PDF/OCR legacy values:",
+            f"  PDF_MAX_PAGES: {PDF_MAX_PAGES}",
+            f"  PDF_OCR_AUTO: {PDF_OCR_AUTO}",
+            f"  PDF_OCR_PROBE_PAGES: {PDF_OCR_PROBE_PAGES}",
+            f"  PDF_OCR_MAX_PAGES: {PDF_OCR_MAX_PAGES}",
+            f"  PDF_OCR_MIN_TEXT_RATIO: {PDF_OCR_MIN_TEXT_RATIO}",
+            f"  PDF_OCR_MIN_CHARS: {PDF_OCR_MIN_CHARS}",
+            f"  TESSERACT_CMD: {TESSERACT_CMD or '<auto>'}",
+            f"  OCR_AVAILABLE: {ocr_available()}",
+            f"  WEB_ENABLE: {getattr(settings, 'ENABLE_WEB', None)}",
         ]
     )
     await update.message.reply_text("\n".join(lines))
@@ -2287,6 +2908,48 @@ async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Если пришлёте обычный текст без адресов, я попрошу ввести их вручную."
         )
     )
+
+
+async def send_hang_dump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the latest hang dump file to the requester if it exists."""
+
+    chat = update.effective_chat
+    chat_id = chat.id if chat else None
+    message = update.effective_message or getattr(update, "message", None)
+    dump_path = Path("var") / "hang_dump.txt"
+    if not dump_path.exists():
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text("Дамп не найден (var/hang_dump.txt).")
+        elif chat_id is not None:
+            await context.bot.send_message(
+                chat_id=chat_id, text="Дамп не найден (var/hang_dump.txt)."
+            )
+        return
+
+    try:
+        data = dump_path.read_bytes()
+    except OSError as exc:
+        text = f"Не удалось прочитать дамп: {exc}"
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text(text)
+        elif chat_id is not None:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        return
+
+    buf = io.BytesIO(data)
+    buf.name = "hang_dump.txt"
+    if chat_id is None:
+        return
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id, document=buf, filename="hang_dump.txt"
+        )
+    except Exception as exc:
+        text = f"Не удалось отправить дамп: {exc}"
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text(text)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text)
 
 
 async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2460,14 +3123,29 @@ async def force_send_command(
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to select a reporting period."""
 
-    keyboard = [
-        [InlineKeyboardButton("📆 День", callback_data="report_day")],
-        [InlineKeyboardButton("🗓 Неделя", callback_data="report_week")],
-        [InlineKeyboardButton("🗓 Месяц", callback_data="report_month")],
-        [InlineKeyboardButton("📅 Год", callback_data="report_year")],
-    ]
-    await update.message.reply_text(
-        "Выберите период отчёта:", reply_markup=InlineKeyboardMarkup(keyboard)
+    message = update.message  # Сохраняем объект сообщения для повторного использования
+    if message is not None:  # Проверяем, что запрос пришёл через текстовое сообщение
+        sent_today, blocked_today, error_today = build_minimal_summary_for_today()  # Считаем показатели за текущий день
+        mini_lines = [  # Подготавливаем отдельные строки краткого отчёта
+            "Мини-отчёт за сегодня:",  # Строка-заголовок для пользователя
+            f"sent: {sent_today}",  # Количество успешно отправленных писем
+            f"blocked: {blocked_today}",  # Число заблокированных адресов
+            f"error: {error_today}",  # Число попыток, закончившихся ошибкой
+        ]
+        mini_report = "\n".join(mini_lines)  # Объединяем строки в единый текст
+        await message.reply_text(mini_report)  # Отправляем краткую сводку пользователю
+
+    user = update.effective_user
+    if user:
+        REPORT_STATE.pop(user.id, None)
+    if message is None:  # Если сообщений нет (например, callback), прекращаем обработку
+        return  # Не можем показать меню без объекта Message
+    await message.reply_text(
+        (
+            "Выберите период отчёта или нажмите «📌 День по дате…», "
+            "чтобы построить отчёт за конкретный день."
+        ),
+        reply_markup=_report_menu_kb(),
     )
 
 
@@ -2540,28 +3218,457 @@ def get_report(period: str = "day") -> dict[str, object]:
     return stats
 
 
+_REPORT_SUCCESS = {"sent", "success", "ok", "synced"}
+_REPORT_ERRORS = {
+    "failed",
+    "fail",
+    "error",
+    "bounce",
+    "bounced",
+    "soft_bounce",
+    "soft-bounce",
+    "hard_bounce",
+    "hard-bounce",
+}
+
+
+def _parse_flexible_date(text: str) -> datetime | None:
+    """Распознаёт дату в формате ISO (YYYY-MM-DD) или русском (ДД.ММ.ГГГГ)."""
+
+    value = (text or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date_range(text: str) -> tuple[str, str] | None:
+    """Универсальный разбор даты или диапазона."""
+
+    payload = (text or "").strip()
+    if not payload:
+        return None
+
+    # Попробовать распознать диапазон из двух дат.
+    for sep in ("—", "–", "-", " "):
+        if sep == " ":
+            parts = [p.strip() for p in payload.split() if p.strip()]
+        else:
+            parts = [p.strip() for p in payload.split(sep) if p.strip()]
+        if len(parts) != 2:
+            continue
+        first = _parse_flexible_date(parts[0])
+        second = _parse_flexible_date(parts[1])
+        if not first or not second:
+            continue
+        if first > second:
+            first, second = second, first
+        return first.strftime("%Y-%m-%d"), second.strftime("%Y-%m-%d")
+
+    tokens = _DATE_TOKEN_RE.findall(payload)
+    if len(tokens) == 2:
+        first = _parse_flexible_date(tokens[0])
+        second = _parse_flexible_date(tokens[1])
+        if first and second:
+            if first > second:
+                first, second = second, first
+            return first.strftime("%Y-%m-%d"), second.strftime("%Y-%m-%d")
+
+    # Только год.
+    if re.fullmatch(r"\d{4}", payload):
+        year = int(payload)
+        if year < 1:
+            return None
+        try:
+            start = datetime(year, 1, 1)
+            end = datetime(year, 12, 31)
+        except ValueError:
+            return None
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    # Месяц в форматах MM.YYYY или YYYY-MM.
+    if re.fullmatch(r"\d{2}\.\d{4}", payload):
+        month_str, year_str = payload.split(".")
+        year = int(year_str)
+        month = int(month_str)
+    elif re.fullmatch(r"\d{4}-\d{2}", payload):
+        year_str, month_str = payload.split("-")
+        year = int(year_str)
+        month = int(month_str)
+    else:
+        month = None
+        year = None
+
+    if month and year:
+        if year < 1 or not (1 <= month <= 12):
+            return None
+        try:
+            start = datetime(year, month, 1)
+        except ValueError:
+            return None
+        _, days_in_month = calendar.monthrange(year, month)
+        try:
+            end = datetime(year, month, days_in_month)
+        except ValueError:
+            return None
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    # Одиночная дата.
+    single = _parse_flexible_date(payload)
+    if single:
+        iso = single.strftime("%Y-%m-%d")
+        return iso, iso
+
+    return None
+
+
+def _detect_report_delimiter(sample: str) -> str:
+    return ";" if sample.count(";") > sample.count(",") else ","
+
+
+def _parse_report_ts(raw: str, tz: ZoneInfo) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        ts = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=tz)
+    return ts.astimezone(tz)
+
+
+def _iter_report_records(base_dir: Path, tz: ZoneInfo):
+    sent_log = base_dir / "sent_log.csv"
+    if sent_log.exists():
+        try:
+            with sent_log.open("r", encoding="utf-8", newline="") as handle:
+                sample = handle.read(1024)
+                handle.seek(0)
+                delimiter = _detect_report_delimiter(sample)
+                reader = csv.DictReader(handle, delimiter=delimiter)
+                for row in reader:
+                    if not row:
+                        continue
+                    ts = _parse_report_ts(row.get("last_sent_at") or row.get("ts"), tz)
+                    if not ts:
+                        continue
+                    status = (row.get("status") or row.get("result") or "").strip()
+                    yield ts, status
+        except Exception:
+            logger.debug("failed to read sent_log.csv", exc_info=True)
+
+    stats_path = base_dir / "send_stats.jsonl"
+    if stats_path.exists():
+        try:
+            with stats_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    payload = line.strip()
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = _parse_report_ts(
+                        str(data.get("ts") or data.get("last_sent_at") or ""), tz
+                    )
+                    if not ts:
+                        continue
+                    status_raw = data.get("status")
+                    if status_raw:
+                        status = str(status_raw).strip()
+                    else:
+                        status = "success" if data.get("success") else ""
+                    yield ts, status
+        except Exception:
+            logger.debug("failed to read send_stats.jsonl", exc_info=True)
+
+
+def _load_audit_records(
+    audit_dir: Path,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict]:
+    """Load audit records from all ``bulk_audit_*.jsonl`` files."""
+
+    global _LAST_AUDIT_DROP_NO_TS
+
+    records: list[dict] = []
+    dropped_no_ts = 0
+    if not audit_dir.exists():
+        _LAST_AUDIT_DROP_NO_TS = 0
+        return records
+
+    for path in sorted(audit_dir.glob("bulk_audit_*.jsonl")):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    ts_raw = (
+                        record.get("timestamp")
+                        or record.get("time")
+                        or record.get("ts")
+                    )
+                    ts = parse_ts(ts_raw)
+                    if (start or end) and ts is None:
+                        dropped_no_ts += 1
+                        continue
+                    if start and ts and ts < start:
+                        continue
+                    if end and ts and ts > end:
+                        continue
+                    if ts is not None:
+                        record["_ts_local"] = ts.isoformat()
+                    records.append(record)
+        except Exception:
+            logger.debug("failed to read %s", path, exc_info=True)
+    _LAST_AUDIT_DROP_NO_TS = dropped_no_ts
+    if dropped_no_ts:
+        logger.warning(
+            "audit: %s записей без timestamp отфильтрованы", dropped_no_ts
+        )
+    return records
+
+
+def _summarize(
+    records: list[dict],
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> str:
+    """Return a human-readable summary for ``records``."""
+
+    counter: Counter[str] = Counter()
+    classifier = globals().get("classify_outcome")
+    for item in records:
+        if callable(classifier):
+            try:
+                outcome = classifier(item)
+            except Exception:
+                outcome = str(item.get("outcome", ""))
+        else:
+            outcome = str(item.get("outcome", ""))
+        outcome = (outcome or "").strip().lower()
+        if not outcome:
+            outcome = "unknown"
+        counter[outcome] += 1
+
+    total = len(records)
+    tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
+    header = ""
+    if start and end:
+        header = (
+            f"📅 Период: {start.strftime('%Y-%m-%d')} — {end.strftime('%Y-%m-%d')}"
+            f" ({tzname})\n"
+        )
+    lines: list[str] = [f"{header}Всего записей: {total}"]
+    dropped = _LAST_AUDIT_DROP_NO_TS if (start or end) else 0
+    if dropped:
+        lines.append(f"⏳ Без timestamp: {dropped}")
+
+    order = [
+        "sent",
+        "blocked",
+        "cooldown",
+        "undeliverable",
+        "error",
+        "unchanged",
+        "unknown",
+    ]
+    for key in order:
+        value = counter.get(key, 0)
+        if not value:
+            continue
+        label = key
+        if key == "unknown":
+            label = "unknown (не классифицировано)"
+        lines.append(f"{label}: {value}")
+
+    for key, value in sorted(counter.items()):
+        if key in order or not value:
+            continue
+        lines.append(f"{key or '—'}: {value}")
+
+    parts_sum = sum(counter.values())
+    if parts_sum != total:
+        lines.append("")
+        lines.append(
+            f"⚠️ Несостыковка: сумма по категориям {parts_sum} ≠ всего {total}"
+        )
+    return "\n".join(lines)
+
+
+def report_day(audit_dir: Path) -> str:
+    now = datetime.now(tz=LOCAL_TZ)
+    start, end = day_bounds(now)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_week(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=7)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_month(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=30)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_year(audit_dir: Path) -> str:
+    end = datetime.now(tz=LOCAL_TZ)
+    start = end - timedelta(days=365)
+    records = _load_audit_records(audit_dir, start, end)
+    return _summarize(records, start, end)
+
+
+def report_period(base_dir: Path, *, start: str, end: str) -> str:
+    """Построить текстовый отчёт за указанный период."""
+
+    try:
+        start_date = datetime.strptime(start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("invalid date range")
+
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+
+    tz = ZoneInfo(REPORT_TZ)
+    success = 0
+    errors = 0
+
+    for ts, status in _iter_report_records(base_dir, tz):
+        ts_date = ts.date()
+        if not (start_date <= ts_date <= end_date):
+            continue
+        status_norm = (status or "").strip().lower()
+        if status_norm in _REPORT_SUCCESS or not status_norm:
+            success += 1
+        elif status_norm in _REPORT_ERRORS:
+            errors += 1
+        else:
+            success += 1
+
+    if success == 0 and errors == 0:
+        return "Нет данных о рассылках."
+
+    return f"Успешных: {success}\nОшибок: {errors}"
+
+
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send the selected report to the user."""
 
     query = update.callback_query
-    await query.answer()
-    period = query.data.replace("report_", "")
-    mapping = {
-        "day": "Отчёт за день",
-        "week": "Отчёт за неделю",
-        "month": "Отчёт за месяц",
-        "year": "Отчёт за год",
-    }
-    report = get_report(period)
-    message = report.get("message")
-    if message:
-        body = str(message)
+    data = query.data or ""
+    action, payload = _split_cb(data)
+    if action == "report":
+        period = payload or ""
+    elif data.startswith("report_"):
+        period = data.replace("report_", "", 1)
     else:
-        body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
-    title = mapping.get(period, period)
+        period = action or data
+
+    if action == "report" and payload in {"confirm", "cancel"}:
+        user = query.from_user
+        if not user:
+            await query.answer("Не удалось определить пользователя", show_alert=True)
+            return
+        state = REPORT_STATE.get(user.id) or {}
+        if payload == "cancel":
+            REPORT_STATE.pop(user.id, None)
+            await query.answer("Отменено")
+            await _safe_edit_message(
+                query,
+                text="Выберите период отчёта:",
+                reply_markup=_report_menu_kb(),
+            )
+            return
+
+        start = state.get("start")
+        end = state.get("end")
+        if not (isinstance(start, str) and isinstance(end, str)):
+            await query.answer("Нет выбранного периода", show_alert=True)
+            return
+        base_dir_raw = state.get("base_dir")
+        base_dir = Path(base_dir_raw) if base_dir_raw else Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+        try:
+            summary = report_period(base_dir, start=start, end=end)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.exception("report_period failed: %s", exc)
+            summary = f"Ошибка формирования отчёта: {exc}"
+        label = _format_period_label(start, end)
+        REPORT_STATE.pop(user.id, None)
+        await query.answer()
+        header = (
+            f"📅 Отчёт за {label}" if start == end else f"📅 Отчёт за период {label}"
+        )
+        await _safe_edit_message(
+            query,
+            text=f"{header}\n\n{summary}",
+            reply_markup=_report_menu_kb(),
+        )
+        return
+
+    if period == "period":
+        period = "single"
+
+    if period == "single":
+        user = query.from_user
+        if user:
+            base_dir = Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+            REPORT_STATE[user.id] = {"await": "single_date", "base_dir": base_dir}
+        await query.answer()
+        await _safe_edit_message(
+            query,
+            text=(
+                "Введите одну дату отчёта.\n"
+                "Поддерживаемые форматы: 29.10.2025 или 2025-10-29."
+            ),
+            reply_markup=None,
+        )
+        return
+
+    mapping: dict[str, tuple[str, Callable[[Path], str]]] = {
+        "day": ("Отчёт за день", report_day),
+        "week": ("Отчёт за неделю", report_week),
+        "month": ("Отчёт за месяц", report_month),
+        "year": ("Отчёт за год", report_year),
+    }
+    if period not in mapping:
+        await query.answer("Неизвестный период", show_alert=True)
+        return
+    await query.answer()
+    base_dir = Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+    title, fn = mapping[period]
+    try:
+        summary = fn(base_dir)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.exception("report %s failed: %s", period, exc)
+        summary = f"Ошибка формирования отчёта: {exc}"
+    tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
     if period == "day":
-        title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
-    await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
+        title = f"{title} ({tzname})"
+    await _safe_edit_message(
+        query,
+        text=f"📊 {title}\n\n{summary}",
+        reply_markup=_report_menu_kb(),
+    )
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2682,11 +3789,11 @@ async def _compose_report_and_save(
     footnote_dupes: int = 0,
     *,
     blocked_after_parse: int = 0,
+    raw_candidates: Iterable[str] | None = None,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
     state = get_state(context)
-    state.preview_allowed_all = sorted(filtered)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
     state.footnote_dupes = footnote_dupes
@@ -2695,18 +3802,64 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = []
     state.cooldown_preview_window = 0
 
+    found_all = [
+        str(item).strip()
+        for item in (raw_candidates if raw_candidates is not None else filtered)
+        if str(item or "").strip()
+    ]
+
+    norm_sequence: list[str] = []
+    norm_to_original: dict[str, list[str]] = {}
+    for raw in found_all:
+        if "@" not in raw:
+            continue
+        norm = _normalize_email(raw)
+        if not norm:
+            continue
+        norm_sequence.append(norm)
+        norm_to_original.setdefault(norm, []).append(raw)
+
+    seen_norm: set[str] = set()
+    unique_norm: list[str] = []
+    for norm in norm_sequence:
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        unique_norm.append(norm)
+
+    dedup_removed = max(len(norm_sequence) - len(unique_norm), 0)
+
+    invalid_norm = [norm for norm in unique_norm if not _EMAIL_RE.match(norm)]
+    invalid_examples = [norm_to_original.get(norm, [norm])[0] for norm in invalid_norm]
+    invalid_count = len(invalid_norm)
+    invalid_norm_set = set(invalid_norm)
+
+    valid_norm = [norm for norm in unique_norm if norm not in invalid_norm_set]
+
+    blocked_lookup = {_normalize_email(addr) for addr in get_blocked_emails()}
+    blocked_norm = [norm for norm in valid_norm if norm in blocked_lookup]
+    blocked_examples = [norm_to_original.get(norm, [norm])[0] for norm in blocked_norm]
+    blocked_norm_set = set(blocked_norm)
+
+    filtered_norm_pairs: list[tuple[str, str]] = []
+    for addr in filtered:
+        norm = _normalize_email(addr)
+        if not norm:
+            continue
+        filtered_norm_pairs.append((norm, addr))
+
     cooldown_blocked = 0
     cooldown_examples: list[tuple[str, str]] = []
+    cooldown_norm_set: set[str] = set()
     ignore_cooldown = _is_ignore_cooldown_enabled(context)
     cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
-    if cooldown_window > 0 and filtered:
-        seen_norm: set[str] = set()
+    if cooldown_window > 0 and filtered_norm_pairs:
+        seen_for_window: set[str] = set()
         group = getattr(state, "group", None)
-        for addr in filtered:
-            norm = normalize_email(addr) or addr.strip().lower()
-            if not norm or norm in seen_norm:
+        for norm, addr in filtered_norm_pairs:
+            if not norm or norm in seen_for_window:
                 continue
-            seen_norm.add(norm)
+            seen_for_window.add(norm)
             try:
                 blocked, reason = check_email(addr, group=group, window=cooldown_window)
             except Exception as exc:  # pragma: no cover - defensive log
@@ -2714,6 +3867,7 @@ async def _compose_report_and_save(
                 blocked, reason = False, ""
             if blocked:
                 cooldown_blocked += 1
+                cooldown_norm_set.add(norm)
                 if len(cooldown_examples) < 3:
                     match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
                     last_seen = match.group(1)[:10] if match else ""
@@ -2723,21 +3877,101 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = cooldown_examples
     state.cooldown_preview_window = cooldown_window
 
-    summary = format_parse_summary(
-        {
-            "total_found": len(allowed_all),
-            "to_send": max(len(filtered) - cooldown_blocked, 0),
-            "suspicious": len(suspicious_numeric),
-            "cooldown_180d": cooldown_blocked,
-            "foreign_domain": len(foreign),
-            "pages_skipped": 0,
-            "footnote_dupes_removed": footnote_dupes,
-            "blocked": blocked_after_parse,
-            "blocked_after_parse": blocked_after_parse,
+    try:
+        ready, blocked_foreign, blocked_invalid, skipped_recent, digest = (
+            messaging.prepare_mass_mailing(
+                list(filtered),
+                getattr(state, "group", None),
+                ignore_cooldown=ignore_cooldown,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive branch
+        logger.warning("prepare_mass_mailing preview failed: %s", exc)
+        ready = list(filtered)
+        blocked_foreign = []
+        blocked_invalid = []
+        skipped_recent = []
+        digest = {"error": str(exc), "ready_final": len(ready)}
+
+    if EXCLUDE_GLOBAL_MAIL:
+        final_ready = [
+            addr for addr in ready if classify_email_domain(addr) != "global_mail"
+        ]
+    else:
+        final_ready = list(ready)
+
+    ready_count = len(final_ready)
+    state.preview_ready_count = ready_count
+    state.to_send = list(final_ready)
+    state.preview_allowed_all = sorted(final_ready)
+    state.blocked_after_parse = count_blocked(state.to_send)
+    context.user_data["last_parsed_emails"] = list(state.to_send)
+
+    cooldown_norm_set.update({_normalize_email(addr) for addr in skipped_recent if addr})
+    cooldown_count = len(cooldown_norm_set)
+    cooldown_example_values = [addr for addr in skipped_recent if addr][:3]
+
+    blocked_invalid_norm = {_normalize_email(addr) for addr in blocked_invalid if addr}
+    blocklist_norm_only = blocked_invalid_norm - invalid_norm_set
+    blocklist_count = len(blocklist_norm_only or blocked_norm_set)
+    if blocklist_norm_only:
+        blocked_examples = []
+        seen_block = set()
+        for addr in blocked_invalid:
+            norm = _normalize_email(addr)
+            if norm in blocklist_norm_only and norm not in seen_block:
+                seen_block.add(norm)
+                blocked_examples.append(addr)
+
+    if digest:
+        invalid_count = max(
+            invalid_count,
+            int(digest.get("invalid", invalid_count) or invalid_count),
+        )
+        dedup_removed = max(
+            dedup_removed,
+            int(digest.get("removed_duplicates_in_batch", dedup_removed) or dedup_removed),
+        )
+
+    total_found = len(found_all)
+    excluded_total = max(total_found - ready_count, 0)
+    others = excluded_total - (dedup_removed + invalid_count + blocklist_count + cooldown_count)
+    if others < 0:
+        others = 0
+
+    dup_examples = []
+    if dedup_removed > 0:
+        dup_seen = set()
+        for norm, count in Counter(norm_sequence).items():
+            if count > 1 and norm not in dup_seen:
+                dup_seen.add(norm)
+                dup_examples.append(norm_to_original.get(norm, [norm])[0])
+
+    dup_display = _head3(list(dict.fromkeys(dup_examples)))
+    invalid_display = _head3(list(dict.fromkeys(invalid_examples)))
+    blocklist_display = _head3(list(dict.fromkeys(blocked_examples)))
+    cooldown_display = _head3(list(dict.fromkeys(cooldown_example_values)))
+
+    summary_payload = {
+        "total_found": total_found,
+        "to_send": ready_count,
+        "suspicious": len(suspicious_numeric),
+        "excluded": {
+            "duplicates_after_norm": dedup_removed,
+            "invalid_after_norm": invalid_count,
+            "blocklist_removed": blocklist_count,
+            "cooldown_removed": cooldown_count,
+            "other_removed": others,
+            "examples": {
+                "duplicates": dup_display,
+                "invalid": invalid_display,
+                "blocklist": blocklist_display,
+                "cooldown": cooldown_display,
+            },
         },
-        examples=(),
-    )
-    return summary
+    }
+    summary = format_parse_summary(summary_payload)
+    return _sanitize_preview_report(summary)
 
 
 def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
@@ -2747,7 +3981,15 @@ def _export_emails_xlsx(emails: list[str], run_id: str) -> Path:
     df = pd.DataFrame({"email": list(emails)})
     if "comment" not in df.columns:
         df["comment"] = ""
-    df.to_excel(path, index=False)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    try:
+        normalized = [
+            value for value in (_normalize_email(addr) for addr in emails) if value
+        ]
+        append_foreign_review_sheet(str(path), normalized)
+    except Exception as ex:  # pragma: no cover - defensive branch
+        logger.warning("Не удалось добавить лист Foreign_Review в Excel: %s", ex)
     return path
 
 
@@ -2788,8 +4030,9 @@ async def _send_combined_parse_response(
         f"{report}\n\n"
         "Дальнейшие действия:\n"
         "• Выберите направление рассылки\n"
-        "• Или отправьте правки: «старый -> новый» и/или адреса для удаления\n"
-        "• Excel-файл прикреплён к сообщению автоматически\n"
+        "• Для правок используйте: «старый -> новый» и/или список адресов к удалению (текстом)\n"
+        "• В Excel добавлен лист «Foreign_Review» с иностранными адресами для ручной проверки\n"
+        "• Глобальные почтовики не исключаются автоматически\n"
     )
 
     emails = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
@@ -2833,12 +4076,23 @@ async def _send_combined_parse_response(
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an uploaded document with potential e-mail addresses."""
 
-    doc = update.message.document
+    message = update.effective_message or getattr(update, "message", None)
+    doc = getattr(message, "document", None)
     if not doc:
+        return
+
+    filename_raw = doc.file_name or ""
+    ext = os.path.splitext(filename_raw)[1].lower()
+    if ext not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        if hasattr(message, "reply_text"):
+            await message.reply_text(
+                "Поддерживаются: PDF, DOC/DOCX, XLS/XLSX, CSV, TXT и ZIP архивы."
+            )
         return
 
     clear_stop()
     job_name = _build_parse_task_name(update, "file")
+    loop = asyncio.get_running_loop()
     current_task = asyncio.current_task()
     idle_seconds = _watchdog_idle_seconds()
     if current_task:
@@ -2846,37 +4100,59 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
 
     progress_msg = None
+    progress: ParseProgress | None = None
+    hb: Heartbeat | None = None
     file_path: str | None = None
+
+    async def _push_progress(force: bool = False) -> None:
+        if not hb or not progress:
+            return
+        text = progress.render_summary() if force else progress.maybe_render_summary(force=True)
+        if text:
+            await hb.force(text)
 
     try:
         await heartbeat()
-        progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        if hasattr(message, "reply_text"):
+            progress_msg = await message.reply_text(
+                "📥 Файл получен. Анализирую…",
+                reply_markup=_build_stop_markup(),
+            )
+        if progress_msg:
+            progress = ParseProgress(phase="подготовка")
+            hb = Heartbeat(
+                progress_msg,
+                interval_sec=max(1.0, float(PROGRESS_UPDATE_MIN_SEC)),
+                supplier=progress.maybe_render_summary,
+            )
+            hb.start()
+            await _push_progress(force=True)
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             file_path = await _download_file(update, DOWNLOAD_DIR)
+            if progress:
+                progress.set_phase("загрузка")
+                await _push_progress(force=True)
             await heartbeat()
         except Exception as e:
+            if hb:
+                hb.stop()
             try:
                 if progress_msg:
                     await progress_msg.edit_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
-                else:
-                    await update.message.reply_text(
+                elif hasattr(message, "reply_text"):
+                    await message.reply_text(
                         f"⛔ Не удалось скачать файл: {type(e).__name__}"
                     )
             except Exception:
                 pass
             return
 
-        try:
-            if progress_msg:
-                await progress_msg.edit_text("📥 Читаю файл…")
-        except Exception:
-            pass
-
         allowed_all, loose_all = set(), set()
+        raw_candidates: list[str] = []
         extracted_files: List[str] = []
         repairs: List[tuple[str, str]] = []
         footnote_dupes = 0
@@ -2884,28 +4160,77 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         state = get_state(context)
 
         try:
-            try:
-                if progress_msg:
-                    await progress_msg.edit_text("🔎 Ищу адреса…")
-            except Exception:
-                pass
+            if progress:
+                progress.set_phase("анализ")
+                await _push_progress(force=True)
             if (file_path or "").lower().endswith(".zip"):
-                allowed, extracted_files, loose, stats = await extract_emails_from_zip(
-                    file_path
-                )
+                try:
+                    zip_kwargs: Dict[str, Any] = {}
+                    try:
+                        sig = inspect.signature(extract_emails_from_zip)
+                    except (TypeError, ValueError):
+                        sig = None
+                    if sig is None or "progress_message" in getattr(sig, "parameters", {}):
+                        zip_kwargs["progress_message"] = progress_msg
+                    if progress:
+                        progress.set_phase("ZIP")
+                        await _push_progress(force=True)
+                    (
+                        allowed,
+                        extracted_files,
+                        loose,
+                        stats,
+                    ) = await extract_emails_from_zip(
+                        file_path,
+                        progress=progress,
+                        **zip_kwargs,
+                    )
+                except ZipValidationError as exc:
+                    if hb:
+                        hb.stop()
+                    warning_text = (
+                        f"⚠️ Архив отклонён: {exc.reason}\n"
+                        f"Загрузите более компактный архив (≤{ZIP_MAX_FILES} файлов, "
+                        f"≤{ZIP_MAX_TOTAL_UNCOMP_MB} МБ распаковано, глубина ≤{ZIP_MAX_DEPTH})."
+                    )
+                    handled = await _edit_progress_message(progress_msg, warning_text)
+                    if not handled and hasattr(message, "reply_text"):
+                        await message.reply_text(warning_text)
+                    _safe_unlink(file_path)
+                    return
+                except ZipProcessingTimeoutError:
+                    if hb:
+                        hb.stop()
+                    timeout_text = (
+                        "⏱️ Время обработки архива истекло. Попробуйте загрузить меньший архив или разбить его на части."
+                    )
+                    handled = await _edit_progress_message(progress_msg, timeout_text)
+                    if not handled and hasattr(message, "reply_text"):
+                        await message.reply_text(timeout_text)
+                    _safe_unlink(file_path)
+                    return
                 await heartbeat()
                 allowed_all.update(allowed)
+                raw_candidates.extend(list(allowed))
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
                 repairs = collect_repairs_from_files(extracted_files)
                 footnote_dupes += stats.get("footnote_pairs_merged", 0)
             else:
-                allowed, loose, stats = await asyncio.to_thread(
+                if not file_path:
+                    raise ValueError("file_path is required for document parsing")
+                if progress:
+                    progress.set_phase(os.path.splitext(file_path)[1].upper().lstrip("."))
+                    await _push_progress(force=True)
+                allowed, loose, stats = await loop.run_in_executor(
+                    None,
                     extract_from_uploaded_file,
                     file_path,
+                    progress,
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
+                raw_candidates.extend(list(allowed))
                 loose_all.update(loose)
                 _register_sources(state, allowed, file_path)
                 if file_path:
@@ -2914,23 +4239,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 else:
                     repairs = []
                 footnote_dupes += stats.get("footnote_pairs_merged", 0)
-            try:
-                if progress_msg:
-                    await progress_msg.edit_text("🧹 Чищу дубликаты и нормализую…")
-            except Exception:
-                pass
+            if progress:
+                progress.set_phase("очистка")
+                await _push_progress(force=True)
         except Exception as e:
             log_error(f"handle_document: {file_path}: {e}")
             try:
+                if hb:
+                    hb.stop()
                 if progress_msg:
                     await progress_msg.edit_text("🛑 Ошибка при анализе файла.")
-                else:
-                    await update.message.reply_text("🛑 Ошибка при анализе файла.")
+                elif hasattr(message, "reply_text"):
+                    await message.reply_text("🛑 Ошибка при анализе файла.")
             except Exception:
                 pass
-            await update.message.reply_text(
-                "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
-            )
+            if hasattr(message, "reply_text"):
+                await message.reply_text(
+                    "🛑 Во время анализа файла произошла ошибка. Проверьте формат и попробуйте снова."
+                )
             return
 
     except asyncio.CancelledError as exc:
@@ -2951,15 +4277,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 notified = True
             except Exception:
                 pass
-        if not notified:
+        if not notified and hasattr(message, "reply_text"):
             try:
-                await update.message.reply_text(cancelled_text)
+                await message.reply_text(cancelled_text)
+            except Exception:
+                pass
+        return
+    except Exception as exc:  # pragma: no cover - defensive handler
+        logger.exception("handle_document failed: %s", exc)
+        error_text = "❌ Ошибка при обработке файла. Подробности в логах."
+        handled = False
+        if progress_msg:
+            try:
+                await progress_msg.edit_text(error_text)
+                handled = True
+            except Exception:
+                handled = False
+        if not handled and hasattr(message, "reply_text"):
+            try:
+                await message.reply_text(error_text)
             except Exception:
                 pass
         return
     finally:
         if current_task:
             unregister_task(job_name, current_task)
+        if hb:
+            hb.stop()
+            hb = None
+        if file_path:
+            forget_timeout_hint_target(file_path)
 
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
@@ -2990,8 +4337,48 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     total_footnote = state.footnote_dupes + footnote_dupes
     blocked_after_parse = count_blocked(state.to_send)
 
+    if hasattr(message, "reply_text"):
+        try:
+            await message.reply_text(
+                f"✅ Анализ завершён. Найдено адресов: {len(state.to_send)}"
+            )
+        except Exception:
+            pass
+
+    summary_items: list[str] = []
+    found_total: Optional[int] = None
+    if isinstance(stats, dict):
+        raw_found = stats.get("unique_after_cleanup")
+        if isinstance(raw_found, int) and raw_found >= 0:
+            found_total = raw_found
+    if found_total is None:
+        found_total = len(filtered)
+    if found_total >= 0:
+        summary_items.append(f"найдено адресов {found_total}")
+    files_total = stats.get("files_total") if isinstance(stats, dict) else None
+    files_processed = stats.get("files_processed") if isinstance(stats, dict) else None
     try:
-        await progress_msg.edit_text("✅ Готово. Формирую превью…")
+        total_val = int(files_total) if files_total is not None else None
+    except (TypeError, ValueError):
+        total_val = None
+    try:
+        processed_val = int(files_processed) if files_processed is not None else None
+    except (TypeError, ValueError):
+        processed_val = None
+    if total_val and total_val > 0:
+        if processed_val is None:
+            processed_val = 0
+        processed_val = max(0, min(processed_val, total_val))
+        summary_items.append(f"обработано файлов {processed_val}/{total_val}")
+    elif processed_val and processed_val > 0:
+        summary_items.append(f"обработано файлов {processed_val}")
+
+    try:
+        if summary_items:
+            summary_text = f"✅ Готово: {', '.join(summary_items)}. Формирую превью…"
+        else:
+            summary_text = "✅ Готово. Формирую превью…"
+        await progress_msg.edit_text(summary_text)
     except Exception:
         pass
     await heartbeat()
@@ -3004,6 +4391,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sorted(foreign_total),
         total_footnote,
         blocked_after_parse=blocked_after_parse,
+        raw_candidates=raw_candidates,
     )
     await heartbeat()
 
@@ -3863,6 +5251,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 ignore_cooldown=ignore_cooldown,
             )
         )
+        expected_ready = getattr(state, "preview_ready_count", None)
+        if isinstance(expected_ready, int) and expected_ready >= 0:
+            assert len(ready) == expected_ready, (
+                f"Mismatch ready_count({expected_ready}) vs emails_to_send({len(ready)})"
+            )
     except Exception as exc:
         logger.exception(
             "prepare_mass_mailing failed",
@@ -5037,6 +6430,7 @@ async def handle_url_text(
         sorted(foreign_total),
         total_footnote,
         blocked_after_parse=blocked_after_parse,
+        raw_candidates=found,
     )
     await _send_combined_parse_response(message, context, report, state)
     await heartbeat()
@@ -5053,6 +6447,61 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     raw_text = message.text or ""
     text = raw_text
+    user = update.effective_user
+    uid = user.id if user else None
+    if uid is not None:
+        st = REPORT_STATE.get(uid)
+        if isinstance(st, dict) and st.get("await") == "single_date":
+            if not raw_text or not raw_text.strip():
+                return
+            try:
+                start_dt, end_dt, ddmmyyyy = parse_user_date_once(raw_text)
+            except Exception:
+                await message.reply_text(
+                    "Не удалось распознать дату. Пример: 29.10.2025 или 2025-10-29"
+                )
+                return
+            base_dir_raw = st.get("base_dir")
+            base_dir = (
+                Path(base_dir_raw)
+                if base_dir_raw
+                else Path(os.getenv("REPORT_BASE_DIR", "var") or "var")
+            )
+            records = _load_audit_records(base_dir, start_dt, end_dt)
+            summary = _summarize(records, start_dt, end_dt)
+            REPORT_STATE.pop(uid, None)
+            tzname = os.getenv("EMAILBOT_TZ", "Europe/Amsterdam")
+            await message.reply_text(
+                f"📅 Отчёт за {ddmmyyyy} ({tzname})\n\n{summary}",
+                reply_markup=_report_menu_kb(),
+            )
+            return
+        if isinstance(st, dict) and st.get("await") in {"date_or_range", "confirm"}:
+            rng = _parse_date_range(raw_text)
+            if not rng:
+                await message.reply_text(
+                    "Не удалось распознать дату.\n"
+                    "Примеры:\n"
+                    "• 29.10.2025 — один день\n"
+                    "• 01.10.2025–15.10.2025 — диапазон\n"
+                    "• 10.2025 или 2025-10 — месяц\n"
+                    "• 2025 — год"
+                )
+                return
+            start, end = rng
+            base_dir_raw = st.get("base_dir")
+            REPORT_STATE[uid] = {
+                "await": "confirm",
+                "start": start,
+                "end": end,
+                "base_dir": base_dir_raw,
+            }
+            label = _format_period_label(start, end)
+            await message.reply_text(
+                f"Период: {label}\nПодтвердить построение отчёта?",
+                reply_markup=_confirm_period_kb(),
+            )
+            return
     has_url = _message_has_url(message, raw_text)
 
     if await _handle_bulk_edit_text(update, context, text):
@@ -5109,7 +6558,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await handle_url_text(update, context)
         return
     await update.message.reply_text(
-        "❌ Не распознана ссылка. Пришлите полную URL, например: https://site.tld/path"
+        "Пришлите файл (PDF/DOC/DOCX/XLS/XLSX/CSV/TXT/ZIP) или ссылку на сайт."
     )
     return
 
@@ -6037,45 +7486,70 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        total_sent = len(sent_ok)
-        total_skipped = len(skipped_recent)
-        total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total_duplicates = len(duplicates)
         total_planned = initial_count
         try:
             stoplist_blocked = count_blocked(blocked_invalid)
         except Exception:
             stoplist_blocked = 0
-        blocked_line_value = (
-            stoplist_blocked if (stoplist_blocked or total_blocked == 0) else total_blocked
+        undeliverable_only = max(0, len(blocked_invalid) - stoplist_blocked)
+        fallback_total = total_planned or (
+            len(sent_ok)
+            + len(skipped_recent)
+            + stoplist_blocked
+            + undeliverable_only
+            + len(duplicates)
         )
-        report_text = format_dispatch_result(
-            total_planned,
-            total_sent,
-            total_skipped,
-            total_blocked,
-            total_duplicates,
-            aborted=aborted,
-        )
-        lines = []
-        for line in report_text.splitlines():
-            if line.startswith("🚫"):
-                line = f"🚫 В стоп-листе: {blocked_line_value}"
-            lines.append(line)
-        report_text = "\n".join(lines)
-        if blocked_foreign:
-            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        undeliverable_count = len(blocked_invalid)
-        blocked_count = stoplist_blocked
-        undeliverable_only = max(0, undeliverable_count - blocked_count)
-        report_text += (
-            "\n🚫 Недоставляемые (без стоп-листа): "
-            f"{undeliverable_only}"
-        )
-        if stoplist_blocked:
-            report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"
+        error_count = len(error_details)
+        fallback_metrics = {
+            "total": fallback_total,
+            "sent": len(sent_ok),
+            "blocked": stoplist_blocked,
+            "cooldown": len(skipped_recent),
+            "undeliverable_only": undeliverable_only,
+            "unchanged": len(duplicates),
+            "errors": error_count,
+            "not_delivered": undeliverable_only + error_count,
+        }
+        audit_path = None
+        try:
+            audit_path = context.chat_data.get("bulk_audit_path")
+        except Exception:
+            audit_path = None
+        metrics = fallback_metrics
+        if audit_path:
+            metrics = _summarize_from_audit(str(audit_path))
+            if not metrics.get("total") and fallback_metrics["total"]:
+                metrics = fallback_metrics
 
-        await query.message.reply_text(report_text)
+        not_delivered = metrics.get(
+            "not_delivered",
+            metrics.get("undeliverable_only", 0) + metrics.get("errors", 0),
+        )
+
+        summary_lines: list[str] = []
+        summary_lines.append("📨 Рассылка завершена.")
+        summary_lines.append(f"📊 В очереди было: {metrics['total']}")
+        summary_lines.append(f"✅ Отправлено: {metrics['sent']}")
+        summary_lines.append(
+            f"⏳ Пропущены (по правилу «180 дней»): {metrics['cooldown']}"
+        )
+        summary_lines.append(f"🚫 В стоп-листе: {metrics['blocked']}")
+        summary_lines.append(f"❌ Не доставлено: {not_delivered}")
+        if aborted:
+            summary_lines.append("⛔ Рассылка остановлена досрочно.")
+        if blocked_foreign:
+            summary_lines.append(
+                f"🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
+            )
+        if audit_path:
+            summary_lines.append(f"📄 Аудит: {audit_path}")
+
+        text_out = "\n".join(summary_lines)
+        text_out = re.sub(r"(?m)^\s*Недоставляемые.*\n?", "", text_out)
+        text_out = re.sub(r"(?m)^\s*Ошиб(?:ок|ки) при отправке.*\n?", "", text_out)
+        text_out = re.sub(r"(?m)^\s*ℹ️\s*Осталось без изменений.*\n?", "", text_out)
+
+        await query.message.reply_text(text_out)
         if error_details:
             summary = format_error_details(error_details)
             if summary:
@@ -6155,6 +7629,7 @@ async def stop_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     chat_id = query.message.chat.id
     request_cancel(chat_id)
+    request_stop()
     await query.message.reply_text(
         "🛑 Запрос на остановку принят. Завершаю текущую операцию…"
     )
@@ -6607,6 +8082,7 @@ __all__ = [
     "url_command",
     "crawl_command",
     "report_callback",
+    "report_period",
     "on_diagnostics",
     "sync_imap_command",
     "reset_email_list",

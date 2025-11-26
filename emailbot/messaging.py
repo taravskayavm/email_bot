@@ -46,13 +46,14 @@ from typing import (
 from threading import RLock
 
 from .extraction import normalize_email, strip_html
-from utils.email_clean import strip_invisibles
+from utils.email_clean import normalize_email_unified, strip_invisibles
 from .cooldown import (
     audit_emails,
     build_cooldown_service,
     normalize_email as cooldown_normalize_email,
 )
 from . import settings as settings_module
+from .domain_utils import GLOBAL_MAIL_PROVIDERS
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from .cooldown import CooldownService
@@ -86,15 +87,85 @@ from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
+from emailbot.storage import storage_audit_add
 
 _TASK_SEQ = count()
 
 logger = logging.getLogger(__name__)
 
+
+def _storage_audit(email: str, status: str, *, override: bool = False) -> None:
+    if not email:
+        return
+    try:
+        storage_audit_add(email, status, override=override)
+    except Exception:
+        logger.debug("storage_audit_add failed", exc_info=True)
+
 _BULK_COOLDOWN_SERVICE: "CooldownService" | None = None
 _HISTORY_SHIM_WARNED_ONCE = False
 
 DEBUG_SAVE_EML = os.getenv("DEBUG_SAVE_EML", "0") == "1"
+
+# Единые метки исхода (взаимно исключающие)
+# При записи аудита использовать только значения из этого словаря, например:
+# record["outcome"] = OUTCOME["sent"]
+OUTCOME = {
+    "sent": "sent",  # письмо отправлено успешно
+    "blocked": "blocked",  # в стоп-листе (не пытались отправлять)
+    "cooldown": "cooldown",  # 180-дневное правило (не пытались отправлять)
+    "undeliverable": "undeliverable",  # недоставляемый (bounce/валидатор/некорректный)
+    "error": "error",  # ошибка при попытке отправки (исключение SMTP/timeout и т.п.)
+    "unchanged": "unchanged",  # «оставлено как было» (например, уже в этой кампании)
+}
+
+
+def classify_audit_outcome(reason: str | None, *, default: str | None = None) -> str:
+    """Map textual ``reason`` to one of the allowed audit outcome labels."""
+
+    if default is None:
+        default = OUTCOME["error"]
+    value = (reason or "").strip().lower()
+    if not value:
+        return default
+
+    if value in OUTCOME.values():
+        return value
+
+    if "cooldown" in value or value.startswith("skip_cooldown"):
+        return OUTCOME["cooldown"]
+
+    if any(token in value for token in ("stop", "block", "foreign_domain", "foreign", "suppressed")):
+        return OUTCOME["blocked"]
+
+    if any(
+        token in value
+        for token in (
+            "duplicate",
+            "daily_limit",
+            "history",
+            "unchanged",
+            "skip",
+        )
+    ):
+        return OUTCOME["unchanged"]
+
+    if any(
+        token in value
+        for token in (
+            "bounce",
+            "validator",
+            "undeliverable",
+            "invalid",
+            "smtp_error",
+        )
+    ):
+        return OUTCOME["undeliverable"]
+
+    if "error" in value or "exception" in value or "timeout" in value:
+        return OUTCOME["error"]
+
+    return default
 
 
 def write_audit(
@@ -502,6 +573,24 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_GLOBAL_MAIL_PROVIDERS = {domain.lower() for domain in GLOBAL_MAIL_PROVIDERS}
+
+
+def extract_domain(addr: str) -> str:
+    """Return a lower-cased domain part of ``addr`` or an empty string."""
+
+    if not addr:
+        return ""
+    parsed = parseaddr(str(addr))[1]
+    if not parsed or "@" not in parsed:
+        return ""
+    domain = parsed.split("@", 1)[1].strip().lower()
+    if not domain:
+        return ""
+    try:
+        return _to_idna(domain).lower()
+    except Exception:
+        return domain
 
 
 def parse_emails_from_text(text: str) -> list[str]:
@@ -589,17 +678,23 @@ def _to_idna(domain: str) -> str:
 
 
 def _normalize_email_for_blocklist(addr: str) -> str:
-    addr = (addr or "").strip().lower()
-    try:
-        local, dom = addr.split("@", 1)
-        dom_idna = _to_idna(dom)
-        return f"{local}@{dom_idna}"
-    except Exception:
-        return addr
+    normalized = normalize_email_unified(addr)
+    if not normalized:
+        return ""
+
+    local, sep, dom = normalized.partition("@")
+    if not sep:
+        return normalized
+
+    dom_idna = _to_idna(dom)
+    if not dom_idna:
+        return normalized
+
+    return f"{local}@{dom_idna}"
 
 
 def _canonical_blocked(email_str: str) -> str:
-    email_norm = normalize_email(email_str)
+    email_norm = normalize_email_unified(email_str)
     email_norm = re.sub(r"^\.+", "", email_norm)
     email_norm = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", email_norm)
     return _normalize_email_for_blocklist(email_norm)
@@ -673,6 +768,70 @@ def _is_blocklisted(email: str) -> bool:
     except Exception:
         logger.debug("blocklist lookup failed", exc_info=True)
         return False
+
+
+def _extend_stoplist_snapshot(snapshot: set[str], values: Iterable[str]) -> None:
+    for raw in values or []:
+        try:
+            canon = _normalize_email_for_blocklist(raw)
+        except Exception:
+            canon = normalize_email_unified(raw)
+        if canon and "@" in canon:
+            snapshot.add(canon)
+
+
+def _extend_snapshot_from_history(snapshot: set[str], attr: str) -> None:
+    loader = getattr(history_service, attr, None)
+    if not callable(loader):
+        return
+    try:
+        entries = loader()
+    except TypeError:
+        # Some legacy helpers might accept unused positional arguments.
+        try:
+            entries = loader([])
+        except Exception:
+            logger.debug("stoplist snapshot: %s() call failed", attr, exc_info=True)
+            return
+    except Exception:
+        logger.debug("stoplist snapshot: %s() call failed", attr, exc_info=True)
+        return
+
+    try:
+        _extend_stoplist_snapshot(snapshot, entries)
+    except Exception:
+        logger.debug("stoplist snapshot: failed to extend from %s", attr, exc_info=True)
+
+
+def load_stoplist_snapshot() -> set[str]:
+    """Collect a unified set of blocked addresses from all available sources."""
+
+    ensure_blocklist_ready()
+
+    snapshot: set[str] = set()
+
+    try:
+        suppress_list.refresh_if_changed()
+        blocked = suppress_list.get_blocked_set()
+    except Exception:
+        logger.debug("stoplist snapshot: failed to load suppress_list", exc_info=True)
+        blocked = set()
+
+    _extend_stoplist_snapshot(snapshot, blocked)
+    _extend_stoplist_snapshot(snapshot, _extra_blocklist())
+
+    try:
+        rules_blocked = rules.load_blocklist()
+    except Exception:
+        logger.debug("stoplist snapshot: failed to load rules blocklist", exc_info=True)
+        rules_blocked = set()
+
+    _extend_stoplist_snapshot(snapshot, rules_blocked)
+
+    for attr in ("iter_unsubscribed", "iter_hard_bounces"):
+        _extend_snapshot_from_history(snapshot, attr)
+
+    return snapshot
 
 
 # HTML templates are stored at the root-level ``templates`` directory.
@@ -1416,6 +1575,7 @@ def send_email_with_sessions(
     if decision is not Decision.SEND_NOW:
         logger.info("skip %s: reason=%s campaign=%s", recipient, reason, campaign)
         outcome = _outcome_for_decision(decision)
+        _storage_audit(recipient, outcome.value, override=override_180d)
         return outcome, "", None, None
 
     msg, token = build_message(
@@ -1430,10 +1590,12 @@ def send_email_with_sessions(
     subject_norm = subject or ""
     if was_sent_today_same_content(recipient, subject_norm, body_for_hash):
         logger.info("Skipping duplicate content for %s within 24h", recipient)
+        _storage_audit(recipient, SendOutcome.DUPLICATE.value, override=override_180d)
         return SendOutcome.DUPLICATE, "", None, None
 
     if not _register_send(recipient, batch_id):
         logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+        _storage_audit(recipient, SendOutcome.COOLDOWN.value, override=override_180d)
         return SendOutcome.COOLDOWN, "", None, None
 
     key = canonical_for_history(recipient)
@@ -1518,6 +1680,7 @@ def send_email_with_sessions(
             msg_text,
             exc_info=True,
         )
+        _storage_audit(recipient, SendOutcome.ERROR.value, override=override_180d)
         return SendOutcome.ERROR, "", None, None
 
     # 3) Зафиксировать отправку для кулдауна
@@ -1542,6 +1705,8 @@ def send_email_with_sessions(
         subject=subject_norm,
         content_hash=content_hash,
     )
+
+    _storage_audit(recipient, SendOutcome.SENT.value, override=override_180d)
 
     if return_raw:
         return SendOutcome.SENT, token, log_key, content_hash, raw_bytes
@@ -1637,12 +1802,7 @@ def process_unsubscribe_requests(
 
 
 def get_blocked_emails() -> Set[str]:
-    ensure_blocklist_ready()
-    canonical = {
-        _canonical_blocked(value)
-        for value in suppress_list.get_blocked_set()
-    }
-    return {item for item in canonical if item and "@" in item}
+    return load_stoplist_snapshot()
 
 
 def dedupe_blocked_file():
@@ -2043,7 +2203,7 @@ def prepare_mass_mailing(
         batch = sanitize_batch(emails)
         cleaned = batch.emails
         dup_skipped = batch.duplicates
-        norm_map = batch.normalized
+        norm_map = {addr: normalize_email_unified(addr) for addr in cleaned}
         if not cleaned:
             return [], [], [], [], {"total": 0, "input_total": 0}
 
@@ -2054,16 +2214,16 @@ def prepare_mass_mailing(
         invalid_basic = [addr for addr in cleaned if not _validate_email_basic(addr)]
         candidates = [addr for addr in cleaned if addr not in invalid_basic]
 
-        blocked_set: set[str] = set()
+        stoplist_snapshot: set[str] = set()
         try:
-            blocked_set = {normalize_email(e) for e in get_blocked_emails()}
+            stoplist_snapshot = load_stoplist_snapshot()
         except Exception as exc:
             logger.warning("blocked list load failed: %s", exc)
 
         queue_after_block: list[str] = []
         for addr in candidates:
-            norm = norm_map.get(addr) or normalize_email(addr)
-            if blocked_set and norm in blocked_set:
+            norm = norm_map.get(addr) or normalize_email_unified(addr)
+            if stoplist_snapshot and norm in stoplist_snapshot:
                 blocked_invalid.append(addr)
                 continue
             if rules.is_blocked(norm):
@@ -2079,7 +2239,21 @@ def prepare_mass_mailing(
 
         queue_after_foreign: list[str] = []
         block_foreign_enabled = os.getenv("FOREIGN_BLOCK", "1") == "1"
+        # Бизнес-правило: пропускаем все .ru и gmail.com без отдельной статистики.
+        allowlisted_globals = _GLOBAL_MAIL_PROVIDERS | {"gmail.com"}
         for addr in queue_after_block:
+            domain = extract_domain(addr)
+            domain_lower = domain.lower()
+            allowlisted = False
+            if domain_lower.endswith(".ru"):
+                allowlisted = True
+            elif domain_lower in allowlisted_globals:
+                allowlisted = True
+
+            if allowlisted:
+                queue_after_foreign.append(addr)
+                continue
+
             try:
                 if block_foreign_enabled and is_foreign(addr):
                     blocked_foreign.append(addr)
@@ -2118,19 +2292,12 @@ def prepare_mass_mailing(
                 blocked_recent = True
             if not blocked_recent:
                 try:
+                    # Единый источник: локальный лог/аудит (normalize + content-hash).
                     if lookback_days > 0 and was_sent_within(addr, days=lookback_days):
                         skipped_recent.append(addr)
                         blocked_recent = True
-                    elif (
-                        lookback_days > 0
-                        and history_service.was_sent_within_days(
-                            addr, group or "", lookback_days
-                        )
-                    ):
-                        skipped_recent.append(addr)
-                        blocked_recent = True
                 except Exception as exc:
-                    logger.warning("history lookup failed for %s: %s", addr, exc)
+                    logger.warning("recent history check failed for %s: %s", addr, exc)
             if blocked_recent:
                 continue
             canon = norm_key if lookback_days > 0 else addr
@@ -2179,6 +2346,10 @@ def prepare_mass_mailing(
             "removed_invalid": len(blocked_invalid),
             "removed_foreign": len(blocked_foreign),
             "removed_today": 0,
+            "global_excluded": 0,
+            "stoplist_snapshot_size": len(stoplist_snapshot),
+            # Больше не возвращаем ru_count/global_count и производные,
+            # чтобы репорт их не печатал.
         }
         return ready, blocked_foreign, blocked_invalid, skipped_recent, digest
     except Exception as exc:
@@ -2350,6 +2521,7 @@ def check_env_vars():
 
 
 __all__ = [
+    "OUTCOME",
     "SendOutcome",
     "DOWNLOAD_DIR",
     "LOG_FILE",

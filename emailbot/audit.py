@@ -14,6 +14,8 @@ from typing import Any, Mapping
 
 from utils.paths import expand_path, ensure_parent
 
+from .time_utils import LOCAL_TZ
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_AUDIT_PATH = expand_path("var/audit.csv")
@@ -77,7 +79,12 @@ class AuditWriter:
         if not self.enabled:
             return
         try:
-            payload = json.dumps({str(k): _json_ready(v) for k, v in record.items()}, ensure_ascii=False)
+            prepared = dict(record)
+            if not prepared.get("timestamp"):
+                prepared["timestamp"] = datetime.now(LOCAL_TZ).isoformat()
+            payload = json.dumps(
+                {str(k): _json_ready(v) for k, v in prepared.items()}, ensure_ascii=False
+            )
         except Exception:
             logger.debug("bulk audit json encode failed", exc_info=True)
             return
@@ -90,14 +97,18 @@ class AuditWriter:
             self.enabled = False
             logger.debug("bulk audit append failed", exc_info=True)
 
-    def log_sent(self, email: str) -> None:
-        self._write_record({"type": "sent", "email": email, "ts": self._now_iso()})
+    def log_sent(self, email: str, *, outcome: str | None = None) -> None:
+        record = {"type": "sent", "email": email, "ts": self._now_iso()}
+        record["outcome"] = str(outcome or "sent")
+        self._write_record(record)
 
     def log_skip(
         self,
         email: str,
         reason: str,
         meta: Mapping[str, Any] | None = None,
+        *,
+        outcome: str | None = None,
     ) -> None:
         record: dict[str, Any] = {
             "type": "skip",
@@ -107,6 +118,7 @@ class AuditWriter:
         }
         if meta:
             record["meta"] = _json_ready(dict(meta))
+        record["outcome"] = str(outcome or "blocked")
         self._write_record(record)
 
     def log_error(
@@ -114,6 +126,8 @@ class AuditWriter:
         email: str,
         reason: str,
         meta: Mapping[str, Any] | None = None,
+        *,
+        outcome: str | None = None,
     ) -> None:
         record: dict[str, Any] = {
             "type": "error",
@@ -123,6 +137,7 @@ class AuditWriter:
         }
         if meta:
             record["meta"] = _json_ready(dict(meta))
+        record["outcome"] = str(outcome or "error")
         self._write_record(record)
 
 

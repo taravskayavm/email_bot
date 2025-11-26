@@ -6,20 +6,75 @@ import csv
 import html
 import io
 import re
+import tempfile
 import zipfile
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Set, Tuple
 from urllib.parse import unquote
 
+from emailbot.ptb_context import get_current_chat_id
 from emailbot.run_control import should_stop
+from emailbot.ui.notify import (
+    forget_timeout_hint_target,
+    remember_timeout_hint_target,
+)
 from emailbot.utils.email_clean import clean_and_normalize_email
+from emailbot.utils.logging_setup import get_logger
+from emailbot.extraction_pdf import extract_emails_from_pdf as _extract_pdf_file
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
+logger = get_logger(__name__)
+
+SAFE_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}",
+    re.ASCII,
+)
+EMAIL_RE = SAFE_EMAIL_RE
+CHUNK_BYTES = 128 * 1024
+MAX_MATCHES_PER_FILE = 1000
 MAX_BYTES = 25 * 1024 * 1024  # 25 MB per file
 ALLOWED_IN_ZIP = {".txt", ".csv", ".tsv", ".pdf", ".docx", ".xlsx", ".htm", ".html"}
 
 
 class ExtractError(Exception):
     """Raised when we cannot process a file."""
+
+
+def _iter_chunks(text: str, chunk_bytes: int = CHUNK_BYTES) -> Iterable[str]:
+    if not text:
+        return
+    encoded = text.encode("utf-8", errors="ignore")
+    view = memoryview(encoded)
+    for start in range(0, len(view), chunk_bytes):
+        yield view[start : start + chunk_bytes].tobytes().decode("utf-8", errors="ignore")
+
+
+def extract_emails_from_text(text: str) -> Set[str]:
+    """Find potential e-mail addresses inside ``text`` using chunked scanning."""
+
+    found: Set[str] = set()
+    carry = ""
+    for chunk in _iter_chunks(text):
+        if carry:
+            chunk = carry + chunk
+            carry = ""
+        if not chunk:
+            continue
+        parts = chunk.split()
+        if chunk and not chunk[-1].isspace():
+            carry = parts.pop() if parts else chunk
+        for part in parts:
+            if "@" not in part:
+                continue
+            for match in SAFE_EMAIL_RE.finditer(part):
+                found.add(match.group(0))
+                if len(found) >= MAX_MATCHES_PER_FILE:
+                    return found
+    if carry and "@" in carry:
+        for match in SAFE_EMAIL_RE.finditer(carry):
+            found.add(match.group(0))
+            if len(found) >= MAX_MATCHES_PER_FILE:
+                break
+    return found
 
 
 def _norm_and_dedupe(cands: List[str]) -> Tuple[List[str], Dict[str, int]]:
@@ -46,7 +101,8 @@ def _from_text(data: bytes) -> Tuple[List[str], Dict[str, int]]:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("latin-1", errors="ignore")
-    return _norm_and_dedupe(EMAIL_RE.findall(text))
+    emails = extract_emails_from_text(text)
+    return _norm_and_dedupe(list(emails))
 
 
 def _find_obfuscated_emails(text: str) -> List[str]:
@@ -194,6 +250,50 @@ def _from_docx(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
 
 
 def _from_pdf(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
+    if not data:
+        return [], {}, None
+
+    tmp: tempfile.NamedTemporaryFile | None = None
+    tmp_path: Path | None = None
+    emails: set[str] | None = None
+    timeout_key: Path | None = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(prefix="ebot_pdf_", suffix=".pdf", delete=False)
+        tmp.write(data)
+        tmp.flush()
+        tmp_path = Path(tmp.name)
+        logger.info("PDF bridge: saved stream -> %s", tmp_path.name)
+        try:
+            chat_id = get_current_chat_id()
+        except Exception:
+            chat_id = None
+        if chat_id is not None:
+            remember_timeout_hint_target(tmp_path, chat_id)
+            timeout_key = tmp_path
+        emails = _extract_pdf_file(tmp_path)
+    except Exception:
+        logger.exception("PDF bridge failed")
+    finally:
+        if timeout_key is not None:
+            try:
+                forget_timeout_hint_target(timeout_key)
+            except Exception:
+                pass
+        if tmp is not None:
+            try:
+                tmp.close()
+            except Exception:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if emails is not None:
+        ok = sorted(emails)
+        return ok, {}, None
+
     try:
         from pdfminer.high_level import extract_text
     except Exception:
@@ -243,6 +343,12 @@ def _from_zip(data: bytes) -> Tuple[List[str], Dict[str, int], List[str]]:
 
     ok_all = list(dict.fromkeys(ok_all))
     return ok_all, rejects, errors
+
+
+def extract_from_plain_text(text: str) -> Set[str]:
+    """Public helper for quickly extracting e-mail addresses from ``text``."""
+
+    return extract_emails_from_text(text)
 
 
 def extract_emails_from_bytes(data: bytes, filename: str) -> Tuple[List[str], Dict[str, int], str | None]:
