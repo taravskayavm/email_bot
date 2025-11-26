@@ -1,68 +1,35 @@
-from __future__ import annotations  # Включаем поддержку отложенных аннотаций для типизации
+from __future__ import annotations
 
-from typing import Iterable  # Импортируем тип Iterable для типизации коллекций адресов
+from typing import Iterable
 
-from config import (  # Импортируем настройки для определения локальных и иностранных доменов
-    FORCE_FOREIGN_DOMAINS_SET,  # Набор доменов, всегда считающихся иностранными
-    LOCAL_DOMAINS_EXTRA_SET,  # Дополнительные домены, которые считаются локальными
-    LOCAL_DOMAINS_EXTRA,  # Совместимое имя для дополнительных локальных доменов
-    LOCAL_TLDS,  # Список локальных TLD
-)
+from config import LOCAL_TLDS, LOCAL_DOMAINS_EXTRA
 
 
-def email_domain(email: str) -> str:  # Возвращает доменную часть e-mail в нижнем регистре
-    """Вернуть доменную часть e-mail в нижнем регистре или пустую строку."""
-    try:  # Пытаемся найти позицию символа '@'
-        at = email.rindex("@")  # Находим индекс последнего символа '@' в адресе
-    except ValueError:  # Обрабатываем ситуацию, когда символ '@' отсутствует
-        return ""  # Если '@' отсутствует, возвращаем пустую строку как сигнал ошибки
-    return email[at + 1 :].strip().lower()  # Забираем домен, убираем пробелы и приводим к нижнему регистру
+def email_domain(email: str) -> str:
+    try:
+        at = email.rindex("@")
+    except ValueError:
+        return ""
+    return email[at + 1 :].strip().lower()
 
 
-def is_forced_foreign(domain: str) -> bool:  # Проверяем, помечен ли домен как иностранный принудительно
-    """Вернуть True, если домен входит в список принудительно иностранных."""
-    return domain in FORCE_FOREIGN_DOMAINS_SET  # Сравниваем домен с набором FORCE_FOREIGN_DOMAINS_SET
+def is_foreign_email(email: str) -> bool:
+    d = email_domain(email)
+    if not d:
+        return False
+    # allow-list доменов — считаем локальными
+    if d in LOCAL_DOMAINS_EXTRA:
+        return False
+    # локальные TLD — считаем локальными
+    for suf in LOCAL_TLDS:
+        suf = suf.strip().lower()
+        if suf and d.endswith(suf):
+            return False
+    return True
 
 
-def domain_tld(domain: str) -> str:  # Извлекаем TLD домена с точкой или пустую строку
-    """Вернуть TLD домена (включая точку) или пустую строку."""
-    if "." not in domain:  # Проверяем наличие точки в домене
-        return ""  # Если точек нет, возвращаем пустую строку
-    return "." + domain.rsplit(".", 1)[-1]  # Выделяем суффикс после последней точки и добавляем точку
-
-
-def is_foreign_email(email: str) -> bool:  # Определяем иностранность email по набору правил
-    """Эвристическая проверка «иностранности» домена с учётом бизнес-правил."""
-    d = email_domain(email)  # Определяем доменную часть адреса
-    if not d:  # Если домен не определён, адрес считаем локальным
-        return False  # Пустой домен трактуем как локальный, чтобы не отбрасывать адрес
-
-    if is_forced_foreign(d):  # Проверяем домен на наличие в списке принудительно иностранных
-        return True  # Немедленно возвращаем True для доменов из FORCE_FOREIGN_DOMAINS_SET
-
-    if (
-        d in LOCAL_DOMAINS_EXTRA_SET  # Проверяем домен по набору дополнительных локальных доменов
-        or d in LOCAL_DOMAINS_EXTRA  # Проверяем домен по совместимому списку локальных доменов
-    ):  # Завершаем условие проверки дополнительных локальных доменов
-        return False  # Явно разрешённые домены считаем локальными
-
-    tld = domain_tld(d)  # Извлекаем TLD для домена
-    if not tld:  # Если TLD отсутствует (например, домен без точки)
-        return True  # Неизвестный формат домена считаем иностранным для безопасности
-
-    normalized_local_tlds = {  # Формируем нормализованное множество локальных TLD
-        t.strip().lower()  # Убираем пробелы и приводим к нижнему регистру
-        for t in LOCAL_TLDS  # Перебираем TLD из настроек
-        if t.strip()  # Исключаем пустые элементы
-    }  # Завершили формирование множества локальных TLD
-    return tld not in normalized_local_tlds  # Если TLD отсутствует в списке локальных, домен считаем иностранным
-
-
-def split_foreign(emails: Iterable[str]) -> tuple[list[str], list[str]]:  # Разделяем адреса на локальные и иностранные
-    """Разделить список адресов на локальные и иностранные."""
-    local: list[str] = []  # Контейнер для локальных адресов
-    foreign: list[str] = []  # Контейнер для иностранных адресов
-    for e in emails:  # Обрабатываем каждый адрес из входного набора
-        bucket = foreign if is_foreign_email(e) else local  # Выбираем целевой список для адреса
-        bucket.append(e)  # Добавляем адрес в соответствующий список
-    return local, foreign  # Возвращаем кортеж с локальными и иностранными адресами
+def split_foreign(emails: Iterable[str]) -> tuple[list[str], list[str]]:
+    local, foreign = [], []
+    for e in emails:
+        (foreign if is_foreign_email(e) else local).append(e)
+    return local, foreign
