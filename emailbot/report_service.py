@@ -11,14 +11,40 @@ from itertools import chain
 from pathlib import Path
 from typing import Iterator
 
+from emailbot.suppress_list import blocklist_path
+from utils import send_stats
+
 if sys.version_info >= (3, 9):
     from zoneinfo import ZoneInfo
 else:  # pragma: no cover - legacy fallback for Python < 3.9
     from backports.zoneinfo import ZoneInfo  # type: ignore
 
-SENT_LOG_PATH = Path(os.path.expanduser(os.getenv("SENT_LOG_PATH", "var/sent_log.csv")))
-SEND_STATS_PATH = Path(os.path.expanduser(os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")))
-REPORT_TZ_NAME = (os.getenv("REPORT_TZ") or "Europe/Moscow").strip() or "Europe/Moscow"
+
+def _resolve_sent_log_path() -> Path:
+    """Resolve path to ``sent_log.csv`` in the shared data directory."""
+
+    env = os.getenv("SENT_LOG_PATH")  # Получаем путь из переменной окружения, если указан.
+    if env:
+        expanded = os.path.expanduser(env)  # Разворачиваем ``~`` до домашней директории.
+        expanded = os.path.expandvars(expanded)  # Подставляем переменные окружения в пути.
+        return Path(expanded).resolve()  # Возвращаем абсолютный путь к файлу лога.
+
+    data_dir = blocklist_path().parent  # Определяем общую директорию с блоклистом.
+    return (data_dir / "sent_log.csv").resolve()  # Размещаем лог рядом с ``blocked_emails.txt``.
+
+
+def _resolve_send_stats_path() -> Path:
+    """Resolve path to ``send_stats.jsonl`` the same way as :mod:`utils.send_stats`."""
+
+    return send_stats._stats_path()  # Используем путь, который задаёт ``utils.send_stats``.
+
+
+SENT_LOG_PATH = _resolve_sent_log_path()  # Финальный путь для файла ``sent_log.csv``.
+SEND_STATS_PATH = _resolve_send_stats_path()  # Финальный путь для файла ``send_stats.jsonl``.
+REPORT_TZ_RAW = os.getenv("REPORT_TZ")  # Получаем значение часового пояса из окружения.
+# Часовой пояс отчёта, с запасным значением по умолчанию.
+REPORT_TZ_NAME = (REPORT_TZ_RAW or "Europe/Moscow").strip() or "Europe/Moscow"
+# Объект таймзоны для локализации времени.
 REPORT_TZ = ZoneInfo(REPORT_TZ_NAME)
 
 _SUCCESS_STATUSES = {"sent", "success", "ok", "synced"}
