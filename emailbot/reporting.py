@@ -26,6 +26,8 @@ from emailbot.directions import resolve_direction_title
 from emailbot.suppress_list import is_blocked
 # Пишем статистику отправок в JSONL-файл атомарно.
 from emailbot.utils.fs import append_jsonl_atomic
+# Используем общий помощник для вычисления пути к файлу send_stats.jsonl.
+from utils import send_stats
 
 if TYPE_CHECKING:  # pragma: no cover - typing hints only
     from emailbot.report_preview import PreviewData
@@ -405,15 +407,15 @@ def _period_bounds(period: str, now: datetime | None = None) -> Tuple[datetime, 
 
 def _default_send_stats_path() -> Path:
     """
-    Путь к send_stats.jsonl относительно корня проекта.
+    Получить путь к ``send_stats.jsonl`` согласованно с модулем ``utils.send_stats``.
 
-    При необходимости можно заменить на конфиг из config.py.
+    Функция делегирует вычисление пути модулю ``utils.send_stats``, который
+    учитывает переменную окружения ``SEND_STATS_PATH`` и возвращает значение по
+    умолчанию ``var/send_stats.jsonl`` относительно корня проекта.
     """
 
-    # Определяем корень проекта по положению текущего файла.
-    project_root = Path(__file__).resolve().parent.parent
-    # Формируем полный путь к файлу статистики отправок.
-    return project_root / "send_stats.jsonl"
+    # Возвращаем путь, вычисленный той же функцией, что использует модуль записи статистики.
+    return send_stats._stats_path()
 
 
 def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, object]]:
