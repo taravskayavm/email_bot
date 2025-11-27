@@ -432,8 +432,9 @@ def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, o
 
     # Определяем вложенную функцию-генератор для ленивой обработки строк файла.
     def _gen() -> Iterable[Mapping[str, object]]:
-        # Открываем файл в кодировке UTF-8 для корректного чтения русских символов.
-        with stats_path.open("r", encoding="utf-8") as file_obj:
+        # Открываем файл в кодировке UTF-8 с поддержкой BOM, чтобы корректно
+        # обрабатывать как файлы без BOM, так и с BOM (utf-8-sig).
+        with stats_path.open("r", encoding="utf-8-sig") as file_obj:
             for line in file_obj:
                 # Удаляем перевод строки и пропускаем пустые строки.
                 stripped = line.strip()
