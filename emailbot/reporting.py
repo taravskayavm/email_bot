@@ -17,6 +17,10 @@ from pathlib import Path
 # Используем расширенные типы аннотаций для повышения читаемости кода.
 from typing import Dict, Iterable, List, Mapping, Optional, TYPE_CHECKING, Tuple
 
+# Работаем с общим модулем статистики отправок для согласованного пути к
+# файлу.
+from utils import send_stats
+
 # Задаём тайм-зону Москвы для корректного сопоставления событий.
 from zoneinfo import ZoneInfo
 
@@ -405,15 +409,18 @@ def _period_bounds(period: str, now: datetime | None = None) -> Tuple[datetime, 
 
 def _default_send_stats_path() -> Path:
     """
-    Путь к send_stats.jsonl относительно корня проекта.
+    Получить путь к файлу send_stats.jsonl, согласованный с utils.send_stats.
 
-    При необходимости можно заменить на конфиг из config.py.
+    Использует общий механизм выбора пути из модуля utils.send_stats, чтобы
+    чтение и запись статистики всегда происходили в одном месте.
+    Модуль ориентируется на переменную окружения SEND_STATS_PATH и по
+    умолчанию использует ``var/send_stats.jsonl`` внутри проекта, поэтому
+    здесь важно делегировать расчёт пути ему.
     """
 
-    # Определяем корень проекта по положению текущего файла.
-    project_root = Path(__file__).resolve().parent.parent
-    # Формируем полный путь к файлу статистики отправок.
-    return project_root / "send_stats.jsonl"
+    # Делегируем вычисление пути модулю utils.send_stats, чтобы избежать
+    # расхождений между местом записи и чтения статистики.
+    return send_stats._stats_path()
 
 
 def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, object]]:
