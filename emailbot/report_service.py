@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator
 
 from emailbot.suppress_list import blocklist_path
+from . import reporting  # Модуль агрегации метрик для повторного использования.
 from utils import send_stats
 
 if sys.version_info >= (3, 9):
@@ -143,27 +144,22 @@ def _iter_send_stats() -> Iterator[dict[str, object]]:
 
 
 def summarize_day_local(today_local: dt.date | None = None) -> tuple[int, int]:
-    """Return counts of successful and failed deliveries for the local day."""
+    """
+    Return counts of successful and failed deliveries for the local day.
 
-    if today_local is None:
-        today_local = dt.datetime.now(REPORT_TZ).date()
-    start_local = dt.datetime.combine(today_local, dt.time(0, 0, 0), tzinfo=REPORT_TZ)
-    end_local = start_local + dt.timedelta(days=1)
+    Аргумент ``today_local`` сохранён для обратной совместимости и в текущей
+    реализации не используется напрямую: фактический подсчёт делегируется
+    функции ``emailbot.reporting.summarize_period_stats("day")``, которая
+    агрегирует статистику по всем направлениям за текущие сутки.
+    """
 
-    ok = 0
-    err = 0
-    for item in chain(_iter_sent_log(), _iter_send_stats()):
-        ts_utc = item["ts_utc"]
-        if not isinstance(ts_utc, dt.datetime):
-            continue
-        status = str(item.get("status", "")).strip().lower()
-        ts_local = ts_utc.astimezone(REPORT_TZ)
-        if not (start_local <= ts_local < end_local):
-            continue
-        if status in _SUCCESS_STATUSES:
-            ok += 1
-        elif status in _ERROR_STATUSES:
-            err += 1
+    # Суммарная статистика за сутки по всем источникам.
+    period_stats = reporting.summarize_period_stats("day")
+    # Количество успешных отправок за период.
+    ok = period_stats.total_success
+    # Количество неудачных отправок за период.
+    err = period_stats.total_failed
+    # Возвращаем кортеж (успехи, ошибки) для совместимости.
     return ok, err
 
 
