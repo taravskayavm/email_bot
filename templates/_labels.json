@@ -49,6 +49,7 @@
   },
   "pedagogy": {
     "title": "Педагогика",
-    "signature": "old"
+    "signature": "old",
+    "order": 999
   }
 }
