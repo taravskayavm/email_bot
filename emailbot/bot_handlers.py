@@ -1376,6 +1376,7 @@ _BUTTON_LABELS_RU: dict[str, str] = {
     "pharmacy": "💊 Фармация",
     "preventiomed": "🛡️ Медико-профилактическое дело",
     "psychology": "🧠 Психология",
+    "pedagogy": "🎓 Педагогика",
     "sport": "⚽ Физкультура и спорт",
     "stomatology": "🦷 Стоматология",
     "tourism": "✈️Туризм и гостиничное дело",

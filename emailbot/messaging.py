@@ -689,6 +689,7 @@ TEMPLATE_MAP = {
     "pharmacy": os.path.join(TEMPLATES_DIR, "pharmacy.html"),
     "preventiomed": os.path.join(TEMPLATES_DIR, "preventiomed.html"),
     "psychology": os.path.join(TEMPLATES_DIR, "psychology.html"),
+    "pedagogy": os.path.join(TEMPLATES_DIR, "pedagogy.html"),
     "sport": os.path.join(TEMPLATES_DIR, "sport.html"),
     "stomatology": os.path.join(TEMPLATES_DIR, "stomatology.html"),
     "tourism": os.path.join(TEMPLATES_DIR, "tourism.html"),
