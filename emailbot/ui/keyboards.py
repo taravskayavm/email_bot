@@ -22,6 +22,8 @@ _DEFAULT_ICONS = {
     "sport": "⚽",
     "stomatology": "🦷",
     "tourism": "✈️",
+    "sociology": "🏛️",
+    "politology": "🗳️",
 }
 
 
@@ -108,6 +110,8 @@ groups_map = {
     "stomatology": "Стоматология",
     "tourism": "Туризм и гостиничное дело",
     "pedagogy": "Педагогика",
+    "sociology": "Социология",
+    "politology": "Политология",
 }
 
 
