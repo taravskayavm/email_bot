@@ -118,6 +118,16 @@ def _resolve_template_path(base: Path, slug: str, exts: Iterable[str]) -> Path |
     return None
 
 
+def _template_sort_key(template: dict[str, Any]) -> tuple[int, str]:
+    raw_order = template.get("order", 500)
+    try:
+        order = int(raw_order)
+    except (TypeError, ValueError):
+        order = 500
+    label = str(template.get("label", ""))
+    return (order, label)
+
+
 def list_templates() -> list[dict[str, Any]]:
     base = _base_dir()
     labels = _load_labels(base)
@@ -159,7 +169,7 @@ def list_templates() -> list[dict[str, Any]]:
         tpl.update(extra)
         templates.append(tpl)
 
-    return sorted(templates, key=lambda x: x.get("label", ""))
+    return sorted(templates, key=_template_sort_key)
 
 
 def get_template(code: str) -> dict[str, Any] | None:

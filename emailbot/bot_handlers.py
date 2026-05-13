@@ -1954,6 +1954,7 @@ _BUTTON_LABELS_RU: dict[str, str] = {
     "sport": "⚽ Физкультура и спорт",
     "stomatology": "🦷 Стоматология",
     "tourism": "✈️Туризм и гостиничное дело",
+    "pedagogy": "🎓 Педагогика",
 }
 
 

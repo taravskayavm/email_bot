@@ -18,6 +18,7 @@ _DEFAULT_ICONS = {
     "pharmacy": "💊",
     "preventiomed": "🛡️",
     "psychology": "🧠",
+    "pedagogy": "🎓",
     "sport": "⚽",
     "stomatology": "🦷",
     "tourism": "✈️",
@@ -106,6 +107,7 @@ groups_map = {
     "sport": "Физкультура и спорт",
     "stomatology": "Стоматология",
     "tourism": "Туризм и гостиничное дело",
+    "pedagogy": "Педагогика",
 }
 
 
