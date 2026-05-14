@@ -86,7 +86,6 @@ from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
-from services.templates import get_template
 
 _TASK_SEQ = count()
 
@@ -112,19 +111,13 @@ def write_audit(
         logger.debug("write_audit failed", exc_info=True)
 
 
-def _sender_address() -> str:
-    """Return the active sender address from runtime state or environment."""
-
-    return EMAIL_ADDRESS or os.getenv("EMAIL_ADDRESS", "")
-
-
-def _normalize_from_header(msg: EmailMessage, group_key: str | None = None) -> None:
+def _normalize_from_header(msg: EmailMessage) -> None:
     """Force the ``From`` header to use the configured SMTP address."""
 
     existing = msg.get("From", "")
     name, _addr = parseaddr(existing)
-    display_name = _from_name_for_group(group_key) or name
-    normalized = formataddr((display_name or "", _sender_address()))
+    display_name = os.getenv("EMAIL_FROM_NAME", "").strip() or name
+    normalized = formataddr((display_name or "", EMAIL_ADDRESS))
     if "From" in msg:
         msg.replace_header("From", normalized)
     else:
@@ -729,65 +722,10 @@ def _outcome_for_decision(decision: Decision) -> SendOutcome:
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
 # the message.
-SIGNATURE_PROFILE_OLD = "old"
-SIGNATURE_PROFILE_GENERAL = "general"
-
-DEFAULT_FROM_NAME = "Редакция литературы по медицине, спорту и туризму"
-GENERAL_FROM_NAME = "Редакция литературы"
-
-DEFAULT_SIGNATURE_POSITION = (
-    "Заведующая редакцией литературы по медицине, спорту и туризму"
-)
-GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литературы"
-
-
-def _signature_profile_for_group(group_key: str | None) -> str:
-    """Return signature profile from template metadata."""
-
-    code = (group_key or "").strip()
-    if not code:
-        return SIGNATURE_PROFILE_OLD
-    try:
-        template = get_template(code)
-    except Exception:
-        template = None
-    if not isinstance(template, dict):
-        return SIGNATURE_PROFILE_OLD
-    profile = str(template.get("signature") or SIGNATURE_PROFILE_OLD).strip().lower()
-    if profile == SIGNATURE_PROFILE_GENERAL:
-        return SIGNATURE_PROFILE_GENERAL
-    return SIGNATURE_PROFILE_OLD
-
-
-def _from_name_for_group(group_key: str | None) -> str:
-    """Return display sender name for the selected signature profile."""
-
-    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
-        return GENERAL_FROM_NAME
-    return os.getenv("EMAIL_FROM_NAME", "").strip() or DEFAULT_FROM_NAME
-
-
-def _signature_position_for_group(group_key: str | None) -> str:
-    """Return position line for the selected signature profile."""
-
-    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
-        return GENERAL_SIGNATURE_POSITION
-    return DEFAULT_SIGNATURE_POSITION
-
-
-def _signature_text_for_group(group_key: str | None = None) -> str:
-    """Return signature text for the selected signature profile."""
-
-    position = _signature_position_for_group(group_key)
-    if position == DEFAULT_SIGNATURE_POSITION:
-        return SIGNATURE_TEXT
-    return SIGNATURE_TEXT.replace(DEFAULT_SIGNATURE_POSITION, position, 1)
-
-
 SIGNATURE_TEXT = (
     "--<br>С уважением,<br>"
     "Таравская Владлена Михайловна<br>"
-    f"{DEFAULT_SIGNATURE_POSITION}<br>"
+    "Заведующая редакцией литературы по медицине, спорту и туризму<br>"
     "ООО Издательство «ЛАНЬ»<br><br>"
     "8 (812) 336-90-92, доб. 208<br><br>"
     "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
@@ -1056,27 +994,10 @@ def text_to_html(text: str) -> str:
     return "<br>".join(lines)
 
 
-def _choose_from_header(group_key: str | None = None) -> str:
-    """Return the From display name selected from template metadata."""
+def build_signature_text() -> str:
+    """Return the plain-text representation of the default signature."""
 
-    return _from_name_for_group(group_key)
-
-
-def _apply_from(msg: EmailMessage, group_key: str | None = None) -> None:
-    """Apply the metadata-driven From display name to an existing message."""
-
-    display_name = _choose_from_header(group_key).rstrip(".  ")
-    normalized = formataddr((display_name, _sender_address()))
-    if "From" in msg:
-        msg.replace_header("From", normalized)
-    else:
-        msg["From"] = normalized
-
-
-def build_signature_text(group_key: str | None = None) -> str:
-    """Return the plain-text representation of the selected signature."""
-
-    return strip_html(_signature_text_for_group(group_key)).strip()
+    return strip_html(SIGNATURE_HTML).strip()
 
 
 def build_email_body(template_path: str, variables: Optional[dict[str, object]]) -> tuple[str, str]:
@@ -1300,18 +1221,15 @@ def build_message(
     html_path: str,
     subject: str,
     *,
-    group_title: str | None = None,
-    group_key: str | None = None,
     override_180d: bool = False,
 ) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
-    signature_text = _signature_text_for_group(group_key)
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
-        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{signature_text}</div>'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{SIGNATURE_TEXT}</div>'
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
@@ -1332,19 +1250,15 @@ def build_message(
     html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
-    default_from_name = _from_name_for_group(group_key)
-    msg["From"] = formataddr((default_from_name or "", _sender_address()))
+    default_from_name = os.getenv(
+        "EMAIL_FROM_NAME", "Редакция литературы по медицине, спорту и туризму"
+    )
+    msg["From"] = formataddr((default_from_name or "", EMAIL_ADDRESS))
     msg["To"] = to_addr
     msg["Subject"] = subject
-    if group_title:
-        msg["X-EBOT-Group"] = group_title
-        msg["X-EBOT-Template-Label"] = group_title
-    if group_key:
-        msg["X-EBOT-Group-Key"] = group_key
-    sender_address = _sender_address()
-    msg["Reply-To"] = sender_address
+    msg["Reply-To"] = EMAIL_ADDRESS
     msg["List-Unsubscribe"] = (
-        f"<mailto:{sender_address}?subject=unsubscribe>, <{link}>"
+        f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
     )
     msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
@@ -1362,36 +1276,8 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
-    _normalize_from_header(msg, group_key)
+    _normalize_from_header(msg)
     return msg, token
-
-
-def build_messages_for_group(
-    group_key: str,
-    recipients: Iterable[str],
-    variables: Mapping[str, object] | None = None,
-) -> list[EmailMessage]:
-    """Build messages for a group with the same metadata-driven signature logic."""
-
-    _ = variables
-    template_info = get_template(group_key)
-    if not isinstance(template_info, dict):
-        return []
-    html_path = str(template_info.get("path") or "")
-    if not html_path:
-        return []
-    group_title = str(template_info.get("label") or group_key)
-    messages: list[EmailMessage] = []
-    for recipient in recipients:
-        msg, _token = build_message(
-            recipient,
-            html_path,
-            DEFAULT_SUBJECT,
-            group_title=group_title,
-            group_key=group_key,
-        )
-        messages.append(msg)
-    return messages
 
 
 def send_email(
@@ -1419,7 +1305,6 @@ def send_email(
             transport_recipient,
             html_path,
             subject,
-            group_key=campaign,
             override_180d=override_180d,
         )
         html_part = msg.get_body("html")
@@ -1540,8 +1425,6 @@ def send_email_with_sessions(
         recipient,
         html_path,
         subject,
-        group_title=group_title,
-        group_key=group_key,
         override_180d=override_180d,
     )
     html_part = msg.get_body("html")
@@ -1566,7 +1449,7 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
-    _normalize_from_header(msg, group_key)
+    _normalize_from_header(msg)
 
     # 2) Отправка
     try:

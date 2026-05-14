@@ -15,6 +15,7 @@ from emailbot import messaging
         ("tourism", "Редакция литературы по медицине, спорту и туризму"),
         ("psychology", "Редакция литературы"),
         ("geography", "Редакция литературы"),
+        ("bioinformatics", "Редакция литературы"),
     ],
 )
 def test_choose_from_header(monkeypatch, group, expected, tmp_path):
@@ -25,7 +26,7 @@ def test_choose_from_header(monkeypatch, group, expected, tmp_path):
 
     def fake_get_template(code):
         if code == group:
-            signature = "general" if code in {"psychology", "geography"} else "old"
+            signature = "new" if code in {"psychology", "geography", "bioinformatics"} else "old"
             return {
                 "code": code,
                 "label": code.title(),
