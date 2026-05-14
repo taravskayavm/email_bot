@@ -89,3 +89,72 @@ def test_missing_or_unknown_signature_profile_falls_back_to_old(monkeypatch, tmp
         assert name == "Редакция литературы по медицине, спорту и туризму"
         assert address == "sender@example.com"
         assert "Заведующая редакцией литературы по медицине, спорту и туризму" in html
+
+
+def test_session_send_uses_general_signature_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "sent_log.csv"))
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+    monkeypatch.delenv("EMAIL_FROM_NAME", raising=False)
+    monkeypatch.setattr(messaging.ledger, "record_send", lambda *a, **k: None)
+
+    sent_messages = []
+
+    class DummyClient:
+        def send(self, msg):
+            sent_messages.append(msg)
+
+    template_info = messaging.get_template("politology")
+    outcome, _token, _log_key, _content_hash = messaging.send_email_with_sessions(
+        DummyClient(),
+        object(),
+        "Sent",
+        "recipient-politology@example.com",
+        template_info["path"],
+        group_title=template_info["label"],
+        group_key="politology",
+        append_message=False,
+    )
+
+    assert outcome is messaging.SendOutcome.SENT
+    msg = sent_messages[0]
+    name, address = parseaddr(str(msg["From"]))
+    html = msg.get_body("html").get_content()
+
+    assert name == "Редакция литературы"
+    assert address == "sender@example.com"
+    assert "Заведующая редакцией литературы<br>" in html
+    assert "Заведующая редакцией литературы по медицине, спорту и туризму" not in html
+
+
+def test_session_send_keeps_old_signature_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "sent_log.csv"))
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+    monkeypatch.delenv("EMAIL_FROM_NAME", raising=False)
+    monkeypatch.setattr(messaging.ledger, "record_send", lambda *a, **k: None)
+
+    sent_messages = []
+
+    class DummyClient:
+        def send(self, msg):
+            sent_messages.append(msg)
+
+    template_info = messaging.get_template("highmedicine")
+    outcome, _token, _log_key, _content_hash = messaging.send_email_with_sessions(
+        DummyClient(),
+        object(),
+        "Sent",
+        "recipient-highmedicine@example.com",
+        template_info["path"],
+        group_title=template_info["label"],
+        group_key="highmedicine",
+        append_message=False,
+    )
+
+    assert outcome is messaging.SendOutcome.SENT
+    msg = sent_messages[0]
+    name, address = parseaddr(str(msg["From"]))
+    html = msg.get_body("html").get_content()
+
+    assert name == "Редакция литературы по медицине, спорту и туризму"
+    assert address == "sender@example.com"
+    assert "Заведующая редакцией литературы по медицине, спорту и туризму" in html

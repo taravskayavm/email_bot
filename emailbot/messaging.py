@@ -1362,7 +1362,7 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
-    _normalize_from_header(msg, group_key=group_key)
+    _normalize_from_header(msg, group_key)
     return msg, token
 
 
@@ -1566,7 +1566,7 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
-    _normalize_from_header(msg, group_key=group_key)
+    _normalize_from_header(msg, group_key)
 
     # 2) Отправка
     try:
