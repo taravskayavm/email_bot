@@ -25,6 +25,8 @@ groups_map = {
     "stomatology": "Стоматология",
     "tourism": "Туризм и гостиничное дело",
     "pedagogy": "Педагогика",
+    "sociology": "Социология",
+    "politology": "Политология",
 }
 
 
