@@ -5,7 +5,7 @@
   },
   "geography": {
     "title": "География",
-    "signature": "old"
+    "signature": "general"
   },
   "highmedicine": {
     "title": "Медицина ВО",
@@ -33,7 +33,7 @@
   },
   "psychology": {
     "title": "Психология",
-    "signature": "old"
+    "signature": "general"
   },
   "sport": {
     "title": "Физкультура и спорт",
@@ -49,7 +49,7 @@
   },
   "pedagogy": {
     "title": "Педагогика",
-    "signature": "old",
+    "signature": "general",
     "order": 999
   },
   "sociology": {
