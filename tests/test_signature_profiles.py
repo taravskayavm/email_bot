@@ -55,3 +55,37 @@ def test_old_signature_profile_keeps_from_and_position(monkeypatch):
     assert name == "Редакция литературы по медицине, спорту и туризму"
     assert address == "sender@example.com"
     assert "Заведующая редакцией литературы по медицине, спорту и туризму" in html
+
+
+def test_missing_or_unknown_signature_profile_falls_back_to_old(monkeypatch, tmp_path):
+    monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
+    monkeypatch.delenv("EMAIL_FROM_NAME", raising=False)
+
+    html_file = tmp_path / "unknown.html"
+    html_file.write_text("<html><body>{{SIGNATURE}}</body></html>", encoding="utf-8")
+
+    for metadata in ({"signature": "unexpected"}, {}):
+        def fake_get_template(code):
+            return {
+                "code": code,
+                "label": "Unknown",
+                "path": str(html_file),
+                **metadata,
+            }
+
+        monkeypatch.setattr(messaging, "get_template", fake_get_template)
+
+        msg, _token = messaging.build_message(
+            "recipient@example.com",
+            str(html_file),
+            "Subject",
+            group_key="unknown",
+            group_title="Unknown",
+        )
+
+        name, address = parseaddr(str(msg["From"]))
+        html = msg.get_body("html").get_content()
+
+        assert name == "Редакция литературы по медицине, спорту и туризму"
+        assert address == "sender@example.com"
+        assert "Заведующая редакцией литературы по медицине, спорту и туризму" in html

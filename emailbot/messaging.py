@@ -86,7 +86,7 @@ from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
-from services.templates import get_template, get_template_by_path
+from services.templates import get_template
 
 _TASK_SEQ = count()
 
@@ -118,12 +118,12 @@ def _sender_address() -> str:
     return EMAIL_ADDRESS or os.getenv("EMAIL_ADDRESS", "")
 
 
-def _normalize_from_header(msg: EmailMessage) -> None:
+def _normalize_from_header(msg: EmailMessage, group_key: str | None = None) -> None:
     """Force the ``From`` header to use the configured SMTP address."""
 
     existing = msg.get("From", "")
     name, _addr = parseaddr(existing)
-    display_name = os.getenv("EMAIL_FROM_NAME", "").strip() or name
+    display_name = _from_name_for_group(group_key) or name
     normalized = formataddr((display_name or "", _sender_address()))
     if "From" in msg:
         msg.replace_header("From", normalized)
@@ -729,93 +729,72 @@ def _outcome_for_decision(decision: Decision) -> SendOutcome:
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
 # the message.
-OLD_SIGNATURE_PROFILE = "old"
-GENERAL_SIGNATURE_PROFILE = "general"
-SIGNATURE_PROFILE_ALIASES = {"new": GENERAL_SIGNATURE_PROFILE}
-SIGNATURE_PROFILES: dict[str, dict[str, str]] = {
-    OLD_SIGNATURE_PROFILE: {
-        "from_name": "Редакция литературы по медицине, спорту и туризму",
-        "position": "Заведующая редакцией литературы по медицине, спорту и туризму",
-    },
-    GENERAL_SIGNATURE_PROFILE: {
-        "from_name": "Редакция литературы",
-        "position": "Заведующая редакцией литературы",
-    },
-}
+SIGNATURE_PROFILE_OLD = "old"
+SIGNATURE_PROFILE_GENERAL = "general"
+
+DEFAULT_FROM_NAME = "Редакция литературы по медицине, спорту и туризму"
+GENERAL_FROM_NAME = "Редакция литературы"
+
+DEFAULT_SIGNATURE_POSITION = (
+    "Заведующая редакцией литературы по медицине, спорту и туризму"
+)
+GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литературы"
 
 
-def _normalize_signature_profile(signature_profile: str | None) -> str:
-    """Return a known signature profile name, falling back to the old profile."""
+def _signature_profile_for_group(group_key: str | None) -> str:
+    """Return signature profile from template metadata."""
 
-    profile = (signature_profile or OLD_SIGNATURE_PROFILE).strip().lower()
-    profile = SIGNATURE_PROFILE_ALIASES.get(profile, profile)
-    if profile in SIGNATURE_PROFILES:
-        return profile
-    return OLD_SIGNATURE_PROFILE
-
-
-def _signature_profile_from_metadata(
-    group_key: str | None = None,
-    html_path: str | Path | None = None,
-) -> str:
-    """Resolve the signature profile from template metadata."""
-
-    template_info: dict[str, Any] | None = None
-    normalized_key = (group_key or "").strip()
-    if normalized_key:
-        template_info = get_template(normalized_key)
-    if template_info is None and html_path:
-        template_info = get_template_by_path(html_path)
-    if isinstance(template_info, dict):
-        raw_profile = template_info.get("signature")
-        if isinstance(raw_profile, str) and raw_profile.strip():
-            return _normalize_signature_profile(raw_profile)
-    return OLD_SIGNATURE_PROFILE
+    code = (group_key or "").strip()
+    if not code:
+        return SIGNATURE_PROFILE_OLD
+    try:
+        template = get_template(code)
+    except Exception:
+        template = None
+    if not isinstance(template, dict):
+        return SIGNATURE_PROFILE_OLD
+    profile = str(template.get("signature") or SIGNATURE_PROFILE_OLD).strip().lower()
+    if profile == SIGNATURE_PROFILE_GENERAL:
+        return SIGNATURE_PROFILE_GENERAL
+    return SIGNATURE_PROFILE_OLD
 
 
-def _signature_profile_for_message(
-    signature_profile: str | None = None,
-    group_key: str | None = None,
-    html_path: str | Path | None = None,
-) -> str:
-    """Choose the explicit profile first, otherwise use template metadata."""
+def _from_name_for_group(group_key: str | None) -> str:
+    """Return display sender name for the selected signature profile."""
 
-    if signature_profile and signature_profile.strip():
-        return _normalize_signature_profile(signature_profile)
-    return _signature_profile_from_metadata(group_key=group_key, html_path=html_path)
+    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
+        return GENERAL_FROM_NAME
+    return os.getenv("EMAIL_FROM_NAME", "").strip() or DEFAULT_FROM_NAME
 
 
-def _signature_position(signature_profile: str | None = None) -> str:
-    """Return the sender position line for a signature profile."""
+def _signature_position_for_group(group_key: str | None) -> str:
+    """Return position line for the selected signature profile."""
 
-    profile = _normalize_signature_profile(signature_profile)
-    return SIGNATURE_PROFILES[profile]["position"]
-
-
-def _signature_from_name(signature_profile: str | None = None) -> str:
-    """Return the From display name for a signature profile."""
-
-    profile = _normalize_signature_profile(signature_profile)
-    return SIGNATURE_PROFILES[profile]["from_name"]
+    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
+        return GENERAL_SIGNATURE_POSITION
+    return DEFAULT_SIGNATURE_POSITION
 
 
-def _build_signature_html(signature_profile: str | None = None) -> str:
-    """Build the HTML signature body for the selected signature profile."""
+def _signature_text_for_group(group_key: str | None = None) -> str:
+    """Return signature text for the selected signature profile."""
 
-    return (
-        "--<br>С уважением,<br>"
-        "Таравская Владлена Михайловна<br>"
-        f"{_signature_position(signature_profile)}<br>"
-        "ООО Издательство «ЛАНЬ»<br><br>"
-        "8 (812) 336-90-92, доб. 208<br><br>"
-        "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
-        "Рабочие часы: 10.00-18.00<br><br>"
-        "med@lanbook.ru<br>"
-        '<a href="https://www.lanbook.com">www.lanbook.com</a>'
-    )
+    position = _signature_position_for_group(group_key)
+    if position == DEFAULT_SIGNATURE_POSITION:
+        return SIGNATURE_TEXT
+    return SIGNATURE_TEXT.replace(DEFAULT_SIGNATURE_POSITION, position, 1)
 
 
-SIGNATURE_TEXT = _build_signature_html(OLD_SIGNATURE_PROFILE)
+SIGNATURE_TEXT = (
+    "--<br>С уважением,<br>"
+    "Таравская Владлена Михайловна<br>"
+    f"{DEFAULT_SIGNATURE_POSITION}<br>"
+    "ООО Издательство «ЛАНЬ»<br><br>"
+    "8 (812) 336-90-92, доб. 208<br><br>"
+    "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
+    "Рабочие часы: 10.00-18.00<br><br>"
+    "med@lanbook.ru<br>"
+    '<a href="https://www.lanbook.com">www.lanbook.com</a>'
+)
 SIGNATURE_HTML = SIGNATURE_TEXT
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
@@ -1080,8 +1059,7 @@ def text_to_html(text: str) -> str:
 def _choose_from_header(group_key: str | None = None) -> str:
     """Return the From display name selected from template metadata."""
 
-    profile = _signature_profile_from_metadata(group_key=group_key)
-    return _signature_from_name(profile)
+    return _from_name_for_group(group_key)
 
 
 def _apply_from(msg: EmailMessage, group_key: str | None = None) -> None:
@@ -1095,10 +1073,10 @@ def _apply_from(msg: EmailMessage, group_key: str | None = None) -> None:
         msg["From"] = normalized
 
 
-def build_signature_text(signature_profile: str | None = None) -> str:
+def build_signature_text(group_key: str | None = None) -> str:
     """Return the plain-text representation of the selected signature."""
 
-    return strip_html(_build_signature_html(signature_profile)).strip()
+    return strip_html(_signature_text_for_group(group_key)).strip()
 
 
 def build_email_body(template_path: str, variables: Optional[dict[str, object]]) -> tuple[str, str]:
@@ -1324,19 +1302,13 @@ def build_message(
     *,
     group_title: str | None = None,
     group_key: str | None = None,
-    signature_profile: str | None = None,
     override_180d: bool = False,
 ) -> tuple[EmailMessage, str]:
     html_body = _read_template_file(html_path)
-    resolved_signature_profile = _signature_profile_for_message(
-        signature_profile=signature_profile,
-        group_key=group_key,
-        html_path=html_path,
-    )
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
-    signature_text = _build_signature_html(resolved_signature_profile)
+    signature_text = _signature_text_for_group(group_key)
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
         f'font-size:{sig_size}px;color:#222;line-height:1.4;">{signature_text}</div>'
@@ -1360,9 +1332,7 @@ def build_message(
     html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
-    default_from_name = os.getenv(
-        "EMAIL_FROM_NAME", _signature_from_name(resolved_signature_profile)
-    )
+    default_from_name = _from_name_for_group(group_key)
     msg["From"] = formataddr((default_from_name or "", _sender_address()))
     msg["To"] = to_addr
     msg["Subject"] = subject
@@ -1392,7 +1362,7 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
-    _normalize_from_header(msg)
+    _normalize_from_header(msg, group_key=group_key)
     return msg, token
 
 
@@ -1449,6 +1419,7 @@ def send_email(
             transport_recipient,
             html_path,
             subject,
+            group_key=campaign,
             override_180d=override_180d,
         )
         html_part = msg.get_body("html")
@@ -1595,7 +1566,7 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
-    _normalize_from_header(msg)
+    _normalize_from_header(msg, group_key=group_key)
 
     # 2) Отправка
     try:
