@@ -18,7 +18,12 @@ import unicodedata
 import time
 from datetime import datetime
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    wait,
+)
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
@@ -53,10 +58,17 @@ from .extraction_pdf import (
 )
 from .extraction_zip import extract_emails_from_zip, extract_text_from_zip
 from .settings_store import get
+from emailbot.cancel_token import is_cancelled
 from utils.tld_utils import is_allowed_domain
 from utils.email_norm import sanitize_for_send
 from .reporting import log_extract_digest
-from .progress_watchdog import heartbeat_now
+from .progress_watchdog import ProgressTracker, heartbeat_now
+from emailbot.ui.progress_state import ParseProgress
+
+try:  # pragma: no cover - optional dependency for aggressive harvesting
+    from .parsing.harvester import harvest_emails as _harvest_emails
+except Exception:  # pragma: no cover - degraded environment fallback
+    _harvest_emails = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:  # pragma: no cover
     from .models import EmailEntry
@@ -95,8 +107,14 @@ _HYPHEN_BREAK_RE = re.compile(r"-\s*\n+\s*")
 
 logger = logging.getLogger(__name__)
 
+
+PDF_STREAM_TIMEOUT_SEC = int(os.getenv("PDF_STREAM_TIMEOUT_SEC", "30"))
+
 LEGACY_MODE = os.getenv("LEGACY_MODE", "0") == "1"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}")
+_AGGRESSIVE_HARVEST = (
+    str(os.getenv("PARSE_AGGRESSIVE", "1")).lower() in {"1", "true", "yes"}
+)
 
 
 # Анти-катастрофический поиск e-mail
@@ -544,12 +562,22 @@ def _normalize_email_fragments(text: str) -> str:
     cleaned = _BREAK_AFTER_AT_RE.sub("@", cleaned)
     cleaned = _BREAK_AFTER_DOT_RE.sub(".", cleaned)
     cleaned = cleaned.replace(".@", "@")
+    cleaned = re.sub(r"(?<=\w)[\r\n]{1,2}(?=[\w@.])", "", cleaned)
     return cleaned
 
 
 def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
     normalized = _normalize_email_fragments(text)
     hits = EMAIL_RE.findall(normalized) if normalized else []
+    if _AGGRESSIVE_HARVEST and _harvest_emails is not None:
+        try:
+            harvested = _harvest_emails(text)
+        except Exception:  # pragma: no cover - defensive fallback
+            harvested = set()
+        if harvested:
+            for candidate in sorted(harvested):
+                if candidate not in hits:
+                    hits.append(candidate)
     deduped = list(dict.fromkeys(hits))
     if stats is not None:
         stats["total_found"] = stats.get("total_found", 0) + len(deduped)
@@ -754,11 +782,15 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
     return kept
 
 
-def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[list[EmailHit], Dict]:
+def extract_from_pdf(
+    path: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
+) -> tuple[list[EmailHit], Dict]:
     """Extract e-mail addresses from a PDF file."""
 
     start = time.monotonic()
-    hits, stats = _extract_from_pdf(path, stop_event)
+    hits, stats = _extract_from_pdf(path, stop_event, progress=progress)
     hits = _postprocess_hits(hits, stats)
     stats["mode"] = "file"
     stats["entry"] = path
@@ -768,11 +800,22 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
 
 def extract_from_pdf_stream(
-    data: bytes, source_ref: str, stop_event: Optional[object] = None
+    data: bytes,
+    source_ref: str,
+    stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit], Dict]:
     """Extract e-mail addresses from PDF bytes."""
 
-    hits, stats = _extract_from_pdf_stream(data, source_ref, stop_event)
+    if is_cancelled():
+        return [], {"errors": ["cancelled"]}
+
+    hits, stats = _extract_from_pdf_stream(
+        data,
+        source_ref,
+        stop_event,
+        progress=progress,
+    )
     hits = _postprocess_hits(hits, stats)
     return hits, stats
 
@@ -1265,6 +1308,9 @@ def extract_any(
     source: str,
     stop_event: Optional[object] = None,
     _return_hits: bool = False,
+    *,
+    tracker: ProgressTracker | None = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit] | list[str], Dict]:
     """Определить тип источника и извлечь e-mail-адреса.
 
@@ -1286,29 +1332,75 @@ def extract_any(
             return hits, stats
         return sorted({h.email for h in hits}), stats
 
+    basename = os.path.basename(source) or source
+
+    if tracker is not None:
+        try:
+            # Маячок роутинга (не ломает старый UI)
+            tracker.update(stage="route", current=basename, processed=0, total=None)
+        except Exception:
+            pass
+
+    def _progress_start() -> None:
+        if tracker is not None:
+            tracker.reset(total=1)
+
+    def _progress_finish(processed: bool) -> None:
+        if tracker is not None:
+            tracker.tick_file(basename, processed=processed)
+
     ext = os.path.splitext(source)[1].lower()
     if ext == ".pdf":
-        hits, stats = extract_from_pdf(source, stop_event)
+        _progress_start()
+        try:
+            if progress:
+                progress.set_phase("PDF")
+            hits, stats = extract_from_pdf(source, stop_event, progress=progress)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".docx":
-        hits, stats = extract_from_docx(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_docx(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".xlsx":
-        hits, stats = extract_from_xlsx(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_xlsx(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext in {".csv", ".txt"}:
-        hits, stats = extract_from_csv_or_text(source, stop_event)
+        _progress_start()
+        try:
+            hits, stats = extract_from_csv_or_text(source, stop_event)
+        except Exception:
+            _progress_finish(False)
+            raise
+        _progress_finish(True)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
     if ext == ".zip":
-        hits, stats = extract_emails_from_zip(source, stop_event)
+        # ⇩ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: используем обработчик, который шлёт пофайловый прогресс
+        if progress:
+            progress.set_phase("ZIP")
+        hits, stats = extract_emails_from_zip(source, stop_event, tracker=tracker)
         if _return_hits:
             return hits, stats
         return sorted({h.email for h in hits}), stats
@@ -1428,12 +1520,32 @@ def extract_any_stream(
     *,
     source_ref: str,
     stop_event: Optional[object] = None,
+    progress: ParseProgress | None = None,
 ) -> tuple[list[EmailHit], Dict]:
     """Определить тип источника по расширению и извлечь e-mail из байтов."""
 
     ext = ext.lower()
     if ext == ".pdf":
-        return extract_from_pdf_stream(data, source_ref, stop_event)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                extract_from_pdf_stream,
+                data,
+                source_ref,
+                stop_event,
+                progress,
+            )
+            try:
+                return future.result(timeout=PDF_STREAM_TIMEOUT_SEC)
+            except FuturesTimeoutError:
+                logger.warning(
+                    "Timeout parsing PDF stream",
+                    extra={
+                        "event": "pdf_stream_timeout",
+                        "entry": source_ref,
+                        "timeout_sec": PDF_STREAM_TIMEOUT_SEC,
+                    },
+                )
+                return [], {"files_skipped_timeout": 1}
     if ext == ".docx":
         return extract_from_docx_stream(data, source_ref, stop_event)
     if ext == ".xlsx":

@@ -43,3 +43,35 @@ def test_prepare_mass_mailing_respects_ignore_flag(monkeypatch, tmp_path):
     )
     assert addr in ready2
     assert digest2.get("skipped_180d", 0) == 0
+
+
+def test_prepare_mass_mailing_allows_ru_and_gmail(monkeypatch, tmp_path):
+    var = tmp_path / "var"
+    var.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SEND_STATS_PATH", str(var / "send_stats.jsonl"))
+    monkeypatch.setenv("SENT_LOG_PATH", str(var / "sent_log.csv"))
+    monkeypatch.setenv("SYNC_STATE_PATH", str(var / "sync_state.json"))
+    monkeypatch.setenv("FOREIGN_BLOCK", "1")
+    monkeypatch.setenv("TLD_ALLOWED", "ru")
+
+    blocked = tmp_path / "blocked_emails.txt"
+    blocked.write_text("", encoding="utf-8")
+
+    from emailbot import messaging, suppress_list
+    from utils import rules
+
+    monkeypatch.setattr(messaging, "BLOCKED_FILE", str(blocked), raising=False)
+    monkeypatch.setattr(rules, "BLOCKLIST_PATH", blocked)
+    suppress_list.init_blocked(blocked)
+    messaging._BLOCK_READY = False
+
+    emails = ["user@gmail.com", "friend@mail.ru", "foreign@example.de"]
+    ready, blocked_foreign, *_rest, digest = messaging.prepare_mass_mailing(
+        emails, ignore_cooldown=True
+    )
+
+    ready_lower = {addr.lower() for addr in ready}
+    assert "user@gmail.com" in ready_lower
+    assert "friend@mail.ru" in ready_lower
+    assert "foreign@example.de" in {addr.lower() for addr in blocked_foreign}
+    assert digest.get("global_excluded") == 0

@@ -148,6 +148,7 @@ def run_selfcheck() -> List[Check]:
     try:
         import fitz  # type: ignore  # noqa: F401
 
+        _ = fitz.Rect(0, 0, 1, 1)  # sanity check that core API доступен
         checks.append(Check("PDF:fitz", True, "available"))
     except Exception:
         warnings.append("PyMuPDF (fitz) not available; pdfminer-only mode")

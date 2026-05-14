@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -16,37 +17,27 @@ from pathlib import Path
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     ContextTypes,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 logger = logging.getLogger("email_bot.selfcheck")
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-# Абсолютный путь до каталога проекта для поиска .env.
-SCRIPT_DIR = Path(__file__).resolve().parent
+_startup_logger = logging.getLogger(__name__)
 
-# Загружаем переменные окружения из .env как можно раньше,
-# чтобы они были доступны всем внутренним модулям emailbot.
-from emailbot.utils import load_env
 
-load_env(SCRIPT_DIR)  # Раннее чтение .env.
-
-# Default watchdog stall timeout in milliseconds (configurable via env).
-# Увеличено по умолчанию до 5 минут, чтобы не прерывать долгие задачи
-# (например, парсинг больших PDF), при этом остаётся возможность
-# переопределить значение через .env (WATCHDOG_STALLED_MS).
-WATCHDOG_STALLED_MS = int(  # Значение по умолчанию 5 минут.
-    os.getenv("WATCHDOG_STALLED_MS", "300000")
-)
-os.environ.setdefault(
-    "WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS)
-)  # Фиксируем значение в окружении.
+# --- [EBOT-WIN-PATH] гарантируем, что корень проекта в PYTHONPATH ---
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _selfcheck_email_clean_exports() -> None:
@@ -88,10 +79,39 @@ _selfcheck_email_clean_exports()
 
 from emailbot import bot_handlers, messaging, history_service
 from emailbot import compat  # EBOT-105
+from emailbot.boot_check import run_boot_check
 
 compat.apply()  # ранний прогрев совместимости
 
 from emailbot.selfcheck import startup_selfcheck
+
+# Default watchdog stall timeout in milliseconds (configurable via env).
+WATCHDOG_STALLED_MS = int(os.getenv("WATCHDOG_STALLED_MS", "90000"))
+os.environ.setdefault("WATCHDOG_STALLED_MS", str(WATCHDOG_STALLED_MS))
+
+_raw_admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+try:
+    ADMIN_CHAT_ID = (
+        int(_raw_admin_chat_id) if _raw_admin_chat_id and _raw_admin_chat_id.strip() else None
+    )
+except ValueError:
+    _startup_logger.warning(
+        "Invalid ADMIN_CHAT_ID=%r; startup notifications disabled", _raw_admin_chat_id
+    )
+    ADMIN_CHAT_ID = None
+
+
+async def _notify_admin_startup(app: Application) -> None:
+    """Notify administrators that the bot is ready to serve updates."""
+
+    if ADMIN_CHAT_ID is None:
+        return
+    try:
+        await app.bot.send_message(
+            chat_id=ADMIN_CHAT_ID, text="🤖 Бот запущен и готов к работе."
+        )
+    except Exception:
+        _startup_logger.warning("Cannot notify ADMIN_CHAT_ID on startup", exc_info=True)
 
 # [EBOT-072] Привязка массового отправителя: жёстко связываем
 # штатный send_all с bot_handlers.send_selected, чтобы _resolve_mass_handler()
@@ -108,6 +128,12 @@ from emailbot.services import cooldown as _cooldown
 from emailbot.suppress_list import get_blocked_count, init_blocked
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
 from emailbot.messaging_utils import SecretFilter
+from emailbot.utils import load_env
+from emailbot.ptb_profile import register_profile_handlers
+from emailbot.cancel_token import cancel_all, reset_all
+from emailbot.ptb_context import set_application, set_current_chat
+
+SCRIPT_DIR = PROJECT_ROOT
 
 
 def _die(msg: str, code: int = 2) -> None:
@@ -215,10 +241,49 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         pass
 
 
+async def remember_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Track the most recent chat to allow background notifications."""
+
+    del context  # callback signature compatibility
+    if update and update.effective_chat is not None:
+        set_current_chat(update.effective_chat)
+
+
+async def handle_stop_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Stop ongoing processing and notify the user."""
+
+    set_current_chat(update.effective_chat)
+    cancel_all()
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("🛑 Процесс остановлен.")
+
+
+async def handle_start_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reset cancellation state and delegate to the default /start handler."""
+
+    set_current_chat(update.effective_chat)
+    reset_all()
+    await bot_handlers.start(update, context)
+
+
+application: Application | None = None
+
+
 def main() -> None:
+    """Сборка и запуск Telegram-приложения."""
+
+    # Silent but strict boot checks (dirs/env/ocr availability)
+    run_boot_check(PROJECT_ROOT)
     errs = startup_selfcheck()
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
+
+    load_env(SCRIPT_DIR)
 
     try:
         history_service.ensure_initialized()
@@ -263,6 +328,11 @@ def main() -> None:
             getattr(messaging, "SYNC_STATE_PATH", "?"),
             _cooldown._send_history_path(),
         )
+        logger.info(  # Логируем используемую таймзону и путь к базе истории
+            "[BOOT] Report TZ=%s; settings HISTORY_DB=%s",  # Сообщение с плейсхолдерами параметров
+            getattr(settings, "REPORT_TZ", "?"),  # Берём часовой пояс из настроек
+            getattr(settings, "HISTORY_DB", "?"),  # Достаём путь к базе истории из настроек
+        )
         logger.info(
             "[BOOT] bot_handlers at %s; has start_sending=%s",
             getattr(bot_handlers, "__file__", "?"),
@@ -271,10 +341,18 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[BOOT] path diagnostics failed: %s", _e)
 
-    app = ApplicationBuilder().token(token).build()
+    builder = ApplicationBuilder().token(token)
+    builder.post_init(_notify_admin_startup)
+    app = builder.build()
+    global application
+    application = app
+    set_application(app)
     app.add_error_handler(error_handler)
+    register_profile_handlers(app)
 
-    app.add_handler(CommandHandler("start", bot_handlers.start))
+    app.add_handler(TypeHandler(Update, remember_chat), group=-100)
+    app.add_handler(CommandHandler("start", handle_start_command))
+    app.add_handler(CommandHandler("stop", handle_stop_command))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
     app.add_handler(CommandHandler("diag", bot_handlers.diag))
     app.add_handler(CommandHandler("features", bot_handlers.features))
@@ -282,6 +360,11 @@ def main() -> None:
     app.add_handler(CommandHandler("url", bot_handlers.url_command))
     app.add_handler(CommandHandler("crawl", bot_handlers.crawl_command))
     app.add_handler(CommandHandler("drop", bot_handlers.handle_drop))
+    app.add_handler(CommandHandler("dump", bot_handlers.send_hang_dump))
+
+    app.add_handler(
+        MessageHandler(filters.Document.ALL, bot_handlers.handle_document)
+    )
 
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex("^📤"), bot_handlers.prompt_upload)
@@ -338,11 +421,11 @@ def main() -> None:
         )
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process)
+        MessageHandler(filters.TEXT & filters.Regex("^🛑"), bot_handlers.stop_process),
+        group=0,
     )
 
-    app.add_handler(MessageHandler(filters.Document.ALL, bot_handlers.handle_document))
-
+    # Example: bulk delete conv — avoid per_message=True to keep message handlers working.
     bulk_delete_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
@@ -360,8 +443,12 @@ def main() -> None:
         fallbacks=[],
         per_chat=True,
         per_user=True,
+        per_message=False,
     )
     app.add_handler(bulk_delete_conv, group=-1)
+    # NOTE: If other ConversationHandler definitions in this file used per_message=True,
+    # switch them to per_message=False to avoid PTB FAQ pitfall where only CallbackQueryHandler
+    # gets context and MessageHandlers are ignored.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -416,7 +503,8 @@ def main() -> None:
         )
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$")
+        CallbackQueryHandler(bot_handlers.stop_job_callback, pattern="^stop_job$"),
+        group=0,
     )
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^group_"))
     app.add_handler(CallbackQueryHandler(bot_handlers.select_group, pattern="^dir:"))
@@ -425,7 +513,7 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.start_sending, pattern="^bulk_start:")
     )
     app.add_handler(
-        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+        CallbackQueryHandler(bot_handlers.report_callback, pattern="^report")
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")
@@ -518,4 +606,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # [EBOT-WIN-SPAWN] На Windows при методе запуска "spawn" дочерние процессы
+    # переимпортируют главный модуль. freeze_support() предотвращает
+    # некорректную инициализацию подпроцесса и «зависания» при старте.
+    multiprocessing.freeze_support()
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        # Метод уже установлен раньше — это ок
+        pass
     main()

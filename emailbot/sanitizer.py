@@ -183,6 +183,42 @@ _HIDDEN_CHARS = [
 
 _REMOVE_TRANSLATION = {ord(ch): None for ch in _HIDDEN_CHARS}
 
+# Расширенный маппинг пунктуации/пробелов, часто встречающихся в PDF/OCR.
+_PUNCT_NORMALIZE_MAP = {
+    # bullets / топографические точки внутри e-mail адресов
+    "\u2022": "",   # • bullet → удалить
+    "\u2219": ".",  # ∙ bullet operator → точка
+    "\u00B7": ".",  # · middle dot → точка
+    "\u2024": ".",  # ․ one dot leader → точка
+    # дефисы/непереносимые дефисы
+    "\u2010": "-",  # ‐ hyphen
+    "\u2011": "-",  # non-breaking hyphen
+    "\u2012": "-",  # figure dash
+    "\u2013": "-",  # – en dash
+    "\u2014": "-",  # — em dash
+    "\u2212": "-",  # − minus
+    "\u00AD": "",   # soft hyphen — удаляем повторно на всякий случай
+    # узкие/неразрывные пробелы
+    "\u00A0": " ",  # NBSP → пробел
+    "\u2009": " ",  # thin space → пробел
+    "\u200A": " ",  # hair space → пробел
+    "\u2002": " ",
+    "\u2003": " ",
+    "\u2004": " ",
+    "\u2005": " ",
+}
+_PUNCT_NORMALIZE_TABLE = str.maketrans(_PUNCT_NORMALIZE_MAP)
+
+
+# Нормализация проблемных пунктуационных символов и узких пробелов перед
+# дальнейшей обработкой e-mail адресов.
+def sanitize_for_email(text: str) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.translate(_PUNCT_NORMALIZE_TABLE)
+
 
 @dataclass(slots=True)
 class SanitizedBatch:
@@ -255,4 +291,5 @@ __all__ = [
     "ZWSP_CHARS",
     "apply_ocr_email_fixes",
     "heal_ocr_email_fragments",
+    "sanitize_for_email",
 ]

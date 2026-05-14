@@ -7,7 +7,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable, List, Optional, Sequence
 
-from config import EMAILBOT_SEND_DELAY_SEC  # Импортируем глобальную задержку отправки из конфигурации
 from . import messaging, settings
 from .audit import write_audit_drop
 from .cancel import is_cancelled
@@ -60,7 +59,7 @@ async def run_smtp_send(
     imap,
     sent_folder: str,
     chat_id: int,
-    sleep_between: Optional[float] = None,
+    sleep_between: float = 1.5,
     cancel_event=None,
     should_stop_cb: Optional[Callable[[], bool]] = None,
     on_sent: Optional[Callable[[str, str, str | None, str | None], None]] = None,
@@ -79,9 +78,6 @@ async def run_smtp_send(
 ) -> tuple[int, bool]:
     """Send e-mails sequentially and dispatch callbacks for outcomes."""
 
-    effective_sleep = (  # Вычисляем фактическую задержку между письмами
-        EMAILBOT_SEND_DELAY_SEC if sleep_between is None else sleep_between
-    )
     sent_count = 0
     aborted = False
     if on_heartbeat:
@@ -220,7 +216,7 @@ async def run_smtp_send(
                 on_sent(email_addr, token, log_key, content_hash)
             if after_each:
                 after_each(email_addr)
-            await asyncio.sleep(effective_sleep)  # Пауза между отправками согласно конфигурации
+            await asyncio.sleep(sleep_between)
         elif outcome == SendOutcome.DUPLICATE:
             if on_duplicate:
                 on_duplicate(email_addr)

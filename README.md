@@ -136,6 +136,14 @@ FILTER_BLOCKLIST=help@x.com,foo@bar.io
 - Файл не коммитьте в публичный репозиторий.
 - В коде уже есть поддержка чтения/дедупликации (см. `emailbot/messaging.py`: функции `get_blocked_emails`, `dedupe_blocked_file` и т.д.).
 
+### Включение SQLite-хранилища (опционально)
+Для хранения блок-листа и аудита в SQLite:
+```powershell
+$env:EMAILBOT_STORAGE="sqlite"
+$env:EMAILBOT_SQLITE_PATH="D:\email_bot\var\emailbot.db"
+```
+База создаётся автоматически при первом запуске.
+
 ## Отправленные (IMAP APPEND)
 После успешной SMTP-отправки бот пытается положить письмо в папку «Отправленные» (через IMAP APPEND).
 Папка определяется автоматически (`detect_sent_folder`) и кешируется в `imap_sent_folder.txt`.
@@ -232,3 +240,50 @@ OCR_TIME_LIMIT=30  # таймаут распознавания, секунд
 OCR делает обработку медленнее, поэтому по умолчанию флаг выключен. Пределы по
 страницам и времени помогают избежать «зависших» документов — при желании их
 можно ослабить, но имейте в виду увеличение нагрузки.
+
+#### Адаптивный таймаут PDF
+По умолчанию включён адаптивный таймаут обработки PDF:
+```
+T = clamp(PDF_TIMEOUT_BASE + PDF_TIMEOUT_PER_MB * size_mb, PDF_TIMEOUT_MIN, PDF_TIMEOUT_MAX)
+```
+Переменные окружения (значения по умолчанию указаны справа):
+```ini
+PDF_ADAPTIVE_TIMEOUT=1
+PDF_TIMEOUT_BASE=15
+PDF_TIMEOUT_PER_MB=0.6
+PDF_TIMEOUT_MIN=15
+PDF_TIMEOUT_MAX=90
+```
+Чтобы вернуться к фиксированному таймауту, отключите адаптивный режим:
+```ini
+PDF_ADAPTIVE_TIMEOUT=0
+PDF_EXTRACT_TIMEOUT=25
+```
+
+## Windows (Anaconda PowerShell) — быстрый старт
+
+1. Откройте **Anaconda PowerShell Prompt**.
+2. Перейдите в каталог проекта:
+   ```powershell
+   cd /d D:\email_bot
+   ```
+3. Активируйте окружение:
+   ```powershell
+   conda activate emailbot
+   ```
+4. Установите зависимости:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+5. Очистите кэши и сборочные артефакты (PowerShell):
+   ```powershell
+   .\scripts\cleanup.ps1
+   ```
+   В **cmd.exe** эквивалентная команда:
+   ```cmd
+   rd /s /q __pycache__
+   ```
+6. Запустите тесты:
+   ```powershell
+   pytest -q
+   ```

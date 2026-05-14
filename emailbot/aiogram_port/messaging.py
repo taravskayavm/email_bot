@@ -46,7 +46,7 @@ def _trace_id() -> str:
 
 async def _send_via_smtp(**kwargs) -> None:
     sender = _get_sender()
-    await asyncio.to_thread(sender.send, **kwargs)
+    await sender.send_async(**kwargs)
 
 
 async def send_one_email(

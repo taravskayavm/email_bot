@@ -224,7 +224,8 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
         if stats is not None:
             stats["email_left_glue_fixed"] = stats.get("email_left_glue_fixed", 0) + fix_count
 
-    # Count occurrences where the guard prevented removal
+    # Count occurrences where the previous guard ("\\w\\w") would have
+    # prevented removal so we can monitor the impact of the relaxed rule.
     if stats is not None:
         m1 = re.findall(r"(?<=\w)-?\s*\n(?=[\w.])", text)
         m2 = re.findall(r"(?<=\w\w)-?\s*\n(?=[\w.])", text)
@@ -234,10 +235,11 @@ def preprocess_text(text: str, stats: dict | None = None) -> str:
         if skips:
             stats["left_guard_skips"] = stats.get("left_guard_skips", 0) + skips
 
-    # Glue hyphenated/soft hyphen line breaks inside addresses starting from
-    # the second local-part character so that leading digits aren't lost.
-    text = re.sub(r"(?<=\w\w)-?\s*\n(?=[\w.])", "", text)
-    text = re.sub(r"(?<=\w\w)\u00AD(?=[\w.])", "", text)
+    # Glue hyphenated/soft hyphen line breaks inside addresses. Ранее было с
+    # «левым гардом» ``\w\w`` и теряло адреса при переносе сразу после
+    # первого символа локальной части.
+    text = re.sub(r"(?<=\w)-?\s*\n(?=[\w.])", "", text)
+    text = re.sub(r"(?<=\w)\u00AD(?=[\w.])", "", text)
     if re.search(r"(?<=\w)-\s*\n(?=[\w.])", raw_input):
         text = re.sub(r"(?<=\w)-(?=[\w.])", "", text)
 
@@ -346,7 +348,19 @@ def is_valid_domain(domain: str) -> bool:
     return tld is not None and is_known_tld(tld)
 
 
-_OCR_ALLOWED_TLDS = {"ru", "com", "org", "net", "edu", "ac", "io"}
+_OCR_ALLOWED_TLDS = {
+    "ru",
+    "com",
+    "org",
+    "net",
+    "edu",
+    "ac",
+    "io",
+    "uz",
+    "su",
+    "by",
+    "kz",
+}
 
 
 def _levenshtein_is_one(a: str, b: str) -> bool:

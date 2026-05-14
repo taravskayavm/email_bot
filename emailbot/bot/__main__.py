@@ -154,6 +154,15 @@ def include_all_routers(dp: Dispatcher) -> None:
         if isinstance(router, Router):
             dp.include_router(router)
 
+    try:
+        from emailbot.handlers import profile as shared_profile
+
+        shared_router = getattr(shared_profile, "router", None)
+        if isinstance(shared_router, Router):
+            dp.include_router(shared_router)
+    except Exception:
+        logger.debug("Failed to include shared profile router", exc_info=True)
+
 
 async def main() -> None:
     """Run the bot dispatcher until cancelled."""

@@ -47,12 +47,13 @@ from emailbot.messaging_utils import (
 )
 from emailbot.reporting import count_blocked, log_mass_filter_digest
 from emailbot.ui.messages import (
-    format_dispatch_result,
     format_error_details,
     render_dispatch_summary,
 )
+from emailbot.ui.progress import ProgressUI
 from emailbot.run_control import clear_stop, should_stop
 from emailbot.utils import log_error
+from emailbot.utils.friendly_errors import to_user_message
 from emailbot.smtp_client import RobustSMTP
 from emailbot.cooldown import build_cooldown_service
 from emailbot.progress_watchdog import heartbeat_now
@@ -535,6 +536,7 @@ async def send_all(
             cooldown_days = 0
 
         cooldown_meta_cache: Dict[str, str] = {}
+        progress_ui: ProgressUI | None = None
 
         def _cooldown_last_iso(email: str) -> str | None:
             if not cooldown_tools:
@@ -583,7 +585,7 @@ async def send_all(
             if not audit_writer:
                 return
             try:
-                audit_writer.log_sent(email)
+                audit_writer.log_sent(email, outcome=messaging.OUTCOME["sent"])
             except Exception:
                 logger.debug("bulk audit log_sent failed", exc_info=True)
 
@@ -601,7 +603,12 @@ async def send_all(
             if not audit_writer:
                 return
             try:
-                audit_writer.log_skip(email, reason, meta=meta)
+                outcome_value = messaging.classify_audit_outcome(
+                    reason, default=messaging.OUTCOME["blocked"]
+                )
+                audit_writer.log_skip(
+                    email, reason, meta=meta, outcome=outcome_value
+                )
             except Exception:
                 logger.debug("bulk audit log_skip failed", exc_info=True)
 
@@ -613,7 +620,12 @@ async def send_all(
             if not audit_writer:
                 return
             try:
-                audit_writer.log_error(email, reason, meta=meta)
+                outcome_value = messaging.classify_audit_outcome(
+                    reason, default=messaging.OUTCOME["error"]
+                )
+                audit_writer.log_error(
+                    email, reason, meta=meta, outcome=outcome_value
+                )
             except Exception:
                 logger.debug("bulk audit log_error failed", exc_info=True)
 
@@ -638,6 +650,11 @@ async def send_all(
                 if writer_candidate is not None:
                     audit_writer = writer_candidate
                     audit_path = getattr(writer_candidate, "path", None)
+                    if audit_path:
+                        try:
+                            context.chat_data["bulk_audit_path"] = str(audit_path)
+                        except Exception:
+                            pass
 
             blocked = get_blocked_emails()
             blocked_norm = {
@@ -872,6 +889,13 @@ async def send_all(
                     )
                 )
 
+            planned_total = len(to_send)
+            if planned_total > 0:
+                try:
+                    progress_ui = ProgressUI(context.bot, chat_id)
+                except Exception:
+                    progress_ui = None
+
             mass_state.save_chat_state(
                 chat_id,
                 {
@@ -910,6 +934,31 @@ async def send_all(
         aborted = False
         smtp = RobustSMTP()
         processed = 0
+        progress_started = False
+
+        try:
+            await asyncio.to_thread(smtp.ensure)
+        except Exception as exc:
+            error_text = to_user_message(exc)
+            await notify(query.message, f"❌ {error_text}", event="error")
+            try:
+                smtp.close()
+            except Exception:
+                pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            return
+
+        if progress_ui and planned_total > 0:
+            try:
+                await progress_ui.start(planned_total)
+                progress_started = True
+            except Exception:
+                progress_ui = None
+                progress_started = False
+
         try:
             while to_send:
                 if should_stop():
@@ -1028,6 +1077,14 @@ async def send_all(
                         reason,
                         {"code": code, "message": msg or str(e)},
                     )
+
+                if progress_ui and progress_started:
+                    try:
+                        await progress_ui.update(min(processed, planned_total))
+                    except Exception:
+                        progress_ui = None
+                        progress_started = False
+
                 mass_state.save_chat_state(
                     chat_id,
                     {
@@ -1044,42 +1101,64 @@ async def send_all(
                     },
                 )
         finally:
-            smtp.close()
+            try:
+                smtp.close()
+            except Exception:
+                pass
+            if progress_ui and progress_started:
+                try:
+                    progress_ui.processed = min(processed, planned_total)
+                    await progress_ui.finish()
+                except Exception:
+                    pass
         imap.logout()
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        total_sent = len(sent_ok)
-        total_skipped = len(skipped_recent)
-        total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total_duplicates = len(skipped_duplicates)
-        total = total_sent + total_skipped + total_blocked + total_duplicates
-        report_text = format_dispatch_result(
-            total,
-            total_sent,
-            total_skipped,
-            total_blocked,
-            total_duplicates,
-            aborted=aborted,
+        error_count = len(error_addresses)
+        fallback_metrics = {
+            "total": len(sent_ok)
+            + len(skipped_recent)
+            + len(blocked_invalid)
+            + len(blocked_foreign)
+            + len(skipped_duplicates),
+            "sent": len(sent_ok),
+            "blocked": len(blocked_invalid) + len(blocked_foreign),
+            "cooldown": len(skipped_recent),
+            "undeliverable_only": 0,
+            "unchanged": len(skipped_duplicates),
+            "errors": error_count,
+            "not_delivered": error_count,
+        }
+        metrics = fallback_metrics
+        if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
+            metrics = bot_handlers._summarize_from_audit(str(audit_path))
+            if not metrics.get("total") and fallback_metrics["total"]:
+                metrics = fallback_metrics
+
+        not_delivered = metrics.get(
+            "not_delivered",
+            metrics.get("undeliverable_only", 0) + metrics.get("errors", 0),
         )
-        filtered_lines = []
-        for line in report_text.splitlines():
-            if line.startswith("⏳") and total_skipped == 0:
-                continue
-            filtered_lines.append(line)
-        report_text = "\n".join(filtered_lines)
+
+        summary_lines: list[str] = []
+        summary_lines.append("📨 Рассылка завершена.")
+        summary_lines.append(f"📊 В очереди было: {metrics['total']}")
+        summary_lines.append(f"✅ Отправлено: {metrics['sent']}")
+        summary_lines.append(
+            f"⏳ Пропущены (по правилу «180 дней»): {metrics['cooldown']}"
+        )
+        summary_lines.append(f"🚫 В стоп-листе: {metrics['blocked']}")
+        summary_lines.append(f"❌ Не доставлено: {not_delivered}")
+        if aborted:
+            summary_lines.append("⛔ Рассылка остановлена досрочно.")
         if blocked_foreign:
-            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        if blocked_invalid:
-            report_text += f"\n🚫 Недоставляемые/в стоп-листе: {len(blocked_invalid)}"
-        if error_addresses:
-            report_text = (
-                f"{report_text}\n❌ Ошибок при отправке: {len(error_addresses)}"
-                if report_text
-                else f"❌ Ошибок при отправке: {len(error_addresses)}"
+            summary_lines.append(
+                f"🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
             )
         if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
-            report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"
+            summary_lines.append(f"📄 Аудит: {audit_path}")
+        report_text = "\n".join(summary_lines)
 
         # Безопасная отправка: notify сам разрежет текст на куски < 4096
         await notify(query.message, report_text, event="finish")
@@ -1087,6 +1166,11 @@ async def send_all(
             error_report = format_error_details(error_details)
             if error_report:
                 await notify(query.message, error_report, event="error")
+
+        try:
+            context.chat_data.pop("bulk_audit_path", None)
+        except Exception:
+            pass
 
         clear_recent_sent_cache()
         bot_handlers.disable_force_send(chat_id)
