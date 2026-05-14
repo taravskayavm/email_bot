@@ -24,6 +24,8 @@ _DEFAULT_ICONS = {
     "sport": "⚽",
     "stomatology": "🦷",
     "tourism": "✈️",
+    "sociology": "🏛️",
+    "politology": "🗳️",
 }
 
 
