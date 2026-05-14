@@ -887,9 +887,7 @@ SIGNATURE_PROFILE_GENERAL = "general"
 DEFAULT_FROM_NAME = "Редакция литературы по медицине, спорту и туризму"
 GENERAL_FROM_NAME = "Редакция литературы"
 
-DEFAULT_SIGNATURE_POSITION = (
-    "Заведующая редакцией литературы по медицине, спорту и туризму"
-)
+DEFAULT_SIGNATURE_POSITION = "Заведующая редакцией литературы по медицине, спорту и туризму"
 GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литературы"
 
 # Text of the signature without styling. The surrounding block and
@@ -898,7 +896,7 @@ GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литер
 SIGNATURE_TEXT = (
     "--<br>С уважением,<br>"
     "Таравская Владлена Михайловна<br>"
-    f"{DEFAULT_SIGNATURE_POSITION}<br>"
+    "Заведующая редакцией литературы по медицине, спорту и туризму<br>"
     "ООО Издательство «ЛАНЬ»<br><br>"
     "8 (812) 336-90-92, доб. 208<br><br>"
     "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"

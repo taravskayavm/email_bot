@@ -1,9 +1,21 @@
 import os  # Читаем переменные окружения
 from pathlib import Path  # Работаем с путями к файлам и каталогам
 from zoneinfo import ZoneInfo  # Поддерживаем часовые пояса стандартными средствами
-import pytz  # Предоставляем pytz-таймзону для обратной совместимости
 
 from emailbot.runtime_config import get as rc_get  # Загружаем динамические настройки
+
+
+class _PytzCompat:  # Создаём локальную совместимость с минимальным API pytz
+    """Provide the ``timezone`` method used by legacy settings."""
+
+    @staticmethod  # Метод не зависит от состояния объекта совместимости
+    def timezone(name: str) -> ZoneInfo:  # Возвращаем стандартную таймзону по имени
+        """Return a ``ZoneInfo`` timezone for ``name``."""
+
+        return ZoneInfo(name)  # Делегируем создание часового пояса стандартной библиотеке
+
+
+pytz = _PytzCompat()  # Сохраняем прежнее имя для существующего кода ниже
 
 
 def _int(name: str, default: int) -> int:
