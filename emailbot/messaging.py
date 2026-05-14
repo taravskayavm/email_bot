@@ -86,6 +86,7 @@ from .suppress_list import add_to_blocklist
 from .run_control import register_task
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
+from services.templates import get_template, get_template_by_path
 
 _TASK_SEQ = count()
 
@@ -117,7 +118,7 @@ def _normalize_from_header(msg: EmailMessage) -> None:
     existing = msg.get("From", "")
     name, _addr = parseaddr(existing)
     display_name = os.getenv("EMAIL_FROM_NAME", "").strip() or name
-    normalized = formataddr((display_name or "", EMAIL_ADDRESS))
+    normalized = formataddr((display_name or "", _sender_address()))
     if "From" in msg:
         msg.replace_header("From", normalized)
     else:
@@ -722,17 +723,61 @@ def _outcome_for_decision(decision: Decision) -> SendOutcome:
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
 # the message.
-SIGNATURE_TEXT = (
-    "--<br>С уважением,<br>"
-    "Таравская Владлена Михайловна<br>"
-    "Заведующая редакцией литературы по медицине, спорту и туризму<br>"
-    "ООО Издательство «ЛАНЬ»<br><br>"
-    "8 (812) 336-90-92, доб. 208<br><br>"
-    "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
-    "Рабочие часы: 10.00-18.00<br><br>"
-    "med@lanbook.ru<br>"
-    '<a href="https://www.lanbook.com">www.lanbook.com</a>'
+OLD_FROM_DISPLAY_NAME = "Редакция литературы по медицине, спорту и туризму"
+GENERAL_FROM_DISPLAY_NAME = "Редакция литературы"
+OLD_SIGNATURE_POSITION = (
+    "Заведующая редакцией литературы по медицине, спорту и туризму"
 )
+GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литературы"
+SIGNATURE_PROFILES = {
+    "old": {
+        "from_name": OLD_FROM_DISPLAY_NAME,
+        "position": OLD_SIGNATURE_POSITION,
+    },
+    "general": {
+        "from_name": GENERAL_FROM_DISPLAY_NAME,
+        "position": GENERAL_SIGNATURE_POSITION,
+    },
+}
+DEFAULT_SIGNATURE_PROFILE = "old"
+
+
+def _signature_profile(profile: str | None) -> dict[str, str]:
+    """Return sender/signature metadata for a known signature profile."""
+
+    # Нормализуем профиль из metadata.
+    # Пустые и неизвестные значения не должны ломать отправку.
+    key = (profile or DEFAULT_SIGNATURE_PROFILE).strip().lower()
+    # Поддерживаем прежнее имя general-профиля из старой metadata.
+    if key == "new":
+        key = "general"
+    # Возвращаем выбранный профиль или безопасный old для совместимости.
+    return SIGNATURE_PROFILES.get(
+        key,
+        SIGNATURE_PROFILES[DEFAULT_SIGNATURE_PROFILE],
+    )
+
+
+def _build_signature_html(profile: str | None = None) -> str:
+    """Return the HTML signature for the selected metadata profile."""
+
+    # Берём должность из профиля подписи, выбранного в templates/_labels.json.
+    position = _signature_profile(profile)["position"]
+    # Собираем неизменяемые строки подписи вокруг профильной должности.
+    return (
+        "--<br>С уважением,<br>"
+        "Таравская Владлена Михайловна<br>"
+        f"{position}<br>"
+        "ООО Издательство «ЛАНЬ»<br><br>"
+        "8 (812) 336-90-92, доб. 208<br><br>"
+        "196105, Санкт-Петербург, проспект Юрия Гагарина, д.1 лит.А<br><br>"
+        "Рабочие часы: 10.00-18.00<br><br>"
+        "med@lanbook.ru<br>"
+        '<a href="https://www.lanbook.com">www.lanbook.com</a>'
+    )
+
+
+SIGNATURE_TEXT = _build_signature_html(DEFAULT_SIGNATURE_PROFILE)
 SIGNATURE_HTML = SIGNATURE_TEXT
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
@@ -994,13 +1039,86 @@ def text_to_html(text: str) -> str:
     return "<br>".join(lines)
 
 
-def build_signature_text() -> str:
-    """Return the plain-text representation of the default signature."""
+def _sender_address() -> str:
+    """Return the SMTP sender address from env or module configuration."""
 
-    return strip_html(SIGNATURE_HTML).strip()
+    # Сначала используем env: тесты и деплой могут менять адрес после импорта.
+    return os.getenv("EMAIL_ADDRESS", "").strip() or EMAIL_ADDRESS
 
 
-def build_email_body(template_path: str, variables: Optional[dict[str, object]]) -> tuple[str, str]:
+def _template_signature_profile(html_path: str) -> str:
+    """Resolve the signature profile from template metadata in ``_labels.json``."""
+
+    # Ищем metadata по пути: ручная и массовая рассылка работают одинаково.
+    template_info = get_template_by_path(html_path)
+    # Если путь временный или нестандартный, пробуем определить шаблон по имени файла.
+    if template_info is None:
+        template_info = get_template(Path(html_path).stem)
+    # Читаем только поле signature из metadata шаблона.
+    raw_profile = (
+        template_info.get("signature") if isinstance(template_info, dict) else None
+    )
+    # Возвращаем профиль строкой или старый профиль по умолчанию.
+    return str(raw_profile).strip() if raw_profile else DEFAULT_SIGNATURE_PROFILE
+
+
+def _choose_from_header(group: str | None = None) -> str:
+    """Return the display name for the selected template signature profile."""
+
+    # Берём профиль из metadata шаблона, если код направления можно разрешить.
+    template_info = get_template(group or "") if group else None
+    # Извлекаем поле signature без хардкода направлений в логике отправки.
+    raw_profile = (
+        template_info.get("signature") if isinstance(template_info, dict) else None
+    )
+    # Возвращаем display name, соответствующий профилю подписи.
+    return _signature_profile(
+        str(raw_profile).strip() if raw_profile else None
+    )["from_name"]
+
+
+def _apply_from_profile(msg: EmailMessage, profile: str | None) -> None:
+    """Apply sender display name for a signature profile to a message."""
+
+    # Позволяем EMAIL_FROM_NAME сохранить прежний конфигурационный приоритет.
+    configured_name = os.getenv("EMAIL_FROM_NAME", "").strip()
+    # Если override не задан, берём display name из профиля signature.
+    profile_name = _signature_profile(profile)["from_name"]
+    # Нормализуем хвостовые точки, NBSP и пробелы перед записью заголовка.
+    display_name = (configured_name or profile_name).rstrip(".  ").strip()
+    # Всегда используем настроенный SMTP-адрес отправителя.
+    normalized = formataddr((display_name or "", _sender_address()))
+    # Обновляем существующий заголовок или создаём новый.
+    if "From" in msg:
+        msg.replace_header("From", normalized)
+    else:
+        msg["From"] = normalized
+
+
+def _apply_from(msg: EmailMessage, group: str | None = None) -> None:
+    """Apply the From display name and configured sender address to a message."""
+
+    # Берём профиль подписи по коду направления из metadata шаблона.
+    template_info = get_template(group or "") if group else None
+    # Извлекаем поле signature, не хардкодя направления в логике отправки.
+    raw_profile = (
+        template_info.get("signature") if isinstance(template_info, dict) else None
+    )
+    # Применяем найденный профиль или старый профиль по умолчанию.
+    _apply_from_profile(msg, str(raw_profile).strip() if raw_profile else None)
+
+
+def build_signature_text(profile: str | None = None) -> str:
+    """Return the plain-text representation of the selected signature."""
+
+    # Преобразуем HTML-подпись выбранного профиля в текстовую версию.
+    return strip_html(_build_signature_html(profile)).strip()
+
+
+def build_email_body(
+    template_path: str,
+    variables: Optional[dict[str, object]],
+) -> tuple[str, str]:
     """Return rendered text and HTML bodies for a template file."""
 
     path = Path(template_path)
@@ -1216,6 +1334,43 @@ def save_to_sent_folder(
                 log_error(f"save_to_sent_folder logout: {e}")
 
 
+def build_messages_for_group(
+    group: str,
+    recipients: Iterable[str],
+    variables: Mapping[str, object] | None = None,
+) -> list[EmailMessage]:
+    """Build preview messages for a direction using the same signature metadata."""
+
+    # Загружаем metadata выбранного направления из templates/_labels.json.
+    template_info = get_template(group)
+    # Без metadata или пути шаблона нельзя построить письмо.
+    if not isinstance(template_info, dict) or not template_info.get("path"):
+        return []
+    # Берём тему из переменных, если она явно передана вызывающим кодом.
+    subject = str((variables or {}).get("subject") or DEFAULT_SUBJECT)
+    # Собираем письма через общий build_message, чтобы подпись совпадала с отправкой.
+    messages: list[EmailMessage] = []
+    # Перебираем получателей в исходном порядке.
+    for recipient in recipients:
+        # Пропускаем пустые адреса, чтобы не создавать некорректные сообщения.
+        recipient_str = str(recipient or "").strip()
+        # Пустой адрес не должен попадать в результат.
+        if not recipient_str:
+            continue
+        # Используем общий путь генерации сообщения для ручного и массового сценариев.
+        msg, _token = build_message(
+            recipient_str,
+            str(template_info["path"]),
+            subject,
+        )
+        # На случай legacy metadata по коду направления повторно применяем профиль From.
+        _apply_from(msg, group)
+        # Добавляем готовое сообщение в список результата.
+        messages.append(msg)
+    # Возвращаем список построенных сообщений.
+    return messages
+
+
 def build_message(
     to_addr: str,
     html_path: str,
@@ -1227,13 +1382,20 @@ def build_message(
     host = os.getenv("HOST", "example.com")
     font_family, base_size = _extract_fonts(html_body)
     sig_size = max(base_size - 1, 1)
+    signature_profile = _template_signature_profile(html_path)
+    signature_text = _build_signature_html(signature_profile)
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
-        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{SIGNATURE_TEXT}</div>'
+        f'font-size:{sig_size}px;color:#222;line-height:1.4;">{signature_text}</div>'
     )
     inline_logo = os.getenv("INLINE_LOGO", "1") == "1"
     if not inline_logo:
-        html_body = re.sub(r"<img[^>]+cid:logo[^>]*>", "", html_body, flags=re.IGNORECASE)
+        html_body = re.sub(
+            r"<img[^>]+cid:logo[^>]*>",
+            "",
+            html_body,
+            flags=re.IGNORECASE,
+        )
     signature_placeholder_present = _has_placeholder(html_body, "SIGNATURE")
     html_body = _render_placeholders(html_body, {"SIGNATURE": signature_html})
     if _has_unresolved_placeholders(html_body):
@@ -1242,18 +1404,16 @@ def build_message(
     link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
     unsub_html = (
         f'<div style="margin-top:8px"><a href="{link}" '
-        'style="display:inline-block;padding:6px 12px;font-size:12px;background:#eee;' \
-        'color:#333;text-decoration:none;border-radius:4px">Отписаться</a></div>'
+        'style="display:inline-block;padding:6px 12px;font-size:12px;'
+        'background:#eee;color:#333;text-decoration:none;border-radius:4px">'
+        'Отписаться</a></div>'
     )
     if not signature_placeholder_present:
         html_body = html_body.replace("</body>", f"{signature_html}</body>")
     html_body = html_body.replace("</body>", f"{unsub_html}</body>")
     text_body = strip_html(html_body) + f"\n\nОтписаться: {link}"
     msg = EmailMessage()
-    default_from_name = os.getenv(
-        "EMAIL_FROM_NAME", "Редакция литературы по медицине, спорту и туризму"
-    )
-    msg["From"] = formataddr((default_from_name or "", EMAIL_ADDRESS))
+    _apply_from_profile(msg, signature_profile)
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
@@ -1449,7 +1609,7 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
-    _normalize_from_header(msg)
+    _apply_from_profile(msg, _template_signature_profile(html_path))
 
     # 2) Отправка
     try:
@@ -2370,6 +2530,7 @@ __all__ = [
     "save_to_sent_folder",
     "get_preferred_sent_folder",
     "build_message",
+    "build_messages_for_group",
     "send_email",
     "async_send_email",
     "create_task_with_logging",
