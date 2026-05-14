@@ -112,12 +112,15 @@ def write_audit(
         logger.debug("write_audit failed", exc_info=True)
 
 
-def _normalize_from_header(msg: EmailMessage) -> None:
+def _normalize_from_header(
+    msg: EmailMessage,
+    group_key: str | None = None,
+) -> None:
     """Force the ``From`` header to use the configured SMTP address."""
 
     existing = msg.get("From", "")
     name, _addr = parseaddr(existing)
-    display_name = os.getenv("EMAIL_FROM_NAME", "").strip() or name
+    display_name = _from_name_for_group(group_key) or name
     normalized = formataddr((display_name or "", _sender_address()))
     if "From" in msg:
         msg.replace_header("From", normalized)
@@ -723,23 +726,31 @@ def _outcome_for_decision(decision: Decision) -> SendOutcome:
 # Text of the signature without styling. The surrounding block and
 # font settings are injected dynamically based on the template used for
 # the message.
-OLD_FROM_DISPLAY_NAME = "Редакция литературы по медицине, спорту и туризму"
-GENERAL_FROM_DISPLAY_NAME = "Редакция литературы"
-OLD_SIGNATURE_POSITION = (
+SIGNATURE_PROFILE_OLD = "old"
+SIGNATURE_PROFILE_GENERAL = "general"
+
+DEFAULT_FROM_NAME = "Редакция литературы по медицине, спорту и туризму"
+GENERAL_FROM_NAME = "Редакция литературы"
+
+DEFAULT_SIGNATURE_POSITION = (
     "Заведующая редакцией литературы по медицине, спорту и туризму"
 )
 GENERAL_SIGNATURE_POSITION = "Заведующая редакцией литературы"
+
+OLD_FROM_DISPLAY_NAME = DEFAULT_FROM_NAME
+GENERAL_FROM_DISPLAY_NAME = GENERAL_FROM_NAME
+OLD_SIGNATURE_POSITION = DEFAULT_SIGNATURE_POSITION
 SIGNATURE_PROFILES = {
-    "old": {
-        "from_name": OLD_FROM_DISPLAY_NAME,
-        "position": OLD_SIGNATURE_POSITION,
+    SIGNATURE_PROFILE_OLD: {
+        "from_name": DEFAULT_FROM_NAME,
+        "position": DEFAULT_SIGNATURE_POSITION,
     },
-    "general": {
-        "from_name": GENERAL_FROM_DISPLAY_NAME,
+    SIGNATURE_PROFILE_GENERAL: {
+        "from_name": GENERAL_FROM_NAME,
         "position": GENERAL_SIGNATURE_POSITION,
     },
 }
-DEFAULT_SIGNATURE_PROFILE = "old"
+DEFAULT_SIGNATURE_PROFILE = SIGNATURE_PROFILE_OLD
 
 
 def _signature_profile(profile: str | None) -> dict[str, str]:
@@ -779,6 +790,65 @@ def _build_signature_html(profile: str | None = None) -> str:
 
 SIGNATURE_TEXT = _build_signature_html(DEFAULT_SIGNATURE_PROFILE)
 SIGNATURE_HTML = SIGNATURE_TEXT
+
+
+def _signature_profile_for_group(group_key: str | None) -> str:
+    """Return signature profile from template metadata."""
+
+    # Пустой ключ направления всегда сохраняет прежний профиль подписи.
+    code = (group_key or "").strip()
+    # Без кода направления metadata нельзя разрешить безопасно.
+    if not code:
+        return SIGNATURE_PROFILE_OLD
+    try:
+        # Читаем templates/_labels.json через общий сервис шаблонов.
+        template = get_template(code)
+    except Exception:
+        # Ошибки чтения metadata не должны блокировать сборку письма.
+        template = None
+    # Некорректная metadata откатывается к прежней подписи.
+    if not isinstance(template, dict):
+        return SIGNATURE_PROFILE_OLD
+    # Поддерживаем только явно разрешённый general-профиль.
+    profile = str(template.get("signature") or SIGNATURE_PROFILE_OLD).strip().lower()
+    # Все отсутствующие и неизвестные значения остаются на old.
+    if profile == SIGNATURE_PROFILE_GENERAL:
+        return SIGNATURE_PROFILE_GENERAL
+    return SIGNATURE_PROFILE_OLD
+
+
+def _from_name_for_group(group_key: str | None) -> str:
+    """Return display sender name for selected signature profile."""
+
+    # General-направления используют сокращённое имя редакции.
+    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
+        return GENERAL_FROM_NAME
+    # Old-направления сохраняют env override и прежнее имя по умолчанию.
+    return os.getenv("EMAIL_FROM_NAME", "").strip() or DEFAULT_FROM_NAME
+
+
+def _signature_position_for_group(group_key: str | None) -> str:
+    """Return position line for selected signature profile."""
+
+    # General-направления получают сокращённую должность.
+    if _signature_profile_for_group(group_key) == SIGNATURE_PROFILE_GENERAL:
+        return GENERAL_SIGNATURE_POSITION
+    # Старый профиль сохраняет прежнюю должность.
+    return DEFAULT_SIGNATURE_POSITION
+
+
+def _signature_text_for_group(group_key: str | None = None) -> str:
+    """Return signature text for selected signature profile."""
+
+    # Берём профильную должность по коду направления.
+    position = _signature_position_for_group(group_key)
+    # Старый профиль возвращает неизменённую константу подписи.
+    if position == DEFAULT_SIGNATURE_POSITION:
+        return SIGNATURE_TEXT
+    # General-профиль меняет только строку должности в общей подписи.
+    return SIGNATURE_TEXT.replace(DEFAULT_SIGNATURE_POSITION, position, 1)
+
+
 EMAIL_ADDRESS = ""
 EMAIL_PASSWORD = ""
 
@@ -1046,20 +1116,33 @@ def _sender_address() -> str:
     return os.getenv("EMAIL_ADDRESS", "").strip() or EMAIL_ADDRESS
 
 
-def _template_signature_profile(html_path: str) -> str:
-    """Resolve the signature profile from template metadata in ``_labels.json``."""
+def _template_group_key(html_path: str) -> str | None:
+    """Resolve the template code for ``html_path`` when metadata is available."""
 
-    # Ищем metadata по пути: ручная и массовая рассылка работают одинаково.
+    # Ищем metadata по абсолютному пути шаблона для штатной отправки.
     template_info = get_template_by_path(html_path)
     # Если путь временный или нестандартный, пробуем определить шаблон по имени файла.
     if template_info is None:
         template_info = get_template(Path(html_path).stem)
-    # Читаем только поле signature из metadata шаблона.
-    raw_profile = (
-        template_info.get("signature") if isinstance(template_info, dict) else None
-    )
-    # Возвращаем профиль строкой или старый профиль по умолчанию.
-    return str(raw_profile).strip() if raw_profile else DEFAULT_SIGNATURE_PROFILE
+    # Возвращаем код направления только из корректной metadata.
+    if not isinstance(template_info, dict):
+        return None
+    # Пустой код не должен становиться валидным group_key.
+    code = str(template_info.get("code") or "").strip()
+    # Отдаём код направления или None для безопасного old fallback.
+    return code or None
+
+
+def _template_signature_profile(html_path: str) -> str:
+    """Resolve the signature profile from template metadata in ``_labels.json``."""
+
+    # Используем общий resolver кода направления, чтобы не дублировать lookup.
+    group_key = _template_group_key(html_path)
+    # По коду направления применяем только поддержанные signature-профили.
+    if group_key is not None:
+        return _signature_profile_for_group(group_key)
+    # Для нестандартных путей сохраняем прежний old-профиль.
+    return DEFAULT_SIGNATURE_PROFILE
 
 
 def _choose_from_header(group: str | None = None) -> str:
@@ -1362,6 +1445,7 @@ def build_messages_for_group(
             recipient_str,
             str(template_info["path"]),
             subject,
+            group_key=group,
         )
         # На случай legacy metadata по коду направления повторно применяем профиль From.
         _apply_from(msg, group)
@@ -1377,13 +1461,22 @@ def build_message(
     subject: str,
     *,
     override_180d: bool = False,
+    group_key: str | None = None,
 ) -> tuple[EmailMessage, str]:
+    # Загружаем HTML шаблона перед подстановкой подписи и ссылки отписки.
     html_body = _read_template_file(html_path)
+    # HOST задаёт домен unsubscribe-ссылки; example.com остаётся безопасным fallback.
     host = os.getenv("HOST", "example.com")
+    # Шрифт и базовый размер берём из шаблона, чтобы подпись визуально совпадала.
     font_family, base_size = _extract_fonts(html_body)
+    # Подпись делаем на 1px меньше основного текста, но не меньше 1px.
     sig_size = max(base_size - 1, 1)
-    signature_profile = _template_signature_profile(html_path)
-    signature_text = _build_signature_html(signature_profile)
+    # Явный group_key важнее определения по пути и сохраняет обратную совместимость.
+    effective_group_key = group_key or _template_group_key(html_path)
+    # Профиль From выбирается из поля signature в templates/_labels.json.
+    signature_profile = _signature_profile_for_group(effective_group_key)
+    # HTML подписи выбирается по тому же group_key, что и From.
+    signature_text = _signature_text_for_group(effective_group_key)
     signature_html = (
         f'<div style="margin-top:20px;font-family:{font_family};'
         f'font-size:{sig_size}px;color:#222;line-height:1.4;">{signature_text}</div>'
@@ -1436,7 +1529,7 @@ def build_message(
             )
         except Exception as e:
             log_error(f"attach_logo: {e}")
-    _normalize_from_header(msg)
+    _normalize_from_header(msg, effective_group_key)
     return msg, token
 
 
@@ -1586,6 +1679,7 @@ def send_email_with_sessions(
         html_path,
         subject,
         override_180d=override_180d,
+        group_key=group_key,
     )
     html_part = msg.get_body("html")
     html_body = html_part.get_content() if html_part else ""
@@ -1609,7 +1703,7 @@ def send_email_with_sessions(
             msg.replace_header("From", fixed_from)
         except KeyError:
             msg["From"] = fixed_from
-    _apply_from_profile(msg, _template_signature_profile(html_path))
+    _normalize_from_header(msg, group_key or _template_group_key(html_path))
 
     # 2) Отправка
     try:
