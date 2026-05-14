@@ -852,6 +852,8 @@ TEMPLATE_MAP = {
     "stomatology": os.path.join(TEMPLATES_DIR, "stomatology.html"),
     "tourism": os.path.join(TEMPLATES_DIR, "tourism.html"),
     "pedagogy": os.path.join(TEMPLATES_DIR, "pedagogy.html"),
+    "sociology": os.path.join(TEMPLATES_DIR, "sociology.html"),
+    "politology": os.path.join(TEMPLATES_DIR, "politology.html"),
     # Дополнительные коды для обратной совместимости
     "medicine": os.path.join(TEMPLATES_DIR, "medicine.html"),
     "bioinformatics": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),

@@ -1955,6 +1955,8 @@ _BUTTON_LABELS_RU: dict[str, str] = {
     "stomatology": "🦷 Стоматология",
     "tourism": "✈️Туризм и гостиничное дело",
     "pedagogy": "🎓 Педагогика",
+    "sociology": "🏛️ Социология",
+    "politology": "🗳️ Политология",
 }
 
 
