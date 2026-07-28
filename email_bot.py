@@ -39,6 +39,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from emailbot.telegram_network import configure_telegram_api_ip
+
 
 def _selfcheck_email_clean_exports() -> None:
     if os.getenv("EMAILBOT_SKIP_EMAIL_CLEAN_SELFTEST", "0") == "1":
@@ -284,6 +286,17 @@ def main() -> None:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
 
     load_env(SCRIPT_DIR)
+
+    telegram_api_ip = os.getenv("TELEGRAM_API_IP", "").strip()
+    if telegram_api_ip:
+        try:
+            configured_ip = configure_telegram_api_ip(telegram_api_ip)
+        except ValueError:
+            _die("TELEGRAM_API_IP must contain one valid IP address.")
+        logging.getLogger(__name__).info(
+            "[BOOT] Telegram API DNS override enabled: api.telegram.org -> %s",
+            configured_ip,
+        )
 
     try:
         history_service.ensure_initialized()
