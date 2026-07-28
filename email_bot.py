@@ -37,6 +37,8 @@ from emailbot.utils import load_env
 
 load_env(SCRIPT_DIR)  # Раннее чтение .env.
 
+from emailbot.telegram_network import configure_telegram_api_ip
+
 # Default watchdog stall timeout in milliseconds (configurable via env).
 # Увеличено по умолчанию до 5 минут, чтобы не прерывать долгие задачи
 # (например, парсинг больших PDF), при этом остаётся возможность
@@ -219,6 +221,17 @@ def main() -> None:
     errs = startup_selfcheck()
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
+
+    telegram_api_ip = os.getenv("TELEGRAM_API_IP", "").strip()
+    if telegram_api_ip:
+        try:
+            configured_ip = configure_telegram_api_ip(telegram_api_ip)
+        except ValueError:
+            _die("TELEGRAM_API_IP must contain one valid IP address.")
+        logging.getLogger(__name__).info(
+            "[BOOT] Telegram API DNS override enabled: api.telegram.org -> %s",
+            configured_ip,
+        )
 
     try:
         history_service.ensure_initialized()
