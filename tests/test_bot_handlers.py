@@ -981,3 +981,36 @@ def test_parse_report_counts_filters_without_overlap(monkeypatch):
     assert "⏳ Под кулдауном (180 дней): 1" in report
     assert "📦 К отправке: 1" in report
     assert ctx.chat_data[SESSION_KEY].preview_allowed_all == ["ready@example.ru"]
+
+
+def test_cooldown_preview_samples_from_all_hits(monkeypatch):
+    ctx = DummyContext()
+    filtered = [f"recent{i}@example.ru" for i in range(5)]
+
+    monkeypatch.setattr(bh, "is_blocked", lambda _email: False)
+    monkeypatch.setattr(
+        bh,
+        "check_email",
+        lambda email, **_kwargs: (
+            True,
+            f"last=2026-07-{int(email.removeprefix('recent').split('@', 1)[0]) + 10:02d}",
+        ),
+    )
+    monkeypatch.setattr(
+        bh,
+        "_sample_random",
+        lambda items, k: list(items)[-k:],
+    )
+
+    run(
+        bh._compose_report_and_save(
+            ctx,
+            set(filtered),
+            filtered,
+            [],
+            [],
+        )
+    )
+
+    examples = ctx.chat_data[SESSION_KEY].cooldown_preview_examples
+    assert [email for email, _date in examples] == filtered[-3:]

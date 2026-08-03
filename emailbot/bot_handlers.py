@@ -814,6 +814,15 @@ def sample_preview(items, k: int):
     return lst[:k]
 
 
+def _sample_random(items: Iterable, k: int):
+    """Return up to ``k`` distinct items chosen with system randomness."""
+
+    unique = list(dict.fromkeys(items))
+    if len(unique) <= k:
+        return unique
+    return secrets.SystemRandom().sample(unique, k)
+
+
 from .messaging import (
     LOG_FILE,
     MAX_EMAILS_PER_DAY,
@@ -1374,7 +1383,7 @@ async def _maybe_send_skipped_summary(
 
     if cooldown_hits:
         tz = ZoneInfo(REPORT_TZ)
-        samples = cooldown_hits[:3]
+        samples = _sample_random(cooldown_hits, 3)
         for hit in samples:
             norm = cooldown_normalize_email(hit.email) or hit.email.lower()
             label = cooldown_display.get(norm, hit.email)
@@ -2888,7 +2897,7 @@ async def _compose_report_and_save(
 
     blocked_keys: set[str] = set()
     cooldown_keys: set[str] = set()
-    cooldown_examples: list[tuple[str, str]] = []
+    cooldown_candidates: list[tuple[str, str]] = []
     ignore_cooldown = _is_ignore_cooldown_enabled(context)
     cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
     if cooldown_window > 0 and filtered:
@@ -2909,10 +2918,9 @@ async def _compose_report_and_save(
                 blocked, reason = False, ""
             if blocked:
                 cooldown_keys.add(norm)
-                if len(cooldown_examples) < 3:
-                    match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
-                    last_seen = match.group(1)[:10] if match else ""
-                    cooldown_examples.append((addr, last_seen))
+                match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
+                last_seen = match.group(1)[:10] if match else ""
+                cooldown_candidates.append((addr, last_seen))
 
     if cooldown_window <= 0:
         for addr in filtered:
@@ -2936,7 +2944,7 @@ async def _compose_report_and_save(
 
     state.blocked_after_parse = len(blocked_keys)
     state.cooldown_preview_total = len(cooldown_keys)
-    state.cooldown_preview_examples = cooldown_examples
+    state.cooldown_preview_examples = _sample_random(cooldown_candidates, 3)
     state.cooldown_preview_window = cooldown_window
 
     total_candidates = (
