@@ -356,6 +356,32 @@ def last_send_any_group(email_norm: str) -> Optional[Tuple[str, datetime]]:
     return row[0], dt
 
 
+def sent_emails_between(start_utc: datetime, end_utc: datetime) -> set[str]:
+    """Return successful recipient keys in the half-open UTC time window."""
+
+    start_iso = _isoformat(start_utc)
+    end_iso = _isoformat(end_utc)
+    conn = _connect()
+    try:
+        cursor = conn.execute(
+            """
+            SELECT DISTINCT email_norm
+            FROM send_history
+            WHERE sent_at_utc >= ? AND sent_at_utc < ?
+              AND COALESCE(LOWER(smtp_result), 'ok')
+                  IN ('ok', 'sent', 'success', 'synced')
+            """,
+            (start_iso, end_iso),
+        )
+        return {
+            str(row[0]).strip().lower()
+            for row in cursor.fetchall()
+            if row and str(row[0]).strip()
+        }
+    finally:
+        conn.close()
+
+
 def was_sent_within(email: str, group: str, days: int) -> bool:
     if days <= 0:
         return False
@@ -509,5 +535,6 @@ __all__ = [
     "get_last_sent",
     "last_send",
     "last_send_any_group",
+    "sent_emails_between",
     "was_sent_within_any_group",
 ]

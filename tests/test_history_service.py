@@ -51,6 +51,26 @@ def test_get_last_sent(monkeypatch):
     assert abs((last_any - now).total_seconds()) < 1
 
 
+def test_get_sent_between_returns_successful_unique_recipients():
+    history_service.ensure_initialized()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    history_service.mark_sent("one@example.com", "grp", "m1", now)
+    history_service.mark_sent("one@example.com", "__cooldown__", None, now)
+    history_service.mark_sent(
+        "old@example.com",
+        "grp",
+        "m2",
+        now - timedelta(days=2),
+    )
+
+    result = history_service.get_sent_between(
+        now - timedelta(minutes=1),
+        now + timedelta(minutes=1),
+    )
+
+    assert result == {"one@example.com"}
+
+
 def test_register_send_attempt_and_cancel(monkeypatch, tmp_path):
     db = tmp_path / "state.db"
     monkeypatch.setenv("HISTORY_DB_PATH", str(db))

@@ -53,3 +53,36 @@ def test_summarize_day_local_combines_sources(monkeypatch, tmp_path):
 
     assert ok == 3
     assert err == 2
+
+
+def test_summarize_day_local_prefers_durable_history(monkeypatch, tmp_path):
+    var = tmp_path / "var"
+    var.mkdir(parents=True, exist_ok=True)
+    sent_log = var / "sent_log.csv"
+    send_stats = var / "send_stats.jsonl"
+
+    monkeypatch.setenv("SENT_LOG_PATH", str(sent_log))
+    monkeypatch.setenv("SEND_STATS_PATH", str(send_stats))
+    monkeypatch.setenv("REPORT_TZ", "Europe/Moscow")
+    sent_log.write_text(
+        "\n".join(
+            [
+                "key,email,last_sent_at,source,status",
+                "k1,one@example.com,2024-05-01T10:00:00+03:00,manual,sent",
+                "k2,two@example.com,2024-05-01T11:00:00+03:00,manual,sent",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    send_stats.write_text("", encoding="utf-8")
+
+    module_name = "emailbot.report_service"
+    sys.modules.pop(module_name, None)
+    report_service = importlib.import_module(module_name)
+    monkeypatch.setattr(report_service, "_history_success_count", lambda *_: 4)
+
+    ok, err = report_service.summarize_day_local(dt.date(2024, 5, 1))
+
+    assert ok == 4
+    assert err == 0

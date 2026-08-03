@@ -583,14 +583,12 @@ def _normalize_ts(value: str) -> str:
     return _ensure_report_tz(dt).isoformat()
 
 
-def ensure_sent_log_schema(path: str) -> List[str]:
-    """Ensure ``sent_log.csv`` has the required schema and migrate legacy names."""
+def _ensure_sent_log_schema_locked(p: Path) -> List[str]:
+    """Ensure the schema while the caller holds the log's :class:`FileLock`."""
 
-    p = Path(path)
     ensure_parent(p)
     if not p.exists():
-        with p.open("w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(REQUIRED_FIELDS)
+        _atomic_write(p, (), list(REQUIRED_FIELDS))
         return list(REQUIRED_FIELDS)
 
     with p.open("r", newline="", encoding="utf-8") as f:
@@ -599,6 +597,9 @@ def ensure_sent_log_schema(path: str) -> List[str]:
         headers = reader.fieldnames or []
 
     mapped_headers = [LEGACY_MAP.get(h, h) for h in headers]
+    if mapped_headers == headers and all(field in headers for field in REQUIRED_FIELDS):
+        return list(headers)
+
     all_fields: List[str] = []
     for h in REQUIRED_FIELDS + mapped_headers:
         if h not in all_fields:
@@ -619,26 +620,35 @@ def ensure_sent_log_schema(path: str) -> List[str]:
     bak = p.with_suffix(p.suffix + ".bak")
     if not bak.exists():
         shutil.copy2(p, bak)
-    tmp_rows: Iterable[Dict[str, str]] = migrated
-    try:
-        _atomic_write(p, tmp_rows, all_fields)
-    except Exception:
-        if bak.exists():
-            shutil.copy2(bak, p)
-        raise
+    _atomic_write(p, migrated, all_fields)
     return all_fields
+
+
+def ensure_sent_log_schema(path: str) -> List[str]:
+    """Ensure ``sent_log.csv`` has the required schema and migrate legacy names."""
+
+    p = Path(path)
+    ensure_parent(p)
+    with FileLock(p):
+        return _ensure_sent_log_schema_locked(p)
 
 
 def _atomic_write(
     path: Path, rows: Iterable[Dict[str, str]], headers: List[str]
 ) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def load_sent_log(path: Path) -> Dict[str, datetime]:
@@ -704,7 +714,6 @@ def upsert_sent_log(
 
     p = Path(path)
     ensure_parent(p)
-    fieldnames = ensure_sent_log_schema(str(p))
     event_key = (key or "").strip() or canonical_for_history(email)
     tz = ZoneInfo(REPORT_TZ)
     ts_local = _ensure_report_tz(ts)
@@ -712,6 +721,7 @@ def upsert_sent_log(
     inserted = False
     updated = False
     with FileLock(p):
+        fieldnames = _ensure_sent_log_schema_locked(p)
         rows: List[Dict[str, str]] = []
         if p.exists():
             with p.open("r", newline="", encoding="utf-8") as f:
@@ -771,12 +781,7 @@ def upsert_sent_log(
         bak = p.with_suffix(p.suffix + ".bak")
         if p.exists() and not bak.exists():
             shutil.copy2(p, bak)
-        try:
-            _atomic_write(p, rows, fieldnames)
-        except Exception:
-            if bak.exists():
-                shutil.copy2(bak, p)
-            raise
+        _atomic_write(p, rows, fieldnames)
     return inserted, updated
 
 

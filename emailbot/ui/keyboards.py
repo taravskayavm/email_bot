@@ -24,6 +24,7 @@ _DEFAULT_ICONS = {
     "tourism": "✈️",
     "sociology": "🏛️",
     "politology": "🗳️",
+    "shooting": "🎯",
 }
 
 
@@ -112,6 +113,7 @@ groups_map = {
     "pedagogy": "Педагогика",
     "sociology": "Социология",
     "politology": "Политология",
+    "shooting": "Спортивная стрельба",
 }
 
 
@@ -129,15 +131,6 @@ def build_after_parse_combined_kb(
             InlineKeyboardButton(
                 "🧭 Выбрать направление",
                 callback_data="open_dirs",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                (
-                    "⏱️ Игнорировать 180 дней (ручная)"
-                    + (" ✅" if ignore_cooldown else "")
-                ),
-                callback_data="toggle_ignore_180",
             )
         ],
         [

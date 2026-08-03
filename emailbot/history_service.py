@@ -184,6 +184,16 @@ def get_last_sent_any_group(email: str) -> Tuple[str, datetime] | None:
     return history_store.last_send_any_group(norm_email)
 
 
+def get_sent_between(start_utc: datetime, end_utc: datetime) -> set[str]:
+    """Return recipients successfully contacted in the UTC time window."""
+
+    ensure_initialized()
+    return history_store.sent_emails_between(
+        _ensure_utc(start_utc),
+        _ensure_utc(end_utc),
+    )
+
+
 def filter_by_days(
     emails: Iterable[str], group: str, days: int
 ) -> tuple[list[str], list[str]]:
@@ -221,5 +231,6 @@ __all__ = [
     "filter_by_days",
     "get_last_sent",
     "get_last_sent_any_group",
+    "get_sent_between",
     "get_days_rule_default",
 ]

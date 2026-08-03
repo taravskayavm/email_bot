@@ -239,60 +239,45 @@ def format_error_details(details: Iterable[str]) -> str:
 
 
 def _format_period_header(period: str, date_start: date, date_end: date) -> str:
-    """Сформировать заголовок отчёта по отправкам в зависимости от периода."""
+    """Сформировать согласованный заголовок детального отчёта."""
 
-    # Формируем заголовок для ежедневного отчёта с точной датой.
     if period == "day":
-        return f"📅 Отчёт по отправкам за {date_start.strftime('%d.%m.%Y')}"
+        return (
+            "📊 Отчёт по отправленным письмам за день "
+            f"{date_start.strftime('%d.%m.%Y')}"
+        )
 
-    # Для остальных периодов готовим человеко-читаемое пояснение.
-    if period == "week":
-        prefix = "📅 Отчёт по отправкам за последние 7 дней"
-    elif period == "month":
-        prefix = "📅 Отчёт по отправкам за последние 30 дней"
-    elif period == "year":
-        prefix = "📅 Отчёт по отправкам за последние 365 дней"
-    else:
-        prefix = "📅 Отчёт по отправкам"
+    names = {
+        "week": "неделю",
+        "month": "месяц",
+        "year": "год",
+    }
+    label = names.get(period, "период")
+    interval = (
+        f"{date_start.strftime('%d.%m.%Y')}–{date_end.strftime('%d.%m.%Y')}"
+    )
+    return f"📊 Отчёт по отправленным письмам за {label} {interval}"
 
-    # Добавляем интервал дат в формате DD.MM.YYYY — DD.MM.YYYY.
-    interval = f"({date_start.strftime('%d.%m.%Y')} — {date_end.strftime('%d.%m.%Y')})"
-    # Объединяем заголовок и уточнение по интервалу.
-    return f"{prefix}\n{interval}"
+
+def _format_count(value: int) -> str:
+    """Format integer counts with spaces as thousands separators."""
+
+    return f"{value:,}".replace(",", " ")
 
 
 def format_send_stats_by_direction(stats: PeriodStats) -> str:
     """Отформатировать статистику отправок по направлениям за период."""
 
-    # Создаём список строк для накапливания итогового сообщения.
-    lines: list[str] = []
-    # Добавляем заголовок периода в начало отчёта.
-    lines.append(_format_period_header(stats.period, stats.date_start, stats.date_end))
-    # Добавляем пустую строку после заголовка для читаемости.
-    lines.append("")
-
-    # Проверяем наличие направлений в статистике.
+    lines = [_format_period_header(stats.period, stats.date_start, stats.date_end), ""]
     if stats.directions:
-        # Перебираем каждое направление для добавления статистики в отчёт.
         for direction in stats.directions:
-            # Формируем строку с количеством успешных и неудачных отправок по направлению.
-            lines.append(
-                f"• {direction.title}: {direction.success} успешно / {direction.failed} ошибок"
-            )
+            if direction.success > 0:
+                lines.append(f"{direction.title} — {_format_count(direction.success)}")
     else:
-        # Добавляем сообщение о пустой статистике, если направлений нет.
-        lines.append("За выбранный период не найдено отправок по направлениям.")
+        lines.append("За выбранный период отправок не найдено.")
 
-    # Вставляем пустую строку перед блоком итогов.
     lines.append("")
-    # Добавляем заголовок итоговой секции.
-    lines.append("Итого:")
-    # Формируем строку с общим числом успешных отправок.
-    lines.append(f"✅ Успешно отправлено: {stats.total_success}")
-    # Формируем строку с общим числом неудачных отправок.
-    lines.append(f"❌ Ошибок / недоставлено: {stats.total_failed}")
-
-    # Возвращаем готовый текст отчёта.
+    lines.append(f"Всего отправлено: {_format_count(stats.total_success)}")
     return "\n".join(lines)
 
 

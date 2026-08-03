@@ -195,6 +195,7 @@ from emailbot.ui.messages import (
     format_dispatch_start,
     format_error_details,
     format_parse_summary,
+    format_send_stats_by_direction,
 )
 
 from emailbot.config import ENABLE_INLINE_EMAIL_EDITOR
@@ -212,7 +213,12 @@ from . import extraction as _extraction
 from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .progress_watchdog import heartbeat, start_watchdog, start_heartbeat_pulse
-from .reporting import log_mass_filter_digest, count_blocked
+from .reporting import (
+    available_report_years,
+    count_blocked,
+    log_mass_filter_digest,
+    summarize_period_stats,
+)
 from . import settings
 from . import mass_state
 from .session_store import load_last_summary, save_last_summary
@@ -409,6 +415,9 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     clear_stop()
+    current_task = asyncio.current_task()
+    if current_task:
+        register_task(_build_parse_task_name(update, "url-command"), current_task)
 
     try:
         async with lock:
@@ -518,6 +527,9 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
     clear_stop()
+    current_task = asyncio.current_task()
+    if current_task:
+        register_task(_build_parse_task_name(update, "crawl-command"), current_task)
 
     try:
         emails, stats = await deep_extract_async(
@@ -588,8 +600,8 @@ async def _download_file(update: Update, download_dir: str) -> str:
     return path
 
 
-async def extract_emails_from_zip(path: str, *_, **__):
-    emails, stats = await asyncio.to_thread(_extraction.extract_any, path)
+async def extract_emails_from_zip(path: str, stop_event=None, *_, **__):
+    emails, stats = await asyncio.to_thread(_extraction.extract_any, path, stop_event)
     emails = set(e.lower().strip() for e in emails)
     extracted_files = [path]
     logger.info(
@@ -727,11 +739,11 @@ async def handle_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-def extract_from_uploaded_file(path: str):
+def extract_from_uploaded_file(path: str, stop_event=None):
     """Return normalized and raw e-mail candidates from ``path``."""
 
     logging.info("[FLOW] upload->text")
-    hits, stats = _extraction.extract_any(path, _return_hits=True)
+    hits, stats = _extraction.extract_any(path, stop_event, _return_hits=True)
     stats = stats or {}
 
     allowed: set[str] = set()
@@ -1167,6 +1179,7 @@ def _is_ignore_cooldown_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
 def init_state(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
     """Initialize session state for the current chat."""
     state = SessionState()
+    state.override_cooldown = _is_ignore_cooldown_enabled(context)
     context.chat_data[SESSION_KEY] = state
     context.chat_data["cancel_event"] = asyncio.Event()
     return state
@@ -1382,6 +1395,7 @@ _BUTTON_LABELS_RU: dict[str, str] = {
     "pedagogy": "🎓 Педагогика",
     "sociology": "🏛️ Социология",
     "politology": "🗳️ Политология",
+    "shooting": "🎯 Спортивная стрельба",
 }
 
 
@@ -1567,7 +1581,6 @@ def _group_keyboard(
 
     markup = _build_group_markup(context, prefix=prefix, selected=selected)
     if context and prefix.startswith("manual_group_"):
-        status = "ВКЛ" if context.user_data.get("ignore_180d") else "ВЫКЛ"
         keyboard: list[list[InlineKeyboardButton]] = [
             list(row) for row in (markup.inline_keyboard or [])
         ]
@@ -1576,14 +1589,6 @@ def _group_keyboard(
                 InlineKeyboardButton(
                     "✏️ Отправить правки текстом",
                     callback_data="enable_text_corrections",
-                )
-            ]
-        )
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    f"⚠️ Игнорировать 180 дней: {status}",
-                    callback_data="toggle_ignore_180d",
                 )
             ]
         )
@@ -2194,7 +2199,19 @@ async def selfcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as exc:  # pragma: no cover - defensive fallback
         await message.reply_text(f"❌ Не удалось выполнить диагностику: {exc}")
         return
-    await message.reply_text(format_selfcheck(checks))
+    await message.reply_text(
+        format_selfcheck(checks),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Сверить журнал с сервером",
+                        callback_data="diag_sync_imap",
+                    )
+                ]
+            ]
+        ),
+    )
 
 
 async def dedupe_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2266,11 +2283,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     init_state(context)
     keyboard = [
         ["📤 Массовая", "🛑 Стоп", "✉️ Ручная"],
-        ["🧹 Очистить список", "📄 Показать исключения"],
-        ["🚫 Добавить в исключения", "🧾 О боте"],
+        ["🧹 Очистить список", "📄 Показать блок-лист"],
+        ["🚫 Добавить в блок-лист", "🧾 О боте"],
         ["🧭 Сменить группу", "📈 Отчёты"],
-        ["🔄 Синхронизировать с сервером", "🚀 Игнорировать лимит"],
-        ["🔁 Синхронизировать бонсы", "🩺 Диагностика"],
+        ["🚀 Игнорировать лимит", "🩺 Диагностика"],
+        ["⚠️ Игнорировать правило 180 дней"],
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
@@ -2306,6 +2323,9 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stop_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the stop button by signalling cancellation."""
+    chat = update.effective_chat
+    if chat is not None:
+        request_cancel(chat.id)
     status = stop_and_status()
     event = context.chat_data.get("cancel_event")
     if event:
@@ -2322,7 +2342,7 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         (
             "Введите email или список email-адресов "
             "(через запятую/пробел/с новой строки), "
-            "которые нужно добавить в исключения:"
+            "которые нужно добавить в блок-лист:"
         )
     )
     context.user_data["awaiting_block_email"] = True
@@ -2334,10 +2354,10 @@ async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     dedupe_blocked_file()
     blocked = get_blocked_emails()
     if not blocked:
-        await update.message.reply_text("📄 Список исключений пуст.")
+        await update.message.reply_text("📄 Блок-лист пуст.")
     else:
         await update.message.reply_text(
-            "📄 В исключениях:\n" + "\n".join(sorted(blocked))
+            "📄 В блок-листе:\n" + "\n".join(sorted(blocked))
         )
 
 
@@ -2460,17 +2480,87 @@ async def force_send_command(
     )
 
 
+async def toggle_ignore_180_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Toggle the shared 180-day cooldown bypass from the main menu."""
+
+    enabled = not _is_ignore_cooldown_enabled(context)
+    context.user_data["ignore_180d"] = enabled
+    context.user_data["ignore_cooldown"] = enabled
+    get_state(context).override_cooldown = enabled
+
+    if enabled:
+        message = (
+            "⚠️ Игнорирование правила 180 дней включено для ручной и "
+            "массовой рассылки. Повторное нажатие отключит этот режим."
+        )
+    else:
+        message = "✅ Правило 180 дней снова включено."
+    await update.message.reply_text(message)
+    raise ApplicationHandlerStop
+
+
+_REPORT_MONTH_NAMES = (
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
+)
+
+
+def _report_main_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📆 За день", callback_data="report_day"),
+                InlineKeyboardButton("🗓 За неделю", callback_data="report_week"),
+            ],
+            [
+                InlineKeyboardButton("🗓 За месяц", callback_data="report_month"),
+                InlineKeyboardButton("📅 За год", callback_data="report_year"),
+            ],
+        ]
+    )
+
+
+def _report_year_markup(years: Iterable[int], *, for_month: bool) -> InlineKeyboardMarkup:
+    prefix = "report_month_year_" if for_month else "report_year_value_"
+    buttons = [
+        InlineKeyboardButton(str(year), callback_data=f"{prefix}{year}")
+        for year in sorted(set(years))
+    ]
+    rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="report_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _report_month_markup(year: int) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            name,
+            callback_data=f"report_month_value_{year}_{month:02d}",
+        )
+        for month, name in enumerate(_REPORT_MONTH_NAMES, start=1)
+    ]
+    rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="report_month")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt the user to select a reporting period."""
 
-    keyboard = [
-        [InlineKeyboardButton("📆 День", callback_data="report_day")],
-        [InlineKeyboardButton("🗓 Неделя", callback_data="report_week")],
-        [InlineKeyboardButton("🗓 Месяц", callback_data="report_month")],
-        [InlineKeyboardButton("📅 Год", callback_data="report_year")],
-    ]
     await update.message.reply_text(
-        "Выберите период отчёта:", reply_markup=InlineKeyboardMarkup(keyboard)
+        "📊 Выберите отчёт:", reply_markup=_report_main_markup()
     )
 
 
@@ -2544,45 +2634,109 @@ def get_report(period: str = "day") -> dict[str, object]:
 
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send the selected report to the user."""
+    """Navigate report selectors or render the selected detailed report."""
 
     query = update.callback_query
     await query.answer()
-    period = query.data.replace("report_", "")
-    mapping = {
-        "day": "Отчёт за день",
-        "week": "Отчёт за неделю",
-        "month": "Отчёт за месяц",
-        "year": "Отчёт за год",
-    }
-    report = get_report(period)
-    message = report.get("message")
-    if message:
-        body = str(message)
+    data = str(query.data or "")
+    target = query.message
+
+    if data == "report_menu":
+        await _safe_edit_message(
+            target, text="📊 Выберите отчёт:", reply_markup=_report_main_markup()
+        )
+        return
+
+    if data in {"report_month", "report_year"}:
+        years = await asyncio.to_thread(available_report_years)
+        for_month = data == "report_month"
+        prompt = "📅 Выберите год, затем месяц:" if for_month else "📅 Выберите год отчёта:"
+        await _safe_edit_message(
+            target,
+            text=prompt,
+            reply_markup=_report_year_markup(years, for_month=for_month),
+        )
+        return
+
+    month_year_match = re.fullmatch(r"report_month_year_(\d{4})", data)
+    if month_year_match:
+        selected_year = int(month_year_match.group(1))
+        await _safe_edit_message(
+            target,
+            text=f"📅 Выберите месяц — {selected_year}:",
+            reply_markup=_report_month_markup(selected_year),
+        )
+        return
+
+    period: str | None = None
+    selected_year: int | None = None
+    selected_month: int | None = None
+    if data == "report_day":
+        period = "day"
+    elif data == "report_week":
+        period = "week"
     else:
-        body = f"Успешных: {report.get('sent', 0)}\nОшибок: {report.get('errors', 0)}"
-    title = mapping.get(period, period)
-    if period == "day":
-        title = f"{title} ({report.get('tz', report_service.REPORT_TZ_NAME)})"
-    await _safe_edit_message(query, text=f"📊 {title}:\n{body}")
+        month_match = re.fullmatch(r"report_month_value_(\d{4})_(\d{2})", data)
+        year_match = re.fullmatch(r"report_year_value_(\d{4})", data)
+        if month_match:
+            period = "month"
+            selected_year = int(month_match.group(1))
+            selected_month = int(month_match.group(2))
+        elif year_match:
+            period = "year"
+            selected_year = int(year_match.group(1))
+
+    if period is None or (selected_month is not None and not 1 <= selected_month <= 12):
+        await _safe_edit_message(
+            target,
+            text="Не удалось определить период отчёта.",
+            reply_markup=_report_main_markup(),
+        )
+        return
+
+    stats = await asyncio.to_thread(
+        summarize_period_stats,
+        period,
+        year=selected_year,
+        month=selected_month,
+    )
+    await _safe_edit_message(
+        target,
+        text=format_send_stats_by_direction(stats),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К отчётам", callback_data="report_menu")]]
+        ),
+    )
 
 
 async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Compare the local sent log with IMAP and report discrepancies."""
 
-    message = update.message
+    message = update.effective_message
     if message is None:
         return
 
-    await message.reply_text("⏳ Сверяем локальный лог и IMAP…")
-
-    loop = asyncio.get_running_loop()
+    clear_stop()
+    job_name = _build_parse_task_name(update, "imap-reconcile")
+    current_task = asyncio.current_task()
+    if current_task:
+        register_task(job_name, current_task)
     try:
-        result = await loop.run_in_executor(None, reconcile_csv_vs_imap)
+        await message.reply_text("⏳ Сверяем локальный лог и IMAP…")
+        result = await asyncio.to_thread(reconcile_csv_vs_imap)
+    except asyncio.CancelledError:
+        try:
+            await message.reply_text("🛑 Сверка с сервером остановлена.")
+        except Exception:
+            pass
+        return
     except Exception as exc:
         logger.exception("reconcile_csv_vs_imap failed: %s", exc)
         await message.reply_text(f"❌ Ошибка сверки: {exc}")
         return
+    finally:
+        if current_task:
+            unregister_task(job_name, current_task)
 
     summary_text = build_summary_text(result)
     await message.reply_text(summary_text)
@@ -2602,6 +2756,18 @@ async def sync_imap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     for file in attachments:
         await message.reply_document(file)
+
+
+async def sync_imap_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Run the IMAP reconciliation from the diagnostics menu."""
+
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    await sync_imap_command(update, context)
 
 
 async def retry_last_command(
@@ -2651,6 +2817,7 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Clear stored e-mails and reset the session state."""
 
     chat_id = update.effective_chat.id
+    ignore_cooldown = _is_ignore_cooldown_enabled(context)
     init_state(context)
     edit_message = context.user_data.get("bulk_edit_message")
     if edit_message:
@@ -2661,6 +2828,9 @@ async def reset_email_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception:
             pass
     context.user_data.clear()
+    if ignore_cooldown:
+        context.user_data["ignore_180d"] = True
+        context.user_data["ignore_cooldown"] = True
     context.chat_data["batch_id"] = None
     mass_state.clear_batch(chat_id)
     # Сброс ожиданий ручного режима, чтобы не ловить "Не нашла корректных адресов…"
@@ -2847,6 +3017,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if current_task:
         register_task(job_name, current_task)
         asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
+    cancel_event = context.chat_data.get("cancel_event")
 
     progress_msg = None
     file_path: str | None = None
@@ -2894,7 +3065,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
             if (file_path or "").lower().endswith(".zip"):
                 allowed, extracted_files, loose, stats = await extract_emails_from_zip(
-                    file_path
+                    file_path, cancel_event
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
@@ -2906,6 +3077,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 allowed, loose, stats = await asyncio.to_thread(
                     extract_from_uploaded_file,
                     file_path,
+                    cancel_event,
                 )
                 await heartbeat()
                 allowed_all.update(allowed)
@@ -3107,14 +3279,16 @@ async def proceed_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def toggle_ignore_180(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Toggle the 180-day cooldown bypass for manual sends."""
+    """Handle the legacy inline toggle using the shared cooldown state."""
 
     query = update.callback_query
     if not query:
         return
 
-    current = bool(context.user_data.get("ignore_cooldown"))
-    context.user_data["ignore_cooldown"] = not current
+    enabled = not _is_ignore_cooldown_enabled(context)
+    context.user_data["ignore_cooldown"] = enabled
+    context.user_data["ignore_180d"] = enabled
+    get_state(context).override_cooldown = enabled
 
     state = context.chat_data.get(SESSION_KEY)
     extra_rows = _after_parse_extra_rows(state)
@@ -3136,7 +3310,7 @@ async def toggle_ignore_180(
     except BadRequest:
         # Fallback to posting a message if answering fails
         await query.message.reply_text(
-            f"Режим «Игнорировать 180 дней (ручная)» теперь {status}."
+            f"Режим «Игнорировать правило 180 дней» теперь {status}."
         )
 
 
@@ -4017,7 +4191,6 @@ async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["awaiting_manual_email"] = True
     context.user_data.pop("manual_emails", None)
     context.user_data.pop("text_corrections", None)
-    context.user_data["ignore_180d"] = False
     await query.message.reply_text(
         "Введите email или список email-адресов (через запятую/пробел/с новой строки):"
     )
@@ -4101,6 +4274,10 @@ async def route_text_message(
 
     raw_text = message.text or ""
     text = raw_text.strip()
+
+    if context.user_data.get("awaiting_block_email"):
+        await handle_text(update, context)
+        raise ApplicationHandlerStop
 
     urls: list[str] = []
     entities = getattr(message, "entities", None)
@@ -4707,7 +4884,6 @@ async def prompt_manual_email(
     context.chat_data["manual_emails"] = []
     context.chat_data["manual_group"] = None
     context.chat_data["awaiting_manual_emails"] = True
-    context.user_data["ignore_180d"] = False
     context.user_data.pop("text_corrections", None)
     await update.message.reply_text(
         (
@@ -5058,8 +5234,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = raw_text
     has_url = _message_has_url(message, raw_text)
 
-    if await _handle_bulk_edit_text(update, context, text):
-        return
     if context.user_data.get("awaiting_block_email"):
         clean = _preclean_text_for_emails(text)
         clear_stop()
@@ -5067,9 +5241,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         emails = {normalize_email(x) for x in raw_emails if "@" in x}
         added = [e for e in emails if add_blocked_email(e)]
         await update.message.reply_text(
-            f"Добавлено в исключения: {len(added)}" if added else "Ничего не добавлено."
+            f"Добавлено в блок-лист: {len(added)}"
+            if added
+            else "Ничего не добавлено в блок-лист."
         )
         context.user_data["awaiting_block_email"] = False
+        return
+    if await _handle_bulk_edit_text(update, context, text):
         return
     if context.user_data.get("awaiting_manual_email"):
         if has_url:
@@ -6572,9 +6750,10 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     app_for_tasks = getattr(context, "application", None)
     if app_for_tasks is not None:
-        app_for_tasks.create_task(_runner())
+        dispatch_task = app_for_tasks.create_task(_runner())
     else:
-        asyncio.create_task(_runner())
+        dispatch_task = asyncio.create_task(_runner())
+    register_task(f"bulk-dispatch:{batch_id}", dispatch_task)
 
 
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6606,12 +6785,14 @@ __all__ = [
     "show_blocked_list",
     "prompt_change_group",
     "force_send_command",
+    "toggle_ignore_180_menu",
     "report_command",
     "url_command",
     "crawl_command",
     "report_callback",
     "on_diagnostics",
     "sync_imap_command",
+    "sync_imap_callback",
     "reset_email_list",
     "diag",
     "selfcheck_command",

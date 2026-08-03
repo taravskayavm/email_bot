@@ -32,5 +32,5 @@ def test_today_and_180(tmp_path, monkeypatch):
     clear_recent_sent_cache()
 
     sent_today = get_sent_today()
-    assert "first.last@gmail.com" in sent_today
+    assert "firstlast@gmail.com" in sent_today
     assert was_sent_within("first.last+tag@gmail.com", days=180) is True

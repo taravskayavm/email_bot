@@ -27,6 +27,7 @@ groups_map = {
     "pedagogy": "Педагогика",
     "sociology": "Социология",
     "politology": "Политология",
+    "shooting": "Спортивная стрельба",
 }
 
 
@@ -112,15 +113,6 @@ def build_after_parse_combined_kb(
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
         [InlineKeyboardButton("🧭 Выбрать направление", callback_data="open_dirs")],
-        [
-            InlineKeyboardButton(
-                (
-                    "⏱️ Игнорировать 180 дней (ручная)"
-                    + (" ✅" if ignore_cooldown else "")
-                ),
-                callback_data="toggle_ignore_180",
-            )
-        ],
         [InlineKeyboardButton("✏️ Отправить правки текстом", callback_data="bulk:txt:start")],
     ]
     if ENABLE_INLINE_EMAIL_EDITOR:

@@ -347,6 +347,12 @@ def main() -> None:
     )
     app.add_handler(
         MessageHandler(
+            filters.TEXT & filters.Regex("^⚠️ Игнорировать правило 180 дней$"),
+            bot_handlers.toggle_ignore_180_menu,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
             filters.TEXT & filters.Regex("^🩺"), bot_handlers.selfcheck_command
         )
     )
@@ -439,6 +445,11 @@ def main() -> None:
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.report_callback, pattern="^report_")
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            bot_handlers.sync_imap_callback, pattern="^diag_sync_imap$"
+        )
     )
     app.add_handler(
         CallbackQueryHandler(bot_handlers.show_numeric_list, pattern="^show_numeric$")

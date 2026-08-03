@@ -15,7 +15,31 @@ from emailbot import messaging
 from emailbot import unsubscribe
 from emailbot import messaging_utils as mu
 from emailbot.reporting import build_mass_report_text
+from emailbot.run_control import clear_stop, request_stop
 from emailbot.settings import REPORT_TZ
+
+
+@pytest.mark.asyncio
+async def test_background_task_cancellation_reaches_inner_coroutine():
+    clear_stop()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def long_job():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+
+    task = messaging.create_task_with_logging(long_job(), task_name="cancel-test")
+    await started.wait()
+    request_stop()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    clear_stop()
 
 
 @pytest.fixture(autouse=True)
@@ -345,6 +369,36 @@ def test_count_sent_today_ignores_external(tmp_path, monkeypatch):
         })
     assert messaging.count_sent_today() == 1
     assert messaging.get_sent_today() == {"b@example.com"}
+
+
+def test_get_sent_today_uses_history_db_when_csv_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "missing.csv"))
+    now = datetime.now(timezone.utc)
+    messaging.history_service.mark_sent("db-only@example.com", "group", "m1", now)
+
+    assert messaging.get_sent_today() == {"db-only@example.com"}
+
+
+def test_get_sent_today_uses_email_instead_of_event_key(tmp_path, monkeypatch):
+    log = tmp_path / "sent_log.csv"
+    monkeypatch.setattr(messaging, "LOG_FILE", str(log))
+    with open(log, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["key", "email", "last_sent_at", "source", "status"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "key": "event-uuid",
+                "email": "recipient@example.com",
+                "last_sent_at": datetime.now(timezone.utc).isoformat(),
+                "source": "group",
+                "status": "ok",
+            }
+        )
+
+    assert messaging.get_sent_today() == {"recipient@example.com"}
 
 
 def test_limit_not_triggered_by_external(tmp_path, monkeypatch):

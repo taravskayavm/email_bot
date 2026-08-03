@@ -199,7 +199,7 @@ async def test_zip_handler_signature(monkeypatch, tmp_path: Path):
 
     called = {}
 
-    async def fake(path):
+    async def fake(path, stop_event=None):
         called["arg"] = path
         return set(), [], set(), {}
 
@@ -207,4 +207,3 @@ async def test_zip_handler_signature(monkeypatch, tmp_path: Path):
 
     await bh.handle_document(update, ctx)
     assert called["arg"].endswith("data.zip")
-

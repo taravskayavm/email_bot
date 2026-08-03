@@ -59,5 +59,9 @@
   "politology": {
     "title": "Политология",
     "signature": "general"
+  },
+  "shooting": {
+    "title": "Спортивная стрельба",
+    "signature": "old"
   }
 }

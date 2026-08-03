@@ -141,6 +141,21 @@ def _iter_send_stats() -> Iterator[dict[str, object]]:
             yield {"ts_utc": ts_utc, "status": status}
 
 
+def _history_success_count(start_local: dt.datetime, end_local: dt.datetime) -> int:
+    """Return the durable successful-recipient count for a local time window."""
+
+    try:
+        from emailbot import history_service
+
+        sent = history_service.get_sent_between(
+            start_local.astimezone(dt.timezone.utc),
+            end_local.astimezone(dt.timezone.utc),
+        )
+        return len(sent)
+    except Exception:
+        return 0
+
+
 
 def summarize_day_local(today_local: dt.date | None = None) -> tuple[int, int]:
     """Return counts of successful and failed deliveries for the local day."""
@@ -164,6 +179,11 @@ def summarize_day_local(today_local: dt.date | None = None) -> tuple[int, int]:
             ok += 1
         elif status in _ERROR_STATUSES:
             err += 1
+    # CSV and JSONL are compatibility sources and can be truncated or reset.
+    # SQLite is the durable source used by the live daily limit.  Taking the
+    # larger successful count preserves legacy-only events without double
+    # counting the same deliveries across stores.
+    ok = max(ok, _history_success_count(start_local, end_local))
     return ok, err
 
 

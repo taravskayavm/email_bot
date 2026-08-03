@@ -8,10 +8,11 @@ import json
 import logging
 # Используем os для работы с путями и переменными окружения.
 import os
+from collections import defaultdict
 # Поддерживаем как текущие отметки времени, так и вычисления периодов отчётности.
 from dataclasses import dataclass
 # Работаем с датами и временными диапазонами отчётов.
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 # Оперируем путями к файлам статистики и конфигурации.
 from pathlib import Path
 # Используем расширенные типы аннотаций для повышения читаемости кода.
@@ -352,55 +353,72 @@ def _event_success_failed(event: Mapping[str, object]) -> Tuple[int, int]:
     return 0, 0
 
 
-def _period_bounds(period: str, now: datetime | None = None) -> Tuple[datetime, datetime]:
-    """
-    Рассчитать границы периода [start, end) в часовом поясе Москвы.
+def _as_moscow(value: datetime | None = None) -> datetime:
+    """Return an aware Moscow timestamp."""
 
-    period:
-      "day"   – текущий день;
-      "week"  – последние 7 дней (включая сегодня);
-      "month" – последние 30 дней (включая сегодня);
-      "year"  – последние 365 дней (включая сегодня).
-    """
+    if value is None:
+        return datetime.now(tz=MOSCOW_TZ)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=MOSCOW_TZ)
+    return value.astimezone(MOSCOW_TZ)
 
-    # Если текущая отметка времени не передана, берём актуальное время в Москве.
-    if now is None:
-        now_msk = datetime.now(tz=MOSCOW_TZ)
-    else:
-        # Если временная зона отсутствует, принудительно задаём московскую.
-        if now.tzinfo is None:
-            now_msk = now.replace(tzinfo=MOSCOW_TZ)
-        else:
-            # В противном случае конвертируем время в московскую зону.
-            now_msk = now.astimezone(MOSCOW_TZ)
 
-    # Выделяем только дату для дальнейших вычислений диапазона.
-    today = now_msk.date()
+def _period_bounds(
+    period: str,
+    now: datetime | None = None,
+    *,
+    year: int | None = None,
+    month: int | None = None,
+) -> Tuple[datetime, datetime]:
+    """Return calendar bounds ``[start, end)`` in Moscow time."""
 
-    # Подбираем границы периода в зависимости от значения аргумента.
+    today = _as_moscow(now).date()
     if period == "day":
         start_date = today
         end_date = today + timedelta(days=1)
     elif period == "week":
-        start_date = today - timedelta(days=6)
-        end_date = today + timedelta(days=1)
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=5)
     elif period == "month":
-        start_date = today - timedelta(days=29)
-        end_date = today + timedelta(days=1)
+        selected_year = year if year is not None else today.year
+        selected_month = month if month is not None else today.month
+        if not 1 <= selected_month <= 12:
+            raise ValueError(f"Invalid month: {selected_month!r}")
+        start_date = date(selected_year, selected_month, 1)
+        if selected_month == 12:
+            end_date = date(selected_year + 1, 1, 1)
+        else:
+            end_date = date(selected_year, selected_month + 1, 1)
     elif period == "year":
-        start_date = today - timedelta(days=364)
-        end_date = today + timedelta(days=1)
+        selected_year = year if year is not None else today.year
+        start_date = date(selected_year, 1, 1)
+        end_date = date(selected_year + 1, 1, 1)
     else:
-        # Сообщаем об ошибке при неизвестном периоде.
         raise ValueError(f"Unknown period: {period!r}")
 
-    # Собираем начало периода как datetime в московской зоне.
-    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=MOSCOW_TZ)
-    # Аналогично рассчитываем верхнюю границу периода.
-    end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=MOSCOW_TZ)
-
-    # Возвращаем полуинтервал [start_dt, end_dt).
+    start_dt = datetime.combine(start_date, dt_time.min, tzinfo=MOSCOW_TZ)
+    end_dt = datetime.combine(end_date, dt_time.min, tzinfo=MOSCOW_TZ)
     return start_dt, end_dt
+
+
+def _working_end(weekday: int) -> dt_time | None:
+    """Return the exclusive end of the working window for a weekday."""
+
+    if 0 <= weekday <= 3:
+        return dt_time(20, 0)
+    if weekday == 4:
+        return dt_time(17, 30)
+    return None
+
+
+def is_working_datetime(value: datetime) -> bool:
+    """Whether ``value`` falls into the agreed Monday-Friday schedule."""
+
+    local = _as_moscow(value)
+    end = _working_end(local.weekday())
+    if end is None:
+        return False
+    return dt_time(8, 0) <= local.time().replace(tzinfo=None) < end
 
 
 def _default_send_stats_path() -> Path:
@@ -410,10 +428,12 @@ def _default_send_stats_path() -> Path:
     При необходимости можно заменить на конфиг из config.py.
     """
 
-    # Определяем корень проекта по положению текущего файла.
+    raw = os.getenv("SEND_STATS_PATH", "var/send_stats.jsonl")
+    expanded = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if expanded.is_absolute():
+        return expanded
     project_root = Path(__file__).resolve().parent.parent
-    # Формируем полный путь к файлу статистики отправок.
-    return project_root / "send_stats.jsonl"
+    return project_root / expanded
 
 
 def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, object]]:
@@ -453,7 +473,7 @@ def _iter_send_events(path: str | Path | None = None) -> Iterable[Mapping[str, o
     return _gen()
 
 
-def summarize_period_stats(period: str) -> PeriodStats:
+def _summarize_period_stats_legacy(period: str) -> PeriodStats:
     """
     Подсчитать статистику отправок за заданный период по направлениям.
 
@@ -542,3 +562,193 @@ def summarize_period_stats(period: str) -> PeriodStats:
         # Возвращаем общее число неудачных отправок.
         total_failed=total_failed,
     )
+
+
+_SUCCESS_STATUSES = {"ok", "sent", "success", "synced"}
+_DIRECTION_ALIASES = {
+    "география": "geography",
+    "психология": "psychology",
+    "спорт": "sport",
+}
+_LEGACY_DIRECTION_TITLES = {"bioinformatics": "Биоинформатика"}
+_DUPLICATE_WINDOW = timedelta(seconds=60)
+
+
+def _canonical_direction_code(value: object) -> str:
+    code = str(value or "").strip().casefold()
+    return _DIRECTION_ALIASES.get(code, code)
+
+
+def _direction_title(code: str) -> str | None:
+    return resolve_direction_title(code) or _LEGACY_DIRECTION_TITLES.get(code)
+
+
+def _iter_history_events(
+    start_msk: datetime, end_msk: datetime
+) -> Iterable[Mapping[str, object]]:
+    """Yield durable and legacy successful send rows for the calendar window."""
+
+    try:
+        from emailbot import history_service, history_store
+
+        history_service.ensure_initialized()
+        connection = history_store._connect()
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Unable to open send history for reporting", exc_info=True
+        )
+        return []
+
+    start_utc = start_msk.astimezone(timezone.utc).isoformat()
+    end_utc = end_msk.astimezone(timezone.utc).isoformat()
+    events: list[Mapping[str, object]] = []
+    try:
+        rows = connection.execute(
+            """
+            SELECT email_norm, group_key, sent_at_utc, message_id, smtp_result
+            FROM send_history
+            WHERE julianday(sent_at_utc) >= julianday(?)
+              AND julianday(sent_at_utc) < julianday(?)
+              AND COALESCE(LOWER(smtp_result), 'ok')
+                  IN ('ok', 'sent', 'success', 'synced')
+            """,
+            (start_utc, end_utc),
+        )
+        for email, group, sent_at, message_id, status in rows:
+            events.append(
+                {
+                    "email": email,
+                    "group": group,
+                    "ts": sent_at,
+                    "message_id": message_id,
+                    "status": status or "ok",
+                }
+            )
+
+        has_legacy_sent = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sent'"
+        ).fetchone()
+        if has_legacy_sent:
+            legacy_rows = connection.execute(
+                """
+                SELECT email, grp, sent_at, msg_id
+                FROM sent
+                WHERE julianday(sent_at) >= julianday(?)
+                  AND julianday(sent_at) < julianday(?)
+                """,
+                (start_utc, end_utc),
+            )
+            for email, group, sent_at, message_id in legacy_rows:
+                events.append(
+                    {
+                        "email": email,
+                        "group": group,
+                        "ts": sent_at,
+                        "message_id": message_id,
+                        "status": "ok",
+                    }
+                )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Unable to read send history for reporting", exc_info=True
+        )
+    finally:
+        connection.close()
+    return events
+
+
+def _report_source_events(
+    start_msk: datetime, end_msk: datetime
+) -> Iterable[Mapping[str, object]]:
+    """Combine durable history with the JSONL compatibility log."""
+
+    yield from _iter_history_events(start_msk, end_msk)
+    yield from _iter_send_events()
+
+
+def summarize_period_stats(
+    period: str,
+    *,
+    year: int | None = None,
+    month: int | None = None,
+    now: datetime | None = None,
+) -> PeriodStats:
+    """Count successful sends by direction within calendar working windows."""
+
+    now_msk = _as_moscow(now)
+    start_msk, calendar_end_msk = _period_bounds(
+        period, now_msk, year=year, month=month
+    )
+    scan_end_msk = min(calendar_end_msk, now_msk + timedelta(microseconds=1))
+
+    buckets: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+    if scan_end_msk > start_msk:
+        for event_number, event in enumerate(
+            _report_source_events(start_msk, scan_end_msk)
+        ):
+            ts = _parse_event_timestamp(event)
+            if ts is None:
+                continue
+            ts_msk = ts.astimezone(MOSCOW_TZ)
+            if not (start_msk <= ts_msk < scan_end_msk):
+                continue
+            status = str(event.get("status") or event.get("result") or "").casefold()
+            if status not in _SUCCESS_STATUSES:
+                continue
+            code = _canonical_direction_code(event.get("group"))
+            if not code or not _direction_title(code):
+                continue
+            email = str(event.get("email") or "").strip().casefold()
+            if not email:
+                email = f"__missing_email_{event_number}"
+            buckets[(email, code)].append(ts_msk)
+
+    counts: dict[str, int] = defaultdict(int)
+    for (_email, code), timestamps in buckets.items():
+        previous: datetime | None = None
+        for timestamp in sorted(timestamps):
+            is_new_send = (
+                previous is None or timestamp - previous > _DUPLICATE_WINDOW
+            )
+            previous = timestamp
+            if is_new_send and is_working_datetime(timestamp):
+                counts[code] += 1
+
+    directions = sorted(
+        (
+            DirectionStats(
+                code=code,
+                title=_direction_title(code) or code,
+                success=count,
+                failed=0,
+            )
+            for code, count in counts.items()
+            if count > 0
+        ),
+        key=lambda item: (-item.success, item.title.casefold()),
+    )
+    return PeriodStats(
+        period=period,
+        date_start=start_msk.date(),
+        date_end=(calendar_end_msk - timedelta(days=1)).date(),
+        directions=directions,
+        total_success=sum(item.success for item in directions),
+        total_failed=0,
+    )
+
+
+def available_report_years(now: datetime | None = None) -> list[int]:
+    """Return years containing reportable directional sends, plus the current year."""
+
+    now_msk = _as_moscow(now)
+    start = datetime(1970, 1, 1, tzinfo=MOSCOW_TZ)
+    years = {now_msk.year}
+    for event in _report_source_events(start, now_msk + timedelta(microseconds=1)):
+        ts = _parse_event_timestamp(event)
+        if ts is None or not is_working_datetime(ts):
+            continue
+        status = str(event.get("status") or event.get("result") or "").casefold()
+        code = _canonical_direction_code(event.get("group"))
+        if status in _SUCCESS_STATUSES and code and _direction_title(code):
+            years.add(ts.astimezone(MOSCOW_TZ).year)
+    return sorted(years)

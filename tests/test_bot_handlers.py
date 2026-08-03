@@ -118,6 +118,65 @@ def test_start_initializes_state():
     assert update.message.replies[0].startswith("Можно загрузить данные")
 
 
+def test_main_menu_has_shared_cooldown_toggle():
+    update = DummyUpdate(text="/start")
+    ctx = DummyContext()
+
+    run(start(update, ctx))
+
+    markup = update.message.reply_markups[0]
+    labels = [
+        getattr(button, "text", button)
+        for row in markup.keyboard
+        for button in row
+    ]
+    assert "⚠️ Игнорировать правило 180 дней" in labels
+    assert "🚫 Добавить в блок-лист" in labels
+    assert "📄 Показать блок-лист" in labels
+    assert "🔄 Синхронизировать с сервером" not in labels
+    assert "🔁 Синхронизировать бонсы" not in labels
+
+
+def test_main_menu_cooldown_toggle_updates_shared_state():
+    update = DummyUpdate(text="⚠️ Игнорировать правило 180 дней")
+    ctx = DummyContext()
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.toggle_ignore_180_menu(update, ctx))
+
+    assert ctx.user_data["ignore_180d"] is True
+    assert ctx.user_data["ignore_cooldown"] is True
+    assert ctx.chat_data[SESSION_KEY].override_cooldown is True
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.toggle_ignore_180_menu(update, ctx))
+
+    assert ctx.user_data["ignore_180d"] is False
+    assert ctx.user_data["ignore_cooldown"] is False
+    assert ctx.chat_data[SESSION_KEY].override_cooldown is False
+
+
+def test_menu_stop_signals_global_and_chat_cancellation(monkeypatch):
+    update = DummyUpdate(text="🛑 Стоп", chat_id=123)
+    ctx = DummyContext()
+    active_event = asyncio.Event()
+    ctx.chat_data["cancel_event"] = active_event
+    cancelled_chats: list[int] = []
+    monkeypatch.setattr(bh, "request_cancel", cancelled_chats.append)
+    monkeypatch.setattr(
+        bh,
+        "stop_and_status",
+        lambda: {"stopped": True, "running": {"manual_mass_send": "running"}},
+    )
+
+    run(bh.stop_process(update, ctx))
+
+    assert cancelled_chats == [123]
+    assert active_event.is_set()
+    assert ctx.chat_data["cancel_event"] is not active_event
+    assert update.message.replies[0].startswith("🛑 Останавливаю все процессы")
+
+
 def test_handle_document_processes_file(monkeypatch, tmp_path):
     update = DummyUpdate(document=DummyDocument())
     ctx = DummyContext()
@@ -126,7 +185,7 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bh,
         "extract_from_uploaded_file",
-        lambda path: (
+        lambda path, stop_event=None: (
             {"good@example.com", "123@site.com"},
             {"foreign@example.de"},
             {},
@@ -255,7 +314,37 @@ def test_handle_text_add_block(monkeypatch):
 
     assert ctx.user_data["awaiting_block_email"] is False
     assert added == ["test@example.com"]
-    assert update.message.replies[0] == "Добавлено в исключения: 1"
+    assert update.message.replies[0] == "Добавлено в блок-лист: 1"
+
+
+def test_route_text_message_adds_to_blocklist(monkeypatch):
+    update = DummyUpdate(text="First@example.com second@example.com")
+    ctx = DummyContext()
+    ctx.user_data["awaiting_block_email"] = True
+    added: list[str] = []
+    monkeypatch.setattr(bh, "add_blocked_email", lambda email: not added.append(email))
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.route_text_message(update, ctx))
+
+    assert sorted(added) == ["first@example.com", "second@example.com"]
+    assert ctx.user_data["awaiting_block_email"] is False
+    assert update.message.replies == ["Добавлено в блок-лист: 2"]
+
+
+def test_selfcheck_offers_server_reconciliation(monkeypatch):
+    update = DummyUpdate(text="🩺 Диагностика")
+    ctx = DummyContext()
+    monkeypatch.setattr(bh, "run_selfcheck", lambda: [])
+    monkeypatch.setattr(bh, "format_selfcheck", lambda checks: "diagnostics")
+
+    run(bh.selfcheck_command(update, ctx))
+
+    markup = update.message.reply_markups[-1]
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert [(button.text, button.callback_data) for button in buttons] == [
+        ("🔄 Сверить журнал с сервером", "diag_sync_imap")
+    ]
 
 
 def test_handle_text_manual_emails():
@@ -516,7 +605,7 @@ def test_manual_input_parsing_accepts_gmail(caplog):
     assert any("Manual input parsing" in r.message for r in caplog.records)
 
 
-def test_manual_input_keyboard_has_toggle():
+def test_manual_input_keyboard_has_no_cooldown_toggle():
     update = DummyUpdate(text="user@example.com")
     ctx = DummyContext()
     ctx.user_data["awaiting_manual_email"] = True
@@ -524,7 +613,7 @@ def test_manual_input_keyboard_has_toggle():
     markup = update.message.reply_markups[-1]
     assert isinstance(markup, InlineKeyboardMarkup)
     labels = [btn.text for row in markup.inline_keyboard for btn in row]
-    assert any("Игнорировать 180 дней" in text for text in labels)
+    assert not any("Игнорировать 180 дней" in text for text in labels)
 
 
 @pytest.mark.asyncio

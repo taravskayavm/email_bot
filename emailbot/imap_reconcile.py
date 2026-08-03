@@ -10,6 +10,7 @@ import imaplib
 from email.utils import getaddresses, parsedate_to_datetime
 
 from .settings import REPORT_TZ, RECONCILE_SINCE_DAYS
+from .run_control import should_stop
 
 IMAP_HOST = os.getenv("IMAP_HOST", "imap.mail.ru")
 IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
@@ -37,6 +38,8 @@ def _load_csv_set(tz: ZoneInfo, since_days: int) -> Set[Tuple[str, datetime]]:
     with open(LOG_FILE, encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
+            if should_stop():
+                break
             status = (row.get("status") or "").strip().lower()
             if status not in {"ok", "sent", "success"}:
                 continue
@@ -84,6 +87,8 @@ def _imap_fetch_since(since_days: int) -> List[bytes]:
         ids = data[0].split()
         headers: List[bytes] = []
         for mid in ids:
+            if should_stop():
+                break
             typ, msg_data = conn.fetch(mid, "(BODY.PEEK[HEADER.FIELDS (DATE TO)])")
             if typ == "OK" and msg_data:
                 for part in msg_data:
@@ -121,6 +126,8 @@ def _parse_to_date(headers_bytes: bytes, tz: ZoneInfo) -> Tuple[List[str], datet
 def _imap_to_set(tz: ZoneInfo, since_days: int) -> Set[Tuple[str, datetime]]:
     items: Set[Tuple[str, datetime]] = set()
     for headers in _imap_fetch_since(since_days):
+        if should_stop():
+            break
         addresses, dt_local = _parse_to_date(headers, tz)
         if not dt_local:
             continue

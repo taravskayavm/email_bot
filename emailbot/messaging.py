@@ -83,7 +83,7 @@ from .messaging_utils import (
 )
 from . import suppress_list
 from .suppress_list import add_to_blocklist
-from .run_control import register_task
+from .run_control import register_task, should_stop
 from .cancel import is_cancelled
 from .net_imap import imap_connect_ssl, get_imap_timeout
 from services.templates import get_template, get_template_by_path
@@ -699,6 +699,7 @@ TEMPLATE_MAP = {
     "pedagogy": os.path.join(TEMPLATES_DIR, "pedagogy.html"),
     "sociology": os.path.join(TEMPLATES_DIR, "sociology.html"),
     "politology": os.path.join(TEMPLATES_DIR, "politology.html"),
+    "shooting": os.path.join(TEMPLATES_DIR, "shooting.html"),
     # Дополнительные коды для обратной совместимости
     "medicine": os.path.join(TEMPLATES_DIR, "medicine.html"),
     "bioinformatics": os.path.join(TEMPLATES_DIR, "bioinformatics.html"),
@@ -1624,7 +1625,7 @@ def create_task_with_logging(
 ):
     async def runner():
         try:
-            await asyncio.shield(coro)
+            await coro
         except asyncio.CancelledError:
             logger.info(
                 "Background task %s cancelled", task_name or f"task-{id(coro):x}"
@@ -2242,37 +2243,43 @@ def clear_recent_sent_cache():
 
 
 def get_sent_today() -> Set[str]:
-    if not os.path.exists(LOG_FILE):
-        return set()
     tz = ZoneInfo(REPORT_TZ)
     now_local = datetime.now(tz)
     day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
     sent: Set[str] = set()
-    with open(LOG_FILE, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            status = (row.get("status") or "ok").strip().lower()
-            if status not in {"ok", "sent", "success"}:
-                continue
-            ts_raw = (row.get("last_sent_at") or "").strip()
-            if not ts_raw:
-                continue
-            try:
-                dt = datetime.fromisoformat(ts_raw)
-            except Exception:
-                continue
-            if dt.tzinfo is None:
-                dt_local = dt.replace(tzinfo=tz)
-            else:
-                dt_local = dt.astimezone(tz)
-            if not (day_start <= dt_local < day_end):
-                continue
-            key = (row.get("key") or "").strip()
-            if not key:
-                key = canonical_for_history(row.get("email", ""))
-            if key:
-                sent.add(key)
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                status = (row.get("status") or "ok").strip().lower()
+                if status not in {"ok", "sent", "success"}:
+                    continue
+                ts_raw = (row.get("last_sent_at") or "").strip()
+                if not ts_raw:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts_raw)
+                except Exception:
+                    continue
+                if dt.tzinfo is None:
+                    dt_local = dt.replace(tzinfo=tz)
+                else:
+                    dt_local = dt.astimezone(tz)
+                if not (day_start <= dt_local < day_end):
+                    continue
+                email_key = canonical_for_history(row.get("email", ""))
+                if email_key:
+                    sent.add(email_key)
+    try:
+        sent.update(
+            history_service.get_sent_between(
+                day_start.astimezone(timezone.utc),
+                day_end.astimezone(timezone.utc),
+            )
+        )
+    except Exception:
+        logger.warning("daily sent count: history DB lookup failed", exc_info=True)
     return sent
 
 
@@ -2487,7 +2494,7 @@ def sync_log_with_imap(
         message_ids = data[0].split() if data and data[0] else []
         cancelled = False
         for num in message_ids:
-            if chat_id is not None and is_cancelled(chat_id):
+            if should_stop() or (chat_id is not None and is_cancelled(chat_id)):
                 cancelled = True
                 break
             _, msg_data = imap.fetch(num, "(RFC822)")
