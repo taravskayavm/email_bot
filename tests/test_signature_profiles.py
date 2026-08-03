@@ -89,3 +89,32 @@ def test_unknown_or_missing_signature_falls_back_to_old(monkeypatch):
     name, address = parseaddr(str(msg["From"]))
     assert name == "Редакция литературы"
     assert address == "sender@example.com"
+
+
+def test_legacy_new_profile_alias_is_used_consistently(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMAIL_ADDRESS", "sender@example.com")
+    monkeypatch.delenv("EMAIL_FROM_NAME", raising=False)
+    template_path = tmp_path / "legacy.html"
+    template_path.write_text("<html><body>{{SIGNATURE}}</body></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        messaging,
+        "get_template",
+        lambda _group: {
+            "code": "legacy",
+            "path": str(template_path),
+            "signature": "new",
+        },
+    )
+
+    msg, _token = messaging.build_message(
+        "recipient@example.com",
+        str(template_path),
+        "Subject",
+        group_key="legacy",
+    )
+
+    name, _address = parseaddr(str(msg["From"]))
+    assert name == "Редакция литературы"
+    assert "Заведующая редакцией литературы<br>" in _html_body(msg)
+    assert "по медицине, спорту и туризму<br>" not in _html_body(msg)

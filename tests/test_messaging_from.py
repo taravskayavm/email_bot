@@ -24,7 +24,11 @@ def test_choose_from_header(monkeypatch, group, expected, tmp_path):
     tpl_path = tmp_path / f"{group}.html"
     tpl_path.write_text("<html><body>{{SIGNATURE}}</body></html>", encoding="utf-8")
 
+    metadata_lookups = 0
+
     def fake_get_template(code):
+        nonlocal metadata_lookups
+        metadata_lookups += 1
         if code == group:
             signature = "new" if code in {"psychology", "geography", "bioinformatics"} else "old"
             return {
@@ -39,6 +43,7 @@ def test_choose_from_header(monkeypatch, group, expected, tmp_path):
 
     msgs = messaging.build_messages_for_group(group, ["rcpt@example.com"], {})
     assert len(msgs) == 1
+    assert metadata_lookups == 1
     msg = msgs[0]
     assert "From" in msg
     value = str(msg["From"])
@@ -55,7 +60,7 @@ def test_apply_from_trims(monkeypatch):
     monkeypatch.setattr(
         messaging,
         "_choose_from_header",
-        lambda group: "Редакция литературы.\u00a0 ",
+        lambda group: "Тестовая редакция.\u00a0 ",
     )
 
     msg = EmailMessage()
@@ -63,6 +68,5 @@ def test_apply_from_trims(monkeypatch):
     messaging._apply_from(msg, "psychology")
 
     name, addr = parseaddr(str(msg["From"]))
-    assert name == "Редакция литературы"
+    assert name == "Тестовая редакция"
     assert addr == "test@lanbook.ru"
-
