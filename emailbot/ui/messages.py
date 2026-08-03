@@ -29,25 +29,34 @@ def format_parse_summary(s: Mapping[str, object], examples: Iterable[str] = ()) 
     """
     Ожидаемые ключи s:
       total_found, to_send,
-      cooldown_180d, foreign_domain, pages_skipped,
-      blocked, blocked_after_parse
+      cooldown_180d, foreign_domain,
+      invalid, technical, blocked, blocked_after_parse
 
     Ключи, которые больше не используются в тексте, но могут приходить:
       suspicious, footnote_dupes_removed
     """
     lines: list[str] = []  # Список строк, из которых соберём сообщение
     lines.append("✅ Анализ завершён.")  # Сообщаем о завершении анализа
-    lines.append(f"Найдено адресов: {s.get('total_found', 0)}")  # Выводим общее количество адресов
-    lines.append(f"📦 К отправке: {s.get('to_send', 0)}")  # Показываем число адресов к отправке
-    lines.append(f"⏳ Под кулдауном (180 дней): {s.get('cooldown_180d', 0)}")  # Информируем про адреса под кулдауном
-    lines.append(f"🌍 Иностранные домены: {s.get('foreign_domain', 0)}")  # Число адресов с иностранными доменами
-    lines.append(f"📄 Пропущено страниц: {s.get('pages_skipped', 0)}")  # Сколько страниц пропущено при парсинге
+    lines.append(f"Всего найдено: {s.get('total_found', 0)}")
+    lines.append(f"🌍 Иностранные домены: {s.get('foreign_domain', 0)}")
 
-    blocked_before = _as_int(s.get("blocked", 0), 0)  # Преобразуем исходное количество блокировок
-    blocked_after = _as_int(s.get("blocked_after_parse", 0), 0)  # Преобразуем блокировки после парсинга
-    total_blocked = blocked_before + blocked_after  # Суммируем для отображения общей величины
-    if total_blocked > 0:  # Добавляем блок стоп-листа только при ненулевом значении
-        lines.append(f"🚫 В стоп-листе: {total_blocked}")  # Добавляем строку, если есть заблокированные адреса
+    invalid = _as_int(s.get("invalid", 0), 0)
+    if invalid > 0:
+        lines.append(f"❌ Некорректные адреса: {invalid}")
+
+    technical = _as_int(s.get("technical", 0), 0)
+    if technical > 0:
+        lines.append(f"🛠 Технические адреса: {technical}")
+
+    blocked_value = s.get("blocked_after_parse")
+    if blocked_value is None:
+        blocked_value = s.get("blocked", 0)
+    blocked = _as_int(blocked_value, 0)
+    if blocked > 0:
+        lines.append(f"🚫 В стоп-листе: {blocked}")
+
+    lines.append(f"⏳ Под кулдауном (180 дней): {s.get('cooldown_180d', 0)}")
+    lines.append(f"📦 К отправке: {s.get('to_send', 0)}")
 
     lines.append("")  # Разделяем основные цифры и примеры пустой строкой
 

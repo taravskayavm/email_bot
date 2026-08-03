@@ -106,9 +106,8 @@ def _build_summary(
         "suspicious": 0,
         "cooldown_180d": 0,
         "foreign_domain": 0,
-        "pages_skipped": 0,
+        "invalid": stats.get("bad", 0),
         "footnote_dupes_removed": 0,
-        "blocked": stats.get("blocked", 0),
         "blocked_after_parse": stats.get("blocked", 0),
     }
     for key in (

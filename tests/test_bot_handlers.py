@@ -208,9 +208,9 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     assert state.dropped == []
     assert state.foreign == ["foreign@example.de"]
     report = update.message.replies[-1]
-    assert "Найдено адресов: 2" in report
+    assert "Всего найдено: 3" in report
     assert "📦 К отправке: 2" in report
-    assert "🟡 Подозрительные: 1" in report
+    assert "🌍 Иностранные домены: 1" in report
 
 
 def test_request_fix_sets_state(monkeypatch):
@@ -935,3 +935,49 @@ def test_preview_separates_foreign():
     state = ctx.chat_data[SESSION_KEY]
     assert "user@gmail.com.br" in state.foreign
     assert "user@gmail.com.br" not in state.preview_allowed_all
+
+
+def test_parse_report_counts_filters_without_overlap(monkeypatch):
+    ctx = DummyContext()
+    allowed_all = {
+        "ready@example.ru",
+        "blocked@example.ru",
+        "recent@example.ru",
+        ".invalid@example.ru",
+        "foreign@example.de",
+    }
+    filtered = [
+        "ready@example.ru",
+        "blocked@example.ru",
+        "recent@example.ru",
+    ]
+
+    monkeypatch.setattr(
+        bh,
+        "is_blocked",
+        lambda email: email == "blocked@example.ru",
+    )
+    monkeypatch.setattr(
+        bh,
+        "check_email",
+        lambda email, **_kwargs: (email == "recent@example.ru", ""),
+    )
+
+    report = run(
+        bh._compose_report_and_save(
+            ctx,
+            allowed_all,
+            filtered,
+            [],
+            ["foreign@example.de"],
+            invalid=[".invalid@example.ru"],
+        )
+    )
+
+    assert "Всего найдено: 5" in report
+    assert "🌍 Иностранные домены: 1" in report
+    assert "❌ Некорректные адреса: 1" in report
+    assert "🚫 В стоп-листе: 1" in report
+    assert "⏳ Под кулдауном (180 дней): 1" in report
+    assert "📦 К отправке: 1" in report
+    assert ctx.chat_data[SESSION_KEY].preview_allowed_all == ["ready@example.ru"]

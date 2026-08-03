@@ -234,6 +234,7 @@ from emailbot.cooldown import (
 from emailbot.web_extract import fetch_and_extract
 from pipelines.extract_emails import extract_from_url_async as deep_extract_async
 from emailbot.suppress_list import is_blocked
+from emailbot.utils.email_clean import clean_and_normalize_email
 from .imap_reconcile import reconcile_csv_vs_imap, build_summary_text, to_csv_bytes
 from .selfcheck import format_checks as format_selfcheck, run_selfcheck
 
@@ -792,6 +793,20 @@ def is_numeric_localpart(email_addr: str) -> bool:
     return local.isdigit()
 
 
+def _partition_valid_addresses(emails: Iterable[str]) -> tuple[set[str], set[str]]:
+    """Split candidates into syntactically valid and invalid addresses."""
+
+    valid: set[str] = set()
+    invalid: set[str] = set()
+    for email in emails or []:
+        normalized, _reason = clean_and_normalize_email(email)
+        if normalized:
+            valid.add(email)
+        else:
+            invalid.add(email)
+    return valid, invalid
+
+
 def sample_preview(items, k: int):
     lst = list(dict.fromkeys(items))
     if len(lst) <= k:
@@ -1101,6 +1116,8 @@ class SessionState:
     source_map: Dict[str, List[str]] = field(default_factory=dict)
     suspect_numeric: List[str] = field(default_factory=list)
     foreign: List[str] = field(default_factory=list)
+    invalid: List[str] = field(default_factory=list)
+    technical: List[str] = field(default_factory=list)
     preview_allowed_all: List[str] = field(default_factory=list)
     dropped: List[tuple[str, str]] = field(default_factory=list)
     repairs: List[tuple[str, str]] = field(default_factory=list)
@@ -2854,21 +2871,23 @@ async def _compose_report_and_save(
     foreign: List[str],
     footnote_dupes: int = 0,
     *,
-    blocked_after_parse: int = 0,
+    invalid: List[str] | None = None,
+    technical: List[str] | None = None,
 ) -> str:
     """Compose a summary report and store samples in session state."""
 
     state = get_state(context)
-    state.preview_allowed_all = sorted(filtered)
     state.suspect_numeric = suspicious_numeric
     state.foreign = sorted(foreign)
+    state.invalid = sorted(invalid or [])
+    state.technical = sorted(technical or [])
     state.footnote_dupes = footnote_dupes
-    state.blocked_after_parse = blocked_after_parse
     state.cooldown_preview_total = 0
     state.cooldown_preview_examples = []
     state.cooldown_preview_window = 0
 
-    cooldown_blocked = 0
+    blocked_keys: set[str] = set()
+    cooldown_keys: set[str] = set()
     cooldown_examples: list[tuple[str, str]] = []
     ignore_cooldown = _is_ignore_cooldown_enabled(context)
     cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
@@ -2880,33 +2899,63 @@ async def _compose_report_and_save(
             if not norm or norm in seen_norm:
                 continue
             seen_norm.add(norm)
+            if is_blocked(addr):
+                blocked_keys.add(norm)
+                continue
             try:
                 blocked, reason = check_email(addr, group=group, window=cooldown_window)
             except Exception as exc:  # pragma: no cover - defensive log
                 logger.debug("cooldown preview check failed for %s: %s", addr, exc)
                 blocked, reason = False, ""
             if blocked:
-                cooldown_blocked += 1
+                cooldown_keys.add(norm)
                 if len(cooldown_examples) < 3:
                     match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
                     last_seen = match.group(1)[:10] if match else ""
                     cooldown_examples.append((addr, last_seen))
 
-    state.cooldown_preview_total = cooldown_blocked
+    if cooldown_window <= 0:
+        for addr in filtered:
+            norm = normalize_email(addr) or addr.strip().lower()
+            if norm and is_blocked(addr):
+                blocked_keys.add(norm)
+
+    filtered_keys = {
+        normalize_email(addr) or addr.strip().lower()
+        for addr in filtered
+        if addr
+    }
+    filtered_keys.discard("")
+    ready_keys = filtered_keys - blocked_keys - cooldown_keys
+    ready_count = len(ready_keys)
+    state.preview_allowed_all = sorted(
+        addr
+        for addr in filtered
+        if (normalize_email(addr) or addr.strip().lower()) in ready_keys
+    )
+
+    state.blocked_after_parse = len(blocked_keys)
+    state.cooldown_preview_total = len(cooldown_keys)
     state.cooldown_preview_examples = cooldown_examples
     state.cooldown_preview_window = cooldown_window
 
+    total_candidates = (
+        set(allowed_all)
+        | set(foreign)
+        | set(invalid or [])
+        | set(technical or [])
+    )
     summary = format_parse_summary(
         {
-            "total_found": len(allowed_all),
-            "to_send": max(len(filtered) - cooldown_blocked, 0),
+            "total_found": len(total_candidates),
+            "to_send": ready_count,
             "suspicious": len(suspicious_numeric),
-            "cooldown_180d": cooldown_blocked,
+            "cooldown_180d": len(cooldown_keys),
             "foreign_domain": len(foreign),
-            "pages_skipped": 0,
+            "invalid": len(invalid or []),
+            "technical": len(technical or []),
             "footnote_dupes_removed": footnote_dupes,
-            "blocked": blocked_after_parse,
-            "blocked_after_parse": blocked_after_parse,
+            "blocked_after_parse": len(blocked_keys),
         },
         examples=(),
     )
@@ -2957,13 +3006,7 @@ async def _send_combined_parse_response(
 
     extra_rows = _after_parse_extra_rows(state)
 
-    caption = (
-        f"{report}\n\n"
-        "Дальнейшие действия:\n"
-        "• Выберите направление рассылки\n"
-        "• Или отправьте правки: «старый -> новый» и/или адреса для удаления\n"
-        "• Excel-файл прикреплён к сообщению автоматически\n"
-    )
+    caption = report
 
     emails = list(context.user_data.get("last_parsed_emails") or state.to_send or [])
     run_id = context.user_data.get("run_id") or secrets.token_hex(6)
@@ -3139,14 +3182,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(repairs + trunc_pairs))
 
-    technical_emails = [e for e in allowed_all if any(tp in e for tp in TECH_PATTERNS)]
+    valid_allowed, invalid_current = _partition_valid_addresses(allowed_all)
+    valid_loose, invalid_loose = _partition_valid_addresses(loose_all)
+    invalid_current.update(invalid_loose)
+
+    technical_emails = [e for e in valid_allowed if any(tp in e for tp in TECH_PATTERNS)]
     filtered = [
-        e for e in allowed_all if e not in technical_emails and is_allowed_tld(e)
+        e for e in valid_allowed if e not in technical_emails and is_allowed_tld(e)
     ]
 
     suspicious_numeric = sorted({e for e in filtered if is_numeric_localpart(e)})
 
-    foreign_raw = {e for e in loose_all if not is_allowed_tld(e)}
+    foreign_raw = {e for e in valid_loose if not is_allowed_tld(e)}
     foreign = sorted(collapse_footnote_variants(foreign_raw))
 
     state.all_emails.update(allowed_all)
@@ -3161,9 +3208,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     state.repairs_sample = sample_preview([f"{b} → {g}" for (b, g) in state.repairs], 6)
     all_allowed = state.all_emails
     foreign_total = set(state.foreign) | set(foreign)
+    invalid_total = set(state.invalid) | invalid_current
+    technical_total = set(state.technical) | set(technical_emails)
     suspicious_total = sorted({e for e in state.to_send if is_numeric_localpart(e)})
     total_footnote = state.footnote_dupes + footnote_dupes
-    blocked_after_parse = count_blocked(state.to_send)
 
     try:
         await progress_msg.edit_text("✅ Готово. Формирую превью…")
@@ -3178,7 +3226,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         suspicious_total,
         sorted(foreign_total),
         total_footnote,
-        blocked_after_parse=blocked_after_parse,
+        invalid=sorted(invalid_total),
+        technical=sorted(technical_total),
     )
     await heartbeat()
 
@@ -5178,12 +5227,17 @@ async def handle_url_text(
     allowed_all, trunc_pairs = apply_numeric_truncation_removal(allowed_all)
     repairs = list(dict.fromkeys(trunc_pairs))
 
+    valid_allowed, invalid_current = _partition_valid_addresses(allowed_all)
     technical_emails = [
-        addr for addr in allowed_all if any(pattern in addr for pattern in TECH_PATTERNS)
+        addr for addr in valid_allowed if any(pattern in addr for pattern in TECH_PATTERNS)
     ]
-    filtered = [addr for addr in allowed_all if addr not in technical_emails and is_allowed_tld(addr)]
+    filtered = [
+        addr
+        for addr in valid_allowed
+        if addr not in technical_emails and is_allowed_tld(addr)
+    ]
     suspicious_numeric = sorted({addr for addr in filtered if is_numeric_localpart(addr)})
-    foreign_raw = {addr for addr in allowed_all if not is_allowed_tld(addr)}
+    foreign_raw = {addr for addr in valid_allowed if not is_allowed_tld(addr)}
 
     state = get_state(context)
     state.all_emails.update(allowed_all)
@@ -5195,8 +5249,9 @@ async def handle_url_text(
     state.repairs_sample = sample_preview([f"{bad} → {good}" for (bad, good) in state.repairs], 6)
 
     foreign_total = set(state.foreign) | foreign_raw
+    invalid_total = set(state.invalid) | invalid_current
+    technical_total = set(state.technical) | set(technical_emails)
     suspicious_total = sorted({addr for addr in state.to_send if is_numeric_localpart(addr)})
-    blocked_after_parse = count_blocked(state.to_send)
     total_footnote = state.footnote_dupes
 
     context.user_data["last_parsed_emails"] = list(state.to_send)
@@ -5215,7 +5270,8 @@ async def handle_url_text(
         suspicious_total,
         sorted(foreign_total),
         total_footnote,
-        blocked_after_parse=blocked_after_parse,
+        invalid=sorted(invalid_total),
+        technical=sorted(technical_total),
     )
     await _send_combined_parse_response(message, context, report, state)
     await heartbeat()
@@ -6429,7 +6485,7 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             batch_id = raw_batch
 
     if not batch_id:
-        message = "Не найден batch_id. Нажмите «Показать примеры» заново."
+        message = "Не найден подготовленный список. Выберите направление заново."
         if query is not None:
             try:
                 await _safe_edit_message(query, text=message)
@@ -6450,7 +6506,7 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.warning("start_sending: batch not found: %s", batch_id)
         message = (
             "Не удалось найти подготовленный список (batch). "
-            "Нажмите «Показать примеры» заново."
+            "Выберите направление заново."
         )
         if query is not None:
             try:
@@ -6470,7 +6526,7 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not emails_in_queue:
         logger.warning("start_sending: empty batch=%s", batch_id)
         empty_message = (
-            "Очередь пуста. Нажмите «Показать примеры» или выберите направление заново."
+            "Очередь пуста. Выберите направление заново."
         )
         if query is not None:
             try:

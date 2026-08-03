@@ -126,7 +126,6 @@ def build_after_parse_combined_kb(
     """Keyboard shown after parsing with follow-up actions."""
 
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("👀 Показать примеры", callback_data="refresh_preview")],
         [
             InlineKeyboardButton(
                 "🧭 Выбрать направление",
@@ -135,14 +134,8 @@ def build_after_parse_combined_kb(
         ],
         [
             InlineKeyboardButton(
-                "✏️ Отправить правки текстом",
+                "✏️ Изменить список",
                 callback_data="bulk:txt:start",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🧹 Удалить отдельные адреса",  # ввод адресов как в ручной рассылке
-                callback_data="bulk:delete:start",
             )
         ],
     ]
