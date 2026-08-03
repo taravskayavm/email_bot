@@ -179,6 +179,10 @@ def format_dispatch_result(
     blocked: int,
     duplicates: int = 0,
     *,
+    foreign: int = 0,
+    undeliverable: int = 0,
+    errors: int = 0,
+    pending: int = 0,
     aborted: bool = False,
 ) -> str:
     """Итоговая сводка для старого (legacy) сценария отправки."""
@@ -186,11 +190,21 @@ def format_dispatch_result(
         "📨 Рассылка завершена.",  # Сообщаем об окончании процесса
         f"📊 В очереди было: {total}",  # Количество писем в очереди
         f"✅ Отправлено: {sent}",  # Сколько писем успешно отправлено
-        f"⏳ Пропущены (по правилу «180 дней»): {cooldown_skipped}",  # Сколько писем пропущено из-за кулдауна
-        f"🚫 В стоп-листе: {blocked}",  # Сколько адресов попало в стоп-лист
     ]
+    if cooldown_skipped:
+        lines.append(f"⏳ Пропущены (по правилу «180 дней»): {cooldown_skipped}")
+    if blocked:
+        lines.append(f"🚫 В стоп-листе: {blocked}")
+    if undeliverable:
+        lines.append(f"📬 Недоставляемые: {undeliverable}")
+    if foreign:
+        lines.append(f"🌍 Иностранные домены (отложены): {foreign}")
     if duplicates:  # Добавляем информацию о найденных дубликатах
         lines.append(f"♻️ Дубликаты за 24 ч: {duplicates}")  # Отмечаем найденные дубликаты
+    if errors:
+        lines.append(f"❌ Ошибок при отправке: {errors}")
+    if pending:
+        lines.append(f"⏸ Осталось в очереди: {pending}")
     if aborted:  # Сообщаем, если процесс рассылки был остановлен
         lines.append("⚠️ Процесс был остановлен по запросу.")  # Добавляем предупреждение, если рассылка прервана
     return "\n".join(lines)  # Возвращаем сформированное сообщение

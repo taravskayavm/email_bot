@@ -4186,7 +4186,7 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     if batch_id:
         handler_payload["batch_id"] = batch_id
-    summary_payload = _store_mass_summary(
+    _store_mass_summary(
         chat_id,
         group=group_code_norm,
         ready=ready,
@@ -4196,7 +4196,6 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         digest=digest,
         total_incoming=len(emails),
     )
-    await _maybe_send_skipped_summary(query, summary_payload)
     if not ready:
         await query.message.reply_text(
             "Все адреса уже в истории за 180 дней или в стоп-листах.",
@@ -4869,7 +4868,7 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    summary_payload = _store_mass_summary(
+    _store_mass_summary(
         chat_id,
         group=group_code,
         ready=ready,
@@ -4879,8 +4878,6 @@ async def manual_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE
         digest=digest,
         total_incoming=len(emails),
     )
-    await _maybe_send_skipped_summary(query, summary_payload)
-
     logger.info(
         "manual prepare digest",
         extra={"event": "manual_prepare", "code": group_code, **digest},

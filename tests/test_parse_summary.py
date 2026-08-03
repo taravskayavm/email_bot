@@ -1,4 +1,4 @@
-from emailbot.ui.messages import format_parse_summary
+from emailbot.ui.messages import format_dispatch_result, format_parse_summary
 from emailbot.ui.keyboards import build_after_parse_combined_kb
 
 
@@ -47,3 +47,22 @@ def test_after_parse_keyboard_has_only_actionable_entries() -> None:
     assert "👀 Показать примеры" not in labels
     assert "🧭 Выбрать направление" in labels
     assert "✏️ Изменить список" in labels
+
+
+def test_dispatch_summary_has_one_disjoint_line_per_outcome() -> None:
+    text = format_dispatch_result(
+        69,
+        39,
+        0,
+        4,
+        undeliverable=12,
+        errors=9,
+        pending=5,
+    )
+
+    assert "📊 В очереди было: 69" in text
+    assert "🚫 В стоп-листе: 4" in text
+    assert "📬 Недоставляемые: 12" in text
+    assert "❌ Ошибок при отправке: 9" in text
+    assert "⏸ Осталось в очереди: 5" in text
+    assert "180 дней" not in text

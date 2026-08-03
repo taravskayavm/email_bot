@@ -48,4 +48,8 @@ async def test_preview_after_filters(monkeypatch, tmp_path):
     await bh.select_group(update, ctx)
 
     assert any("стоп-листах" in text for text in update.callback_query.message.replies)
+    assert not any(
+        text.startswith("👀 Отфильтрованные адреса")
+        for text in update.callback_query.message.replies
+    )
     assert update.callback_query.message.reply_markups[-1] is None

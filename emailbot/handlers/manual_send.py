@@ -671,6 +671,7 @@ async def send_all(
             if saved_state and saved_state.get("pending"):
                 blocked_foreign = list(saved_state.get("blocked_foreign", []))
                 blocked_invalid = list(saved_state.get("blocked_invalid", []))
+                undeliverable = list(saved_state.get("undeliverable", []))
                 skipped_recent = list(saved_state.get("skipped_recent", []))
                 skipped_duplicates = list(saved_state.get("skipped_duplicates", []))
                 sent_ok = list(saved_state.get("sent_ok", []))
@@ -679,10 +680,26 @@ async def send_all(
                 state_obj = bot_handlers.get_state(context)
                 blocked_foreign = list(state_obj.foreign or [])
                 blocked_invalid = []
+                undeliverable: List[str] = []
                 skipped_recent = list(state_obj.cooldown_blocked or [])
                 skipped_duplicates: List[str] = []
                 sent_ok: List[str] = []
                 base_candidates = list(state_obj.to_send or emails)
+
+            stored_planned = (
+                saved_state.get("planned_emails")
+                if saved_state and isinstance(saved_state.get("planned_emails"), list)
+                else None
+            )
+            planned_source = list(stored_planned or [*sent_ok, *base_candidates])
+            planned_emails: List[str] = []
+            planned_norms: Set[str] = set()
+            for addr in planned_source:
+                norm = messaging._normalize_key(addr)
+                if not norm or norm in planned_norms:
+                    continue
+                planned_norms.add(norm)
+                planned_emails.append(addr)
 
             for addr in blocked_foreign:
                 audit_skip(addr, "foreign_domain")
@@ -740,6 +757,8 @@ async def send_all(
                     audit_skip(addr, "stop_list")
                     continue
                 if norm in sent_today_norm and not bot_handlers.is_force_send(chat_id):
+                    if addr not in skipped_duplicates:
+                        skipped_duplicates.append(addr)
                     audit_skip(addr, "daily_limit")
                     continue
                 if is_foreign(addr):
@@ -879,9 +898,11 @@ async def send_all(
                     "template": template_path,
                     "template_label": template_label,
                     "pending": to_send,
+                    "planned_emails": planned_emails,
                     "sent_ok": sent_ok,
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
+                    "undeliverable": undeliverable,
                     "skipped_recent": skipped_recent,
                     "skipped_duplicates": skipped_duplicates,
                     "source_map": filtered_sources,
@@ -991,7 +1012,7 @@ async def send_all(
                     if is_hard_bounce(code, msg):
                         suppress_add(email_addr, code, "hard bounce on send")
                     target_list = (
-                        blocked_invalid if is_hard_bounce(code, msg) else error_addresses
+                        undeliverable if is_hard_bounce(code, msg) else error_addresses
                     )
                     if email_addr not in target_list:
                         target_list.append(email_addr)
@@ -1018,10 +1039,12 @@ async def send_all(
                         code = getattr(e, "smtp_code", None)
                         msg = getattr(e, "smtp_error", None)
                     add_bounce(email_addr, code, str(msg or e), phase="send")
-                    if is_hard_bounce(code, msg):
+                    hard_bounce = is_hard_bounce(code, msg)
+                    if hard_bounce:
                         suppress_add(email_addr, code, "hard bounce on send")
-                    if email_addr not in error_addresses:
-                        error_addresses.append(email_addr)
+                    target_list = undeliverable if hard_bounce else error_addresses
+                    if email_addr not in target_list:
+                        target_list.append(email_addr)
                     reason = f"smtp_error:{code}" if code else "smtp_error"
                     audit_error(
                         email_addr,
@@ -1035,9 +1058,11 @@ async def send_all(
                         "template": template_path,
                         "template_label": template_label,
                         "pending": to_send,
+                        "planned_emails": planned_emails,
                         "sent_ok": sent_ok,
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
+                        "undeliverable": undeliverable,
                         "skipped_recent": skipped_recent,
                         "skipped_duplicates": skipped_duplicates,
                         "source_map": filtered_sources,
@@ -1049,35 +1074,41 @@ async def send_all(
         if not to_send:
             mass_state.clear_chat_state(chat_id)
 
-        total_sent = len(sent_ok)
-        total_skipped = len(skipped_recent)
-        total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total_duplicates = len(skipped_duplicates)
-        total = total_sent + total_skipped + total_blocked + total_duplicates
+        accounted_norms: Set[str] = set()
+
+        def count_planned(addresses: List[str]) -> int:
+            count = 0
+            for addr in addresses:
+                norm = messaging._normalize_key(addr)
+                if not norm or norm not in planned_norms or norm in accounted_norms:
+                    continue
+                accounted_norms.add(norm)
+                count += 1
+            return count
+
+        # Считаем только адреса из очереди «К отправке», зафиксированной после
+        # парсинга. Предварительно отфильтрованные адреса сюда не попадают.
+        total_sent = count_planned(sent_ok)
+        total_skipped = count_planned(skipped_recent)
+        total_blocked = count_planned(blocked_invalid)
+        total_undeliverable = count_planned(undeliverable)
+        total_foreign = count_planned(blocked_foreign)
+        total_duplicates = count_planned(skipped_duplicates)
+        total_errors = count_planned(error_addresses)
+        total = len(planned_norms)
+        total_pending = max(0, total - len(accounted_norms))
         report_text = format_dispatch_result(
             total,
             total_sent,
             total_skipped,
             total_blocked,
             total_duplicates,
+            foreign=total_foreign,
+            undeliverable=total_undeliverable,
+            errors=total_errors,
+            pending=total_pending,
             aborted=aborted,
         )
-        filtered_lines = []
-        for line in report_text.splitlines():
-            if line.startswith("⏳") and total_skipped == 0:
-                continue
-            filtered_lines.append(line)
-        report_text = "\n".join(filtered_lines)
-        if blocked_foreign:
-            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        if blocked_invalid:
-            report_text += f"\n🚫 Недоставляемые/в стоп-листе: {len(blocked_invalid)}"
-        if error_addresses:
-            report_text = (
-                f"{report_text}\n❌ Ошибок при отправке: {len(error_addresses)}"
-                if report_text
-                else f"❌ Ошибок при отправке: {len(error_addresses)}"
-            )
         if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
             report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"
 
