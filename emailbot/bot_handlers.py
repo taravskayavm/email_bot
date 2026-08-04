@@ -4802,6 +4802,10 @@ async def _send_batch_with_sessions(
                                 error_details.append("пропущено (кулдаун)")
                             elif outcome == messaging.SendOutcome.BLOCKED:
                                 error_details.append("пропущено (стоп-лист)")
+                            elif outcome == messaging.SendOutcome.ROLE:
+                                error_details.append(
+                                    "пропущено (служебный/редакционный адрес)"
+                                )
                             else:
                                 error_details.append("ошибка отправки")
                         except (

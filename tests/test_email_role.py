@@ -19,3 +19,15 @@ def test_unknown_default() -> None:
     result = classify_email_role("abc", "example.com", "random text")
     assert result["class"] in {"unknown", "personal", "role"}
     assert 0.0 <= result["score"] <= 1.0
+
+
+def test_public_mail_domain_does_not_make_personal_addresses_role_accounts() -> None:
+    for local in ("arishok25", "drmark1982", "veronika1306"):
+        result = classify_email_role(local, "mail.ru", "")
+        assert result["class"] != "role", (local, result)
+
+
+def test_explicit_editorial_local_parts_remain_role_accounts() -> None:
+    for local in ("cardio.nauka", "cardiovasc.journal"):
+        result = classify_email_role(local, "yandex.ru", "")
+        assert result["class"] == "role", (local, result)

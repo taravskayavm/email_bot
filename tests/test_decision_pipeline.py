@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import asyncio
 import logging
 
 from emailbot.policy import decide, Decision
@@ -82,3 +83,55 @@ def test_send_email_skips_blocked_without_ledger(monkeypatch, tmp_path, caplog):
     assert outcome is messaging.SendOutcome.BLOCKED
     assert "reason=blocked" in caplog.text
 
+
+def test_send_email_reports_role_account_separately(monkeypatch, tmp_path):
+    from emailbot import messaging
+
+    html_path = tmp_path / "tpl.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        messaging,
+        "decide",
+        lambda email, campaign, now: (Decision.SKIP_ROLE, "role_like"),
+    )
+
+    def _fail_build(*args, **kwargs):
+        raise AssertionError("role account must be skipped before rendering")
+
+    monkeypatch.setattr(messaging, "build_message", _fail_build)
+
+    outcome = messaging.send_email("journal@example.com", str(html_path))
+
+    assert outcome is messaging.SendOutcome.ROLE
+
+
+def test_shared_sender_dispatches_role_outcome_separately(monkeypatch):
+    from emailbot import send_core
+    from emailbot.messaging import SendOutcome
+
+    monkeypatch.setattr(
+        send_core.messaging,
+        "send_email_with_sessions",
+        lambda *args, **kwargs: (SendOutcome.ROLE, "", None, None),
+    )
+    roles: list[str] = []
+    blocked: list[str] = []
+
+    sent, aborted = asyncio.run(
+        send_core.run_smtp_send(
+            object(),
+            ["journal@example.com"],
+            template_path="unused.html",
+            group_code="medicine",
+            imap=None,
+            sent_folder="Sent",
+            chat_id=123,
+            override_180d=True,
+            on_role=roles.append,
+            on_blocked=blocked.append,
+        )
+    )
+
+    assert (sent, aborted) == (0, False)
+    assert roles == ["journal@example.com"]
+    assert blocked == []

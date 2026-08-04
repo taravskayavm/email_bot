@@ -67,6 +67,7 @@ async def run_smtp_send(
     on_duplicate: Optional[Callable[[str], None]] = None,
     on_cooldown: Optional[Callable[[str], None]] = None,
     on_blocked: Optional[Callable[[str], None]] = None,
+    on_role: Optional[Callable[[str], None]] = None,
     on_error: Optional[
         Callable[[str, Exception, Optional[int], Optional[str]], None]
     ] = None,
@@ -233,6 +234,15 @@ async def run_smtp_send(
                 after_each(email_addr)
         elif outcome == SendOutcome.BLOCKED:
             if on_blocked:
+                on_blocked(email_addr)
+            if after_each:
+                after_each(email_addr)
+        elif outcome == SendOutcome.ROLE:
+            if on_role:
+                on_role(email_addr)
+            elif on_blocked:
+                # Preserve compatibility for callers that have not introduced
+                # a dedicated role-account bucket yet.
                 on_blocked(email_addr)
             if after_each:
                 after_each(email_addr)

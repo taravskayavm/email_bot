@@ -58,10 +58,12 @@ def test_dispatch_summary_has_one_disjoint_line_per_outcome() -> None:
         undeliverable=12,
         errors=9,
         pending=5,
+        role_like=2,
     )
 
     assert "📊 В очереди было: 69" in text
     assert "🚫 В стоп-листе: 4" in text
+    assert "👥 Служебные/редакционные адреса: 2" in text
     assert "📬 Недоставляемые: 12" in text
     assert "❌ Ошибок при отправке: 9" in text
     assert "⏸ Осталось в очереди: 5" in text

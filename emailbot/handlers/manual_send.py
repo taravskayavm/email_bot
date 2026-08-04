@@ -671,6 +671,7 @@ async def send_all(
             if saved_state and saved_state.get("pending"):
                 blocked_foreign = list(saved_state.get("blocked_foreign", []))
                 blocked_invalid = list(saved_state.get("blocked_invalid", []))
+                blocked_role = list(saved_state.get("blocked_role", []))
                 undeliverable = list(saved_state.get("undeliverable", []))
                 skipped_recent = list(saved_state.get("skipped_recent", []))
                 skipped_duplicates = list(saved_state.get("skipped_duplicates", []))
@@ -680,6 +681,7 @@ async def send_all(
                 state_obj = bot_handlers.get_state(context)
                 blocked_foreign = list(state_obj.foreign or [])
                 blocked_invalid = []
+                blocked_role: List[str] = []
                 undeliverable: List[str] = []
                 skipped_recent = list(state_obj.cooldown_blocked or [])
                 skipped_duplicates: List[str] = []
@@ -704,7 +706,14 @@ async def send_all(
             for addr in blocked_foreign:
                 audit_skip(addr, "foreign_domain")
             for addr in blocked_invalid:
-                audit_skip(addr, "stop_list")
+                reason = (
+                    "blocked_domain"
+                    if blocked_domains.is_blocked_email_domain(addr)
+                    else "stop_list"
+                )
+                audit_skip(addr, reason)
+            for addr in blocked_role:
+                audit_skip(addr, "role_like")
             for addr in skipped_recent:
                 mark_cooldown_skip(addr)
             for addr in skipped_duplicates:
@@ -793,6 +802,8 @@ async def send_all(
                         target = blocked_foreign
                     elif category == "cooldown":
                         target = skipped_recent
+                    elif category in {"role", "role_like", "blocked_role"}:
+                        target = blocked_role
                     else:
                         target = blocked_invalid
                     if actual not in target:
@@ -802,6 +813,8 @@ async def send_all(
                         reason_name = "cooldown_180d"
                     elif reason_name == "foreign":
                         reason_name = "foreign_domain"
+                    elif reason_name in {"role", "blocked_role"}:
+                        reason_name = "role_like"
                     if reason_name == "cooldown_180d":
                         mark_cooldown_skip(actual)
                     else:
@@ -907,6 +920,7 @@ async def send_all(
                     "sent_ok": sent_ok,
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
+                    "blocked_role": blocked_role,
                     "undeliverable": undeliverable,
                     "skipped_recent": skipped_recent,
                     "skipped_duplicates": skipped_duplicates,
@@ -991,6 +1005,10 @@ async def send_all(
                         if email_addr not in blocked_invalid:
                             blocked_invalid.append(email_addr)
                         audit_skip(email_addr, "stop_list")
+                    elif outcome == SendOutcome.ROLE:
+                        if email_addr not in blocked_role:
+                            blocked_role.append(email_addr)
+                        audit_skip(email_addr, "role_like")
                     elif outcome == SendOutcome.ERROR:
                         if email_addr not in error_addresses:
                             error_addresses.append(email_addr)
@@ -1067,6 +1085,7 @@ async def send_all(
                         "sent_ok": sent_ok,
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
+                        "blocked_role": blocked_role,
                         "undeliverable": undeliverable,
                         "skipped_recent": skipped_recent,
                         "skipped_duplicates": skipped_duplicates,
@@ -1096,6 +1115,7 @@ async def send_all(
         total_sent = count_planned(sent_ok)
         total_skipped = count_planned(skipped_recent)
         total_blocked = count_planned(blocked_invalid)
+        total_role = count_planned(blocked_role)
         total_undeliverable = count_planned(undeliverable)
         total_foreign = count_planned(blocked_foreign)
         total_duplicates = count_planned(skipped_duplicates)
@@ -1113,6 +1133,7 @@ async def send_all(
             errors=total_errors,
             pending=total_pending,
             aborted=aborted,
+            role_like=total_role,
         )
         if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
             report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"

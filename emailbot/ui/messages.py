@@ -187,6 +187,7 @@ def format_dispatch_result(
     errors: int = 0,
     pending: int = 0,
     aborted: bool = False,
+    role_like: int = 0,
 ) -> str:
     """Итоговая сводка для старого (legacy) сценария отправки."""
     lines: list[str] = [  # Формируем базовый набор строк итоговой сводки
@@ -198,6 +199,8 @@ def format_dispatch_result(
         lines.append(f"⏳ Пропущены (по правилу «180 дней»): {cooldown_skipped}")
     if blocked:
         lines.append(f"🚫 В стоп-листе: {blocked}")
+    if role_like:
+        lines.append(f"👥 Служебные/редакционные адреса: {role_like}")
     if undeliverable:
         lines.append(f"📬 Недоставляемые: {undeliverable}")
     if foreign:

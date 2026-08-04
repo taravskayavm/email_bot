@@ -711,6 +711,7 @@ class SendOutcome(Enum):
     SENT = "sent"
     COOLDOWN = "cooldown"
     BLOCKED = "blocked"
+    ROLE = "role_like"
     ERROR = "error"
     DUPLICATE = "duplicate"
 
@@ -718,7 +719,9 @@ class SendOutcome(Enum):
 def _outcome_for_decision(decision: Decision) -> SendOutcome:
     if decision is Decision.SKIP_COOLDOWN:
         return SendOutcome.COOLDOWN
-    if decision in {Decision.SKIP_BLOCKED, Decision.SKIP_ROLE, Decision.SKIP_DOMAIN_POLICY}:
+    if decision is Decision.SKIP_ROLE:
+        return SendOutcome.ROLE
+    if decision in {Decision.SKIP_BLOCKED, Decision.SKIP_DOMAIN_POLICY}:
         return SendOutcome.BLOCKED
     return SendOutcome.ERROR
 

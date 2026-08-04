@@ -269,7 +269,13 @@ def classify_email_role(
         reason.append("dept-context")
 
     score = max(0.0, min(1.0, score))
-    if score <= 0.35:
+    # A domain name alone is not evidence that a particular mailbox is a role
+    # account.  In particular, public providers such as mail.ru contain the
+    # token ``mail`` and previously turned personal addresses with digits in
+    # the local part into false positives.  Keep the domain signal only as
+    # supporting context for another role hint.
+    domain_hint_only = reason == ["role-domain"]
+    if score <= 0.35 and not domain_hint_only:
         cls = "role"
     elif score >= 0.65:
         cls = "personal"
@@ -280,4 +286,3 @@ def classify_email_role(
 
 
 __all__ = ["classify_email_role"]
-
