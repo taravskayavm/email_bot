@@ -2432,6 +2432,7 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     )
     context.user_data["awaiting_block_email"] = True
+    raise ApplicationHandlerStop
 
 
 async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2458,6 +2459,10 @@ async def add_blocked_domain_prompt(
         "Например: example.com university.ru"
     )
     context.user_data["awaiting_block_domain"] = True
+    # This menu handler runs before the universal text router (in another
+    # handler group).  Stop propagation so that the button label itself is not
+    # consumed as the domain list and the freshly enabled state stays active.
+    raise ApplicationHandlerStop
 
 
 async def show_blocked_domains(

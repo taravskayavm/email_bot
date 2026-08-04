@@ -351,6 +351,17 @@ def test_route_text_message_adds_to_blocklist(monkeypatch):
     assert update.message.replies == ["Добавлено в блок-лист: 2"]
 
 
+def test_block_email_prompt_is_not_consumed_by_text_router():
+    update = DummyUpdate(text="🚫 Добавить в блок-лист")
+    ctx = DummyContext()
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.add_block_prompt(update, ctx))
+
+    assert ctx.user_data["awaiting_block_email"] is True
+    assert len(update.message.replies) == 1
+
+
 def test_handle_text_adds_blocked_domains(monkeypatch):
     update = DummyUpdate(text="Example.com, qq.com bad_domain")
     ctx = DummyContext()
@@ -379,6 +390,39 @@ def test_handle_text_adds_blocked_domains(monkeypatch):
     assert ctx.user_data["awaiting_block_domain"] is False
     assert "Добавлено исключённых доменов: 2" in update.message.replies[0]
     assert "Не распознано: bad_domain" in update.message.replies[0]
+
+
+def test_blocked_domain_prompt_waits_for_the_next_message(monkeypatch):
+    ctx = DummyContext()
+    prompt_update = DummyUpdate(text="🌐 Добавить исключённый домен")
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.add_blocked_domain_prompt(prompt_update, ctx))
+
+    assert ctx.user_data["awaiting_block_domain"] is True
+    assert len(prompt_update.message.replies) == 1
+
+    added: list[str] = []
+    monkeypatch.setattr(
+        bh.blocked_domains,
+        "add_blocked_domains",
+        lambda domains: added.extend(domains) or len(domains),
+    )
+    monkeypatch.setattr(
+        bh.blocked_domains,
+        "load_blocked_domains",
+        lambda: {"yahoo.com"},
+    )
+
+    domain_update = DummyUpdate(text="yahoo.com")
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.route_text_message(domain_update, ctx))
+
+    assert added == ["yahoo.com"]
+    assert ctx.user_data["awaiting_block_domain"] is False
+    assert domain_update.message.replies == [
+        "Добавлено исключённых доменов: 1\nВсего в списке: 1"
+    ]
 
 
 def test_selfcheck_offers_server_reconciliation(monkeypatch):
