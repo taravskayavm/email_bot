@@ -2927,10 +2927,11 @@ async def retry_last_command(
         return
     sent = 0
     for addr in unique:
-        if is_suppressed(addr):
+        if is_suppressed(addr) or blocked_domains.is_blocked_email_domain(addr):
             continue
         try:
-            messaging.send_raw_smtp_with_retry("retry", addr)
+            if messaging.send_raw_smtp_with_retry("retry", addr) is False:
+                continue
             log_sent_email(addr, "retry")
             sent += 1
         except Exception as e:
@@ -6415,6 +6416,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         on_error=on_error,
                         on_unknown=on_unknown,
                         after_each=after_each,
+                        override_180d=_is_ignore_cooldown_enabled(context),
                     )
                 except messaging.TemplateRenderError as err:
                     missing = ", ".join(sorted(err.missing)) if err.missing else "—"

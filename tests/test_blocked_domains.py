@@ -89,6 +89,32 @@ def test_send_guard_blocks_domain_before_smtp(monkeypatch) -> None:
     assert (raw, code, error) == ("", None, None)
 
 
+def test_direct_send_guard_blocks_domain_before_message_build(monkeypatch) -> None:
+    monkeypatch.setattr(messaging, "_is_blocklisted", lambda email: True)
+    monkeypatch.setattr(
+        messaging,
+        "build_message",
+        lambda *args, **kwargs: pytest.fail("blocked recipient reached message build"),
+    )
+
+    outcome = messaging.send_email("person@ion.com", "unused.html")
+
+    assert outcome is messaging.SendOutcome.BLOCKED
+
+
+def test_raw_smtp_guard_rechecks_domain_before_connect(monkeypatch) -> None:
+    monkeypatch.setattr(messaging, "_is_blocklisted", lambda email: True)
+    monkeypatch.setattr(
+        messaging,
+        "SmtpClient",
+        lambda *args, **kwargs: pytest.fail("blocked recipient reached SMTP"),
+    )
+
+    sent = messaging.send_raw_smtp_with_retry("raw", "person@ion.com")
+
+    assert sent is False
+
+
 def test_preview_marks_domain_exclusion_separately(domain_store: Path) -> None:
     blocked_rows, foreign_rows = _collect_blocked(
         [], ["editor@cardiotomsk.ru", "person@example.ru"]

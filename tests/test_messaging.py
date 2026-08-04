@@ -713,7 +713,7 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     assert calls["password"] == "env-secret"
     assert calls["mailbox"] == "INBOX"
     assert calls["search"] == (None, 'UNSEEN')
-    assert calls["fetch"] == [(b"1", "(RFC822)")]
+    assert calls["fetch"] == [(b"1", "(BODY.PEEK[])")]
     assert calls["store"] == [(b"1", "+FLAGS", "\\Seen")]
     assert calls.get("logout") is True
 

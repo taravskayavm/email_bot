@@ -16,6 +16,7 @@ import time
 import secrets
 import smtplib
 import uuid
+from urllib.parse import quote, urlencode
 
 try:  # pragma: no cover - optional dependency in lightweight deployments
     import idna
@@ -1279,7 +1280,20 @@ def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
     return "Sent"
 
 
-def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
+def send_raw_smtp_with_retry(
+    raw_message: str, recipient: str, max_tries: int = 3
+) -> bool:
+    """Send a raw message unless the recipient is currently blocked.
+
+    The block-list is checked at the transport boundary as a final guard.  This
+    matters for long-running batches: a domain can be added after the preview
+    was built but before its recipient reaches SMTP.
+    """
+
+    if _is_blocklisted(recipient):
+        logger.info("skip %s: reason=blocked_domain_or_address", recipient)
+        return False
+
     last_exc: Exception | None = None
     for attempt in range(max_tries):
         _rate_limit_domain(recipient)
@@ -1297,7 +1311,7 @@ def send_raw_smtp_with_retry(raw_message: str, recipient: str, max_tries=3):
             ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
-            return
+            return True
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", None)
             msg = getattr(e, "smtp_error", b"")
@@ -1429,8 +1443,6 @@ def build_message(
 ) -> tuple[EmailMessage, str]:
     # Загружаем HTML шаблона перед подстановкой подписи и ссылки отписки.
     html_body = _read_template_file(html_path)
-    # HOST задаёт домен unsubscribe-ссылки; example.com остаётся безопасным fallback.
-    host = os.getenv("HOST", "example.com")
     # Шрифт и базовый размер берём из шаблона, чтобы подпись визуально совпадала.
     font_family, base_size = _extract_fonts(html_body)
     # Подпись делаем на 1px меньше основного текста, но не меньше 1px.
@@ -1462,9 +1474,32 @@ def build_message(
     if _has_unresolved_placeholders(html_body):
         raise ValueError("Unresolved placeholders in template")
     token = secrets.token_urlsafe(16)
-    link = f"https://{host}/unsubscribe?email={to_addr}&token={token}"
+    # Use a real public endpoint when configured. Without one, use the
+    # established IMAP flow instead of generating a dead example.com link.
+    public_base = os.getenv("UNSUBSCRIBE_PUBLIC_URL", "").strip()
+    legacy_host = os.getenv("HOST", "").strip()
+    if not public_base and legacy_host and legacy_host.casefold() != "example.com":
+        public_base = (
+            legacy_host
+            if legacy_host.startswith(("http://", "https://"))
+            else f"https://{legacy_host}"
+        )
+    if public_base:
+        public_base = public_base.rstrip("/")
+        if not public_base.endswith("/unsubscribe"):
+            public_base += "/unsubscribe"
+        link = f"{public_base}?{urlencode({'email': to_addr, 'token': token})}"
+    else:
+        unsubscribe_subject = quote("Отписка от рассылки")
+        body = quote(
+            "Прошу отписать этот адрес от рассылки.\n"
+            f"Адрес получателя: {to_addr}"
+        )
+        link = (
+            f"mailto:{EMAIL_ADDRESS}?subject={unsubscribe_subject}&body={body}"
+        )
     unsub_html = (
-        f'<div style="margin-top:8px"><a href="{link}" '
+        f'<div style="margin-top:8px"><a href="{html.escape(link, quote=True)}" '
         'style="display:inline-block;padding:6px 12px;font-size:12px;'
         'background:#eee;color:#333;text-decoration:none;border-radius:4px">'
         'Отписаться</a></div>'
@@ -1478,10 +1513,16 @@ def build_message(
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    msg["List-Unsubscribe"] = (
-        f"<mailto:{EMAIL_ADDRESS}?subject=unsubscribe>, <{link}>"
+    native_unsubscribe_subject = quote("Отписка от рассылки")
+    mailto_unsubscribe = (
+        f"mailto:{EMAIL_ADDRESS}?subject={native_unsubscribe_subject}"
     )
-    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    list_unsubscribe = [f"<{mailto_unsubscribe}>"]
+    if public_base:
+        list_unsubscribe.append(f"<{link}>")
+    msg["List-Unsubscribe"] = ", ".join(list_unsubscribe)
+    if public_base:
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     if override_180d:
@@ -1510,6 +1551,10 @@ def send_email(
     override_180d: bool = False,
 ) -> SendOutcome:
     try:
+        if _is_blocklisted(recipient):
+            logger.info("skip %s: reason=blocked_domain_or_address", recipient)
+            return SendOutcome.BLOCKED
+
         campaign = Path(html_path).stem
         now = datetime.now(timezone.utc)
         decision, reason = decide(recipient, campaign, now)
@@ -1543,7 +1588,10 @@ def send_email(
             payload = f"{key}|{subject_norm}|{body_for_hash}".encode("utf-8")
             content_hash = hashlib.sha1(payload).hexdigest()
         raw = msg.as_string()
-        send_raw_smtp_with_retry(raw, transport_recipient, max_tries=3)
+        if send_raw_smtp_with_retry(
+            raw, transport_recipient, max_tries=3
+        ) is False:
+            return SendOutcome.BLOCKED
         save_to_sent_folder(raw)
         try:
             ledger.record_send(
@@ -1829,26 +1877,27 @@ def process_unsubscribe_requests(
         if imap_client is None:
             return 0
 
-        search_terms = [
-            ('HEADER', 'Subject', 'unsubscribe'),
-            ('HEADER', 'List-Unsubscribe', '<'),
-            ('BODY', 'unsubscribe'),
-        ]
+        # Search only by the standard UNSEEN flag and inspect messages locally.
+        # Mail.ru may reject charset=UTF-8 or compound HEADER/BODY searches even
+        # though the same mailbox works with a plain ``SEARCH UNSEEN`` request.
+        # Failed intent checks are deliberately left unread below.
+        try:
+            typ, data = imap_client.search(None, "UNSEEN")
+        except Exception:
+            logger.warning("unsubscribe UNSEEN search failed", exc_info=True)
+            return 0
         message_ids: set[bytes] = set()
-        for term in search_terms:
-            try:
-                typ, data = imap_client.search('UTF-8', 'UNSEEN', *term)
-            except Exception:
-                logger.debug("unsubscribe search failed", exc_info=True)
-                continue
-            if typ == 'OK' and data and data[0]:
-                message_ids.update(data[0].split())
+        if typ == "OK" and data and data[0]:
+            message_ids.update(data[0].split())
 
         if not message_ids:
             return 0
 
         for num in sorted(message_ids, key=int):
-            typ, msg_data = imap_client.fetch(num, '(RFC822)')
+            # BODY.PEEK[] reads the complete message without implicitly adding
+            # the \Seen flag.  Only a successfully processed unsubscribe is
+            # marked as read explicitly below.
+            typ, msg_data = imap_client.fetch(num, "(BODY.PEEK[])")
             if typ != 'OK' or not msg_data:
                 continue
 
@@ -2026,7 +2075,9 @@ def _message_has_unsubscribe_intent(msg) -> bool:
 
     try:
         subject = _decode_header_value(msg.get("Subject", ""))
-        if "unsubscribe" in subject.casefold():
+        intent_words = ("unsubscribe", "отписаться", "отписка", "remove me")
+        subject_folded = subject.casefold()
+        if any(word in subject_folded for word in intent_words):
             return True
 
         body_chunks: list[str] = []
@@ -2059,7 +2110,8 @@ def _message_has_unsubscribe_intent(msg) -> bool:
                     body_chunks.append(payload.decode("utf-8", errors="replace"))
 
         body_text = "\n".join(body_chunks)
-        return "unsubscribe" in body_text.casefold()
+        body_folded = body_text.casefold()
+        return any(word in body_folded for word in intent_words)
     except Exception:
         return False
 

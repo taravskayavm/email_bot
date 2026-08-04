@@ -474,6 +474,14 @@ async def send_all(
     query = update.callback_query
     chat_id = query.message.chat.id
     bot_handlers = _bot_handlers()
+    # The main-menu toggle is shared by preview, manual send and bulk send.
+    # Capture it once for this run so every validation stage uses the same
+    # decision even if Telegram updates user_data while the background job is
+    # already running.
+    ignore_180d = bool(
+        context.user_data.get("ignore_cooldown")
+        or context.user_data.get("ignore_180d")
+    )
     saved = mass_state.load_chat_state(chat_id)
     if saved and saved.get("pending"):
         emails = saved.get("pending", [])
@@ -791,7 +799,13 @@ async def send_all(
             ready_after_history: List[str] = []
             for addr in to_send:
                 norm = messaging._normalize_key(addr)
-                skip, skip_reason = messaging._should_skip_by_history(addr)
+                # This is a last-moment cooldown recheck.  Keep it for normal
+                # sends, but do not silently re-enable the 180-day rule after
+                # a preview was explicitly built with the override enabled.
+                if ignore_180d:
+                    skip, skip_reason = False, ""
+                else:
+                    skip, skip_reason = messaging._should_skip_by_history(addr)
                 if skip:
                     category = reason_map.get(norm)
                     if not category:
@@ -976,7 +990,7 @@ async def send_all(
                         fixed_from=fixed_map.get(email_addr),
                         group_title=template_label,
                         group_key=group_code,
-                        override_180d=(context.chat_data.get("manual_send_mode") == "all"),
+                        override_180d=ignore_180d,
                     )
                     if outcome == SendOutcome.SENT:
                         log_sent_email(

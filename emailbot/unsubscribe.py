@@ -19,7 +19,7 @@ from .messaging import (
 )
 
 logger = logging.getLogger(__name__)
-UNSUB_SOFT = os.getenv("UNSUBSCRIBE_ALLOW_WITHOUT_TOKEN", "1") == "1"
+UNSUB_SOFT = os.getenv("UNSUBSCRIBE_ALLOW_WITHOUT_TOKEN", "0") == "1"
 
 
 def _clean_single_email(raw: str) -> str:
