@@ -134,6 +134,12 @@ BASIC_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 
 # Быстрый детектор «обычных» e-mail без тяжёлой предобработки
 _QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
+_QUICK_LOCAL_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-"
+)
+_QUICK_DOMAIN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-"
+)
 # Порог, начиная с которого страницу считаем «простой» и не гоним через тяжёлый пайплайн
 _PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
 _PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
@@ -260,11 +266,57 @@ def _maybe_join_pdf_breaks(text: str, *, join_hyphen: bool, join_email: bool) ->
     return out
 
 
+def _linear_email_matches(text: str) -> list[tuple[str, int, int]]:
+    """Find bounded ASCII addresses in linear time by scanning around ``@``."""
+
+    matches: list[tuple[str, int, int]] = []
+    cursor = 0
+    text_len = len(text)
+    while cursor < text_len:
+        at = text.find("@", cursor)
+        if at < 0:
+            break
+
+        left = at
+        while (
+            left > 0
+            and at - left < 64
+            and text[left - 1] in _QUICK_LOCAL_CHARS
+        ):
+            left -= 1
+
+        right = at + 1
+        while (
+            right < text_len
+            and right - at <= 319
+            and text[right] in _QUICK_DOMAIN_CHARS
+        ):
+            right += 1
+        while right > at + 1 and text[right - 1] in ".-":
+            right -= 1
+
+        candidate = text[left:right]
+        local, separator, domain = candidate.partition("@")
+        domain_head, dot, tld = domain.rpartition(".")
+        if (
+            separator
+            and local
+            and domain_head
+            and dot
+            and 2 <= len(tld) <= 63
+            and tld.isascii()
+            and tld.isalpha()
+        ):
+            matches.append((candidate, left, right))
+
+        cursor = at + 1
+    return matches
+
+
 def _quick_email_matches(text: str) -> list[tuple[str, int, int]]:
     if not text:
         return []
     matches: list[tuple[str, int, int]] = []
-    iterator = None
     if _REGEX_HAS_TIMEOUT:
         try:
             iterator = _QUICK_EMAIL_RE.finditer(
@@ -272,13 +324,22 @@ def _quick_email_matches(text: str) -> list[tuple[str, int, int]]:
                 overlapped=False,
                 timeout=_PDF_FAST_TIMEOUT_MS / 1000.0,
             )
-        except Exception:
-            iterator = _QUICK_EMAIL_RE.finditer(text)
+            # The third-party regex iterator evaluates lazily.  Its timeout is
+            # raised while consuming the iterator, not by ``finditer`` itself.
+            for match in iterator:
+                matches.append((match.group(0), match.start(), match.end()))
+            return matches
+        except Exception as exc:
+            logger.debug("PDF quick e-mail regex failed; using linear scan: %s", exc)
     else:
-        iterator = _QUICK_EMAIL_RE.finditer(text)
-    for match in iterator:
-        matches.append((match.group(0), match.start(), match.end()))
-    return matches
+        try:
+            for match in _QUICK_EMAIL_RE.finditer(text):
+                matches.append((match.group(0), match.start(), match.end()))
+            return matches
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.debug("PDF quick e-mail regex failed; using linear scan: %s", exc)
+
+    return _linear_email_matches(text)
 
 
 def _quick_document_emails(
