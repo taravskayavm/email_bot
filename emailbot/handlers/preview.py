@@ -15,7 +15,7 @@ from services.templates import get_template_label
 
 from emailbot import config as C
 from emailbot import extraction as extraction_module
-from emailbot import history_service, mass_state, messaging, reporting
+from emailbot import blocked_domains, history_service, mass_state, messaging, reporting
 from emailbot.dedupe_global import build_hits_with_sources, dedupe_across_sources
 from emailbot.edit_service import (
     apply_edits as apply_saved_edits,
@@ -322,14 +322,21 @@ def _collect_blocked(
         if email in seen_blocked:
             continue
         seen_blocked.add(email)
-        reason = "invalid" if _is_basic_invalid(email) else "blocked"
+        domain_blocked = blocked_domains.is_blocked_email_domain(email)
+        reason = (
+            "invalid"
+            if _is_basic_invalid(email)
+            else "blocked_domain"
+            if domain_blocked
+            else "blocked"
+        )
         blocked_rows.append(
             {
                 "email": email,
                 "reason": reason,
                 "details": "",
                 "source": _source_text(email, source_map, fallback_sources)
-                or "system:suppress",
+                or ("system:blocked_domain" if domain_blocked else "system:suppress"),
             }
         )
     seen_foreign: set[str] = set()

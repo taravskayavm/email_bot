@@ -80,7 +80,7 @@ from .messaging_utils import (
     was_sent_today_same_content,
     SYNC_SEEN_EVENTS_PATH,
 )
-from . import suppress_list
+from . import blocked_domains, suppress_list
 from .suppress_list import add_to_blocklist
 from .run_control import register_task, should_stop
 from .cancel import is_cancelled
@@ -657,6 +657,9 @@ def _is_blocklisted(email: str) -> bool:
     normalized = _normalize_email_for_blocklist(email)
     if not normalized or "@" not in normalized:
         return False
+
+    if blocked_domains.is_blocked_email_domain(normalized):
+        return True
 
     if normalized in _DEFAULT_BLOCKLIST:
         return True
@@ -1624,6 +1627,10 @@ def send_email_with_sessions(
     append_message: bool = True,
     return_raw: bool = False,
 ) -> tuple[SendOutcome, str, str | None, str | None]:
+    if _is_blocklisted(recipient):
+        logger.info("skip %s: reason=blocked_domain_or_address", recipient)
+        return SendOutcome.BLOCKED, "", None, None
+
     # 0) Проверка кулдауна (если не запросили явный override)
     campaign = group_key or group_title or Path(html_path).stem
     now = datetime.now(timezone.utc)
@@ -1686,6 +1693,23 @@ def send_email_with_sessions(
         if append_message:
             save_to_sent_folder(raw_bytes, imap=imap, folder=sent_folder)
     except Exception as exc:
+        # A dead connection must be handled by the batch-level reconnect loop.
+        # Returning ERROR here would leave the same broken SmtpClient in use for
+        # every remaining recipient and would also lose the failed recipient.
+        is_connection_error = isinstance(
+            exc,
+            (
+                smtplib.SMTPServerDisconnected,
+                smtplib.SMTPConnectError,
+                TimeoutError,
+            ),
+        ) or (
+            isinstance(exc, OSError)
+            and not isinstance(exc, smtplib.SMTPException)
+        )
+        if is_connection_error:
+            raise
+
         code = getattr(exc, "smtp_code", None)
         msg_obj = getattr(exc, "smtp_error", None)
 
@@ -1715,6 +1739,13 @@ def send_email_with_sessions(
                 msg_text = repr(msg_obj)
         else:
             msg_text = msg_obj or str(exc)
+
+        try:
+            add_bounce(recipient, code, str(msg_text), "send")
+            if is_hard_bounce(code, msg_obj if msg_obj is not None else msg_text):
+                suppress_add(recipient, code, "hard bounce on send")
+        except Exception:
+            logger.debug("bounce bookkeeping failed for %s", recipient, exc_info=True)
 
         try:
             write_audit(
@@ -2253,6 +2284,7 @@ def prepare_mass_mailing(
     chat_id: int | None = None,
     *,
     ignore_cooldown: bool = False,
+    lookback_days: int | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], dict[str, object]]:
     """Filter ``emails`` for manual/preview sends.
 
@@ -2272,6 +2304,7 @@ def prepare_mass_mailing(
             return [], [], [], [], {"total": 0, "input_total": 0}
 
         blocked_invalid: list[str] = []
+        blocked_domain: list[str] = []
         blocked_foreign: list[str] = []
         skipped_recent: list[str] = []
 
@@ -2287,6 +2320,10 @@ def prepare_mass_mailing(
         queue_after_block: list[str] = []
         for addr in candidates:
             norm = norm_map.get(addr) or normalize_email(addr)
+            if blocked_domains.is_blocked_email_domain(norm or addr):
+                blocked_invalid.append(addr)
+                blocked_domain.append(addr)
+                continue
             if blocked_set and norm in blocked_set:
                 blocked_invalid.append(addr)
                 continue
@@ -2312,11 +2349,19 @@ def prepare_mass_mailing(
                 logger.warning("foreign check failed for %s: %s", addr, exc)
             queue_after_foreign.append(addr)
 
-        raw_lookback = os.getenv("HALF_YEAR_DAYS", os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
-        try:
-            lookback_days = int(raw_lookback)
-        except (TypeError, ValueError):
-            lookback_days = 180
+        if lookback_days is None:
+            raw_lookback = os.getenv(
+                "HALF_YEAR_DAYS", os.getenv("EMAIL_LOOKBACK_DAYS", "180")
+            )
+            try:
+                lookback_days = int(raw_lookback)
+            except (TypeError, ValueError):
+                lookback_days = 180
+        else:
+            try:
+                lookback_days = int(lookback_days)
+            except (TypeError, ValueError):
+                lookback_days = 180
         if lookback_days < 0:
             lookback_days = 0
         if ignore_cooldown:
@@ -2384,6 +2429,8 @@ def prepare_mass_mailing(
             "invalid": len(invalid_basic),
             "blocked_foreign": len(blocked_foreign),
             "blocked_invalid": len(blocked_invalid),
+            "blocked_domain": len(blocked_domain),
+            "blocked_domains": len(blocked_domain),
             "skipped_recent": len(skipped_recent),
             "input_total": len(cleaned),
             "after_suppress": len(queue_after_block),
@@ -2401,6 +2448,7 @@ def prepare_mass_mailing(
             "skipped_foreign": len(blocked_foreign),
             "removed_recent_180d": len(skipped_recent),
             "removed_invalid": len(blocked_invalid),
+            "removed_blocked_domain": len(blocked_domain),
             "removed_foreign": len(blocked_foreign),
             "removed_today": 0,
         }

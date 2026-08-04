@@ -314,6 +314,18 @@ def main() -> None:
     )
     app.add_handler(
         MessageHandler(
+            filters.TEXT & filters.Regex("^🌐 Добавить исключённый домен$"),
+            bot_handlers.add_blocked_domain_prompt,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex("^📵 Исключённые домены$"),
+            bot_handlers.show_blocked_domains,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
             filters.TEXT & filters.Regex("^📄"), bot_handlers.show_blocked_list
         )
     )

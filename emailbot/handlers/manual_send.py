@@ -23,7 +23,7 @@ from emailbot.notify import notify
 from bot.keyboards import build_templates_kb, send_flow_keyboard
 
 from emailbot import config as C
-from emailbot import mass_state, messaging
+from emailbot import blocked_domains, mass_state, messaging
 from emailbot import settings as _settings
 from emailbot.dedupe_global import build_hits_with_sources, dedupe_across_sources
 from emailbot.extraction import normalize_email
@@ -750,6 +750,11 @@ async def send_all(
             for addr in ordered_candidates:
                 norm = messaging._normalize_key(addr)
                 if not norm:
+                    continue
+                if blocked_domains.is_blocked_email_domain(addr):
+                    if addr not in blocked_invalid:
+                        blocked_invalid.append(addr)
+                    audit_skip(addr, "blocked_domain")
                     continue
                 if norm in blocked_norm:
                     if addr not in blocked_invalid:

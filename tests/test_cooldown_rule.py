@@ -27,7 +27,9 @@ def test_cooldown_should_skip_and_ignore(monkeypatch, tmp_path):
     messaging._BLOCK_READY = False
 
     # Исходные данные
-    now = datetime(2025, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
+    # Keep the test relative to wall clock because prepare_mass_mailing uses the
+    # current UTC time internally.
+    now = datetime.now(timezone.utc)
     addr = "test.user+alias@gmail.com"
 
     # 1) До отметки: не должно скипать

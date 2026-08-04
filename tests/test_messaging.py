@@ -227,6 +227,66 @@ def test_send_email_with_sessions_skips_duplicate_content(tmp_path, monkeypatch)
     assert len(rows) == 1
 
 
+def test_send_email_with_sessions_propagates_connection_loss(tmp_path, monkeypatch):
+    html = tmp_path / "template.html"
+    html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        messaging,
+        "decide",
+        lambda *_: (messaging.Decision.SEND_NOW, "ok"),
+    )
+    monkeypatch.setattr(messaging, "was_sent_today_same_content", lambda *a, **k: False)
+    monkeypatch.setattr(messaging, "_register_send", lambda *a, **k: True)
+
+    class DisconnectedClient:
+        def send(self, _from_addr, _to_addr, _raw):
+            raise smtplib.SMTPServerDisconnected("connection lost")
+
+    with pytest.raises(smtplib.SMTPServerDisconnected):
+        messaging.send_email_with_sessions(
+            DisconnectedClient(),
+            object(),
+            "Sent",
+            "user@example.com",
+            str(html),
+        )
+
+
+def test_send_email_with_sessions_records_hard_bounce(tmp_path, monkeypatch):
+    html = tmp_path / "template.html"
+    html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
+    monkeypatch.setattr(
+        messaging,
+        "decide",
+        lambda *_: (messaging.Decision.SEND_NOW, "ok"),
+    )
+    monkeypatch.setattr(messaging, "was_sent_today_same_content", lambda *a, **k: False)
+    monkeypatch.setattr(messaging, "_register_send", lambda *a, **k: True)
+    monkeypatch.setattr(messaging, "is_hard_bounce", lambda *a, **k: True)
+    bounces: list[tuple] = []
+    suppressed: list[tuple] = []
+    monkeypatch.setattr(messaging, "add_bounce", lambda *a, **k: bounces.append(a))
+    monkeypatch.setattr(messaging, "suppress_add", lambda *a, **k: suppressed.append(a))
+
+    class RefusedClient:
+        def send(self, _from_addr, _to_addr, _raw):
+            raise smtplib.SMTPRecipientsRefused(
+                {"user@example.com": (550, b"user not found")}
+            )
+
+    outcome, *_ = messaging.send_email_with_sessions(
+        RefusedClient(),
+        object(),
+        "Sent",
+        "user@example.com",
+        str(html),
+    )
+
+    assert outcome is messaging.SendOutcome.ERROR
+    assert bounces
+    assert suppressed
+
+
 def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
     html_file = tmp_path / "template.html"
     html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")

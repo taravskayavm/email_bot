@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import smtplib
 import types
 
 import pytest
@@ -133,8 +134,26 @@ def test_main_menu_has_shared_cooldown_toggle():
     assert "⚠️ Игнорировать правило 180 дней" in labels
     assert "🚫 Добавить в блок-лист" in labels
     assert "📄 Показать блок-лист" in labels
+    assert "🌐 Добавить исключённый домен" in labels
+    assert "📵 Исключённые домены" in labels
     assert "🔄 Синхронизировать с сервером" not in labels
     assert "🔁 Синхронизировать бонсы" not in labels
+
+
+def test_main_menu_hides_manual_override_when_disabled(monkeypatch):
+    monkeypatch.setenv("MANUAL_ALLOW_OVERRIDE", "0")
+    update = DummyUpdate(text="/start")
+    ctx = DummyContext()
+
+    run(start(update, ctx))
+
+    markup = update.message.reply_markups[0]
+    labels = [
+        getattr(button, "text", button)
+        for row in markup.keyboard
+        for button in row
+    ]
+    assert "⚠️ Игнорировать правило 180 дней" not in labels
 
 
 def test_main_menu_cooldown_toggle_updates_shared_state():
@@ -332,6 +351,36 @@ def test_route_text_message_adds_to_blocklist(monkeypatch):
     assert update.message.replies == ["Добавлено в блок-лист: 2"]
 
 
+def test_handle_text_adds_blocked_domains(monkeypatch):
+    update = DummyUpdate(text="Example.com, qq.com bad_domain")
+    ctx = DummyContext()
+    ctx.user_data["awaiting_block_domain"] = True
+    added: list[str] = []
+
+    monkeypatch.setattr(
+        bh.blocked_domains,
+        "parse_domains",
+        lambda text: (["example.com", "qq.com"], ["bad_domain"]),
+    )
+    monkeypatch.setattr(
+        bh.blocked_domains,
+        "add_blocked_domains",
+        lambda domains: added.extend(domains) or len(domains),
+    )
+    monkeypatch.setattr(
+        bh.blocked_domains,
+        "load_blocked_domains",
+        lambda: {"example.com", "qq.com"},
+    )
+
+    run(handle_text(update, ctx))
+
+    assert added == ["example.com", "qq.com"]
+    assert ctx.user_data["awaiting_block_domain"] is False
+    assert "Добавлено исключённых доменов: 2" in update.message.replies[0]
+    assert "Не распознано: bad_domain" in update.message.replies[0]
+
+
 def test_selfcheck_offers_server_reconciliation(monkeypatch):
     update = DummyUpdate(text="🩺 Диагностика")
     ctx = DummyContext()
@@ -523,6 +572,145 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
     assert "Готово к отправке" in update.callback_query.message.replies[-1]
     doc_entry = update.callback_query.message.documents[-1]
     assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")
+
+
+@pytest.mark.asyncio
+async def test_active_manual_send_runs_in_background_and_keeps_remainder(
+    monkeypatch, tmp_path
+):
+    template = tmp_path / "tourism.html"
+    template.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setitem(bh.messaging.TEMPLATE_MAP, "tourism", str(template))
+    monkeypatch.setenv("MANUAL_ENFORCE_180", "1")
+    monkeypatch.setenv("MANUAL_DAYS", "90")
+    monkeypatch.setenv("MANUAL_ALLOW_OVERRIDE", "1")
+    monkeypatch.setattr(bh, "_store_mass_summary", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda *_: None)
+
+    prepare_args: dict[str, object] = {}
+
+    def fake_prepare(emails, group, **kwargs):
+        prepare_args.update(kwargs)
+        return list(emails), [], [], [], {}
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_send(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return bh.ManualBatchResult(remaining=["two@example.com"], retryable=True)
+
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing", fake_prepare)
+    monkeypatch.setattr(bh, "_send_batch_with_sessions", fake_send)
+
+    update = DummyUpdate(callback_data="manual_group_tourism", chat_id=42)
+    ctx = DummyContext()
+    ctx.chat_data["manual_emails"] = ["one@example.com", "two@example.com"]
+    ctx.user_data["manual_emails"] = ["one@example.com", "two@example.com"]
+
+    await bh.manual_select_group(update, ctx)
+    task = ctx.chat_data["manual_send_task"]
+    await started.wait()
+
+    assert not task.done()
+    assert prepare_args["lookback_days"] == 90
+
+    release.set()
+    await task
+
+    assert ctx.chat_data["manual_emails"] == ["two@example.com"]
+    assert ctx.user_data["manual_emails"] == ["two@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_active_manual_batch_preserves_queue_when_daily_limit_is_full(
+    monkeypatch
+):
+    monkeypatch.setattr(bh, "MAX_EMAILS_PER_DAY", 1)
+    monkeypatch.setattr(bh, "get_sent_today", lambda: {"already@example.com"})
+    monkeypatch.setattr(bh, "is_force_send", lambda _chat_id: False)
+    update = DummyUpdate(callback_data="manual_group_tourism", chat_id=42)
+    ctx = DummyContext()
+
+    result = await bh._send_batch_with_sessions(
+        update.callback_query,
+        ctx,
+        ["one@example.com", "two@example.com"],
+        "unused.html",
+        "tourism",
+    )
+
+    assert result.retryable is True
+    assert result.remaining == ["one@example.com", "two@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_active_manual_batch_retries_same_recipient_after_disconnect(
+    monkeypatch
+):
+    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
+    monkeypatch.setattr(bh, "is_force_send", lambda _chat_id: False)
+    monkeypatch.setattr(bh, "should_stop", lambda: False)
+    monkeypatch.setattr(bh, "is_cancelled", lambda _chat_id: False)
+    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
+    monkeypatch.setattr(bh, "mark_soft_bounce_success", lambda *_: None)
+    monkeypatch.setattr(bh, "get_preferred_sent_folder", lambda _imap: "Sent")
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(bh, "heartbeat", no_wait)
+    monkeypatch.setattr(bh.asyncio, "sleep", no_wait)
+
+    class DummyImap:
+        def login(self, *a, **k):
+            return "OK", []
+
+        def select(self, *a, **k):
+            return "OK", []
+
+        def logout(self):
+            return "BYE", []
+
+    class DummySmtp:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(bh.imaplib, "IMAP4_SSL", lambda *a, **k: DummyImap())
+    monkeypatch.setattr(bh, "SmtpClient", DummySmtp)
+
+    attempts = 0
+
+    def fake_send(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise smtplib.SMTPServerDisconnected("connection lost")
+        return SendOutcome.SENT, "token", "key", "hash"
+
+    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
+    update = DummyUpdate(callback_data="manual_group_tourism", chat_id=42)
+    ctx = DummyContext()
+
+    result = await bh._send_batch_with_sessions(
+        update.callback_query,
+        ctx,
+        ["one@example.com"],
+        "template.html",
+        "tourism",
+    )
+
+    assert attempts == 2
+    assert result.sent_count == 1
+    assert result.remaining == []
 
 
 def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):

@@ -202,6 +202,11 @@ def _from_pdf(data: bytes) -> Tuple[List[str], Dict[str, int], str | None]:
     if should_stop():
         return [], {}, None
     text = extract_text(io.BytesIO(data), maxpages=200) or ""
+    # Keep the boundary heuristic scoped to PDFs.  Some publishers store
+    # visually separate text spans without whitespace in the text layer.
+    from emailbot.extraction_pdf import repair_pdf_email_boundaries
+
+    text = repair_pdf_email_boundaries(text)
     ok, rej = _norm_and_dedupe(EMAIL_RE.findall(text))
     return ok, rej, None
 

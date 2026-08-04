@@ -145,6 +145,7 @@ def format_dispatch_start(
     *,
     deferred: int = 0,
     suppressed: int = 0,
+    blocked_domains: int = 0,
     foreign: int = 0,
     duplicates: int = 0,
     limited_from: int | None = None,
@@ -165,6 +166,8 @@ def format_dispatch_start(
         lines.append(f"Отложено по правилу 180 дней: {deferred}")  # Добавляем статистику по кулдауну
     if suppressed:  # Учитываем письма, исключённые супрессией
         lines.append(f"Исключено (супресс/стоп-лист): {suppressed}")  # Сколько адресов исключено
+    if blocked_domains:
+        lines.append(f"В том числе исключено по доменам: {blocked_domains}")
     if foreign:  # Сообщаем об иностранных доменах
         lines.append(f"Отложено (иностранные домены): {foreign}")  # Сколько адресов убрано как иностранные
     if duplicates:  # Указываем количество найденных дубликатов

@@ -26,7 +26,8 @@ def test_prepare_mass_mailing_respects_ignore_flag(monkeypatch, tmp_path):
     messaging._BLOCK_READY = False
 
     addr = "user@example.com"
-    now = datetime(2025, 10, 12, 8, 0, 0, tzinfo=timezone.utc)
+    # prepare_mass_mailing evaluates history against the current UTC time.
+    now = datetime.now(timezone.utc)
 
     # Отмечаем недавнюю отправку → правило должно сработать
     cooldown.mark_sent(addr, sent_at=now - timedelta(days=2))

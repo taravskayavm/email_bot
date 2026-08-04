@@ -84,6 +84,7 @@ from .run_control import should_stop
 from .progress_watchdog import heartbeat_now
 from emailbot.timebudget import TimeBudget
 from utils.email_text_fix import fix_email_text
+from .tld_registry import KNOWN_TLDS
 
 _SUP_DIGITS = str.maketrans({
     "0": "⁰",
@@ -137,6 +138,23 @@ _QUICK_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}"
 _PDF_FAST_MIN_HITS = int(os.getenv("PDF_FAST_MIN_HITS", "8"))
 _PDF_FAST_TIMEOUT_MS = int(os.getenv("PDF_FAST_TIMEOUT_MS", "60"))
 
+# Some journal PDFs concatenate adjacent text runs without whitespace, e.g.
+# ``editor@journal.ruWebsite`` or ``editor@journal.ruwww.journal.ru``.  The
+# ordinary e-mail regex then consumes the beginning of the following run as a
+# (foreign/invalid) TLD.  Keep this repair PDF-specific and require strong
+# boundary evidence so regular addresses are not changed.
+_KNOWN_TLD_PATTERN = "|".join(
+    sorted((re.escape(tld) for tld in KNOWN_TLDS), key=len, reverse=True)
+)
+_PDF_GLUE_AFTER_EMAIL_RE = re.compile(
+    rf"(?P<email>"
+    rf"[A-Za-z0-9._%+\-]+@"
+    rf"(?:[A-Za-z0-9\-]+\.)+"
+    rf"(?i:{_KNOWN_TLD_PATTERN})"
+    rf")"
+    rf"(?P<tail>(?i:https?://|www\.)|[A-Z\u0410-\u042F\u0401][A-Za-z\u0400-\u04FF])",
+)
+
 
 _ZERO_WIDTH_MAP = dict.fromkeys(map(ord, "\u200B\u200C\u200D\u2060\uFEFF"), None)
 _NBSP_TRANSLATE = str.maketrans({"\u00A0": " ", "\u202F": " "})
@@ -154,6 +172,28 @@ def clean_pdf_text(text: str) -> str:
     text = _HARD_HYPHENS_RE.sub("-", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
+
+
+def repair_pdf_email_boundaries(
+    text: str, stats: Dict[str, int] | None = None
+) -> str:
+    """Separate an e-mail from an adjacent PDF text run.
+
+    PDF extractors sometimes omit the visual whitespace between text spans.
+    We only split after a known TLD and only when the next run is clearly a URL
+    or starts like a new capitalised word.  Matching remains case-sensitive on
+    purpose: a lower-case suffix may be part of a legitimate longer TLD.
+    """
+
+    if not text:
+        return text or ""
+
+    repaired, count = _PDF_GLUE_AFTER_EMAIL_RE.subn(r"\g<email> \g<tail>", text)
+    if count and stats is not None:
+        stats["pdf_email_boundaries_repaired"] = (
+            stats.get("pdf_email_boundaries_repaired", 0) + count
+        )
+    return repaired
 
 
 def _legacy_cleanup_text(text: str) -> str:
@@ -239,6 +279,42 @@ def _quick_email_matches(text: str) -> list[tuple[str, int, int]]:
     for match in iterator:
         matches.append((match.group(0), match.start(), match.end()))
     return matches
+
+
+def _quick_document_emails(
+    text: str, stats: Dict[str, int]
+) -> list[str] | None:
+    """Return direct PDF addresses when a document already has many of them.
+
+    The general text normalizer deliberately heals broken/obfuscated addresses,
+    but on long journal PDFs it can also join neighbouring layout lines and turn
+    ordinary prose into e-mail fragments.  If the PDF text layer already
+    contains enough explicit addresses, use those literal addresses just as the
+    existing per-page fast path does.
+    """
+
+    if not text:
+        return None
+    repaired = repair_pdf_email_boundaries(clean_pdf_text(text))
+    matches = _quick_email_matches(repaired)
+    if len(matches) < _PDF_FAST_MIN_HITS:
+        return None
+
+    # Record boundary repairs only for the path that is actually selected.
+    repaired = repair_pdf_email_boundaries(clean_pdf_text(text), stats)
+    matches = _quick_email_matches(repaired)
+    seen: set[str] = set()
+    emails: list[str] = []
+    for raw_email, _, _ in matches:
+        norm = normalize_email(raw_email)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        emails.append(raw_email)
+
+    stats["pdf_fast_documents"] = stats.get("pdf_fast_documents", 0) + 1
+    stats["pdf_fast_hits"] = stats.get("pdf_fast_hits", 0) + len(emails)
+    return emails
 
 
 def _page_text_layout(page) -> str:
@@ -537,6 +613,7 @@ def cleanup_text(text: str) -> str:
     if not text:
         return ""
     text = clean_pdf_text(text)
+    text = repair_pdf_email_boundaries(text)
     text = fix_email_text(text)
     text = _legacy_cleanup_text(text)
     return preprocess_text(text, stats=None)
@@ -679,13 +756,13 @@ def extract_text(
     if text_fitz and text_fitz.strip():
         if stats is not None and pages_fitz:
             stats["pages"] = stats.get("pages", 0) + pages_fitz
-        return fix_email_text(text_fitz)
+        return fix_email_text(repair_pdf_email_boundaries(text_fitz, stats))
 
     text_pdfminer, pages_pdfminer = _pdfminer_extract_with_stats(pdf_path, budget)
     if text_pdfminer and text_pdfminer.strip():
         if stats is not None:
             stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
-        return fix_email_text(text_pdfminer)
+        return fix_email_text(repair_pdf_email_boundaries(text_pdfminer, stats))
 
     if stats is not None and max(pages_fitz, pages_pdfminer):
         stats["pages"] = stats.get("pages", 0) + max(pages_fitz, pages_pdfminer)
@@ -733,6 +810,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        prepared = repair_pdf_email_boundaries(prepared, stats)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -755,6 +833,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     if text and text.strip():
         if pages_with_text:
             stats["pages"] = stats.get("pages", 0) + pages_with_text
+        quick_emails = _quick_document_emails(text, stats)
+        if quick_emails is not None:
+            return _finalize_hits(quick_emails, f"pdf:{path}"), stats
         prepared = _prepare_text(text)
         hits = _finalize_hits(
             extract_emails_document(prepared, stats),
@@ -813,6 +894,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = repair_pdf_email_boundaries(text, stats)
         text = fix_email_text(text)
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -931,6 +1013,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        prepared = repair_pdf_email_boundaries(prepared, stats)
         prepared = fix_email_text(prepared)
         if len(prepared) > _PDF_TEXT_TRUNCATE_LIMIT:
             prepared = prepared[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -964,6 +1047,9 @@ def extract_from_pdf_stream(
     if text and text.strip():
         if pages_with_text:
             stats["pages"] = stats.get("pages", 0) + pages_with_text
+        quick_emails = _quick_document_emails(text, stats)
+        if quick_emails is not None:
+            return _finalize_hits(quick_emails, source_ref), stats
         prepared = _prepare_text(text)
         hits = _finalize_hits(
             extract_emails_document(prepared, stats),
@@ -1020,6 +1106,7 @@ def extract_from_pdf_stream(
             join_hyphen=join_hyphen_breaks,
             join_email=join_email_breaks,
         )
+        text = repair_pdf_email_boundaries(text, stats)
         text = fix_email_text(text)
         if len(text) > _PDF_TEXT_TRUNCATE_LIMIT:
             text = text[:_PDF_TEXT_TRUNCATE_LIMIT]
@@ -1100,6 +1187,7 @@ __all__ = [
     "SUPERSCRIPTS",
     "BASIC_EMAIL",
     "cleanup_text",
+    "repair_pdf_email_boundaries",
     "separate_around_emails",
     "extract_text_from_pdf_bytes",
     "extract_text_from_pdf",
