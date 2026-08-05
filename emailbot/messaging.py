@@ -48,6 +48,7 @@ from threading import RLock
 
 from .extraction import normalize_email, strip_html
 from utils.email_clean import strip_invisibles
+from .extraction_common import normalize_text as normalize_email_source_text
 from .cooldown import (
     audit_emails,
     build_cooldown_service,
@@ -515,7 +516,10 @@ def parse_emails_from_text(text: str) -> list[str]:
     if not text:
         return []
 
-    found = EMAIL_RE.findall(text)
+    # Telegram and copied documents may contain Cyrillic lookalikes inside an
+    # otherwise Latin address (for example ``usсhakova`` with Cyrillic "с").
+    # Normalize those before applying the strict ASCII e-mail expression.
+    found = EMAIL_RE.findall(normalize_email_source_text(text))
     cleaned: list[str] = []
     seen: set[str] = set()
     for raw in found:

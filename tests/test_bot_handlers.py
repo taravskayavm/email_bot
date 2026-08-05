@@ -497,6 +497,29 @@ def test_manual_input_router_summary(monkeypatch):
     }
 
 
+def test_manual_router_accepts_email_mislabeled_as_url(monkeypatch):
+    text = "natalia.kushnarenko1@gmail.com usсhakova.om@yandex.ru"
+    update = DummyUpdate(text=text)
+    update.message.entities = [
+        types.SimpleNamespace(type="url", offset=31, length=23)
+    ]
+    ctx = DummyContext()
+    ctx.user_data["awaiting_manual_email"] = True
+
+    monkeypatch.setattr(
+        bh, "should_skip_by_cooldown", lambda email, days=None: (False, "")
+    )
+
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.route_text_message(update, ctx))
+
+    assert set(ctx.chat_data["manual_emails"]) == {
+        "natalia.kushnarenko1@gmail.com",
+        "uschakova.om@yandex.ru",
+    }
+    assert bh.MANUAL_URL_REJECT_MESSAGE not in update.message.replies
+
+
 def test_manual_input_router_rejects_url():
     update = DummyUpdate(text="https://example.com")
     ctx = DummyContext()

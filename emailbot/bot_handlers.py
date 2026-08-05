@@ -4458,11 +4458,15 @@ async def route_text_message(
             context.chat_data.get("awaiting_manual_emails")
             or context.user_data.get("awaiting_manual_email")
         )
-        if awaiting_manual:
+        # Telegram can classify an e-mail containing Unicode lookalikes as a
+        # URL entity.  In manual mode an explicit '@' takes precedence; the
+        # e-mail parser will validate/normalize the actual values below.
+        if awaiting_manual and "@" not in raw_text:
             await message.reply_text(MANUAL_URL_REJECT_MESSAGE)
             raise ApplicationHandlerStop
-        await handle_url_text(update, context)
-        raise ApplicationHandlerStop
+        if not awaiting_manual:
+            await handle_url_text(update, context)
+            raise ApplicationHandlerStop
 
     awaiting = context.chat_data.get("awaiting_manual_emails") or context.user_data.get(
         "awaiting_manual_email"
