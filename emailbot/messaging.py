@@ -2075,13 +2075,26 @@ def _extract_sender_email(msg) -> str:
 
 
 def _message_has_unsubscribe_intent(msg) -> bool:
-    """Return ``True`` if ``msg`` contains an unsubscribe keyword."""
+    """Return ``True`` only for an explicit unsubscribe command."""
 
     try:
         subject = _decode_header_value(msg.get("Subject", ""))
-        intent_words = ("unsubscribe", "отписаться", "отписка", "remove me")
-        subject_folded = subject.casefold()
-        if any(word in subject_folded for word in intent_words):
+        commands = {
+            "unsubscribe",
+            "отписаться",
+            "отписка",
+            "отписка от рассылки",
+            "remove me",
+        }
+
+        def _normalize_command(value: str) -> str:
+            normalized = " ".join((value or "").casefold().strip().split())
+            # Replies/forwards may preserve the original unsubscribe subject.
+            while re.match(r"^(?:re|fw|fwd):\s*", normalized):
+                normalized = re.sub(r"^(?:re|fw|fwd):\s*", "", normalized).strip()
+            return normalized.strip(".!?,;:–—-")
+
+        if _normalize_command(subject) in commands:
             return True
 
         body_chunks: list[str] = []
@@ -2114,8 +2127,22 @@ def _message_has_unsubscribe_intent(msg) -> bool:
                     body_chunks.append(payload.decode("utf-8", errors="replace"))
 
         body_text = "\n".join(body_chunks)
-        body_folded = body_text.casefold()
-        return any(word in body_folded for word in intent_words)
+        # Do not search the whole body: ordinary replies often quote an older
+        # campaign footer containing an unsubscribe link.  Only the first
+        # meaningful, non-quoted line can act as an explicit command.
+        first_line = ""
+        for raw_line in body_text.splitlines():
+            candidate = raw_line.strip()
+            if not candidate:
+                continue
+            if candidate.startswith(">"):
+                return False
+            first_line = candidate
+            break
+        normalized_first = _normalize_command(first_line)
+        return normalized_first in commands or normalized_first.startswith(
+            "прошу отписать этот адрес от рассылки"
+        )
     except Exception:
         return False
 
