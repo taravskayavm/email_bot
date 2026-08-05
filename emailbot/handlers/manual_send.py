@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Set
 
 from asyncio import Lock
 
-from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from emailbot.handlers.common import safe_answer
 
@@ -246,15 +246,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     bot_handlers = _bot_handlers()
     bot_handlers.init_state(context)
-    keyboard = [
-        ["📤 Массовая", "🛑 Стоп", "✉️ Ручная"],
-        ["🧹 Очистить список", "📄 Показать блок-лист"],
-        ["🚫 Добавить в блок-лист", "🧾 О боте"],
-        ["🧭 Сменить группу", "📈 Отчёты"],
-        ["🚀 Игнорировать лимит", "🩺 Диагностика"],
-        ["⚠️ Игнорировать правило 180 дней"],
-    ]
-    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    markup = bot_handlers.build_main_menu_markup(context)
     await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
 
 
@@ -910,7 +902,7 @@ async def send_all(
                     (
                         f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
                         "Если вы исправили ошибки — нажмите "
-                        "«🚀 Игнорировать лимит» и запустите ещё раз."
+                        "«🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
                     )
                 )
                 return

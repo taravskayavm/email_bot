@@ -132,12 +132,25 @@ def test_main_menu_has_shared_cooldown_toggle():
         for button in row
     ]
     assert "⚠️ Игнорировать правило 180 дней" in labels
+    assert "🚀 Игнорировать дневной лимит 300 писем" in labels
+    assert "🚀 Игнорировать лимит" not in labels
     assert "🚫 Добавить в блок-лист" in labels
     assert "📄 Показать блок-лист" in labels
     assert "🌐 Добавить исключённый домен" in labels
     assert "📵 Исключённые домены" in labels
     assert "🔄 Синхронизировать с сервером" not in labels
     assert "🔁 Синхронизировать бонсы" not in labels
+    rows = [
+        [getattr(button, "text", button) for button in row]
+        for row in markup.keyboard
+    ]
+    assert rows[:5] == [
+        ["📤 Массовая", "✉️ Ручная"],
+        ["🛑 Стоп", "🧹 Очистить список"],
+        ["🧭 Сменить группу", "📈 Отчёты"],
+        ["🚀 Игнорировать дневной лимит 300 писем"],
+        ["⚠️ Игнорировать правило 180 дней"],
+    ]
 
 
 def test_main_menu_hides_manual_override_when_disabled(monkeypatch):

@@ -2364,18 +2364,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the main menu and initialize state."""
 
     init_state(context)
+    markup = build_main_menu_markup(context)
+    await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
+
+
+DAILY_LIMIT_BUTTON = "🚀 Игнорировать дневной лимит 300 писем"
+COOLDOWN_LIMIT_BUTTON = "⚠️ Игнорировать правило 180 дней"
+
+
+def build_main_menu_markup(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> ReplyKeyboardMarkup:
+    """Build the shared main menu grouped by purpose."""
+
     keyboard = [
-        ["📤 Массовая", "🛑 Стоп", "✉️ Ручная"],
-        ["🧹 Очистить список", "📄 Показать блок-лист"],
-        ["🚫 Добавить в блок-лист", "🧾 О боте"],
-        ["🌐 Добавить исключённый домен", "📵 Исключённые домены"],
+        ["📤 Массовая", "✉️ Ручная"],
+        ["🛑 Стоп", "🧹 Очистить список"],
         ["🧭 Сменить группу", "📈 Отчёты"],
-        ["🚀 Игнорировать лимит", "🩺 Диагностика"],
+        [DAILY_LIMIT_BUTTON],
     ]
     if _manual_flag("MANUAL_ALLOW_OVERRIDE", True):
-        keyboard.append(["⚠️ Игнорировать правило 180 дней"])
-    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Можно загрузить данные", reply_markup=markup)
+        keyboard.append([COOLDOWN_LIMIT_BUTTON])
+    keyboard.extend(
+        [
+            ["🚫 Добавить в блок-лист", "📄 Показать блок-лист"],
+            ["🌐 Добавить исключённый домен", "📵 Исключённые домены"],
+            ["🩺 Диагностика", "🧾 О боте"],
+        ]
+    )
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
 async def prompt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4687,7 +4704,7 @@ async def _send_batch_with_sessions(
         await query.message.reply_text(
             (
                 f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                "Если вы исправили ошибки — нажмите «🚀 Игнорировать лимит» и запустите ещё раз."
+                "Если вы исправили ошибки — нажмите «🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
             )
         )
         return ManualBatchResult(remaining=to_send, retryable=True)
@@ -5788,7 +5805,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 (
                     f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
                     "Если вы исправили ошибки — нажмите "
-                    "«🚀 Игнорировать лимит» и запустите ещё раз."
+                    "«🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
                 )
             )
             clear_cancel(chat_id)
@@ -6231,7 +6248,7 @@ async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 (
                     f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
                     "Если вы исправили ошибки — нажмите "
-                    "«🚀 Игнорировать лимит» и запустите ещё раз."
+                    "«🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
                 )
             )
             clear_cancel(chat_id)
