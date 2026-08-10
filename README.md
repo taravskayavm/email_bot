@@ -26,12 +26,10 @@ python email_bot.py
 /url https://example.com/page
 ```
 
-Глубокий обход (несколько страниц):
+Разбор одной указанной страницы (команда `/crawl` оставлена для совместимости):
 
 ```text
-/crawl https://example.com
-/crawl https://example.com --max-pages 80 --max-depth 3
-/crawl https://example.com --prefix /staff,/contacts
+/crawl https://example.com  # совместимый псевдоним разбора одной страницы
 ```
 
 ## Конфигурация через .env

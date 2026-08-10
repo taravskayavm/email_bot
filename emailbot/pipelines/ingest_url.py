@@ -17,14 +17,18 @@ async def ingest_url(
     path_prefixes: Optional[list[str]] = None,
     limit_pages: Optional[int] = None,
 ) -> Tuple[List[str], Dict[str, object]]:
-    """Fetch ``url`` and return extracted e-mails along with summary stats."""
+    """Fetch only ``url`` and return extracted e-mails with summary stats.
+
+    Crawl-related arguments remain accepted so callbacks from older bot
+    messages keep working, but they no longer enable site-wide crawling.
+    """
 
     try:
         emails, meta = await extract_from_url_async(
             url,
-            deep=deep,
-            path_prefixes=path_prefixes,
-            max_pages=limit_pages if deep else None,
+            deep=False,
+            path_prefixes=None,
+            max_pages=None,
         )
     except httpx.UnsupportedProtocol as exc:
         return [], {
@@ -72,4 +76,3 @@ async def ingest_url(
 
 
 __all__ = ["ingest_url"]
-

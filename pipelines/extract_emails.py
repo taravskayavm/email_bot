@@ -41,6 +41,48 @@ from utils.tld_utils import is_allowed_domain, is_foreign_domain
 PERSONAL_ONLY = os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1"
 
 
+class URLResponseTooLargeError(RuntimeError):
+    """Raised when a URL response exceeds the configured in-memory limit."""
+
+
+def _url_response_limit() -> int:
+    """Return the single-page download limit, defaulting to three megabytes."""
+
+    raw = (
+        os.getenv("WEB_MAX_BYTES")
+        or os.getenv("CRAWL_MAX_CONTENT_LENGTH")
+        or "3000000"
+    )
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 3_000_000
+
+
+def _read_limited_response(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read a streamed response without ever buffering more than ``max_bytes``."""
+
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except (TypeError, ValueError):
+            declared_size = 0
+        if declared_size > max_bytes:
+            raise URLResponseTooLargeError(
+                f"URL response is larger than {max_bytes} bytes"
+            )
+
+    content = bytearray()
+    for chunk in response.iter_bytes():
+        if len(content) + len(chunk) > max_bytes:
+            raise URLResponseTooLargeError(
+                f"URL response is larger than {max_bytes} bytes"
+            )
+        content.extend(chunk)
+    return bytes(content)
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float((os.getenv(name, "") or "").strip())
@@ -564,7 +606,7 @@ def run_pipeline_on_text(text: str) -> Tuple[List[str], List[Tuple[str, str]]]:
 
 
 def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
-    """Fetch a single URL synchronously and decode using charset-normalizer."""
+    """Fetch one URL with a bounded streamed response body."""
 
     headers = {"User-Agent": C.CRAWL_USER_AGENT}
     timeout_conf = httpx.Timeout(connect=10.0, read=timeout, write=timeout, pool=10.0)
@@ -579,21 +621,29 @@ def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                response = client.get(url)
-                response.raise_for_status()
-                content_type = str(response.headers.get("content-type", "")).lower()
-                if content_type and not any(
-                    hint in content_type for hint in ("text", "html", "xml", "json")
-                ):
-                    return ""
-                return best_effort_decode(response.content)
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    content_type = str(
+                        response.headers.get("content-type", "")
+                    ).lower()
+                    if content_type and not any(
+                        hint in content_type
+                        for hint in ("text", "html", "xml", "json")
+                    ):
+                        return ""
+                    content = _read_limited_response(
+                        response, _url_response_limit()
+                    )
+                    return best_effort_decode(content)
+            except URLResponseTooLargeError:
+                raise
             except httpx.ReadTimeout as exc:
                 last_exc = exc
             except Exception as exc:
                 last_exc = exc
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
-                    # HTTP errors should propagate after retries.
-                    pass
+                    if 400 <= exc.response.status_code < 500:
+                        raise
             if attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
                 continue
@@ -606,24 +656,23 @@ def _http_get_text(url: str, *, timeout: float = 20.0) -> str:
 async def extract_from_url_async(
     url: str,
     *,
-    deep: bool = True,
+    deep: bool = False,
     progress_cb: ProgressCB = None,
     path_prefixes: Optional[Sequence[str]] = None,
     max_pages: Optional[int] = None,
 ) -> tuple[list[str], dict]:
-    """Extract e-mail addresses from ``url`` asynchronously.
+    """Extract e-mail addresses from only the explicitly requested URL.
 
-    When ``deep`` is ``True`` the crawler walks the site breadth-first (respecting
-    robots.txt and staying on the same domain if configured) and aggregates all
-    discovered HTML pages. ``progress_cb`` is invoked with ``(pages, page_url)``
-    to report crawling progress; it is throttled internally to avoid flooding.
-    ``path_prefixes`` (if provided) limits the deep crawl to URLs whose path
-    starts with one of the prefixes. ``max_pages`` (if provided) caps the number
-    of pages processed during a deep crawl.
+    Crawl-related arguments are retained for compatibility with older callers
+    and already-sent Telegram callback buttons, but are intentionally ignored.
     """
 
-    if os.getenv("CRAWLER_DISABLED", "0") == "1":
-        deep = False
+    # Site-wide crawling is intentionally disabled. Keep the argument for
+    # compatibility with old callbacks and integrations, but never follow
+    # links, sitemaps, or documents discovered on another page.
+    deep = False
+    path_prefixes = None
+    max_pages = None
 
     prefixes_list: list[str] = []
     if path_prefixes:
@@ -657,7 +706,12 @@ async def extract_from_url_async(
             except Exception:
                 pass
         try:
-            html = _http_get_text(url)
+            # httpx.Client and its retry backoff are synchronous. Running the
+            # fetch in a worker thread keeps Telegram updates responsive while
+            # a remote server is slow.
+            html = await asyncio.to_thread(_http_get_text, url)
+        except URLResponseTooLargeError as exc:
+            raise RuntimeError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(
                 f"HTTP ошибка при загрузке {url}: {exc.__class__.__name__}"
@@ -795,7 +849,7 @@ async def extract_from_url_async(
     return emails, stats
 
 
-def extract_from_url(url: str, *, deep: bool = True) -> list[str]:
+def extract_from_url(url: str, *, deep: bool = False) -> list[str]:
     """Synchronous wrapper for :func:`extract_from_url_async`."""
 
     emails, _ = asyncio.run(extract_from_url_async(url, deep=deep))
@@ -809,4 +863,3 @@ __all__ = [
     "extract_from_url_async",
     "extract_from_url",
 ]
-

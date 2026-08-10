@@ -389,9 +389,12 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
                 if email:
                     mailtos.add(email)
     if mailtos:
-        mailto_block = " ".join(sorted(mailtos))
-        if out:
-            mailto_block = " " + mailto_block
+        # Keep annotation targets behind an explicit ``mailto:`` boundary.
+        # Appending a bare address after visible text such as ``Contact us``
+        # allowed later PDF cleanup to invent ``us.hello@example.com``.
+        mailto_block = "\n".join(
+            f"mailto:{email}" for email in sorted(mailtos)
+        )
         out.append(mailto_block)
     return "\n".join(out), pages_with_text
 

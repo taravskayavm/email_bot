@@ -469,7 +469,7 @@ async def url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Глубокий обход сайта: /crawl <url> [--max-pages N] [--max-depth D] [--prefix /staff,/contacts]"""
+    """Совместимая команда разбора одной указанной страницы: /crawl <url>."""
 
     msg = update.message
     if not msg:
@@ -544,9 +544,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         emails, stats = await deep_extract_async(
             url,
-            deep=True,
-            progress_cb=_progress,
-            path_prefixes=prefixes,
+            deep=False,
         )
     except Exception as exc:  # pragma: no cover - network/parse errors
         await msg.reply_text(f"Ошибка при обходе {url}: {exc.__class__.__name__}")
@@ -580,7 +578,7 @@ async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         msg,
         sorted(unique),
         source=url,
-        title="Результат (глубокий обход)",
+        title="Результат (1 страница)",
         stats=stats_map if isinstance(stats_map, dict) else None,
     )
 

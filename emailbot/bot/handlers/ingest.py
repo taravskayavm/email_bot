@@ -186,7 +186,7 @@ async def parse_single_cmd(message: types.Message) -> None:
 
 @router.message(F.text.startswith("/crawl"))
 async def crawl_cmd(message: types.Message) -> None:
-    """Глубокий скан по домену: /crawl <ссылка> [limit]."""
+    """Compatibility alias for parsing one explicitly requested page."""
 
     tokens = (message.text or "").strip().split()
     if len(tokens) < 2:
@@ -194,18 +194,10 @@ async def crawl_cmd(message: types.Message) -> None:
         return
 
     url = tokens[1].strip()
-    limit_override: int | None = None
-    if len(tokens) >= 3:
-        try:
-            limit_override = max(1, int(tokens[2]))
-        except Exception:
-            limit_override = None
-
-    limit = limit_override or settings.CRAWL_MAX_PAGES_PER_DOMAIN
-
     try:
-        await message.reply(f"🕷️ Сканирую сайт (лимит {limit} стр.):\n{hcode(url)}")
-        final_url, emails = await crawl_emails(url, limit)
+        await message.reply(f"🔎 Парсю одну страницу:\n{hcode(url)}")
+        emails, _stats = await ingest_url(url, deep=False)
+        final_url = url
     except Exception as exc:  # pragma: no cover - network errors vary
         await message.reply(f"⚠️ Ошибка сканирования: {exc}")
         return
@@ -266,10 +258,6 @@ async def handle_url(msg: types.Message) -> None:
         _LAST_URLS[user_id] = url
     builder = InlineKeyboardBuilder()
     builder.button(text="🔎 Парсить эту страницу", callback_data="parse_url:single")
-    builder.button(
-        text="🕷️ Сканировать сайт",
-        callback_data="parse_url:deep",
-    )
     builder.adjust(1)
     await msg.answer(
         f"Нашла ссылку:\n{hcode(url)}\nВыберите режим:",
@@ -327,29 +315,9 @@ async def parse_single(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "parse_url:deep")
 async def parse_deep(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id if callback.from_user else None
-    if user_id is None:
-        await callback.answer("Не удалось определить ссылку", show_alert=True)
-        return
-    url = _LAST_URLS.get(user_id)
-    if not url:
-        await callback.answer("Не удалось определить ссылку", show_alert=True)
-        return
-    keyboard = InlineKeyboardBuilder()
-    for limit in (10, 25, 50, 100):
-        keyboard.button(text=f"{limit} стр.", callback_data=f"parse_limit:{limit}")
-    keyboard.button(text="Другое…", callback_data="parse_limit:custom")
-    keyboard.adjust(2)
-    waiting = _get_awaiting_users(callback.message.bot)
-    waiting.discard(user_id)
-    text = (
-        f"🕷️ Сканирование сайта:\n{hcode(url)}\n\nВыберите лимит страниц:"
-    )
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard.as_markup())
-    except TelegramBadRequest:
-        await callback.message.answer(text, reply_markup=keyboard.as_markup())
-    await callback.answer()
+    # Old inline keyboards may still contain this callback. Treat it as a
+    # single-page request instead of starting a site crawl.
+    await _process_url_callback(callback, deep=False)
 
 
 @router.callback_query(F.data.startswith("parse_limit:"))
@@ -375,7 +343,7 @@ async def parse_limit(callback: CallbackQuery) -> None:
         return
     waiting.discard(user_id)
     limit = _normalize_page_limit(choice)
-    await _process_url_callback(callback, deep=True, limit_pages=limit)
+    await _process_url_callback(callback, deep=False)
 
 
 @router.message(F.text, F.func(_is_waiting_for_limit))
@@ -400,12 +368,12 @@ async def handle_limit_input(msg: types.Message) -> None:
     status_text = f"🕷️ Сканирую сайт (лимит {limit} стр.):\n{hcode(url)}"
     await msg.answer(status_text)
     try:
-        ok, stats = await ingest_url(url, deep=True, limit_pages=limit)
+        ok, stats = await ingest_url(url, deep=False)
     except Exception as exc:  # pragma: no cover - network errors are variable
         await msg.answer(f"Не удалось обработать ссылку {hcode(url)}: {exc}")
         return
     filtered = _prepare_filtered(ok)
-    summary = _build_summary(filtered, stats, deep=True, limit_pages=limit)
+    summary = _build_summary(filtered, stats, deep=False)
     await msg.answer(summary)
 
 
