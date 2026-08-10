@@ -107,7 +107,12 @@ _PDF_GLUE_AFTER_EMAIL_RE = re.compile(
     rf"(?:[A-Za-z0-9\-]+\.)+"
     rf"(?i:{_KNOWN_TLD_PATTERN})"
     rf")"
+    rf"[ \t\r\n]*"
     rf"(?P<tail>(?i:https?://|www\.)|[A-Z\u0410-\u042F\u0401][A-Za-z\u0400-\u04FF])",
+)
+_PDF_EMAIL_AT_LINE_START_RE = re.compile(
+    rf"(?m)(?P<prefix>^[^\r\n]*(?:[ \t]|[:;])[^\r\n]*)"
+    rf"\r?\n[ \t]*(?P<email>{BASIC_EMAIL})"
 )
 
 
@@ -144,9 +149,16 @@ def repair_pdf_email_boundaries(
         return text or ""
 
     repaired, count = _PDF_GLUE_AFTER_EMAIL_RE.subn(r"\g<email> \g<tail>", text)
+    repaired, left_count = _PDF_EMAIL_AT_LINE_START_RE.subn(
+        r"\g<prefix>; \g<email>", repaired
+    )
     if count and stats is not None:
         stats["pdf_email_boundaries_repaired"] = (
             stats.get("pdf_email_boundaries_repaired", 0) + count
+        )
+    if left_count and stats is not None:
+        stats["pdf_email_left_boundaries_repaired"] = (
+            stats.get("pdf_email_left_boundaries_repaired", 0) + left_count
         )
     return repaired
 
@@ -354,6 +366,43 @@ def _page_text_layout(page) -> str:
     return "".join(out)
 
 
+_SHIFTED_PDF_PUNCTUATION = {
+    3: " ",
+    15: ",",
+    16: "-",
+    17: ".",
+    18: "/",
+    29: ":",
+    35: "@",
+}
+
+
+def _extract_shift_encoded_emails(text: str) -> set[str]:
+    """Recover addresses from a known embedded-font character mapping.
+
+    Some journal PDFs expose ordinary prose correctly but return contact lines
+    through a font encoding where letters and digits are shifted and ``#`` is
+    the visible ``@`` glyph.  Decode only lines containing both characteristic
+    control-space and at-sign codes, then accept only normal bounded addresses.
+    """
+
+    emails: set[str] = set()
+    for line in (text or "").split("\n"):
+        if "#" not in line or "\x03" not in line:
+            continue
+        decoded_chars: list[str] = []
+        for char in line:
+            code = ord(char)
+            if 19 <= code <= 28 or 36 <= code <= 93:
+                decoded_chars.append(chr(code + 29))
+            else:
+                decoded_chars.append(_SHIFTED_PDF_PUNCTUATION.get(code, char))
+        decoded = "".join(decoded_chars)
+        for match in _QUICK_EMAIL_RE.finditer(decoded):
+            emails.add(match.group(0).rstrip("."))
+    return emails
+
+
 def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]:
     """Return concatenated text and a count of pages with non-empty content."""
 
@@ -374,6 +423,16 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
             except Exception:
                 text = ""
         if text and text.strip():
+            shifted_emails = _extract_shift_encoded_emails(text)
+            if shifted_emails:
+                mailtos.update(shifted_emails)
+                # The encoded source line is unreadable prose to the normal
+                # pipeline and can attach its glyph codes to an adjacent real
+                # address.  Its decoded addresses are already preserved above.
+                text = "\n".join(
+                    "" if "#" in line and "\x03" in line else line
+                    for line in text.split("\n")
+                )
             pages_with_text += 1
             out.append(text)
         try:
@@ -392,9 +451,14 @@ def _collect_fitz_text(doc, budget: TimeBudget | None = None) -> Tuple[str, int]
         # Keep annotation targets behind an explicit ``mailto:`` boundary.
         # Appending a bare address after visible text such as ``Contact us``
         # allowed later PDF cleanup to invent ``us.hello@example.com``.
-        mailto_block = "\n".join(
+        # A semicolon is intentional: the PDF line-break repair treats some
+        # newlines as dots inside split addresses and could otherwise turn
+        # ``a@example.ru\nmailto:b@example.ru`` into one invalid domain.
+        mailto_block = "; ".join(
             f"mailto:{email}" for email in sorted(mailtos)
         )
+        if out:
+            mailto_block = "; " + mailto_block
         out.append(mailto_block)
     return "\n".join(out), pages_with_text
 
@@ -696,6 +760,9 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         else:
             text, pages_with_text = "", 0
         if text and text.strip():
+            stats["pdf_backend"] = (
+                "pymupdf" if backend == "fitz" else "pdfminer"
+            )
             break
 
     if text and text.strip():
@@ -712,6 +779,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         return hits, stats
 
     if _fitz is None:
+        stats["pdf_backend"] = "raw"
         try:
             with open(path, "rb") as f:
                 text = f.read().decode("utf-8", "ignore")
@@ -725,6 +793,7 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         return hits, stats
 
     hits: List[EmailHit] = []
+    stats["pdf_backend"] = "pymupdf"
     doc = _fitz.open(path)
     for page_idx, page in enumerate(doc, start=1):
         heartbeat_now()
@@ -881,6 +950,8 @@ def extract_from_pdf_stream(
         if doc_for_text is not None:
             try:
                 text, pages_with_text = _collect_fitz_text(doc_for_text)
+                if text.strip():
+                    stats["pdf_backend"] = "pymupdf"
             finally:
                 try:
                     doc_for_text.close()
@@ -892,6 +963,7 @@ def extract_from_pdf_stream(
         if text_pdfminer.strip():
             text = text_pdfminer
             pages_with_text = max(pages_with_text, pages_pdfminer)
+            stats["pdf_backend"] = "pdfminer"
 
     if text and text.strip():
         if pages_with_text:

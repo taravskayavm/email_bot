@@ -21,10 +21,17 @@ _DOMAIN_CHARS = r"[A-Za-z0-9.\-]"
 def _preclean_obfuscations(s: str) -> str:
     """Снимаем популярные «обфускации» вида name (at) domain [dot] ru, «собака», «точка» и пр."""
 
-    s = re.sub(r"\s*\[?\(?\s*at\s*\)?\]?\s*", "@", s, flags=re.I)
-    s = re.sub(r"\s*\[?\(?\s*dog\s*\)?\]?\s*", "@", s, flags=re.I)  # «собака»
+    # Bracketed tokens may touch the address, while plain words must have real
+    # word boundaries.  The previous optional-bracket expression matched
+    # ``at`` inside ordinary words such as ``Annotation``, ``education`` and
+    # ``acrobats`` and manufactured addresses from English PDF prose.
+    s = re.sub(r"[\[\(\{<]\s*at\s*[\]\)\}>]", "@", s, flags=re.I)
+    s = re.sub(r"(?<!\w)at(?!\w)", "@", s, flags=re.I)
+    s = re.sub(r"[\[\(\{<]\s*dog\s*[\]\)\}>]", "@", s, flags=re.I)
+    s = re.sub(r"(?<!\w)dog(?!\w)", "@", s, flags=re.I)  # «собака»
     s = re.sub(r"\s*\[?\(?\s*точка\s*\)?\]?\s*", ".", s, flags=re.I)  # «точка»
-    s = re.sub(r"\s*\[?\(?\s*dot\s*\)?\]?\s*", ".", s, flags=re.I)
+    s = re.sub(r"[\[\(\{<]\s*dot\s*[\]\)\}>]", ".", s, flags=re.I)
+    s = re.sub(r"(?<!\w)dot(?!\w)", ".", s, flags=re.I)
     # убираем пробелы вокруг @ и .
     s = re.sub(rf"({_LOCAL_CHARS})\s*@\s*({_DOMAIN_CHARS})", r"\1@\2", s)
     s = re.sub(rf"({_DOMAIN_CHARS})\s*\.\s*({_DOMAIN_CHARS})", r"\1.\2", s)
@@ -56,7 +63,15 @@ def _join_email_internal_breaks(s: str) -> str:
     # 1) переносы строк/лишние пробелы вокруг '@' и '.'
     s = re.sub(rf"({_LOCAL_CHARS})\s*[\r\n]+\s*@", r"\1@", s)  # local\n@ → local@
     s = re.sub(rf"@\s*[\r\n]+\s*({_DOMAIN_CHARS})", r"@\1", s)  # @\n domain → @domain
-    s = re.sub(rf"({_DOMAIN_CHARS})\s*[\r\n]+\s*\.?\s*({_DOMAIN_CHARS})", r"\1.\2", s)  # domain\npart → domain.part
+    # Join a line-broken top-level domain only when the left side is already
+    # an explicit ``@domain`` label.  The previous character-to-character rule
+    # changed every prose line break into a dot and could turn
+    # ``Contact us\nowner@example.net`` into ``us.owner@example.net``.
+    s = re.sub(
+        r"(@[A-Za-z0-9-]{1,63})\s*[\r\n]+\s*\.?\s*([A-Za-z]{2,24})(?![A-Za-z])",
+        r"\1.\2",
+        s,
+    )
     # 2) пробелы внутри «local@domain»
     s = re.sub(rf"({_LOCAL_CHARS})\s+@\s+({_DOMAIN_CHARS})", r"\1@\2", s)
     s = re.sub(rf"({_DOMAIN_CHARS})\s+\.\s+({_DOMAIN_CHARS})", r"\1.\2", s)

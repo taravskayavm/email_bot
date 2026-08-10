@@ -3327,13 +3327,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     filename = (doc.file_name or "").lower()
     if filename.endswith(".pdf"):
-        backend_states = _pdf.backend_status()
-        report += "\n\n" + "\n".join(
-            [
-                "📄 PDF-бэкенды:",
-                f" • PDFMiner: {'доступен' if backend_states.get('pdfminer') else 'недоступен'}",
-            ]
-        )
+        backend_name = str(stats.get("pdf_backend") or "").lower()
+        backend_label = {
+            "pymupdf": "PyMuPDF",
+            "pdfminer": "PDFMiner (резервный)",
+            "raw": "встроенное чтение",
+        }.get(backend_name, "не определён")
+        report += f"\n\n📄 PDF-движок: {backend_label}"
 
     logging.info("[FLOW] done")
     await _send_combined_parse_response(update.message, context, report, state)
