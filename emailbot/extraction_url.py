@@ -653,7 +653,6 @@ def extract_obfuscated_hits(
 
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    ocr = get("ENABLE_OCR", settings.ENABLE_OCR)
     hits: List[EmailHit] = []
     for m in re.finditer(r'href=["\']mailto:([^"\'?]+)', text, flags=re.I):
         addr = urllib.parse.unquote(m.group(1)).strip()
@@ -754,4 +753,3 @@ __all__ = [
     "extract_sitemap_hits",
     "extract_api_hits",
 ]
-

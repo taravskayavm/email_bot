@@ -91,9 +91,6 @@ def render_summary(stats: dict) -> str:
     if missed_pages:
         lines.append(f"📄 Не распознаны страницы PDF: {missed_pages}")
 
-    needs_ocr = stats.get("needs_ocr")
-    if needs_ocr:
-        lines.append("💡 Включите OCR для лучшего извлечения")
 
     invalid_tld = stats.get("invalid_tld")
     if invalid_tld:

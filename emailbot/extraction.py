@@ -1170,7 +1170,6 @@ def extract_from_url(
     settings.STRICT_OBFUSCATION = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     settings.FOOTNOTE_RADIUS_PAGES = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     settings.PDF_LAYOUT_AWARE = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    settings.ENABLE_OCR = get("ENABLE_OCR", settings.ENABLE_OCR)
 
     import re
     import urllib.parse
@@ -1275,7 +1274,6 @@ def extract_any(
     settings.STRICT_OBFUSCATION = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     settings.FOOTNOTE_RADIUS_PAGES = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     settings.PDF_LAYOUT_AWARE = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    settings.ENABLE_OCR = get("ENABLE_OCR", settings.ENABLE_OCR)
 
     import os
     import re
@@ -1451,5 +1449,4 @@ def extract_any_stream(
     stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
     return hits, stats
-
 

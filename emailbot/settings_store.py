@@ -12,7 +12,6 @@ DEFAULTS = {
     "STRICT_OBFUSCATION": True,
     "FOOTNOTE_RADIUS_PAGES": 1,
     "PDF_LAYOUT_AWARE": False,
-    "ENABLE_OCR": False,
     "MAX_ASSETS": 8,
     "MAX_SITEMAP_URLS": 200,
     "MAX_DOCS": 30,
@@ -74,7 +73,6 @@ def set(name: str, value: Any) -> None:
         "STRICT_OBFUSCATION": {True, False},
         "FOOTNOTE_RADIUS_PAGES": {0, 1, 2},
         "PDF_LAYOUT_AWARE": {True, False},
-        "ENABLE_OCR": {True, False},
     }
     if name in allowed and value not in allowed[name]:
         raise ValueError("invalid value")

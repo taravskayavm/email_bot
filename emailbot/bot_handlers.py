@@ -2031,10 +2031,6 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if settings.PDF_LAYOUT_AWARE == DEFAULTS["PDF_LAYOUT_AWARE"]:
             line += " (рекомендуется)"
         lines.append(line)
-        line = f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
-        if settings.ENABLE_OCR == DEFAULTS["ENABLE_OCR"]:
-            line += " (рекомендуется)"
-        lines.append(line)
         return "\n".join(lines)
 
     def _keyboard() -> InlineKeyboardMarkup:
@@ -2059,12 +2055,6 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ],
                 [
                     InlineKeyboardButton(
-                        f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
-                        callback_data="feat:ocr:toggle",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
                         "Сбросить к рекомендованным",
                         callback_data="feat:reset:defaults",
                     )
@@ -2075,7 +2065,7 @@ async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     def _doc() -> str:
         return (
             "ℹ️ Рекомендуемые настройки: строгие обфускации — ON, радиус сносок — 1, "
-            "PDF-layout — OFF, OCR — OFF."
+            "PDF-layout — OFF."
         )
 
     await update.message.reply_text(f"{_status()}\n\n{_doc()}", reply_markup=_keyboard())
@@ -2126,18 +2116,10 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if settings.PDF_LAYOUT_AWARE
                 else "📄 Учёт макета PDF выключен. Используется стандартное извлечение текста."
             )
-        elif section == "ocr" and argument == "toggle":
-            settings.ENABLE_OCR = not settings.ENABLE_OCR
-            hint = (
-                "🔍 OCR включён. Будем распознавать e-mail в скан-PDF. Анализ станет медленнее. Ограничения: до 10 страниц, таймаут 30 сек."
-                if settings.ENABLE_OCR
-                else "🔍 OCR выключен. Скан-PDF без текста пропускаются без распознавания."
-            )
         elif section == "reset" and argument == "defaults":
             settings.STRICT_OBFUSCATION = DEFAULTS["STRICT_OBFUSCATION"]
             settings.FOOTNOTE_RADIUS_PAGES = DEFAULTS["FOOTNOTE_RADIUS_PAGES"]
             settings.PDF_LAYOUT_AWARE = DEFAULTS["PDF_LAYOUT_AWARE"]
-            settings.ENABLE_OCR = DEFAULTS["ENABLE_OCR"]
             hint = "↩️ Сброшено к рекомендованным настройкам."
         else:
             raise ValueError
@@ -2157,10 +2139,6 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines.append(line)
         line = f"PDF_LAYOUT_AWARE={'on' if settings.PDF_LAYOUT_AWARE else 'off'}"
         if settings.PDF_LAYOUT_AWARE == DEFAULTS["PDF_LAYOUT_AWARE"]:
-            line += " (рекомендуется)"
-        lines.append(line)
-        line = f"ENABLE_OCR={'on' if settings.ENABLE_OCR else 'off'}"
-        if settings.ENABLE_OCR == DEFAULTS["ENABLE_OCR"]:
             line += " (рекомендуется)"
         lines.append(line)
         return "\n".join(lines)
@@ -2187,12 +2165,6 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 ],
                 [
                     InlineKeyboardButton(
-                        f"OCR {'on' if settings.ENABLE_OCR else 'off'} ⏼",
-                        callback_data="feat:ocr:toggle",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
                         "Сбросить к рекомендованным",
                         callback_data="feat:reset:defaults",
                     )
@@ -2203,7 +2175,7 @@ async def features_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     def _doc() -> str:
         return (
             "ℹ️ Рекомендуемые настройки: строгие обфускации — ON, радиус сносок — 1, "
-            "PDF-layout — OFF, OCR — OFF."
+            "PDF-layout — OFF."
         )
 
     await query.answer()
@@ -2247,7 +2219,6 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     flags = {
         "STRICT_OBFUSCATION": settings.STRICT_OBFUSCATION,
         "PDF_LAYOUT_AWARE": settings.PDF_LAYOUT_AWARE,
-        "ENABLE_OCR": settings.ENABLE_OCR,
     }
 
     lines = [

@@ -1,11 +1,9 @@
-"""PDF extraction helpers with optional layout and OCR features."""
+"""PDF text extraction helpers."""
 from __future__ import annotations
 
-import hashlib
 import io
 import logging
 import os
-import shutil
 import statistics
 import time
 from pathlib import Path
@@ -37,45 +35,13 @@ except Exception:  # pragma: no cover - тихая деградация до pdf
     fitz = None  # type: ignore
     FITZ_OK = False
 
-# Заглушка: когда появится OCR, заменить на фактическую проверку.
-_OCR_AVAILABLE = False
-_OCR_LOGGED_MISSING = False
-
-
-def _detect_ocr_status() -> tuple[bool, bool, str]:
-    """Determine whether OCR is enabled and available."""
-
-    global _OCR_AVAILABLE, _OCR_LOGGED_MISSING
-    enabled = bool(get("ENABLE_OCR", settings.ENABLE_OCR))
-    if not enabled:
-        _OCR_AVAILABLE = False
-        return False, False, ""
-    engine = shutil.which("tesseract")
-    if engine:
-        _OCR_AVAILABLE = True
-        return True, True, ""
-    _OCR_AVAILABLE = False
-    if not _OCR_LOGGED_MISSING:
-        logger.warning("OCR engine not found")
-        _OCR_LOGGED_MISSING = True
-    return False, True, "не найден tesseract"
-
-
 def backend_status() -> Dict[str, bool | str]:
     """Return availability flags for PDF extraction backends."""
 
-    ocr_available, ocr_enabled, reason = _detect_ocr_status()
-    status: Dict[str, bool | str] = {
+    return {
         "fitz": FITZ_OK,
         "pdfminer": _PDFMINER_AVAILABLE,
-        "ocr": ocr_available if ocr_enabled else False,
-        "ocr_enabled": ocr_enabled,
-        "ocr_engine": _OCR_ENGINE,
-        "ocr_lang": _OCR_LANG,
     }
-    if reason:
-        status["ocr_reason"] = reason
-    return status
 
 from emailbot import settings
 from emailbot.settings_store import get
@@ -99,17 +65,6 @@ _SUP_DIGITS = str.maketrans({
     "9": "⁹",
 })
 
-_OCR_ENGINE = os.getenv("OCR_ENGINE", "pytesseract") or "pytesseract"
-_OCR_LANG = os.getenv("OCR_LANG", "eng+rus") or "eng+rus"
-_OCR_PAGE_LIMIT = int(os.getenv("OCR_PAGE_LIMIT", "10"))
-_OCR_TIME_LIMIT = int(os.getenv("OCR_TIME_LIMIT", "30"))  # seconds
-_OCR_MIN_TEXT_RATIO = float(os.getenv("OCR_MIN_TEXT_RATIO", "0.05"))
-_OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "150"))
-_OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", str(_OCR_PAGE_LIMIT)))
-_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
-_OCR_TIMEOUT_PER_PAGE = int(os.getenv("OCR_TIMEOUT_PER_PAGE", "12"))
-_OCR_CACHE_DIR = Path(os.getenv("OCR_CACHE_DIR", "var/ocr_cache"))
-_OCR_ALLOW_BEST_EFFORT = os.getenv("OCR_ALLOW_BEST_EFFORT", "1") == "1"
 _PDF_TEXT_TRUNCATE_LIMIT = int(os.getenv("PDF_TEXT_TRUNCATE_LIMIT", "2000000"))
 MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "200"))
 
@@ -120,11 +75,6 @@ if _pdf_backend_env not in {"fitz", "pdfminer", "auto"}:
 PDF_BACKEND = _pdf_backend_env
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - depends on runtime environment
-    _OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-except Exception:  # pragma: no cover - cache directory is best-effort
-    logger.debug("Failed to create OCR cache directory", exc_info=True)
 
 _SOFT_HYPH = "\u00AD"
 
