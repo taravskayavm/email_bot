@@ -62,12 +62,10 @@ def test_defaults_and_reset(monkeypatch, tmp_path):
     assert get("STRICT_OBFUSCATION") is True
     assert get("FOOTNOTE_RADIUS_PAGES") == 1
     assert get("PDF_LAYOUT_AWARE") is False
-    assert get("ENABLE_OCR") is False
 
     set("STRICT_OBFUSCATION", False)
     set("FOOTNOTE_RADIUS_PAGES", 2)
     set("PDF_LAYOUT_AWARE", True)
-    set("ENABLE_OCR", True)
 
     assert get("STRICT_OBFUSCATION") is False
 
@@ -79,7 +77,6 @@ def test_defaults_and_reset(monkeypatch, tmp_path):
     assert get("STRICT_OBFUSCATION") is True
     assert get("FOOTNOTE_RADIUS_PAGES") == 1
     assert get("PDF_LAYOUT_AWARE") is False
-    assert get("ENABLE_OCR") is False
 
     monkeypatch.setattr(bh, "ADMIN_IDS", {999})
     update2 = DummyUpdate(text="/features", chat_id=1)

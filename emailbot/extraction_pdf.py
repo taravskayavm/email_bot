@@ -5,7 +5,6 @@ import io
 import logging
 import os
 import statistics
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -118,7 +117,7 @@ _HARD_HYPHENS_RE = re.compile(r"[‐-‒–—―]")
 
 
 def clean_pdf_text(text: str) -> str:
-    """Remove invisible characters and normalize whitespace for OCR text."""
+    """Remove invisible characters and normalize whitespace in PDF text."""
 
     if not text:
         return text
@@ -416,108 +415,6 @@ def _fitz_extract_with_stats(path: Path | str, budget: TimeBudget | None = None)
             pass
 
 
-def _ocr_page(page) -> str:
-    try:
-        import pytesseract  # type: ignore
-        from PIL import Image  # type: ignore
-    except Exception:
-        logger.warning(
-            "pytesseract/Pillow are not installed; PDF OCR is disabled"
-        )
-        return ""
-    try:
-        pix = page.get_pixmap(dpi=_OCR_DPI)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        return pytesseract.image_to_string(img, lang=_OCR_LANG)
-    except Exception:
-        return ""
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _ocr_cache_get(key: str) -> str | None:
-    path = _OCR_CACHE_DIR / f"{key}.txt"
-    if not path.exists():
-        return None
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception:
-        logger.debug("Failed to read OCR cache entry", exc_info=True)
-        return None
-
-
-def _ocr_cache_set(key: str, text: str) -> None:
-    path = _OCR_CACHE_DIR / f"{key}.txt"
-    try:
-        path.write_text(text, encoding="utf-8")
-    except Exception:
-        logger.debug("Failed to write OCR cache entry", exc_info=True)
-
-
-def _should_document_ocr(text: str, data: bytes) -> bool:
-    if not data:
-        return False
-    ocr_available, ocr_enabled, _ = _detect_ocr_status()
-    if not ocr_enabled:
-        return False
-    if not (ocr_available or _OCR_ALLOW_BEST_EFFORT):
-        return False
-    cleaned = clean_pdf_text(text or "").strip()
-    if not cleaned:
-        return True
-    if len(cleaned) < _OCR_MIN_CHARS:
-        return True
-    ratio = len(cleaned) / max(len(data), 1)
-    return ratio < _OCR_MIN_TEXT_RATIO
-
-
-def _document_ocr(data: bytes, *, budget: TimeBudget | None = None) -> tuple[str, int]:
-    try:
-        from pdf2image import convert_from_bytes  # type: ignore
-    except Exception:
-        logger.warning("pdf2image is not installed; PDF OCR fallback disabled")
-        return "", 0
-    try:
-        import pytesseract  # type: ignore
-    except Exception:
-        logger.warning("pytesseract is not installed; PDF OCR fallback disabled")
-        return "", 0
-
-    try:
-        images = convert_from_bytes(data, dpi=_OCR_DPI)
-    except Exception:
-        logger.debug("Failed to render PDF pages for OCR", exc_info=True)
-        return "", 0
-
-    if not images:
-        return "", 0
-
-    ocr_parts: list[str] = []
-    start = time.time()
-    pages = images[: min(len(images), _OCR_MAX_PAGES)]
-    for img in pages:
-        if budget:
-            budget.checkpoint()
-        page_start = time.time()
-        try:
-            text = pytesseract.image_to_string(img, lang=_OCR_LANG)
-        except Exception:
-            text = ""
-        if text:
-            ocr_parts.append(text)
-        if time.time() - page_start > _OCR_TIMEOUT_PER_PAGE:
-            break
-        if time.time() - start > _OCR_TIMEOUT_PER_PAGE * min(len(pages), 5):
-            break
-
-    combined = clean_pdf_text("\n".join(ocr_parts))
-    if combined:
-        return combined, len(ocr_parts)
-    return "", 0
-
-
 def _fitz_extract(path: Path) -> str:
     text, _ = _fitz_extract_with_stats(path)
     return text
@@ -678,33 +575,8 @@ def extract_text_from_pdf_bytes(
                 text = text_pdfminer
                 pages_with_text = max(pages_with_text, 1)
 
-    ocr_pages = 0
-    ocr_used = False
-    if _should_document_ocr(text, data):
-        if stats is not None:
-            stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
-        key = _sha256(data)
-        cached = _ocr_cache_get(key)
-        if cached:
-            text = cached
-            ocr_used = True
-        else:
-            ocr_text, ocr_pages = _document_ocr(data, budget=budget)
-            if ocr_text:
-                text = ocr_text
-                ocr_used = True
-                _ocr_cache_set(key, ocr_text)
-
     if stats is not None and pages_with_text:
         stats["pages"] = stats.get("pages", 0) + pages_with_text
-
-    if ocr_used and not pages_with_text and text and text.strip():
-        pages_with_text = 1
-        if stats is not None:
-            stats["pages"] = stats.get("pages", 0) + 1
-
-    if stats is not None and ocr_used and ocr_pages:
-        stats["ocr_pages"] = stats.get("ocr_pages", 0) + ocr_pages
 
     if not text:
         return ""
@@ -715,11 +587,6 @@ def extract_text_from_pdf_bytes(
 
 def extract_text_from_pdf(path: str | Path) -> str:
     pdf_path = Path(path)
-
-    try:
-        pdf_bytes = pdf_path.read_bytes()
-    except Exception:
-        pdf_bytes = b""
 
     text = ""
     pages = 0
@@ -735,17 +602,6 @@ def extract_text_from_pdf(path: str | Path) -> str:
     if not text or not text.strip():
         fallback = _extract_with_pypdf(pdf_path)
         text = fallback if fallback.strip() else ""
-
-    if pdf_bytes and _should_document_ocr(text, pdf_bytes):
-        key = _sha256(pdf_bytes)
-        cached = _ocr_cache_get(key)
-        if cached:
-            text = cached
-        else:
-            ocr_text, _ = _document_ocr(pdf_bytes)
-            if ocr_text:
-                text = ocr_text
-                _ocr_cache_set(key, ocr_text)
 
     if not text:
         return ""
@@ -790,8 +646,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    ocr_available, ocr_configured, _ = _detect_ocr_status()
-    ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
@@ -869,9 +723,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
 
     hits: List[EmailHit] = []
     doc = _fitz.open(path)
-    ocr_pages = 0
-    ocr_start = time.time()
-    ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
         heartbeat_now()
         if should_stop() or (
@@ -885,18 +736,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
                 text = page.get_text() or ""
         else:
             text = page.get_text() or ""
-        if not text.strip() and ocr:
-            if (
-                ocr_pages < _OCR_PAGE_LIMIT
-                and time.time() - ocr_start < _OCR_TIME_LIMIT
-            ):
-                if not ocr_marked:
-                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
-                    ocr_marked = True
-                text = _ocr_page(page)
-                if text:
-                    ocr_pages += 1
-                    stats["ocr_pages"] = ocr_pages
         if not text or not text.strip():
             continue
         stats["pages"] = stats.get("pages", 0) + 1
@@ -968,8 +807,6 @@ def extract_from_pdf(path: str, stop_event: Optional[object] = None) -> tuple[li
         ):
             break
     doc.close()
-    if ocr:
-        logger.debug("ocr_pages=%d", ocr_pages)
 
     hits = merge_footnote_prefix_variants(hits, stats)
     hits, fstats = repair_footnote_singletons(hits, layout)
@@ -994,8 +831,6 @@ def extract_from_pdf_stream(
     strict = get("STRICT_OBFUSCATION", settings.STRICT_OBFUSCATION)
     radius = get("FOOTNOTE_RADIUS_PAGES", settings.FOOTNOTE_RADIUS_PAGES)
     layout = get("PDF_LAYOUT_AWARE", settings.PDF_LAYOUT_AWARE)
-    ocr_available, ocr_configured, _ = _detect_ocr_status()
-    ocr = ocr_configured and (ocr_available or _OCR_ALLOW_BEST_EFFORT)
     join_hyphen_breaks = get("PDF_JOIN_HYPHEN_BREAKS", True)
     join_email_breaks = get("PDF_JOIN_EMAIL_BREAKS", True)
 
@@ -1082,9 +917,6 @@ def extract_from_pdf_stream(
 
     hits: List[EmailHit] = []
     doc = fitz_local.open(stream=data, filetype="pdf")
-    ocr_pages = 0
-    ocr_start = time.time()
-    ocr_marked = False
     for page_idx, page in enumerate(doc, start=1):
         if should_stop() or (
             stop_event and getattr(stop_event, "is_set", lambda: False)()
@@ -1098,18 +930,6 @@ def extract_from_pdf_stream(
                 text = page.get_text() or ""
         else:
             text = page.get_text() or ""
-        if not text.strip() and ocr:
-            if (
-                ocr_pages < _OCR_PAGE_LIMIT
-                and time.time() - ocr_start < _OCR_TIME_LIMIT
-            ):
-                if not ocr_marked:
-                    stats["needs_ocr"] = stats.get("needs_ocr", 0) + 1
-                    ocr_marked = True
-                text = _ocr_page(page)
-                if text:
-                    ocr_pages += 1
-                    stats["ocr_pages"] = ocr_pages
         if not text or not text.strip():
             continue
         text = _maybe_join_pdf_breaks(
@@ -1180,8 +1000,6 @@ def extract_from_pdf_stream(
         ):
             break
     doc.close()
-    if ocr:
-        logger.debug("ocr_pages=%d", ocr_pages)
 
     hits = merge_footnote_prefix_variants(hits, stats)
     hits, fstats = repair_footnote_singletons(hits, layout)

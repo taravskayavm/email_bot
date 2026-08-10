@@ -3330,24 +3330,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     filename = (doc.file_name or "").lower()
     if filename.endswith(".pdf"):
         backend_states = _pdf.backend_status()
-        ocr_enabled = bool(backend_states.get("ocr_enabled"))
-        ocr_available = bool(backend_states.get("ocr")) if ocr_enabled else False
-        ocr_reason = backend_states.get("ocr_reason") if ocr_enabled else ""
-        if not ocr_enabled:
-            ocr_status = "не включён"
-        elif ocr_available:
-            engine = str(backend_states.get("ocr_engine") or "pytesseract")
-            lang = str(backend_states.get("ocr_lang") or "eng+rus")
-            ocr_status = f"включён ({engine}, {lang})"
-        elif ocr_reason:
-            ocr_status = f"недоступен ({ocr_reason})"
-        else:
-            ocr_status = "недоступен"
         report += "\n\n" + "\n".join(
             [
                 "📄 PDF-бэкенды:",
                 f" • PDFMiner: {'доступен' if backend_states.get('pdfminer') else 'недоступен'}",
-                f" • OCR: {ocr_status}",
             ]
         )
 

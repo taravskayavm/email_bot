@@ -67,7 +67,6 @@ def _init_settings(monkeypatch):
     monkeypatch.setattr(settings, "STRICT_OBFUSCATION", True)
     monkeypatch.setattr(settings, "FOOTNOTE_RADIUS_PAGES", 1)
     monkeypatch.setattr(settings, "PDF_LAYOUT_AWARE", False)
-    monkeypatch.setattr(settings, "ENABLE_OCR", False)
     monkeypatch.setattr(settings, "load", lambda: None)
     monkeypatch.setattr(settings, "save", lambda: None)
     return settings
@@ -90,7 +89,6 @@ def test_features_admin_flow(monkeypatch):
         "feat:radius:1",
         "feat:radius:2",
         "feat:layout:toggle",
-        "feat:ocr:toggle",
         "feat:reset:defaults",
     ]
 
@@ -115,11 +113,3 @@ def test_features_admin_flow(monkeypatch):
     cb = DummyUpdate(callback_data="feat:layout:toggle", chat_id=123)
     run(bh.features_callback(cb, ctx))
     assert "📄 Учёт макета PDF выключен" in cb.callback_query.message.replies[-1]
-
-    # Toggle OCR on then off
-    cb = DummyUpdate(callback_data="feat:ocr:toggle", chat_id=123)
-    run(bh.features_callback(cb, ctx))
-    assert "🔍 OCR включён" in cb.callback_query.message.replies[-1]
-    cb = DummyUpdate(callback_data="feat:ocr:toggle", chat_id=123)
-    run(bh.features_callback(cb, ctx))
-    assert "🔍 OCR выключен" in cb.callback_query.message.replies[-1]
