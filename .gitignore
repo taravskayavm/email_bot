@@ -13,6 +13,7 @@ imap_sent_folder.txt
 emailbot/sent_ids.jsonl
 bot_errors.log
 sent_log.csv
+sent_log.csv.lock
 downloads/*
 !downloads/.gitkeep
 .idea/
