@@ -1494,7 +1494,8 @@ def build_message(
             public_base += "/unsubscribe"
         link = f"{public_base}?{urlencode({'email': to_addr, 'token': token})}"
     else:
-        unsubscribe_subject = quote("Отписка от рассылки")
+        # ASCII subject lets IMAP select only unsubscribe messages.
+        unsubscribe_subject = quote("unsubscribe")
         body = quote(
             "Прошу отписать этот адрес от рассылки.\n"
             f"Адрес получателя: {to_addr}"
@@ -1517,7 +1518,7 @@ def build_message(
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
-    native_unsubscribe_subject = quote("Отписка от рассылки")
+    native_unsubscribe_subject = quote("unsubscribe")
     mailto_unsubscribe = (
         f"mailto:{EMAIL_ADDRESS}?subject={native_unsubscribe_subject}"
     )
@@ -1881,18 +1882,41 @@ def process_unsubscribe_requests(
         if imap_client is None:
             return 0
 
-        # Search only by the standard UNSEEN flag and inspect messages locally.
-        # Mail.ru may reject charset=UTF-8 or compound HEADER/BODY searches even
-        # though the same mailbox works with a plain ``SEARCH UNSEEN`` request.
-        # Failed intent checks are deliberately left unread below.
-        try:
-            typ, data = imap_client.search(None, "UNSEEN")
-        except Exception:
-            logger.warning("unsubscribe UNSEEN search failed", exc_info=True)
-            return 0
+        # The button uses an ASCII technical subject, allowing Mail.ru to
+        # select only unsubscribe requests. Limit the query to fresh mail so a
+        # restart cannot replay the entire mailbox history.
+        since_dt = datetime.now() - timedelta(days=2)
+        month = (
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        )[since_dt.month - 1]
+        since = f"{since_dt.day:02d}-{month}-{since_dt.year:04d}"
         message_ids: set[bytes] = set()
-        if typ == "OK" and data and data[0]:
-            message_ids.update(data[0].split())
+        searches = (
+            (None, f'SINCE "{since}" SUBJECT "unsubscribe"'),
+            (
+                "UTF-8",
+                f'SINCE "{since}" SUBJECT '.encode("ascii")
+                + '"Отписка от рассылки"'.encode("utf-8"),
+            ),
+        )
+        successful_search = False
+        for charset, criteria in searches:
+            try:
+                typ, data = imap_client.search(charset, criteria)
+            except Exception:
+                logger.warning(
+                    "unsubscribe SUBJECT search failed: charset=%r",
+                    charset,
+                    exc_info=True,
+                )
+                continue
+            successful_search = successful_search or typ == "OK"
+            if typ == "OK" and data and data[0]:
+                message_ids.update(data[0].split())
+
+        if not successful_search:
+            return 0
 
         if not message_ids:
             return 0
@@ -1917,6 +1941,12 @@ def process_unsubscribe_requests(
                     "unsubscribe: cannot extract sender email; msg-id=%r",
                     msg.get("Message-Id"),
                 )
+                continue
+
+            # SUBJECT searches also return already read messages.  That is
+            # required for button clicks opened before the poller runs, but an
+            # address already in the stop-list must not be processed again.
+            if _is_blocklisted(sender):
                 continue
 
             try:

@@ -2981,52 +2981,49 @@ async def _compose_report_and_save(
     state.cooldown_preview_examples = []
     state.cooldown_preview_window = 0
 
-    blocked_keys: set[str] = set()
-    cooldown_keys: set[str] = set()
-    cooldown_candidates: list[tuple[str, str]] = []
     ignore_cooldown = _is_ignore_cooldown_enabled(context)
     cooldown_window = COOLDOWN_WINDOW_DAYS if not ignore_cooldown else 0
-    if cooldown_window > 0 and filtered:
-        seen_norm: set[str] = set()
-        group = getattr(state, "group", None)
-        for addr in filtered:
-            norm = normalize_email(addr) or addr.strip().lower()
-            if not norm or norm in seen_norm:
-                continue
-            seen_norm.add(norm)
-            if is_blocked(addr):
-                blocked_keys.add(norm)
-                continue
-            try:
-                blocked, reason = check_email(addr, group=group, window=cooldown_window)
-            except Exception as exc:  # pragma: no cover - defensive log
-                logger.debug("cooldown preview check failed for %s: %s", addr, exc)
-                blocked, reason = False, ""
-            if blocked:
-                cooldown_keys.add(norm)
-                match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
-                last_seen = match.group(1)[:10] if match else ""
-                cooldown_candidates.append((addr, last_seen))
+    group = getattr(state, "group", None)
+    preview_ready, _blocked_foreign, preview_blocked, preview_recent, digest = (
+        messaging.prepare_mass_mailing(
+            list(filtered),
+            group=group,
+            ignore_cooldown=ignore_cooldown,
+            lookback_days=cooldown_window,
+        )
+    )
+    if digest.get("error"):
+        logger.warning("preview preflight failed: %s", digest.get("error"))
+        preview_ready = list(filtered)
+        preview_blocked = []
+        preview_recent = []
 
-    if cooldown_window <= 0:
-        for addr in filtered:
-            norm = normalize_email(addr) or addr.strip().lower()
-            if norm and is_blocked(addr):
-                blocked_keys.add(norm)
-
-    filtered_keys = {
+    blocked_keys = {
         normalize_email(addr) or addr.strip().lower()
-        for addr in filtered
+        for addr in preview_blocked
         if addr
     }
-    filtered_keys.discard("")
-    ready_keys = filtered_keys - blocked_keys - cooldown_keys
-    ready_count = len(ready_keys)
-    state.preview_allowed_all = sorted(
-        addr
-        for addr in filtered
-        if (normalize_email(addr) or addr.strip().lower()) in ready_keys
-    )
+    blocked_keys.discard("")
+    cooldown_keys = {
+        normalize_email(addr) or addr.strip().lower()
+        for addr in preview_recent
+        if addr
+    }
+    cooldown_keys.discard("")
+
+    cooldown_candidates: list[tuple[str, str]] = []
+    for addr in preview_recent:
+        try:
+            _blocked, reason = check_email(addr, group=group, window=cooldown_window)
+        except Exception as exc:  # pragma: no cover - defensive log
+            logger.debug("cooldown preview date lookup failed for %s: %s", addr, exc)
+            reason = ""
+        match = re.search(r"last=([0-9T:\.\+\-]+)", reason or "")
+        last_seen = match.group(1)[:10] if match else ""
+        cooldown_candidates.append((addr, last_seen))
+
+    ready_count = len(preview_ready)
+    state.preview_allowed_all = sorted(preview_ready)
 
     state.blocked_after_parse = len(blocked_keys)
     state.cooldown_preview_total = len(cooldown_keys)

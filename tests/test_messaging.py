@@ -678,7 +678,7 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
             return "OK", [b""]
 
         def search(self, charset, criteria):
-            calls["search"] = (charset, criteria)
+            calls.setdefault("search", []).append((charset, criteria))
             return "OK", [b"1"]
 
         def fetch(self, num, spec):
@@ -712,7 +712,11 @@ def test_process_unsubscribe_requests_uses_env_settings(monkeypatch):
     assert calls["user"] == "env@example.com"
     assert calls["password"] == "env-secret"
     assert calls["mailbox"] == "INBOX"
-    assert calls["search"] == (None, 'UNSEEN')
+    ascii_search = calls["search"][0]
+    assert ascii_search[0] is None
+    assert 'SUBJECT "unsubscribe"' in ascii_search[1]
+    assert 'SINCE "' in ascii_search[1]
+    assert calls["search"][1][0] == "UTF-8"
     assert calls["fetch"] == [(b"1", "(BODY.PEEK[])")]
     assert calls["store"] == [(b"1", "+FLAGS", "\\Seen")]
     assert calls.get("logout") is True

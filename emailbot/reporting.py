@@ -375,7 +375,8 @@ def _period_bounds(
         end_date = today + timedelta(days=1)
     elif period == "week":
         start_date = today - timedelta(days=today.weekday())
-        end_date = start_date + timedelta(days=5)
+        # The reporting week runs Monday through Saturday (inclusive).
+        end_date = start_date + timedelta(days=6)
     elif period == "month":
         selected_year = year if year is not None else today.year
         selected_month = month if month is not None else today.month
@@ -403,13 +404,13 @@ def _working_end(weekday: int) -> dt_time | None:
 
     if 0 <= weekday <= 3:
         return dt_time(20, 0)
-    if weekday == 4:
+    if weekday in {4, 5}:
         return dt_time(17, 30)
     return None
 
 
 def is_working_datetime(value: datetime) -> bool:
-    """Whether ``value`` falls into the agreed Monday-Friday schedule."""
+    """Whether ``value`` falls into the agreed Monday-Saturday schedule."""
 
     local = _as_moscow(value)
     end = _working_end(local.weekday())
@@ -670,7 +671,7 @@ def summarize_period_stats(
     month: int | None = None,
     now: datetime | None = None,
 ) -> PeriodStats:
-    """Count successful sends by direction within calendar working windows."""
+    """Count successful sends through the report invocation time."""
 
     now_msk = _as_moscow(now)
     start_msk, calendar_end_msk = _period_bounds(
@@ -727,7 +728,10 @@ def summarize_period_stats(
     return PeriodStats(
         period=period,
         date_start=start_msk.date(),
-        date_end=(calendar_end_msk - timedelta(days=1)).date(),
+        date_end=min(
+            (calendar_end_msk - timedelta(days=1)).date(),
+            now_msk.date(),
+        ),
         directions=directions,
         total_success=sum(item.success for item in directions),
         total_failed=0,

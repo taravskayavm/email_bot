@@ -23,7 +23,8 @@ def test_month_report_uses_working_hours_aliases_and_deduplicates(monkeypatch):
         _event("2026-07-06T20:00:00+03:00", "late@example.com", "highmedicine"),
         _event("2026-07-10T17:29:59+03:00", "friday@example.com", "psychology"),
         _event("2026-07-10T17:30:00+03:00", "friday-late@example.com", "psychology"),
-        _event("2026-07-11T10:00:00+03:00", "weekend@example.com", "sport"),
+        _event("2026-07-11T10:00:00+03:00", "saturday@example.com", "sport"),
+        _event("2026-07-11T17:30:00+03:00", "saturday-late@example.com", "sport"),
         _event("2026-07-07T10:00:00+03:00", "geo@example.com", "география"),
         _event("2026-07-07T10:00:30+03:00", "geo@example.com", "geography"),
         _event("2026-07-07T10:02:00+03:00", "geo@example.com", "geography"),
@@ -45,15 +46,17 @@ def test_month_report_uses_working_hours_aliases_and_deduplicates(monkeypatch):
         ("geography", 2),
         ("highmedicine", 2),
         ("psychology", 1),
+        ("sport", 1),
     ]
-    assert stats.total_success == 5
+    assert stats.total_success == 6
     assert stats.total_failed == 0
 
 
-def test_week_report_is_current_monday_through_friday(monkeypatch):
+def test_week_report_is_current_monday_through_saturday(monkeypatch):
     events = [
         _event("2026-08-03T08:00:00+03:00", "monday@example.com", "sport"),
         _event("2026-08-07T17:29:59+03:00", "friday@example.com", "sport"),
+        _event("2026-08-08T17:29:59+03:00", "saturday@example.com", "sport"),
         _event("2026-08-09T10:00:00+03:00", "sunday@example.com", "sport"),
     ]
     monkeypatch.setattr(reporting, "_report_source_events", lambda *_args: iter(events))
@@ -63,8 +66,47 @@ def test_week_report_is_current_monday_through_friday(monkeypatch):
     )
 
     assert stats.date_start.isoformat() == "2026-08-03"
-    assert stats.date_end.isoformat() == "2026-08-07"
-    assert stats.total_success == 2
+    assert stats.date_end.isoformat() == "2026-08-08"
+    assert stats.total_success == 3
+
+
+def test_year_report_includes_saturday_values(monkeypatch):
+    events = [
+        _event("2026-08-08T10:00:00+03:00", "saturday@example.com", "sport"),
+        _event("2026-08-09T10:00:00+03:00", "sunday@example.com", "sport"),
+    ]
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_args: iter(events))
+
+    stats = reporting.summarize_period_stats(
+        "year", year=2026, now=datetime(2026, 8, 10, 12, 0, tzinfo=MOSCOW_TZ)
+    )
+
+    assert stats.date_end.isoformat() == "2026-08-10"
+    assert stats.total_success == 1
+
+
+@pytest.mark.parametrize(
+    ("period", "year", "month", "expected_start"),
+    [
+        ("week", None, None, "2026-08-03"),
+        ("month", 2026, 8, "2026-08-01"),
+        ("year", 2026, None, "2026-01-01"),
+    ],
+)
+def test_current_report_period_ends_on_invocation_date(
+    monkeypatch, period, year, month, expected_start
+):
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_args: iter(()))
+
+    stats = reporting.summarize_period_stats(
+        period,
+        year=year,
+        month=month,
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=MOSCOW_TZ),
+    )
+
+    assert stats.date_start.isoformat() == expected_start
+    assert stats.date_end.isoformat() == "2026-08-05"
 
 
 def test_current_period_does_not_count_future_events(monkeypatch):

@@ -6,8 +6,10 @@ class _FakeIMAP:
         self._msg = msg_bytes
         self.store_calls = []
         self.fetch_specs = []
+        self.search_calls = []
 
     def search(self, *args, **kwargs):
+        self.search_calls.append(args)
         return 'OK', [b'1']
 
     def fetch(self, *args, **kwargs):
@@ -69,3 +71,32 @@ def test_explicit_russian_body_command_unsubscribes(tmp_path, monkeypatch):
 
     assert messaging.process_unsubscribe_requests(imap) == 1
     assert imap.store_calls
+
+
+def test_legacy_russian_subject_has_narrow_imap_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(messaging, "BLOCKED_FILE", str(tmp_path / "blocked_emails.txt"))
+    imap = _FakeIMAP(
+        _build_msg(
+            "Artur <artur.nesterenko@hotmail.com>",
+            "Отписка от рассылки",
+            "Прошу отписать этот адрес от рассылки.",
+        )
+    )
+
+    assert messaging.process_unsubscribe_requests(imap) == 1
+    assert any(call[0] == "UTF-8" for call in imap.search_calls)
+    assert all(b"UNSEEN" not in str(call).encode() for call in imap.search_calls)
+
+
+def test_already_blocked_unsubscribe_is_not_reprocessed(tmp_path, monkeypatch):
+    monkeypatch.setattr(messaging, "BLOCKED_FILE", str(tmp_path / "blocked_emails.txt"))
+    monkeypatch.setattr(messaging, "_is_blocklisted", lambda _email: True)
+    monkeypatch.setattr(
+        messaging,
+        "mark_unsubscribed",
+        lambda _email: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    imap = _FakeIMAP(_build_msg("User <blocked@example.com>", "unsubscribe"))
+
+    assert messaging.process_unsubscribe_requests(imap) == 0
+    assert not imap.store_calls

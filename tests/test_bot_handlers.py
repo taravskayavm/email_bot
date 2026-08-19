@@ -1181,7 +1181,7 @@ async def test_manual_send_selective_override(monkeypatch, tmp_path):
     assert "manual_override_days" not in ctx.chat_data
 
 
-def test_preview_separates_foreign():
+def test_preview_separates_foreign(monkeypatch):
     ctx = DummyContext()
     allowed_all = {
         "user@ncfu.ru",
@@ -1190,6 +1190,11 @@ def test_preview_separates_foreign():
     }
     filtered = ["user@ncfu.ru", "user@gmail.com"]
     foreign = ["user@gmail.com.br"]
+    monkeypatch.setattr(
+        bh.messaging,
+        "prepare_mass_mailing",
+        lambda emails, **_kwargs: (list(emails), [], [], [], {}),
+    )
     run(
         bh._compose_report_and_save(
             ctx,
@@ -1221,9 +1226,15 @@ def test_parse_report_counts_filters_without_overlap(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        bh,
-        "is_blocked",
-        lambda email: email == "blocked@example.ru",
+        bh.messaging,
+        "prepare_mass_mailing",
+        lambda _emails, **_kwargs: (
+            ["ready@example.ru"],
+            [],
+            ["blocked@example.ru"],
+            ["recent@example.ru"],
+            {},
+        ),
     )
     monkeypatch.setattr(
         bh,
@@ -1251,11 +1262,46 @@ def test_parse_report_counts_filters_without_overlap(monkeypatch):
     assert ctx.chat_data[SESSION_KEY].preview_allowed_all == ["ready@example.ru"]
 
 
+def test_parse_report_uses_the_same_final_preflight_count(monkeypatch):
+    ctx = DummyContext()
+    filtered = [f"user{i}@example.ru" for i in range(147)]
+    blocked = filtered[:11]
+    recent = filtered[11:86]
+    ready = filtered[86:]
+
+    monkeypatch.setattr(
+        bh.messaging,
+        "prepare_mass_mailing",
+        lambda _emails, **_kwargs: (ready, [], blocked, recent, {}),
+    )
+    monkeypatch.setattr(bh, "check_email", lambda _email, **_kwargs: (True, ""))
+
+    report = run(
+        bh._compose_report_and_save(
+            ctx,
+            set(filtered),
+            filtered,
+            [],
+            [],
+        )
+    )
+
+    state = ctx.chat_data[SESSION_KEY]
+    assert len(state.preview_allowed_all) == 61
+    assert state.blocked_after_parse == 11
+    assert state.cooldown_preview_total == 75
+    assert "61" in report
+
+
 def test_cooldown_preview_samples_from_all_hits(monkeypatch):
     ctx = DummyContext()
     filtered = [f"recent{i}@example.ru" for i in range(5)]
 
-    monkeypatch.setattr(bh, "is_blocked", lambda _email: False)
+    monkeypatch.setattr(
+        bh.messaging,
+        "prepare_mass_mailing",
+        lambda _emails, **_kwargs: ([], [], [], list(filtered), {}),
+    )
     monkeypatch.setattr(
         bh,
         "check_email",

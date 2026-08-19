@@ -1,5 +1,6 @@
 163.com
 cardiotomsk.ru
+dfks.mos.ru
 doclinika.ru
 emcmos.ru
 ion.com
@@ -10,3 +11,5 @@ qq.com
 staff.sechenov.ru
 yahoo.com
 zdrav.mos.ru
+nsi.ru
+

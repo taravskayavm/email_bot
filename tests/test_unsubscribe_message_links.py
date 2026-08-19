@@ -29,7 +29,7 @@ def test_unsubscribe_uses_mailto_when_public_url_is_missing(tmp_path, monkeypatc
     )
     parsed = urlparse(href)
     query = parse_qs(parsed.query)
-    assert query["subject"] == ["Отписка от рассылки"]
+    assert query["subject"] == ["unsubscribe"]
     assert "Прошу отписать этот адрес от рассылки." in query["body"][0]
     assert "Адрес получателя: recipient@example.com" in query["body"][0]
     assert "mailto:sender@example.com?subject=" in msg["List-Unsubscribe"]
