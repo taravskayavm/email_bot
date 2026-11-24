@@ -8,6 +8,7 @@ import email
 import hashlib
 import html
 import imaplib
+import inspect
 import json
 import logging
 import os
@@ -44,7 +45,7 @@ from typing import (
     Tuple,
     TYPE_CHECKING,
 )
-from threading import RLock
+from threading import Lock, RLock
 
 from .extraction import normalize_email, strip_html
 from utils.email_clean import strip_invisibles
@@ -603,7 +604,7 @@ def _normalize_email_for_blocklist(addr: str) -> str:
 
 
 def _canonical_blocked(email_str: str) -> str:
-    email_norm = normalize_email(email_str)
+    email_norm = canonical_for_history(_normalize_email_for_blocklist(email_str))
     email_norm = re.sub(r"^\.+", "", email_norm)
     email_norm = re.sub(r"^\d{1,2}(?=[A-Za-z])", "", email_norm)
     return _normalize_email_for_blocklist(email_norm)
@@ -849,6 +850,8 @@ IMAP_FOLDER_FILE = DATA_DIR / "imap_sent_folder.txt"
 _last_domain_send: Dict[str, float] = {}
 _DOMAIN_RATE_LIMIT = 1.0  # seconds between sends per domain
 _sent_idempotency: Set[str] = set()
+_inflight_idempotency: Set[str] = set()
+_idempotency_lock = Lock()
 
 _DEFAULT_BLOCKLIST = {
     "no-reply@site.com",
@@ -1260,10 +1263,21 @@ def _register_send(recipient: str, batch_id: str | None) -> bool:
     if not batch_id:
         return True
     key = f"{normalize_email(recipient)}|{batch_id}"
-    if key in _sent_idempotency:
-        return False
-    _sent_idempotency.add(key)
-    return True
+    with _idempotency_lock:
+        if key in _sent_idempotency or key in _inflight_idempotency:
+            return False
+        _inflight_idempotency.add(key)
+        return True
+
+
+def _finish_send(recipient: str, batch_id: str | None, *, accepted: bool) -> None:
+    if not batch_id:
+        return
+    key = f"{normalize_email(recipient)}|{batch_id}"
+    with _idempotency_lock:
+        _inflight_idempotency.discard(key)
+        if accepted:
+            _sent_idempotency.add(key)
 
 
 def get_preferred_sent_folder(imap: imaplib.IMAP4_SSL) -> str:
@@ -1315,6 +1329,13 @@ def send_raw_smtp_with_retry(
             ) as client:
                 client.send(EMAIL_ADDRESS, recipient, raw_message)
             logger.info("Email sent", extra={"event": "send", "email": recipient})
+            from utils.send_stats import log_success
+
+            try:
+                parsed = email.message_from_bytes(raw_message) if isinstance(raw_message, bytes) else email.message_from_string(raw_message)
+                log_success(recipient, parsed.get("X-EBOT-Group-Key") or "unknown")
+            except Exception:
+                logger.exception("Could not record SMTP success statistics")
             return True
         except smtplib.SMTPResponseException as e:
             code = getattr(e, "smtp_code", None)
@@ -1345,6 +1366,10 @@ def send_raw_smtp_with_retry(
         except Exception as e:
             last_exc = e
             logger.warning("SMTP send failed to %s: %s", recipient, e)
+            from emailbot.smtp_client import DeliveryUncertainError
+
+            if isinstance(e, DeliveryUncertainError):
+                raise
             if attempt < max_tries - 1:
                 time.sleep(2**attempt)
     if last_exc:
@@ -1355,47 +1380,40 @@ def save_to_sent_folder(
     raw_message: EmailMessage | str | bytes,
     imap: Optional[imaplib.IMAP4_SSL] = None,
     folder: Optional[str] = None,
-):
-    try:
-        close = False
-        if imap is None:
-            host = os.getenv("IMAP_HOST", "imap.mail.ru")
-            port = int(os.getenv("IMAP_PORT", "993"))
-            imap = imaplib.IMAP4_SSL(host, port)
-            imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            close = True
-        if folder is None:
-            folder = get_preferred_sent_folder(imap)
-        status = "OK"
-        if hasattr(imap, "select"):
-            status, _ = imap.select(folder)
-            if status != "OK":
-                logger.warning("select %s failed (%s), using Sent", folder, status)
-                folder = "Sent"
-                imap.select(folder)
+) -> bool:
+    from emailbot.sent_copy import SentCopySession
 
-        if isinstance(raw_message, EmailMessage):
-            msg_bytes = raw_message.as_bytes()
-        elif isinstance(raw_message, bytes):
-            msg_bytes = raw_message
-        else:
-            msg_bytes = raw_message.encode("utf-8")
+    if isinstance(raw_message, EmailMessage):
+        msg_bytes = raw_message.as_bytes()
+    elif isinstance(raw_message, bytes):
+        msg_bytes = raw_message
+    else:
+        msg_bytes = raw_message.encode("utf-8")
 
-        res = imap.append(
-            folder,
-            "(\\Seen)",
-            imaplib.Time2Internaldate(time.time()),
-            msg_bytes,
-        )
-        logger.info("imap.append to %s: %s", folder, res)
-    except Exception as e:
-        log_error(f"save_to_sent_folder: {e}")
-    finally:
-        if close and imap is not None:
+    def connect():
+        host = os.getenv("IMAP_HOST", "imap.mail.ru")
+        port = int(os.getenv("IMAP_PORT", "993"))
+        connection = imaplib.IMAP4_SSL(host, port, timeout=30)
+        try:
+            connection.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        except Exception:
             try:
-                imap.logout()
-            except Exception as e:
-                log_error(f"save_to_sent_folder logout: {e}")
+                connection.shutdown()
+            except Exception:
+                pass
+            raise
+        return connection
+
+    if isinstance(imap, SentCopySession):
+        return imap.save(msg_bytes, folder)
+    session = SentCopySession(imap, connect, get_preferred_sent_folder)
+    try:
+        return session.save(msg_bytes, folder)
+    finally:
+        # A caller-owned healthy connection remains available to that caller.
+        if imap is None or session.connection is not imap:
+            session.logout()
+
 
 
 def build_messages_for_group(
@@ -1443,6 +1461,7 @@ def build_message(
     *,
     override_180d: bool = False,
     group_key: str | None = None,
+    group_title: str | None = None,
     signature_profile: str | None = None,
 ) -> tuple[EmailMessage, str]:
     # Загружаем HTML шаблона перед подстановкой подписи и ссылки отписки.
@@ -1518,6 +1537,11 @@ def build_message(
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Reply-To"] = EMAIL_ADDRESS
+    if effective_group_key:
+        label = group_title or effective_group_key
+        msg["X-EBOT-Group-Key"] = effective_group_key
+        msg["X-EBOT-Group"] = label
+        msg["X-EBOT-Template-Label"] = label
     native_unsubscribe_subject = quote("unsubscribe")
     mailto_unsubscribe = (
         f"mailto:{EMAIL_ADDRESS}?subject={native_unsubscribe_subject}"
@@ -1555,6 +1579,8 @@ def send_email(
     *,
     override_180d: bool = False,
 ) -> SendOutcome:
+    reserved = False
+    accepted = False
     try:
         if _is_blocklisted(recipient):
             logger.info("skip %s: reason=blocked_domain_or_address", recipient)
@@ -1587,6 +1613,7 @@ def send_email(
         if not _register_send(recipient, batch_id):
             logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
             return SendOutcome.COOLDOWN
+        reserved = True
         key = canonical_for_history(recipient)
         content_hash = None
         if key:
@@ -1596,8 +1623,12 @@ def send_email(
         if send_raw_smtp_with_retry(
             raw, transport_recipient, max_tries=3
         ) is False:
+            _finish_send(recipient, batch_id, accepted=False)
             return SendOutcome.BLOCKED
-        save_to_sent_folder(raw)
+        accepted = True
+        _finish_send(recipient, batch_id, accepted=True)
+        if os.getenv("APPEND_TO_SENT", "1") == "1":
+            save_to_sent_folder(raw)
         try:
             ledger.record_send(
                 recipient,
@@ -1620,6 +1651,10 @@ def send_email(
         return SendOutcome.SENT
     except Exception as e:
         log_error(f"send_email: {recipient}: {e}")
+        from emailbot.smtp_client import DeliveryUncertainError
+
+        if reserved:
+            _finish_send(recipient, batch_id, accepted=accepted or isinstance(e, DeliveryUncertainError))
         if notify_func:
             notify_func(f"❌ Ошибка при отправке на {recipient}: {e}")
         raise
@@ -1713,10 +1748,6 @@ def send_email_with_sessions(
         logger.info("Skipping duplicate content for %s within 24h", recipient)
         return SendOutcome.DUPLICATE, "", None, None
 
-    if not _register_send(recipient, batch_id):
-        logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
-        return SendOutcome.COOLDOWN, "", None, None
-
     key = canonical_for_history(recipient)
     content_hash = None
     if key:
@@ -1730,6 +1761,10 @@ def send_email_with_sessions(
     _normalize_from_header(msg, group_key or _template_group_key(html_path))
 
     # 2) Отправка
+    if not _register_send(recipient, batch_id):
+        logger.info("Skipping duplicate send to %s for batch %s", recipient, batch_id)
+        return SendOutcome.COOLDOWN, "", None, None
+    accepted = False
     try:
         raw = msg.as_string()
         raw_bytes = msg.as_bytes()
@@ -1742,14 +1777,29 @@ def send_email_with_sessions(
                 )
             except Exception:
                 logger.debug("debug EML save failed", exc_info=True)
+        # Select the legacy three-argument API before sending. A TypeError
+        # raised inside send() must never trigger a second SMTP attempt.
+        send_args = (msg,)
         try:
-            client.send(msg)
-        except TypeError:
-            client.send(EMAIL_ADDRESS, recipient, raw)
+            send_signature = inspect.signature(client.send)
+        except (TypeError, ValueError):
+            pass
+        else:
+            try:
+                send_signature.bind(msg)
+            except TypeError:
+                send_args = (EMAIL_ADDRESS, recipient, raw)
+                send_signature.bind(*send_args)
+        client.send(*send_args)
+        accepted = True
+        _finish_send(recipient, batch_id, accepted=True)
         if append_message:
             save_to_sent_folder(raw_bytes, imap=imap, folder=sent_folder)
     except Exception as exc:
         # A dead connection must be handled by the batch-level reconnect loop.
+        from emailbot.smtp_client import DeliveryUncertainError
+
+        _finish_send(recipient, batch_id, accepted=accepted or isinstance(exc, DeliveryUncertainError))
         # Returning ERROR here would leave the same broken SmtpClient in use for
         # every remaining recipient and would also lose the failed recipient.
         is_connection_error = isinstance(
@@ -2047,37 +2097,9 @@ def mark_unsubscribed(email_addr: str, token: str | None = None) -> MarkUnsubscr
 
     block_added = _mark_unsubscribed_block_only(email_addr, token)
 
-    email_norm = normalize_email(email_addr)
-    p = Path(LOG_FILE)
-    rows: list[dict] = []
-    changed = False
-    if p.exists():
-        with p.open(encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        for row in rows:
-            if row.get("email") == email_norm:
-                row["unsubscribed"] = "1"
-                row["unsubscribed_at"] = datetime.utcnow().isoformat()
-                changed = True
-    if changed:
-        headers = rows[0].keys() if rows else [
-            "key",
-            "email",
-            "last_sent_at",
-            "source",
-            "status",
-            "user_id",
-            "filename",
-            "error_msg",
-            "unsubscribe_token",
-            "unsubscribed",
-            "unsubscribed_at",
-        ]
-        with p.open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(headers))
-            writer.writeheader()
-            writer.writerows(rows)
+    from emailbot.messaging_utils import mark_unsubscribed_in_log
+
+    changed = mark_unsubscribed_in_log(LOG_FILE, normalize_email(email_addr))
     return MarkUnsubscribedResult(csv_updated=changed, block_added=block_added)
 
 
@@ -2728,7 +2750,7 @@ def periodic_unsubscribe_check(stop_event):
             process_unsubscribe_requests()
         except Exception as e:
             log_error(f"periodic_unsubscribe_check: {e}")
-        time.sleep(300)
+        stop_event.wait(300)
 
 
 def check_env_vars():

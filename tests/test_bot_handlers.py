@@ -2,6 +2,7 @@ import asyncio
 import logging
 import smtplib
 import types
+from unittest.mock import AsyncMock
 
 import pytest
 from telegram import InlineKeyboardMarkup
@@ -24,14 +25,14 @@ from emailbot.bot_handlers import (
 
 
 class DummyFile:
-    async def download_to_drive(self, path):
+    async def download_to_drive(self, path, **kwargs):
         return
 
 
 class DummyDocument:
     file_name = "test.txt"
 
-    async def get_file(self):
+    async def get_file(self, **kwargs):
         return DummyFile()
 
 
@@ -104,6 +105,7 @@ class DummyContext:
     def __init__(self):
         self.chat_data: dict = {}
         self.user_data: dict = {}
+        self.bot_data: dict = {}
 
 
 def run(coro):
@@ -210,6 +212,9 @@ def test_menu_stop_signals_global_and_chat_cancellation(monkeypatch):
 
 
 def test_handle_document_processes_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing",
+                        lambda emails, **kwargs: (list(emails), [], [], [], {}))
     update = DummyUpdate(document=DummyDocument())
     ctx = DummyContext()
 
@@ -245,94 +250,10 @@ def test_handle_document_processes_file(monkeypatch, tmp_path):
     assert "🌍 Иностранные домены: 1" in report
 
 
-def test_request_fix_sets_state(monkeypatch):
-    update = DummyUpdate(callback_data="fix:0")
-    ctx = DummyContext()
-    ctx.chat_data["send_preview"] = {
-        "final": [],
-        "dropped": [("bad@example.com", "invalid-email")],
-        "fixed": [],
-    }
-
-    run(bh.request_fix(update, ctx))
-
-    assert ctx.chat_data["fix_pending"] == {
-        "index": 0,
-        "original": "bad@example.com",
-    }
-    prompt = update.callback_query.message.replies[-1]
-    assert "Введите исправленный адрес" in prompt
 
 
-def test_handle_text_fix_success(monkeypatch):
-    update = DummyUpdate(text="new@example.com")
-    ctx = DummyContext()
-    state = SessionState(
-        to_send=[],
-        preview_allowed_all=[],
-        dropped=[("old@example.com", "invalid-email")],
-        foreign=[],
-    )
-    ctx.chat_data[SESSION_KEY] = state
-    ctx.chat_data["send_preview"] = {
-        "final": [],
-        "dropped": [("old@example.com", "invalid-email")],
-        "fixed": [],
-    }
-    ctx.chat_data["fix_pending"] = {
-        "index": 0,
-        "original": "old@example.com",
-    }
-
-    monkeypatch.setattr(
-        "pipelines.extract_emails.run_pipeline_on_text",
-        lambda text: (["new@example.com"], []),
-    )
-
-    run(handle_text(update, ctx))
-
-    assert ctx.chat_data.get("fix_pending") is None
-    preview = ctx.chat_data["send_preview"]
-    assert "new@example.com" in preview["final"]
-    assert preview["dropped"] == []
-    assert {"from": "old@example.com", "to": "new@example.com"} in preview["fixed"]
-    assert state.to_send == ["new@example.com"]
-    assert state.dropped == []
-    assert "✅ Исправлено" in update.message.replies[-1]
 
 
-def test_handle_text_fix_invalid(monkeypatch):
-    update = DummyUpdate(text="still-bad")
-    ctx = DummyContext()
-    state = SessionState(
-        to_send=[],
-        preview_allowed_all=[],
-        dropped=[("broken@example", "invalid")],
-        foreign=[],
-    )
-    ctx.chat_data[SESSION_KEY] = state
-    ctx.chat_data["send_preview"] = {
-        "final": [],
-        "dropped": [("broken@example", "invalid")],
-        "fixed": [],
-    }
-    ctx.chat_data["fix_pending"] = {
-        "index": 0,
-        "original": "broken@example",
-    }
-
-    monkeypatch.setattr(
-        "pipelines.extract_emails.run_pipeline_on_text",
-        lambda text: ([], [(text, "invalid-email")]),
-    )
-
-    run(handle_text(update, ctx))
-
-    assert ctx.chat_data.get("fix_pending") is not None
-    assert ctx.chat_data["send_preview"]["dropped"] == [
-        ("broken@example", "invalid")
-    ]
-    assert "❌ Всё ещё некорректно" in update.message.replies[-1]
 
 
 def test_handle_text_add_block(monkeypatch):
@@ -464,7 +385,7 @@ def test_handle_text_manual_emails():
 
     assert ctx.chat_data["manual_all_emails"] == ["user@example.com"]
     assert ctx.chat_data["manual_drop_reasons"] == [
-        ("123@site.com", "role-like"),
+        ("123@site.com", "looks-like-footnote"),
         ("1test@site.com", "role-like"),
         ("support@support.com", "role-like"),
     ]
@@ -598,7 +519,7 @@ def test_select_group_sets_html_template(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
+async def test_select_group_prepares_queue_and_start_button(monkeypatch, tmp_path):
     tpl_path = tmp_path / "tourism.html"
     tpl_path.write_text("<html></html>", encoding="utf-8")
 
@@ -635,8 +556,6 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
 
     await bh.select_group(update, ctx)
 
-    path = tmp_path / "preview_42.xlsx"
-    assert path.exists()
     markup = update.callback_query.message.reply_markups[-1]
     assert isinstance(markup, InlineKeyboardMarkup)
     callbacks = [
@@ -644,14 +563,14 @@ async def test_select_group_sends_preview_document(monkeypatch, tmp_path):
         for row in markup.inline_keyboard
         for button in row
     ]
-    assert callbacks == [
-        "bulk:send:start",
-        "bulk:send:back",
-        "bulk:send:edit",
-    ]
+    batch_id = ctx.chat_data["bulk_handler"]["batch_id"]
+    assert callbacks == [f"bulk_start:{batch_id}"]
+    batch = ctx.bot_data["bulk_batches"][batch_id]
+    assert batch["emails"] == ["a@example.com"]
+    assert batch["template"] == str(tpl_path)
+    assert batch["group"] == "tourism"
     assert "Готово к отправке" in update.callback_query.message.replies[-1]
-    doc_entry = update.callback_query.message.documents[-1]
-    assert doc_entry["name"] and doc_entry["name"].endswith("preview_42.xlsx")
+
 
 
 @pytest.mark.asyncio
@@ -793,72 +712,6 @@ async def test_active_manual_batch_retries_same_recipient_after_disconnect(
     assert result.remaining == []
 
 
-def test_send_manual_email_uses_html_template(monkeypatch, tmp_path):
-    tpl_path = tmp_path / "tourism.html"
-    tpl_path.write_text("<html></html>", encoding="utf-8")
-
-    monkeypatch.setattr(
-        bh,
-        "get_template",
-        lambda code: {
-            "code": code,
-            "label": code.title(),
-            "path": str(tpl_path),
-        }
-        if code == "tourism"
-        else None,
-    )
-
-    update = DummyUpdate(callback_data="manual_tpl:tourism")
-    ctx = DummyContext()
-    ctx.chat_data["manual_all_emails"] = ["user@example.com"]
-
-    sent_paths = []
-
-    def fake_send(client, imap, folder, addr, path, *a, **kw):
-        sent_paths.append(path)
-        return SendOutcome.SENT, "tok", "log"
-
-    class DummyImap:
-        def login(self, *a, **k):
-            return "OK", None
-
-        def list(self, *a, **k):
-            return "OK", []
-
-        def select(self, *a, **k):
-            return "OK", None
-
-        def logout(self):
-            return
-
-    class DummySMTP:
-        def close(self):
-            return None
-
-    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
-    monkeypatch.setattr(
-        bh,
-        "imap_connect_ssl",
-        lambda *a, **k: DummyImap(),
-        raising=False,
-    )
-    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
-    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
-    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
-    monkeypatch.setattr(bh, "was_emailed_recently", lambda *a, **k: False)
-    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
-    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
-    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
-
-    async def dummy_sleep(_):
-        return
-
-    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
-
-    run(bh.send_manual_email(update, ctx))
-
-    assert sent_paths and sent_paths[0].endswith((".htm", ".html"))
 
 
 def test_manual_input_parsing_accepts_gmail(caplog):
@@ -884,301 +737,14 @@ def test_manual_input_keyboard_has_no_cooldown_toggle():
     assert not any("Игнорировать 180 дней" in text for text in labels)
 
 
-@pytest.mark.asyncio
-async def test_send_manual_email_no_block_mentions(monkeypatch, tmp_path):
-    tpl_path = tmp_path / "tourism.html"
-    tpl_path.write_text("<html></html>", encoding="utf-8")
-    monkeypatch.setattr(
-        bh,
-        "get_template",
-        lambda code: {
-            "code": code,
-            "label": code.title(),
-            "path": str(tpl_path),
-        }
-        if code == "tourism"
-        else None,
-    )
-
-    update = DummyUpdate(callback_data="manual_tpl:tourism")
-    ctx = DummyContext()
-    ctx.chat_data["manual_all_emails"] = ["x@example.com"]
-    ctx.user_data["manual_emails"] = ["x@example.com"]
-
-    monkeypatch.setattr(bh, "get_blocked_emails", lambda: {"x@example.com"})
-    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
-
-    class DummyImap:
-        def login(self, *a, **k):
-            return "OK", None
-
-        def list(self, *a, **k):
-            return "OK", []
-
-        def select(self, *a, **k):
-            return "OK", None
-
-        def logout(self):
-            return
-
-    monkeypatch.setattr(bh.messaging, "imap_connect_ssl", lambda *a, **k: DummyImap())
-
-    monkeypatch.setattr(
-        bh.messaging,
-        "create_task_with_logging",
-        lambda coro, _: asyncio.create_task(coro),
-    )
-
-    await bh.send_manual_email(update, ctx)
-    await asyncio.sleep(0)
-
-    text = "\n".join(update.callback_query.message.replies)
-    assert "Правило 180 дней" in text
-    assert "❗ Все адреса уже есть" in text
 
 
-@pytest.mark.asyncio
-async def test_manual_send_override_sets_flag(monkeypatch, tmp_path):
-    tpl_path = tmp_path / "tourism.html"
-    tpl_path.write_text("<html></html>", encoding="utf-8")
-    monkeypatch.setattr(
-        bh,
-        "get_template",
-        lambda code: {
-            "code": code,
-            "label": code.title(),
-            "path": str(tpl_path),
-        }
-        if code == "tourism"
-        else None,
-    )
-
-    update = DummyUpdate(callback_data="manual_tpl:tourism")
-    ctx = DummyContext()
-    ctx.chat_data["manual_all_emails"] = ["user@example.com"]
-    ctx.chat_data["manual_send_mode"] = "all"
-
-    overrides: list[bool | None] = []
-
-    def fake_send(client, imap, folder, addr, path, *a, **kw):
-        overrides.append(kw.get("override_180d"))
-        return SendOutcome.SENT, "tok", "log"
-
-    class DummyImap:
-        def login(self, *a, **k):
-            return "OK", []
-
-        def list(self, *a, **k):
-            return "OK", []
-
-        def select(self, *a, **k):
-            return "OK", []
-
-        def logout(self):
-            return None
-
-    class DummySMTP:
-        def close(self):
-            return None
-
-    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
-    monkeypatch.setattr(
-        bh,
-        "imap_connect_ssl",
-        lambda *a, **k: DummyImap(),
-        raising=False,
-    )
-    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
-    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
-    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
-    monkeypatch.setattr(bh.rules, "load_blocklist", lambda: [])
-    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
-    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
-    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
-    tasks: list[asyncio.Task] = []
-
-    def spawn(coro, _):
-        task = asyncio.create_task(coro)
-        tasks.append(task)
-        return task
-
-    monkeypatch.setattr(bh.messaging, "create_task_with_logging", spawn)
-
-    async def dummy_sleep(_):
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
-
-    await bh.send_manual_email(update, ctx)
-    for task in tasks:
-        await task
-
-    assert overrides and overrides[0] is True
 
 
-def test_manual_override_store_selected_filters_candidates():
-    ctx = DummyContext()
-    ctx.chat_data["manual_override_candidates"] = [
-        {"email": "valid@example.com", "reason": "recent"}
-    ]
-
-    bh._manual_override_store_selected(
-        ctx, {"valid@example.com", "other@example.com"}
-    )
-
-    assert ctx.chat_data["manual_override_selected"] == ["valid@example.com"]
-
-    bh._manual_override_store_selected(ctx, {"valid@example.com"})
-    assert ctx.chat_data["manual_override_selected"] == ["valid@example.com"]
 
 
-@pytest.mark.asyncio
-async def test_manual_ignore_selected_flow():
-    ctx = DummyContext()
-    ctx.chat_data["manual_override_candidates"] = [
-        {"email": "one@example.com", "reason": "recent"},
-        {"email": "two@example.com", "reason": "recent"},
-    ]
-    ctx.chat_data["manual_override_selected"] = []
-    ctx.chat_data["manual_override_days"] = 200
-
-    initial = DummyUpdate(callback_data="manual_ignore_selected:go")
-    await bh.manual_ignore_selected(initial, ctx)
-    message = initial.callback_query.message
-    assert message.replies, "Expected initial list to be rendered"
-
-    toggle = DummyUpdate(callback_data="manual_ignore_selected:toggle:1")
-    toggle.callback_query.message = message
-    await bh.manual_ignore_selected(toggle, ctx)
-    assert ctx.chat_data["manual_override_selected"] == ["two@example.com"]
-
-    apply = DummyUpdate(callback_data="manual_ignore_selected:apply")
-    apply.callback_query.message = message
-    await bh.manual_ignore_selected(apply, ctx)
-    assert ctx.chat_data["manual_override_selected"] == ["two@example.com"]
-
-    clear = DummyUpdate(callback_data="manual_ignore_selected:clear")
-    clear.callback_query.message = message
-    await bh.manual_ignore_selected(clear, ctx)
-    assert ctx.chat_data["manual_override_selected"] == []
-
-    toggle_first = DummyUpdate(callback_data="manual_ignore_selected:toggle:0")
-    toggle_first.callback_query.message = message
-    await bh.manual_ignore_selected(toggle_first, ctx)
-    assert ctx.chat_data["manual_override_selected"] == ["one@example.com"]
-
-    close = DummyUpdate(callback_data="manual_ignore_selected:close")
-    close.callback_query.message = message
-    await bh.manual_ignore_selected(close, ctx)
-
-    assert "Игнорирование правила 200 дней" in message.replies[-1]
-    assert ctx.chat_data["manual_override_selected"] == ["one@example.com"]
 
 
-@pytest.mark.asyncio
-async def test_manual_send_selective_override(monkeypatch, tmp_path):
-    tpl_path = tmp_path / "tourism.html"
-    tpl_path.write_text("<html></html>", encoding="utf-8")
-
-    monkeypatch.setattr(
-        bh,
-        "get_template",
-        lambda code: {
-            "code": code,
-            "label": code.title(),
-            "path": str(tpl_path),
-        }
-        if code == "tourism"
-        else None,
-    )
-
-    monkeypatch.setattr(
-        bh,
-        "_filter_by_180",
-        lambda emails, group, days, chat_id=None: (
-            ["allowed@example.com"],
-            ["recent@example.com"],
-        ),
-    )
-
-    overrides: dict[str, bool | None] = {}
-
-    def fake_send(client, imap, folder, addr, path, *a, **kw):
-        overrides[addr] = kw.get("override_180d")
-        return SendOutcome.SENT, "tok", f"key-{addr}"
-
-    class DummyImap:
-        def login(self, *a, **k):
-            return "OK", []
-
-        def list(self, *a, **k):
-            return "OK", []
-
-        def select(self, *a, **k):
-            return "OK", []
-
-        def logout(self):
-            return None
-
-    class DummySMTP:
-        def close(self):
-            return None
-
-    monkeypatch.setattr(bh, "RobustSMTP", lambda *a, **k: DummySMTP())
-    monkeypatch.setattr(
-        bh,
-        "imap_connect_ssl",
-        lambda *a, **k: DummyImap(),
-        raising=False,
-    )
-    monkeypatch.setattr(bh, "send_email_with_sessions", fake_send)
-    monkeypatch.setattr(bh, "get_blocked_emails", lambda: set())
-    monkeypatch.setattr(bh, "get_sent_today", lambda: set())
-    monkeypatch.setattr(bh.rules, "load_blocklist", lambda: [])
-    monkeypatch.setattr(bh, "log_sent_email", lambda *a, **k: None)
-    monkeypatch.setattr(bh, "clear_recent_sent_cache", lambda: None)
-    monkeypatch.setattr(bh, "disable_force_send", lambda chat_id: None)
-
-    tasks: list[asyncio.Task] = []
-
-    def spawn(coro, _):
-        task = asyncio.create_task(coro)
-        tasks.append(task)
-        return task
-
-    monkeypatch.setattr(bh.messaging, "create_task_with_logging", spawn)
-
-    async def dummy_sleep(_):
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", dummy_sleep)
-
-    update = DummyUpdate(callback_data="manual_tpl:tourism")
-    ctx = DummyContext()
-    ctx.chat_data["manual_all_emails"] = [
-        "allowed@example.com",
-        "recent@example.com",
-    ]
-    ctx.chat_data["manual_send_mode"] = "allowed"
-    ctx.chat_data["manual_override_candidates"] = [
-        {"email": "recent@example.com", "reason": "cooldown"},
-        {"email": "allowed@example.com", "reason": "cooldown"},
-    ]
-    ctx.chat_data["manual_override_selected"] = ["recent@example.com"]
-    ctx.chat_data["manual_override_days"] = 180
-    ctx.chat_data["manual_override_page"] = 0
-
-    await bh.send_manual_email(update, ctx)
-    for task in tasks:
-        await task
-
-    assert overrides["allowed@example.com"] is False
-    assert overrides["recent@example.com"] is True
-
-    assert "manual_override_selected" not in ctx.chat_data
-    assert "manual_override_candidates" not in ctx.chat_data
-    assert "manual_override_page" not in ctx.chat_data
-    assert "manual_override_days" not in ctx.chat_data
 
 
 def test_preview_separates_foreign(monkeypatch):
@@ -1328,3 +894,109 @@ def test_cooldown_preview_samples_from_all_hits(monkeypatch):
 
     examples = ctx.chat_data[SESSION_KEY].cooldown_preview_examples
     assert [email for email, _date in examples] == filtered[-3:]
+
+
+@pytest.fixture(autouse=True)
+def isolate_handler_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(bh.mass_state, "STATE_PATH", tmp_path / "mass_state.json")
+    monkeypatch.setattr(bh.mass_state, "_state_cache", None)
+
+
+def test_enable_manual_text_corrections():
+    ctx = DummyContext()
+    ctx.user_data["manual_emails"] = ["old@example.com"]
+    update = DummyUpdate(callback_data="enable_text_corrections")
+    run(bh.enable_text_corrections(update, ctx))
+    assert ctx.user_data["text_corrections"] is True
+    assert ctx.user_data["state"] == MANUAL_WAIT_INPUT
+    assert "старый -> новый" in update.callback_query.message.replies[-1]
+
+
+@pytest.mark.parametrize("new,expected", [
+    ("new@example.com", "new@example.com"),
+    ("still-bad", "old@example.com"),
+])
+def test_manual_text_replacement_validates_address(new, expected):
+    ctx = DummyContext()
+    bh._update_manual_storage(ctx, ["old@example.com"])
+    run(bh.enable_text_corrections(DummyUpdate(callback_data="enable_text_corrections"), ctx))
+    update = DummyUpdate(text=f"old@example.com -> {new}")
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.route_text_message(update, ctx))
+    assert ctx.user_data["manual_emails"] == [expected]
+    assert ctx.chat_data["manual_emails"] == [expected]
+    assert bool(ctx.user_data.get("text_corrections")) == (new == "still-bad")
+    assert update.message.replies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ignore,allow,enforce", [
+    (False, True, True), (True, True, True),
+    (True, False, True), (False, True, False),
+])
+async def test_active_manual_send_template_and_cooldown(monkeypatch, tmp_path, ignore, allow, enforce):
+    template = tmp_path / "tourism.html"
+    template.write_text("<html>Test</html>", encoding="utf-8")
+    monkeypatch.setitem(bh.messaging.TEMPLATE_MAP, "tourism", str(template))
+    monkeypatch.setenv("MANUAL_DAYS", "180")
+    monkeypatch.setenv("MANUAL_ENFORCE_180", str(int(enforce)))
+    monkeypatch.setenv("MANUAL_ALLOW_OVERRIDE", str(int(allow)))
+    monkeypatch.setattr(bh, "_store_mass_summary", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "disable_force_send", lambda *a: None)
+    captured = {}
+    def prepare(emails, group, **kwargs):
+        captured.update(kwargs)
+        return list(emails), [], [], [], {}
+    send = AsyncMock(return_value=bh.ManualBatchResult(sent_count=1, remaining=[]))
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing", prepare)
+    monkeypatch.setattr(bh, "_send_batch_with_sessions", send)
+    ctx = DummyContext()
+    bh._update_manual_storage(ctx, ["user@example.com"])
+    ctx.user_data["ignore_180d"] = ignore
+    update = DummyUpdate(callback_data="manual_group_tourism")
+    await bh.manual_select_group(update, ctx)
+    await ctx.chat_data["manual_send_task"]
+    assert captured["ignore_cooldown"] == (not enforce or (ignore and allow))
+    assert captured["lookback_days"] == (180 if enforce else 0)
+    assert send.await_args.args[2:] == (["user@example.com"], str(template), "tourism")
+    assert ctx.chat_data["manual_emails"] == []
+    assert ctx.user_data.get("manual_emails", []) == []
+    assert not ctx.chat_data.get("manual_send_running")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["blocked", "recent"])
+async def test_active_manual_send_excluded_addresses_not_sent(monkeypatch, reason):
+    monkeypatch.setenv("MANUAL_ENFORCE_180", "1")
+    monkeypatch.setenv("MANUAL_DAYS", "180")
+    monkeypatch.setattr(bh, "_store_mass_summary", lambda *a, **k: None)
+    def prepare(emails, group, **kwargs):
+        return [], [], list(emails) if reason == "blocked" else [], list(emails) if reason == "recent" else [], {}
+    send = AsyncMock()
+    monkeypatch.setattr(bh.messaging, "prepare_mass_mailing", prepare)
+    monkeypatch.setattr(bh, "_send_batch_with_sessions", send)
+    ctx = DummyContext()
+    bh._update_manual_storage(ctx, ["user@example.com"])
+    update = DummyUpdate(callback_data="manual_group_tourism")
+    await bh.manual_select_group(update, ctx)
+    send.assert_not_awaited()
+    text = "\n".join(update.callback_query.message.replies)
+    assert ("заблокированных" if reason == "blocked" else "180 дней") in text
+    assert "Никого не осталось" in text
+    assert "manual_send_task" not in ctx.chat_data
+
+
+@pytest.mark.parametrize("text", [
+    "missing@example.com -> new@example.com",
+    "old@example.com -> new@example.com\nother@example.com -> invalid",
+])
+def test_manual_replacements_do_not_lose_original_list(text):
+    ctx = DummyContext()
+    original = ["old@example.com", "other@example.com"]
+    bh._update_manual_storage(ctx, original)
+    run(bh.enable_text_corrections(DummyUpdate(callback_data="enable_text_corrections"), ctx))
+    with pytest.raises(ApplicationHandlerStop):
+        run(bh.route_text_message(DummyUpdate(text=text), ctx))
+    assert ctx.user_data["manual_emails"] == original
+    assert ctx.chat_data["manual_emails"] == original
+    assert ctx.user_data["text_corrections"] is True

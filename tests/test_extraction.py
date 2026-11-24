@@ -7,7 +7,7 @@ from emailbot.extraction import smart_extract_emails
     "raw,expected",
     [
         ("\u00b9ivanov@uni.com", ["ivanov@uni.com"]),
-        ("1petrov@uni.com", ["petrov@uni.com"]),
+        ("1petrov@uni.com", ["1petrov@uni.com"]),
         ("apetrov@uni.com", ["apetrov@uni.com"]),
         ("aivanov@uni.com", ["aivanov@uni.com"]),
         ("name-name@dept.domain.com", ["name-name@dept.domain.com"]),

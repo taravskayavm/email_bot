@@ -27,6 +27,7 @@ from emailbot.directions import resolve_direction_title
 from emailbot.suppress_list import is_blocked
 # Пишем статистику отправок в JSONL-файл атомарно.
 from emailbot.utils.fs import append_jsonl_atomic
+from emailbot.delivery_status import failed_send_indices, unique_bounces, event_time, recipient
 
 if TYPE_CHECKING:  # pragma: no cover - typing hints only
     from emailbot.report_preview import PreviewData
@@ -366,6 +367,7 @@ def _period_bounds(
     *,
     year: int | None = None,
     month: int | None = None,
+    week: int | None = None,
 ) -> Tuple[datetime, datetime]:
     """Return calendar bounds ``[start, end)`` in Moscow time."""
 
@@ -374,9 +376,12 @@ def _period_bounds(
         start_date = today
         end_date = today + timedelta(days=1)
     elif period == "week":
-        start_date = today - timedelta(days=today.weekday())
-        # The reporting week runs Monday through Saturday (inclusive).
-        end_date = start_date + timedelta(days=6)
+        current_year, current_week, _ = today.isocalendar()
+        start_date, last_date = report_week_dates(
+            year if year is not None else current_year,
+            week if week is not None else current_week,
+        )
+        end_date = last_date + timedelta(days=1)
     elif period == "month":
         selected_year = year if year is not None else today.year
         selected_month = month if month is not None else today.month
@@ -397,6 +402,19 @@ def _period_bounds(
     start_dt = datetime.combine(start_date, dt_time.min, tzinfo=MOSCOW_TZ)
     end_dt = datetime.combine(end_date, dt_time.min, tzinfo=MOSCOW_TZ)
     return start_dt, end_dt
+
+
+def report_weeks_in_year(year: int) -> int:
+    """Return the number of ISO weeks in a production-calendar year (52 or 53)."""
+
+    return date(year, 12, 28).isocalendar().week
+
+
+def report_week_dates(year: int, week: int) -> tuple[date, date]:
+    """Return inclusive Monday-Sunday dates for a numbered calendar week."""
+
+    start = date.fromisocalendar(year, week, 1)
+    return start, start + timedelta(days=6)
 
 
 def _working_end(weekday: int) -> dt_time | None:
@@ -669,21 +687,25 @@ def summarize_period_stats(
     *,
     year: int | None = None,
     month: int | None = None,
+    week: int | None = None,
     now: datetime | None = None,
 ) -> PeriodStats:
-    """Count successful sends through the report invocation time."""
+    """Count sends in the calendar period through the report invocation time.
+
+    Actual sends remain reportable outside the planned mailing hours.
+    """
 
     now_msk = _as_moscow(now)
     start_msk, calendar_end_msk = _period_bounds(
-        period, now_msk, year=year, month=month
+        period, now_msk, year=year, month=month, week=week
     )
     scan_end_msk = min(calendar_end_msk, now_msk + timedelta(microseconds=1))
 
-    buckets: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+    buckets: dict[tuple[str, str], list[tuple[datetime, int]]] = defaultdict(list)
+    accepted: list[Mapping[str, object]] = []
+    events = list(_report_source_events(start_msk, scan_end_msk)) if scan_end_msk > start_msk else []
     if scan_end_msk > start_msk:
-        for event_number, event in enumerate(
-            _report_source_events(start_msk, scan_end_msk)
-        ):
+        for event_number, event in enumerate(events):
             ts = _parse_event_timestamp(event)
             if ts is None:
                 continue
@@ -696,20 +718,32 @@ def summarize_period_stats(
             code = _canonical_direction_code(event.get("group"))
             if not code or not _direction_title(code):
                 continue
-            email = str(event.get("email") or "").strip().casefold()
+            email = recipient(event)
             if not email:
                 email = f"__missing_email_{event_number}"
-            buckets[(email, code)].append(ts_msk)
+            accepted.append(event)
+            buckets[(email, code)].append((ts_msk, len(accepted) - 1))
 
+    failures = [row for row in unique_bounces(events)
+                if event_time(row) is None or event_time(row) <= now_msk]
+    bounced = failed_send_indices(accepted, failures)
     counts: dict[str, int] = defaultdict(int)
+    failed_counts: dict[str, int] = defaultdict(int)
     for (_email, code), timestamps in buckets.items():
-        previous: datetime | None = None
-        for timestamp in sorted(timestamps):
-            is_new_send = (
-                previous is None or timestamp - previous > _DUPLICATE_WINDOW
-            )
-            previous = timestamp
-            if is_new_send and is_working_datetime(timestamp):
+        clusters: list[list[tuple[datetime, int]]] = []
+        for item in sorted(timestamps):
+            message_id = accepted[item[1]].get("message_id")
+            cluster_ids = {accepted[i].get("message_id") for _, i in clusters[-1]
+                           if accepted[i].get("message_id")} if clusters else set()
+            if (not clusters or item[0] - clusters[-1][-1][0] > _DUPLICATE_WINDOW
+                    or (message_id and cluster_ids and message_id not in cluster_ids)):
+                clusters.append([])
+            clusters[-1].append(item)
+        for cluster in clusters:
+            identified = [i for _, i in cluster if accepted[i].get("message_id")]
+            if any(index in bounced for index in (identified or [i for _, i in cluster])):
+                failed_counts[code] += 1
+            else:
                 counts[code] += 1
 
     directions = sorted(
@@ -717,39 +751,42 @@ def summarize_period_stats(
             DirectionStats(
                 code=code,
                 title=_direction_title(code) or code,
-                success=count,
-                failed=0,
+                success=counts[code],
+                failed=failed_counts[code],
             )
-            for code, count in counts.items()
-            if count > 0
+            for code in counts.keys() | failed_counts.keys()
         ),
         key=lambda item: (-item.success, item.title.casefold()),
     )
     return PeriodStats(
         period=period,
         date_start=start_msk.date(),
-        date_end=min(
-            (calendar_end_msk - timedelta(days=1)).date(),
-            now_msk.date(),
-        ),
+        date_end=(calendar_end_msk - timedelta(days=1)).date()
+        if period == "week" and week is not None
+        else min((calendar_end_msk - timedelta(days=1)).date(), now_msk.date()),
         directions=directions,
         total_success=sum(item.success for item in directions),
-        total_failed=0,
+        total_failed=sum(item.failed for item in directions),
     )
 
 
-def available_report_years(now: datetime | None = None) -> list[int]:
-    """Return years containing reportable directional sends, plus the current year."""
+def available_report_years(
+    now: datetime | None = None, *, for_week: bool = False
+) -> list[int]:
+    """Return calendar or ISO week-years with sends, plus the current year."""
 
     now_msk = _as_moscow(now)
     start = datetime(1970, 1, 1, tzinfo=MOSCOW_TZ)
     years = {now_msk.year}
+    if for_week:
+        years.add(now_msk.isocalendar().year)
     for event in _report_source_events(start, now_msk + timedelta(microseconds=1)):
         ts = _parse_event_timestamp(event)
-        if ts is None or not is_working_datetime(ts):
+        if ts is None:
             continue
         status = str(event.get("status") or event.get("result") or "").casefold()
         code = _canonical_direction_code(event.get("group"))
         if status in _SUCCESS_STATUSES and code and _direction_title(code):
-            years.add(ts.astimezone(MOSCOW_TZ).year)
+            local = ts.astimezone(MOSCOW_TZ)
+            years.add(local.isocalendar().year if for_week else local.year)
     return sorted(years)

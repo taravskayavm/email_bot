@@ -13,6 +13,7 @@ from typing import Iterator
 
 from emailbot.suppress_list import blocklist_path
 from utils import send_stats
+from .delivery_status import BOUNCE_STATUSES, failed_send_indices, failure_time, unique_bounces, successful_send_count
 
 if sys.version_info >= (3, 9):
     from zoneinfo import ZoneInfo
@@ -108,7 +109,7 @@ def _iter_sent_log() -> Iterator[dict[str, object]]:
                     continue
                 status_raw = (row.get("status") or "").strip()
                 status = status_raw.lower() if status_raw else "sent"
-                yield {"ts_utc": ts_utc, "status": status}
+                yield {**row, "ts_utc": ts_utc, "status": status}
     except FileNotFoundError:
         return
 
@@ -138,7 +139,7 @@ def _iter_send_stats() -> Iterator[dict[str, object]]:
                 status = str(status_raw).strip().lower()
             else:
                 status = "sent" if data.get("success") else "failed"
-            yield {"ts_utc": ts_utc, "status": status}
+            yield {**data, "ts_utc": ts_utc, "status": status}
 
 
 def _history_success_count(start_local: dt.datetime, end_local: dt.datetime) -> int:
@@ -165,9 +166,11 @@ def summarize_day_local(today_local: dt.date | None = None) -> tuple[int, int]:
     start_local = dt.datetime.combine(today_local, dt.time(0, 0, 0), tzinfo=REPORT_TZ)
     end_local = start_local + dt.timedelta(days=1)
 
-    ok = 0
+    items = list(chain(_iter_sent_log(), _iter_send_stats()))
+    failures = unique_bounces(items)
+    accepted = []
     err = 0
-    for item in chain(_iter_sent_log(), _iter_send_stats()):
+    for item in items:
         ts_utc = item["ts_utc"]
         if not isinstance(ts_utc, dt.datetime):
             continue
@@ -176,14 +179,28 @@ def summarize_day_local(today_local: dt.date | None = None) -> tuple[int, int]:
         if not (start_local <= ts_local < end_local):
             continue
         if status in _SUCCESS_STATUSES:
-            ok += 1
-        elif status in _ERROR_STATUSES:
+            accepted.append(item)
+        elif status in _ERROR_STATUSES and status not in BOUNCE_STATUSES:
             err += 1
+    failed = failed_send_indices(accepted, failures)
+    ok = successful_send_count(accepted, failed)
+    # A DSN arriving tomorrow corrects the day of its original send.
+    err += sum(1 for row in failures if failure_time(row) is not None
+               and start_local <= failure_time(row) < end_local)
     # CSV and JSONL are compatibility sources and can be truncated or reset.
     # SQLite is the durable source used by the live daily limit.  Taking the
     # larger successful count preserves legacy-only events without double
     # counting the same deliveries across stores.
-    ok = max(ok, _history_success_count(start_local, end_local))
+    history_ok = _history_success_count(start_local, end_local)
+    if failures and history_ok:
+        from .reporting import _iter_history_events
+
+        history = list(_iter_history_events(start_local, end_local))
+        bounced = failed_send_indices(history, failures)
+        failed_addresses = {str(history[i].get("email", "")) for i in bounced}
+        surviving_addresses = {str(row.get("email", "")) for i, row in enumerate(history) if i not in bounced}
+        history_ok = max(0, history_ok - len(failed_addresses - surviving_addresses))
+    ok = max(ok, history_ok)
     return ok, err
 
 

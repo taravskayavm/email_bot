@@ -22,7 +22,9 @@ CYR_TO_LAT = {
     "е": "e",
     "о": "o",
     "р": "p",
-    "с": "s",
+    "с": "c",
+    "ь": "b",
+    "л": "l",
     "у": "y",
     "к": "k",
     "х": "x",
@@ -161,7 +163,7 @@ def _normalize_confusables(text: str) -> str:
 
 
 def strip_invisibles(text: str) -> str:
-    return _INVISIBLES_RE.sub("", text or "")
+    return _INVISIBLES_RE.sub("", text or "").replace("\xad", "").replace("\u2060", "")
 
 
 def _idna_domain(domain: str) -> str:
@@ -176,7 +178,6 @@ def _idna_domain(domain: str) -> str:
 
 def preclean_for_email_extraction(text: str) -> str:
     t = strip_invisibles(text or "")
-    t = _normalize_confusables(t)
     # убрать NBSP и мягкие переносы, выровнять пробелы
     t = t.replace("\u00A0", " ").replace("\u00AD", "")
     t = t.replace("\r", "\n")
@@ -256,7 +257,9 @@ def preclean_obfuscations(text: str) -> str:
     cleaned = preclean_for_email_extraction(text)
     if not cleaned:
         return ""
-    return "".join(_deobfuscate_chunks([cleaned]))
+    from utils.email_deobfuscate import deobfuscate_text
+
+    return deobfuscate_text(cleaned) if OBFUSCATION_ENABLE else cleaned
 
 
 def parse_emails_unified(text: str, return_meta: bool = False):
@@ -264,70 +267,79 @@ def parse_emails_unified(text: str, return_meta: bool = False):
     Нормализация (гомоглифы/невидимые) → деобфускация → извлечение e-mail → IDNA для домена.
     """
 
+    from utils.email_deobfuscate import deobfuscate_text
+
     src = preclean_for_email_extraction(text)
-    raw_chunks = re.split(r"[,\s;\n]+", src)
-    chunks = list(_deobfuscate_chunks(raw_chunks))
-
-    found: Set[str] = set()
-    items_map: dict[str, dict] = {}
-
-    def _register(email: str, raw_value: str | None = None) -> None:
-        if email in items_map:
-            return
-        item = {
-            "raw": raw_value or email,
-            "normalized": email,
-            "sanitized": email,
-            "span": None,
-            "reason": None,
-        }
-        items_map[email] = item
-
-    def _add_match(candidate: str) -> None:
-        if not candidate:
-            return
-        for m in EMAIL_RE.finditer(candidate):
-            raw_email = m.group(0)
-            local, dom = raw_email.split("@", 1)
-            normalized = f"{local.lower()}@{_idna_domain(dom)}"
-            found.add(normalized)
-            _register(normalized, raw_email)
-
-    for tok in chunks:
-        if not tok:
-            continue
-        variants = {tok}
-        collapsed = _collapse_spaced_tokens(tok)
-        if collapsed:
-            variants.add(collapsed)
-        trimmed = drop_leading_char_twins(tok)
-        trimmed = drop_trailing_char_twins(trimmed)
-        if trimmed:
-            variants.add(trimmed)
-            collapsed_trimmed = _collapse_spaced_tokens(trimmed)
-            if collapsed_trimmed:
-                variants.add(collapsed_trimmed)
-        for candidate in variants:
-            _add_match(candidate)
-
-    for m in OBFUSCATED_EMAIL_RE.finditer(src):
-        local_raw = m.group(1) or ""
-        sep = m.group(2) or ""
-        domain_raw = m.group(3) or ""
-        cand = f"{local_raw}{'@' if '@' in sep else '@'}{domain_raw}"
-        cand = _collapse_spaced_tokens(cand)
-        if not cand or "@" not in cand:
-            continue
-        _add_match(cand)
-
-    res = sorted(found)
-    if return_meta:
-        items = [items_map[email] for email in res]
-        return (
-            res,
-            {"source": text, "normalized": src, "tokens": chunks, "emails": res, "items": items},
+    src = re.sub(r"\{\d+\}(?=[A-Za-z])", " ", src)
+    if OBFUSCATION_ENABLE:
+        src = deobfuscate_text(src)
+    # Repair only a missing domain separator, never join adjacent addresses.
+    src = re.sub(r"(@[\w-]+),\s*(ru|com)\b", r"\1.\2", src, flags=re.I)
+    src = re.sub(r"(?<=\w)\s*\.\s*(?=\w)", ".", src)
+    token_re = re.compile(r"[A-Za-z0-9\u0400-\u04ff.!#$%&'*+/=?^_`{|}~-]+@(?:[^\W_]|[-.])+", re.UNICODE)
+    found, items, suspects = [], [], []
+    for match in token_re.finditer(src):
+        raw = match.group(0).rstrip(".")
+        local, domain = raw.split("@", 1)
+        prefix = re.match(r"^[\u0400-\u04ff][\u0400-\u04ff.-]*[\u0400-\u04ff][.-]*", local)
+        if prefix:
+            local = local[prefix.end():].lstrip(".-")
+        local = local.lstrip(".-")
+        # Numeric markers are removed only with nearby explicit footnote evidence.
+        if re.search(r"\[\d+\]|\(\d+\)", src):
+            local = re.sub(r"^\d+(?=[A-Za-z])", "", local)
+        original_domain = domain
+        local, domain, changed = normalize_confusables(local, domain)
+        reverted = False
+        normalized_domain = normalize_domain(domain)
+        if isinstance(normalized_domain, tuple):
+            normalized_domain, domain_reason = normalized_domain
+            if domain_reason and changed:
+                normalized_domain = _idna_domain(original_domain)
+                reverted, changed = True, False
+        normalized = f"{local.lower()}@{normalized_domain}"
+        cleaned, reason = sanitize_email(normalized)
+        if not reason and changed:
+            reason = "confusables-normalized"
+        candidate = cleaned or normalized
+        previous = src[max(0, match.start()-1):match.start()]
+        suspicious = bool(
+            prefix or (previous and (previous.isalpha() or previous == "."))
+            or re.search(r"[A-Za-z]{12,}", local)
+            or re.search(r"\d{7,}|\d{4}-\d{4}-", local)
+            or re.search(r"[^\x00-\x7f]", domain.rsplit(".", 1)[-1])
+            or re.search(r"(?:ru|com)[A-ZА-Я]", original_domain)
+            or re.search(r"[^\x00-\x7f]", original_domain)
         )
-    return res
+        if suspicious and candidate not in suspects:
+            suspects.append(candidate)
+        items.append({"raw": raw, "normalized": normalized, "sanitized": cleaned,
+                      "span": match.span(), "reason": reason, "reverted": reverted})
+        if cleaned and cleaned not in found:
+            found.append(cleaned)
+    # Require the clean counterpart as evidence before discarding numeric glue.
+    for address in list(found):
+        shorter = re.sub(r"^\d+(?=[A-Za-z])", "", address)
+        if shorter != address and shorter in found:
+            found.remove(address)
+            for item in items:
+                if item["sanitized"] == address:
+                    item["sanitized"], item["reason"] = "", "footnote-duplicate"
+    meta = {"source": text, "normalized": src, "tokens": src.split(), "emails": found,
+            "items": items, "suspects": suspects}
+    return (found, meta) if return_meta else found
+
+
+def extract_emails(text: str, return_meta: bool = False):
+    """Compatibility entrypoint for the unified extractor."""
+    return parse_emails_unified(text, return_meta=return_meta)
+
+
+def canonicalize_email(addr: str) -> str:
+    """Legacy canonical key, preserving the original provider domain alias."""
+    local, domain = addr.strip().lower().split("@", 1)
+    domain = _idna_domain(domain)
+    return f"{_canonical_local(local, domain)}@{domain}"
 
 
 def contains_url_but_not_email(text: str) -> bool:
@@ -342,6 +354,7 @@ def contains_url_but_not_email(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PLUS_TAG_PROVIDERS = {
+    "mail.ru",
     "gmail.com",
     "googlemail.com",
     "yandex.ru",
@@ -415,27 +428,21 @@ def dedupe_with_variants(emails, return_map: bool = False):
     - gmail/googlemail, yandex/ya: игнор точек в local, режем +tag
     - IDNA и lowercase для домена
     Возвращает:
-      - список уникальных адресов (в каноническом виде);
+      - список уникальных адресов с сохранением первого транспортного варианта;
       - при return_map=True кортеж (уникальные, mapping), где
-        mapping[canonical] = {варианты_как_вводились}.
+        mapping[canonical] = {очищенные_варианты}.
     """
 
-    if not emails:
-        return ([], {}) if return_map else []
+    uniques = []
     mapping: dict[str, set[str]] = {}
-    for raw in emails:
-        e = (raw or "").strip().lower()
-        if not e or "@" not in e:
+    for raw in emails or []:
+        e, _ = sanitize_email(raw, _filter_policy=False)
+        if not e:
             continue
-        try:
-            local, dom = e.split("@", 1)
-        except ValueError:
-            continue
-        dom_c = _canonical_domain(dom)
-        loc_c = _canonical_local(local, dom_c)
-        canon = f"{loc_c}@{dom_c}"
+        canon = canonical_email(e)
+        if canon not in mapping:
+            uniques.append(e)
         mapping.setdefault(canon, set()).add(e)
-    uniques = sorted(mapping.keys())
     if return_map:
         return uniques, mapping
     return uniques
@@ -456,8 +463,9 @@ def finalize_email(
     """Normalize an address and return ``(email, reason, stage)``.
 
     The helper accepts either a full e-mail address as the first argument or a
-    ``(local, domain)`` pair. Additional keyword arguments are accepted for
-    backward compatibility with pipeline callers and are ignored here.
+    ``(local, domain)`` pair. A supplied sanitized address takes precedence;
+    a previous rejection reason is preserved. Raw text and span are accepted
+    for compatibility with pipeline callers.
     """
 
     if domain is None:
@@ -465,15 +473,10 @@ def finalize_email(
     else:
         addr = f"{local_or_email}@{domain}"
 
-    try:
-        cleaned = canonical_email(addr)
-    except Exception as exc:
-        logger.warning("finalize_email fallback for %r: %s", addr, exc)
-        cleaned = (addr or "").strip().lower()
-
-    if not cleaned or "@" not in cleaned:
-        return "", "invalid", "finalize"
-    return cleaned, None, "finalize"
+    cleaned, reason = sanitize_email(sanitized or addr)
+    if sanitize_reason and sanitize_reason != "confusables-normalized":
+        return "", sanitize_reason, "sanitize"
+    return cleaned, reason, "finalize"
 
 
 def normalize_email(addr: str) -> str:
@@ -505,40 +508,54 @@ def repair_email(addr: str) -> str:
         return (addr or "").strip().lower()
 
 
-def sanitize_email(addr: str, strip_footnote: bool = True) -> tuple[str, str | None]:
+def sanitize_email(addr: str, strip_footnote: bool = True, *, _filter_policy: bool = True) -> tuple[str, str | None]:
     """
     Совместимый с легаси интерфейс:
       возвращает (cleaned, reason).
-    - cleaned: нормализованный e-mail в канонической форме (ключ для кулдауна/дедупа),
+    - cleaned: очищенный транспортный адрес с сохранением точек и +tag,
                либо "" если адрес некорректный;
     - reason:  строковый код причины отказа (например, "invalid", "invalid-local",
                "invalid-domain"), либо None.
-    ВАЖНО: ЭТО НЕ «транспортный» адрес для SMTP. Для фактической отправки используйте
-    адрес пользователя без удаления точек/плюсов (см. emailbot.messaging).
+    Ключ для истории и дедупликации получается отдельно через canonical_email().
     """
 
-    try:
-        a = (addr or "").strip()
-        a = a.strip("()[]{}<>,;\"'`«»„“”‚‘’")
-        if not a or "@" not in a:
-            return "", "invalid"
-        local, sep, domain = a.partition("@")
-        if not sep:
-            return "", "invalid"
-        if not local:
-            return "", "invalid-local"
-        if not domain:
-            return "", "invalid-domain"
-        try:
-            cleaned = canonical_email(a)
-        except Exception:
-            cleaned = a.strip().lower()
-        if not cleaned or "@" not in cleaned:
-            return "", "invalid"
-        return cleaned, None
-    except Exception as e:
-        logger.warning("sanitize_email fallback for %r: %s", addr, e)
+    from utils.tld_utils import is_allowed_domain
+
+    a = strip_invisibles(addr or "").strip().strip("()[]{}<>,;\"'`«»„“”‚‘’")
+    if strip_footnote:
+        a = re.sub(r"^[¹²³⁰⁴⁵⁶⁷⁸⁹①-⑳]+", "", a)
+    a = re.sub(r"(?<=\w)-\r?\n(?=\w)", "", a)
+    if a.count("@") != 1:
         return "", "invalid"
+    local, domain = a.split("@", 1)
+    domain = re.split(r"[?#]", domain, maxsplit=1)[0].rstrip(".")
+    local = re.sub(r"\.{2,}", ".", local).strip("._-")
+    if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}", local):
+        return "", "invalid-local"
+    if re.match(r"(?:mail|yandex|gmail)\.(?:ru|com)[A-Za-z]", local, re.I):
+        return "", "glued-domain-prefix"
+    if _filter_policy and local.isdigit() and len(local) <= 3:
+        return "", "looks-like-footnote"
+    try:
+        domain = idna.encode(domain.lower(), uts46=True).decode("ascii") if idna else domain.lower()
+    except Exception:
+        return "", "invalid-idna"
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}", domain):
+        return "", "invalid-domain"
+    if not is_allowed_domain(domain) and os.getenv("REPAIR_TLD_TAIL", "1") == "1":
+        base, tail = domain.rsplit(".", 1)
+        # Retain the established conservative list of known PDF tail artefacts.
+        repaired = re.fullmatch(r"(ru|com)(russia|com|net|sysoev|faculty|доцент|россия)", tail)
+        if repaired:
+            domain = f"{base}.{repaired.group(1)}"
+    if _filter_policy and not is_allowed_domain(domain):
+        return "", "tld-not-allowed"
+    if _filter_policy and os.getenv("EMAIL_ROLE_PERSONAL_ONLY", "1") == "1" and (
+        local.lower() in {"info", "support", "office", "contact", "admin", "noreply", "no-reply"}
+        or local.lower().startswith("russia")
+    ):
+        return "", "role-like-prefix"
+    return f"{local.lower()}@{domain}", None
 
 
 def get_variants(addr: str):
@@ -694,9 +711,17 @@ def remove_bad_glyphs(text: str) -> str:
     return strip_invisibles(text)
 
 
-def normalize_confusables(text: str) -> str:
+def normalize_confusables(text: str, domain: str | None = None):
     """Псевдоним для _normalize_confusables()."""
-    return _normalize_confusables(text)
+    if domain is None:
+        return _normalize_confusables(text)
+    local = _normalize_confusables(text)
+    labels = domain.split(".")
+    normalized_domain = ".".join(
+        _normalize_confusables(label) if re.search(r"[A-Za-z]", label) and not label.startswith("xn--") else label
+        for label in labels
+    )
+    return local, normalized_domain, (local, normalized_domain) != (text, domain)
 
 
 def fix_confusables(text: str) -> str:

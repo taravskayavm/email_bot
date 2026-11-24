@@ -9,6 +9,7 @@ import os
 import pkgutil
 import signal
 import sys
+import threading
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
@@ -163,6 +164,9 @@ async def main() -> None:
     token = _resolve_token()
     bot = _make_bot(token)
     dispatcher = Dispatcher()
+    from emailbot.access import AccessPolicy, AiogramAccessMiddleware
+
+    dispatcher.update.outer_middleware(AiogramAccessMiddleware(AccessPolicy.from_env()))
     clear_stop()
     try:
         from emailbot.bot.middlewares.error_logging import ErrorLoggingMiddleware
@@ -203,6 +207,14 @@ async def main() -> None:
             # Windows Py<3.8 и некоторые окружения
             pass
 
+    from utils.bounce import periodic_bounce_check
+
+    bounce_stop = threading.Event()
+    bounce_thread = threading.Thread(
+        target=periodic_bounce_check, args=(bounce_stop,), daemon=True,
+        name="bounce-scanner",
+    )
+    bounce_thread.start()
     async with bot:
         polling = asyncio.create_task(
             dispatcher.start_polling(
@@ -212,7 +224,10 @@ async def main() -> None:
             )
         )
         polling.add_done_callback(lambda _: (request_stop(), stop_event.set()))
-        await stop_event.wait()
+        try:
+            await stop_event.wait()
+        finally:
+            bounce_stop.set()
         if not polling.done():
             polling.cancel()
         try:

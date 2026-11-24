@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import logging
 import smtplib
 import ssl
 from email.message import EmailMessage
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _get_setting(name: str, default=None):
@@ -58,13 +61,18 @@ class SmtpSender:
             )
         else:
             client = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
-            client.ehlo()
-            try:
+        try:
+            if self.starttls or self.port != 465:
+                client.ehlo()
                 client.starttls(context=self._ssl_context)
                 client.ehlo()
-            except smtplib.SMTPNotSupportedError:
-                pass
-        client.login(str(self.email_address), str(self.email_password))
+            client.login(str(self.email_address), str(self.email_password))
+        except BaseException:
+            try:
+                client.close()
+            except (smtplib.SMTPException, OSError):
+                logger.warning("SMTP socket close failed after connection error", exc_info=True)
+            raise
         return client
 
     def send(

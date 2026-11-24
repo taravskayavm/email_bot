@@ -1,5 +1,6 @@
 import os
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ class _FakeSMTP:
     def __init__(self, *a, **k):
         pass
 
-    def send(self, msg):
+    def send(self, *args):
         return None
 
     def ensure(self):
@@ -28,7 +29,7 @@ def _env_tmp_stats(tmp_path, monkeypatch):
     # подменяем SMTP-клиент на фейковый
     import emailbot.messaging as m
     fake = _FakeSMTP
-    monkeypatch.setattr(m, "RobustSMTP", lambda *a, **k: fake(), raising=True)
+    monkeypatch.setattr(m, "SmtpClient", lambda *a, **k: nullcontext(fake()))
     monkeypatch.setattr(
         m,
         "send_with_retry",

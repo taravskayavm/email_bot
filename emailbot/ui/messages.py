@@ -285,6 +285,12 @@ def _format_period_header(period: str, date_start: date, date_end: date) -> str:
     interval = (
         f"{date_start.strftime('%d.%m.%Y')}–{date_end.strftime('%d.%m.%Y')}"
     )
+    if period == "week":
+        week_year, week_number, _ = date_start.isocalendar()
+        return (
+            f"📊 Отчёт по отправленным письмам за неделю №{week_number} ({week_year})\n"
+            f"{interval}"
+        )
     return f"📊 Отчёт по отправленным письмам за {label} {interval}"
 
 
@@ -300,13 +306,15 @@ def format_send_stats_by_direction(stats: PeriodStats) -> str:
     lines = [_format_period_header(stats.period, stats.date_start, stats.date_end), ""]
     if stats.directions:
         for direction in stats.directions:
-            if direction.success > 0:
+            if direction.success > 0 or direction.failed > 0:
                 lines.append(f"{direction.title} — {_format_count(direction.success)}")
     else:
         lines.append("За выбранный период отправок не найдено.")
 
     lines.append("")
     lines.append(f"Всего отправлено: {_format_count(stats.total_success)}")
+    if stats.total_failed:
+        lines.append(f"Недоставлено (возвраты): {_format_count(stats.total_failed)}")
     return "\n".join(lines)
 
 

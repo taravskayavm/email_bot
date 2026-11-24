@@ -70,7 +70,7 @@ def remove_footnotes_safe(text: str) -> str:
     tight_patterns = [
         (
             r"(?<=[А-Яа-яЁё])(?P<foot>[a-cA-C])(?=(?:\s|[.,;:!?)\]\}»]|$))"
-            + email_follow,
+            ,
             "",
         ),
         (

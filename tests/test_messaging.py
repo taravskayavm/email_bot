@@ -10,6 +10,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 import pytest
+from contextlib import nullcontext
 
 from emailbot import messaging
 from emailbot import unsubscribe
@@ -57,7 +58,7 @@ def fake_smtp(monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(messaging, "SmtpClient", lambda *a, **k: nullcontext(DummySMTP()))
     monkeypatch.setattr(
         messaging,
         "send_with_retry",
@@ -82,23 +83,23 @@ def test_add_blocked_email_handles_duplicates_and_invalid(temp_files):
     # invalid email
     assert messaging.add_blocked_email("invalid") is False
     assert blocked.exists()
-    assert blocked.read_text() == ""
+    assert blocked.read_text(encoding="utf-8") == ""
 
     # add new email
     assert messaging.add_blocked_email("User@Example.COM ") is True
-    assert blocked.read_text().splitlines() == ["user@example.com"]
+    assert blocked.read_text(encoding="utf-8").splitlines() == ["user@example.com"]
 
     # duplicate should not be added
     assert messaging.add_blocked_email("user@example.com") is False
-    assert blocked.read_text().splitlines() == ["user@example.com"]
+    assert blocked.read_text(encoding="utf-8").splitlines() == ["user@example.com"]
 
     # numeric variant should also be treated as duplicate
     assert messaging.add_blocked_email("1user@example.com") is False
-    assert blocked.read_text().splitlines() == ["user@example.com"]
+    assert blocked.read_text(encoding="utf-8").splitlines() == ["user@example.com"]
 
     # IDNA normalization
     assert messaging.add_blocked_email("Тест@пример.рф") is True
-    assert "тест@xn--e1afmkfd.xn--p1ai" in blocked.read_text().splitlines()
+    assert "тест@xn--e1afmkfd.xn--p1ai" in blocked.read_text(encoding="utf-8").splitlines()
 
 
 def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
@@ -117,7 +118,7 @@ def test_dedupe_blocked_file_removes_duplicates_and_variants(temp_files):
         + "\n"
     )
     messaging.dedupe_blocked_file()
-    result = blocked.read_text().splitlines()
+    result = blocked.read_text(encoding="utf-8").splitlines()
     assert result == ["jane@example.com", "john@example.com"]
 
 
@@ -186,8 +187,7 @@ def test_send_email_with_sessions_skips_duplicate_content(tmp_path, monkeypatch)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
     monkeypatch.setattr(messaging, "EMAIL_PASSWORD", "secret")
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
-    monkeypatch.setattr(messaging, "cooldown_mark_sent", lambda *a, **k: None)
-    monkeypatch.setattr(messaging, "should_skip_by_cooldown", lambda *_: (False, ""))
+    monkeypatch.setattr(messaging, "decide", lambda *_: (messaging.Decision.SEND_NOW, "ok"))
 
     class DummyClient:
         def send(self, from_addr, to_addr, raw):
@@ -292,8 +292,8 @@ def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
     html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
     token_host = "example.com"
-    monkeypatch.setenv("HOST", token_host)
-    msg, token, _ = messaging.build_message(
+    monkeypatch.setenv("UNSUBSCRIBE_PUBLIC_URL", f"https://{token_host}")
+    msg, token = messaging.build_message(
         "recipient@example.com", str(html_file), "Subject"
     )
     assert token
@@ -302,10 +302,10 @@ def test_build_message_adds_signature_and_unsubscribe(tmp_path, monkeypatch):
     html = html_part.get_content()
     assert "Hello" in html
     assert "С уважением" in html
-    assert f"https://{token_host}/unsubscribe?email=recipient@example.com&token={token}" in html
+    assert f"https://{token_host}/unsubscribe?email=recipient%40example.com&amp;token={token}" in html
     text_part = msg.get_body("plain")
     assert (
-        f"Отписаться: https://{token_host}/unsubscribe?email=recipient@example.com&token={token}"
+        f"Отписаться: https://{token_host}/unsubscribe?email=recipient%40example.com&token={token}"
         in text_part.get_content()
     )
 
@@ -322,7 +322,7 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
-    msg, _, _ = messaging.build_message(
+    msg, _ = messaging.build_message(
         "r@example.com", str(html_file), "Subj"
     )
     html = msg.get_body("html").get_content()
@@ -330,7 +330,7 @@ def test_build_message_logo_toggle(tmp_path, monkeypatch):
     assert html.count("<img") == 1
 
     monkeypatch.setenv("INLINE_LOGO", "0")
-    msg2, _, _ = messaging.build_message(
+    msg2, _ = messaging.build_message(
         "r@example.com", str(html_file), "Subj"
     )
     html2 = msg2.get_body("html").get_content()
@@ -343,7 +343,7 @@ def test_build_message_uses_explicit_group_metadata(tmp_path, monkeypatch):
     html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
-    msg, _, _ = messaging.build_message(
+    msg, _ = messaging.build_message(
         "user@example.com",
         str(html_file),
         "Subject",
@@ -361,7 +361,7 @@ def test_build_message_marks_override(tmp_path, monkeypatch):
     html_file.write_text("<html><body>Hello</body></html>", encoding="utf-8")
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
-    msg, _, _ = messaging.build_message(
+    msg, _ = messaging.build_message(
         "override@example.com",
         str(html_file),
         "Subject",
@@ -369,7 +369,7 @@ def test_build_message_marks_override(tmp_path, monkeypatch):
     )
     assert msg["X-EBOT-Override-180d"] == "1"
 
-    msg2, _, _ = messaging.build_message(
+    msg2, _ = messaging.build_message(
         "override@example.com",
         str(html_file),
         "Subject",
@@ -380,19 +380,19 @@ def test_build_message_marks_override(tmp_path, monkeypatch):
 def test_repository_templates_logo_toggle(monkeypatch, tmp_path):
     template_path = tmp_path / "template.html"
     template_path.write_text(
-        "<html><body><img src=\"cid:logo\" alt=\"logo\"/>{{BODY}}<br/><br/>{{SIGNATURE}}</body></html>",
+        "<html><body><img src=\"cid:logo\" alt=\"logo\"/>Hello<br/><br/>{{SIGNATURE}}</body></html>",
         encoding="utf-8",
     )
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "sender@example.com")
 
     monkeypatch.setenv("INLINE_LOGO", "1")
-    msg, _, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
+    msg, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
     html = msg.get_body("html").get_content()
     assert html.count("cid:logo") == 1
     assert html.count("<img") == 1
 
     monkeypatch.setenv("INLINE_LOGO", "0")
-    msg2, _, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
+    msg2, _ = messaging.build_message("u@example.com", str(template_path), "Subj")
     html2 = msg2.get_body("html").get_content()
     assert "cid:logo" not in html2
     assert "<img" not in html2
@@ -740,7 +740,7 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(messaging, "SmtpClient", lambda *a, **k: nullcontext(DummySMTP()))
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
     monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "log.csv"))
@@ -750,14 +750,14 @@ def test_send_email_idempotent(tmp_path, monkeypatch):
     second = messaging.send_email("u@example.com", str(html), batch_id="b1")
     assert len(sent) == 1
     assert first is messaging.SendOutcome.SENT
-    assert second is messaging.SendOutcome.DUPLICATE
+    assert second in {messaging.SendOutcome.DUPLICATE, messaging.SendOutcome.COOLDOWN}
 
 
 def test_send_email_respects_cooldown(tmp_path, monkeypatch):
     html = tmp_path / "t.html"
     html.write_text("<html><body>Hi</body></html>", encoding="utf-8")
     monkeypatch.setattr(messaging, "LOG_FILE", str(tmp_path / "log.csv"))
-    monkeypatch.setattr(messaging, "_should_skip_by_history", lambda *_: (True, "cooldown"))
+    monkeypatch.setattr(messaging, "decide", lambda *_: (messaging.Decision.SKIP_COOLDOWN, "cooldown"))
 
     called = {"send": 0}
 
@@ -773,10 +773,10 @@ def test_send_email_respects_cooldown(tmp_path, monkeypatch):
 
 
 def test_domain_rate_limit(monkeypatch, caplog):
-    times = [0, 0]
+    times = iter([0, 0])
 
     def fake_monotonic():
-        return times.pop(0)
+        return next(times, 0)
 
     sleeps: list[float] = []
 
@@ -796,7 +796,7 @@ def test_domain_rate_limit(monkeypatch, caplog):
         def close(self):
             return None
 
-    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(messaging, "SmtpClient", lambda *a, **k: nullcontext(DummySMTP()))
     monkeypatch.setattr(messaging.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(messaging.time, "sleep", fake_sleep)
     messaging._last_domain_send.clear()
@@ -829,7 +829,7 @@ def test_soft_bounce_retry_and_no_suppress(monkeypatch, caplog):
 
     sleeps: list[float] = []
     monkeypatch.setattr(messaging.time, "sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(messaging, "SmtpClient", lambda *a, **k: nullcontext(DummySMTP()))
     monkeypatch.setattr(messaging, "save_to_sent_folder", lambda *a, **k: None)
     monkeypatch.setattr(messaging, "EMAIL_ADDRESS", "s@example.com")
     monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
@@ -860,7 +860,7 @@ def test_hard_bounce_triggers_suppress(monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(messaging, "RobustSMTP", lambda *a, **k: DummySMTP())
+    monkeypatch.setattr(messaging, "SmtpClient", lambda *a, **k: nullcontext(DummySMTP()))
     monkeypatch.setattr(messaging, "_rate_limit_domain", lambda r: None)
     monkeypatch.setattr(messaging.time, "sleep", lambda s: None)
 

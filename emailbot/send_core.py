@@ -14,6 +14,7 @@ from .cancel import is_cancelled
 from .cooldown import _merged_history_map, is_under_cooldown
 from .messaging import SendOutcome, log_sent_email, was_emailed_recently
 from .smtp_client import SmtpClient
+from .async_transport import with_mail_worker
 from .messaging_utils import append_to_sent
 from .services import APPEND_TO_SENT, SENT_MAILBOX, mark_sent
 
@@ -51,6 +52,7 @@ def build_send_list(
     return result
 
 
+@with_mail_worker
 async def run_smtp_send(
     client: SmtpClient,
     to_send: List[str],
@@ -77,6 +79,7 @@ async def run_smtp_send(
     batch_id: str | None = None,
     override_180d: bool = False,
     on_heartbeat: Optional[Callable[[], Awaitable[None]]] = None,
+    _mail_worker=None,
 ) -> tuple[int, bool]:
     """Send e-mails sequentially and dispatch callbacks for outcomes."""
 
@@ -93,6 +96,9 @@ async def run_smtp_send(
     cooldown_days = getattr(settings, "SEND_COOLDOWN_DAYS", 180)
     cooldown_cache: dict[str, datetime] | None = None
     while to_send:
+        if _mail_worker.cancel_requested:
+            aborted = True
+            break
         if should_stop_cb and should_stop_cb():
             aborted = True
             break
@@ -130,7 +136,8 @@ async def run_smtp_send(
                 continue
         raw_payload = None
         try:
-            send_result = messaging.send_email_with_sessions(
+            send_result = await _mail_worker.run(
+                messaging.send_email_with_sessions,
                 client,
                 imap,
                 sent_folder,
@@ -209,7 +216,7 @@ async def run_smtp_send(
                         msg_bytes = raw_payload
                     else:
                         msg_bytes = str(raw_payload).encode("utf-8")
-                    status, _ = append_to_sent(imap, mailbox, msg_bytes)
+                    status, _ = await _mail_worker.run(append_to_sent, imap, mailbox, msg_bytes)
                     if status != "OK":
                         logger.warning(
                             "append_to_sent returned %s for %s", status, email_addr

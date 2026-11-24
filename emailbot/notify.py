@@ -46,15 +46,15 @@ async def _safe_reply_text(message, text: str, **kwargs):
     if not text:
         return
     if len(text) <= MAX_TG:
-        await message.reply_text(text, **kwargs)
-        return
+        return await message.reply_text(text, **kwargs)
     chunks = _split_for_telegram(text)
     if not chunks:
         return
     first, *rest = chunks
-    await message.reply_text(first, **kwargs)
+    sent = await message.reply_text(first, **kwargs)
     for part in rest:
         await message.reply_text(part)
+    return sent
 
 # Политика уведомлений:
 #   full  — как раньше (все сообщения)
@@ -89,10 +89,10 @@ async def notify(
     event: Event = "analysis",
     force: bool = False,
     **kwargs: Any,
-) -> None:
+) -> Any:
     """Send Telegram messages respecting notification level policy."""
     if not text:
         return
     if not force and not _allowed(event):
         return
-    await _safe_reply_text(message, text, **kwargs)
+    return await _safe_reply_text(message, text, **kwargs)

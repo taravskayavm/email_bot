@@ -67,7 +67,8 @@ def test_numeric_local_dropped():
     finally:
         server.shutdown()
     emails = [h.email for h in hits]
-    assert "2@mail.ru" in emails
+    assert "2@mail.ru" not in emails
+    assert stats.get("dropped_numeric_local_1_2", 0) >= 1
     assert stats["obfuscated_hits"] == 0
     assert stats.get("numeric_from_obfuscation_dropped", 0) >= 1
 

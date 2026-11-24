@@ -261,7 +261,7 @@ def extract_emails_pipeline(
         meta_in["role_rejected"] = role_rejected_early
     except Exception:
         pass
-    fio_pairs = fio_candidates(source_text)
+    fio_pairs = fio_candidates(text)
 
     def _merge_reason(reason: str | None, extra: str) -> str:
         parts = [

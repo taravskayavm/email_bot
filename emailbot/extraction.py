@@ -35,7 +35,7 @@ from typing import (
 )
 
 from . import settings
-from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons
+from .dedupe import merge_footnote_prefix_variants, repair_footnote_singletons, remove_pdf_left_glue_duplicates
 from .extraction_common import (
     normalize_email,
     normalize_text,
@@ -310,7 +310,7 @@ def strip_html(html: str) -> str:
     s = _BR_RE.sub("\n", s)
     s = _LI_RE.sub("\n- ", s)
     s = _P_BLOCK_RE.sub("\n", s)
-    s = _TAG_RE.sub(" ", s)  # снять остальные теги
+    s = _TAG_RE.sub("", s)  # inline tags do not introduce whitespace inside an address
     s = unescape(s)
     s = s.replace("\r", "")
     # NBSP (после unescape) -> пробел
@@ -539,17 +539,38 @@ def _multi_prefix_mode(text: str) -> bool:
 def _normalize_email_fragments(text: str) -> str:
     if not text:
         return ""
-    cleaned = _FOOTNOTE_TAG_RE.sub("", text)
+    cleaned = re.sub(r"\.\[\d+\](?=@)", "", text)
+    cleaned = _FOOTNOTE_TAG_RE.sub("", cleaned)
     cleaned = _HYPHEN_BREAK_RE.sub("", cleaned)
     cleaned = _BREAK_AFTER_AT_RE.sub("@", cleaned)
-    cleaned = _BREAK_AFTER_DOT_RE.sub(".", cleaned)
-    cleaned = cleaned.replace(".@", "@")
+    def join_domain(match):
+        domain = match.group(1)
+        if domain.rstrip(".").rsplit(".", 1)[-1].lower() in _COMMON_TLDS:
+            return match.group(0)
+        return domain + match.group(2)
+    cleaned = re.sub(r"(@[A-Za-z0-9.-]+\.)\s*\n\s*([A-Za-z]{2,24})(?![\w@])", join_domain, cleaned)
     return cleaned
 
 
 def smart_extract_emails(text: str, stats: Dict[str, int] | None = None) -> List[str]:
-    normalized = _normalize_email_fragments(text)
-    hits = EMAIL_RE.findall(normalized) if normalized else []
+    from utils.email_clean import strip_invisibles, normalize_confusables
+    from utils.email_deobfuscate import deobfuscate_text
+
+    normalized = _normalize_email_fragments(strip_invisibles(text))
+    normalized = re.sub(r"(?<=[A-Za-z])\n(?=\.)", "", normalized)
+    normalized = re.sub(r"\b([a-z]{2,3})\n(?=[a-z][a-z0-9._+-]*@)", r"\1", normalized)
+    normalized = deobfuscate_text(normalized)
+    pattern = re.compile(r"[A-Za-z0-9\u0400-\u04ff.!#$%&'*+/=?^_`{|}~-]+@(?:[^\W_]|[-.])+", re.UNICODE)
+    hits = []
+    for match in pattern.finditer(normalized):
+        token = match.group(0).rstrip(".")
+        local, domain = token.split("@", 1)
+        local = re.sub(r"^[\u0400-\u04ff]{2,}", "", local)
+        local, domain, _ = normalize_confusables(local, domain)
+        local, _ = strip_phone_prefix(local, stats)
+        domain = _trim_appended_word(domain)
+        if _valid_local(local) and local.isascii() and _valid_domain(domain):
+            hits.append(f"{local.lower()}@{domain.lower()}")
     deduped = list(dict.fromkeys(hits))
     if stats is not None:
         stats["total_found"] = stats.get("total_found", 0) + len(deduped)
@@ -687,6 +708,7 @@ def _postprocess_hits(hits: list[EmailHit], stats: Dict[str, int]) -> list[Email
         key = mapping.get(origin)
         if key:
             stats[key] = stats.get(key, 0) + count
+    hits = remove_pdf_left_glue_duplicates(hits, stats)
     hits = merge_footnote_prefix_variants(hits, stats)
     fixed_hits, fstats = repair_footnote_singletons(hits, settings.PDF_LAYOUT_AWARE)
     for k, v in fstats.items():
@@ -1442,11 +1464,11 @@ def extract_any_stream(
         return extract_from_html_stream(data, source_ref, stop_event)
 
     text = data.decode("utf-8", "ignore")
+    stats: Dict[str, int] = {}
     hits = [
         EmailHit(email=e, source_ref=source_ref, origin="direct_at")
         for e in extract_emails_document(text, stats)
     ]
-    stats: Dict[str, int] = {}
     hits = _postprocess_hits(hits, stats)
     return hits, stats
 

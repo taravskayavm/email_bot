@@ -6,7 +6,10 @@ import logging
 import os
 import statistics
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .extraction import EmailHit
 
 try:  # pragma: no cover - ``regex`` may be unavailable in runtime
     import regex as re  # type: ignore
@@ -111,7 +114,7 @@ _PDF_GLUE_AFTER_EMAIL_RE = re.compile(
     rf"(?P<tail>(?i:https?://|www\.)|[A-Z\u0410-\u042F\u0401][A-Za-z\u0400-\u04FF])",
 )
 _PDF_EMAIL_AT_LINE_START_RE = re.compile(
-    rf"(?m)(?P<prefix>^[^\r\n]*(?:[ \t]|[:;])[^\r\n]*)"
+    rf"(?m)(?P<prefix>^(?:[^\r\n]*(?:[ \t]|[:;])[^\r\n]*|[ \t]*\d+|Russia))"
     rf"\r?\n[ \t]*(?P<email>{BASIC_EMAIL})"
 )
 

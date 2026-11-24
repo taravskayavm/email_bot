@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 import types
 
@@ -15,7 +16,7 @@ def _event(ts: str, email: str, group: str, status: str = "success") -> dict[str
     return {"ts": ts, "email": email, "group": group, "status": status}
 
 
-def test_month_report_uses_working_hours_aliases_and_deduplicates(monkeypatch):
+def test_month_report_counts_all_hours_uses_aliases_and_deduplicates(monkeypatch):
     events = [
         _event("2026-07-06T07:59:59+03:00", "early@example.com", "highmedicine"),
         _event("2026-07-06T08:00:00+03:00", "one@example.com", "highmedicine"),
@@ -43,34 +44,155 @@ def test_month_report_uses_working_hours_aliases_and_deduplicates(monkeypatch):
     assert stats.date_start.isoformat() == "2026-07-01"
     assert stats.date_end.isoformat() == "2026-07-31"
     assert [(item.code, item.success) for item in stats.directions] == [
+        ("highmedicine", 4),
         ("geography", 2),
-        ("highmedicine", 2),
-        ("psychology", 1),
-        ("sport", 1),
+        ("psychology", 2),
+        ("sport", 2),
     ]
-    assert stats.total_success == 6
+    assert stats.total_success == 10
     assert stats.total_failed == 0
 
 
-def test_week_report_is_current_monday_through_saturday(monkeypatch):
+@pytest.mark.parametrize("period", ["day", "week", "month", "year"])
+def test_reports_include_friday_evening_sends_and_returns(monkeypatch, period):
     events = [
+        {**_event("2026-11-20T17:29:59+03:00", "medical@example.com", "highmedicine"), "message_id": "medical"},
+        {**_event("2026-11-20T17:31:55+03:00", "good@example.com", "psychology"), "message_id": "good"},
+        {**_event("2026-11-20T17:32:00+03:00", "bad@example.com", "psychology"), "message_id": "bad"},
+        {**_event("2026-11-20T17:31:55Z", "future@example.com", "psychology"), "message_id": "future"},
+        {"ts": "2026-11-20T14:40:00Z", "email": "bad@example.com", "status": "bounce",
+         "message_id": "bad", "original_sent_at": "2026-11-20T14:32:00Z"},
+    ]
+    # The JSONL and SQLite copies of a late send must still count only once.
+    events.append(dict(events[1], ts="2026-11-20T14:31:56Z"))
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_: iter(events))
+
+    stats = reporting.summarize_period_stats(
+        period, now=datetime(2026, 11, 20, 17, 42, tzinfo=MOSCOW_TZ)
+    )
+
+    assert {row.code: (row.success, row.failed) for row in stats.directions} == {
+        "highmedicine": (1, 0), "psychology": (1, 1),
+    }
+    assert stats.total_success == 2
+    assert stats.total_failed == 1
+
+
+def test_day_report_includes_full_local_day_on_sunday(monkeypatch):
+    events = [
+        _event("2026-11-21T20:59:59Z", "previous@example.com", "sport"),
+        _event("2026-11-21T21:00:00Z", "midnight@example.com", "sport"),
+        _event("2026-11-22T04:59:59Z", "early@example.com", "sport"),
+        _event("2026-11-22T20:59:59Z", "late@example.com", "sport"),
+        _event("2026-11-22T21:00:00Z", "next@example.com", "sport"),
+    ]
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_: iter(events))
+
+    stats = reporting.summarize_period_stats(
+        "day", now=datetime(2026, 11, 22, 23, 59, 59, tzinfo=MOSCOW_TZ)
+    )
+
+    assert stats.total_success == 3
+
+
+def test_report_years_include_sends_outside_mailing_schedule(monkeypatch):
+    events = [_event("2025-12-28T23:00:00+03:00", "late@example.com", "sport")]
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_: iter(events))
+
+    assert reporting.available_report_years(
+        datetime(2026, 11, 20, 17, 42, tzinfo=MOSCOW_TZ)
+    ) == [2025, 2026]
+
+
+@pytest.mark.parametrize("period", ["day", "week", "month", "year"])
+def test_late_return_corrects_directional_report_and_preserves_retry(monkeypatch, period):
+    events = [
+        {**_event("2026-11-06T11:10:00+03:00", "bad@example.com", "sport"), "message_id": "first"},
+        {**_event("2026-11-06T11:10:01+03:00", "bad@example.com", "sport"), "message_id": "first"},
+        {**_event("2026-11-06T11:10:02+03:00", "bad@example.com", "sport"), "message_id": "retry"},
+        _event("2026-11-06T11:11:00+03:00", "good@example.com", "highmedicine"),
+        {"email": "bad@example.com", "status": "bounce", "message_id": "first",
+         "ts": "2026-11-09T08:00:00Z", "original_sent_at": "2026-11-06T08:10:00Z"},
+    ]
+    events.append(dict(events[-1], bounce_id="second-notification"))
+    monkeypatch.setattr(reporting, "_report_source_events", lambda *_: iter(events))
+    # Use the original Friday for day/week bounds, with the late DSN already known.
+    now = datetime(2026, 11, 6, 15, tzinfo=MOSCOW_TZ) if period in {"day", "week"} else datetime(2026, 11, 9, 12, tzinfo=MOSCOW_TZ)
+    if period in {"day", "week"}:
+        events[-1]["ts"] = events[-2]["ts"] = "2026-11-06T12:00:00Z"
+    stats = reporting.summarize_period_stats(period, now=now)
+    assert stats.total_success == 2
+    assert stats.total_failed == 1
+    assert {r.code: (r.success, r.failed) for r in stats.directions} == {"sport": (1, 1), "highmedicine": (1, 0)}
+    assert "Недоставлено (возвраты): 1" in format_send_stats_by_direction(stats)
+
+
+def test_week_report_includes_monday_through_full_sunday(monkeypatch):
+    events = [
+        _event("2026-08-02T23:59:59+03:00", "previous@example.com", "sport"),
         _event("2026-08-03T08:00:00+03:00", "monday@example.com", "sport"),
-        _event("2026-08-07T17:29:59+03:00", "friday@example.com", "sport"),
-        _event("2026-08-08T17:29:59+03:00", "saturday@example.com", "sport"),
-        _event("2026-08-09T10:00:00+03:00", "sunday@example.com", "sport"),
+        _event("2026-08-07T23:59:59+03:00", "friday@example.com", "sport"),
+        _event("2026-08-08T23:59:59+03:00", "saturday@example.com", "sport"),
+        _event("2026-08-09T23:59:59+03:00", "sunday@example.com", "sport"),
+        _event("2026-08-10T00:00:00+03:00", "next@example.com", "sport"),
     ]
     monkeypatch.setattr(reporting, "_report_source_events", lambda *_args: iter(events))
 
     stats = reporting.summarize_period_stats(
-        "week", now=datetime(2026, 8, 9, 18, 0, tzinfo=MOSCOW_TZ)
+        "week", now=datetime(2026, 8, 9, 23, 59, 59, tzinfo=MOSCOW_TZ)
     )
 
     assert stats.date_start.isoformat() == "2026-08-03"
-    assert stats.date_end.isoformat() == "2026-08-08"
-    assert stats.total_success == 3
+    assert stats.date_end.isoformat() == "2026-08-09"
+    assert stats.total_success == 4
 
 
-def test_year_report_includes_saturday_values(monkeypatch):
+@pytest.mark.parametrize(
+    ("now_iso", "expected_start", "expected_count"),
+    [
+        ("2026-11-20T17:42:00+03:00", "2026-11-16", 1),
+        ("2026-11-21T23:59:59+03:00", "2026-11-16", 2),
+        ("2026-11-21T21:00:00Z", "2026-11-16", 3),
+        ("2026-11-22T12:00:00+03:00", "2026-11-16", 3),
+        ("2026-11-23T00:00:00+03:00", "2026-11-23", 1),
+    ],
+)
+def test_weekly_summaries_follow_monday_sunday_calendar(
+    monkeypatch, tmp_path, now_iso, expected_start, expected_count
+):
+    from utils import send_stats
+
+    now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    timestamps = [
+        "2026-11-14T23:59:59+03:00",
+        "2026-11-15T00:00:00+03:00",
+        "2026-11-20T17:30:00+03:00",
+        "2026-11-21T23:59:59+03:00",
+        "2026-11-22T00:00:00+03:00",
+        "2026-11-23T00:00:00+03:00",
+    ]
+    # Simulate the real log as it existed when each report was requested.
+    events = [
+        _event(ts, f"recipient-{i}@example.com", "sport")
+        for i, ts in enumerate(timestamps) if datetime.fromisoformat(ts) <= now
+    ]
+    path = tmp_path / "weekly_stats.jsonl"
+    path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SEND_STATS_PATH", str(path))
+    monkeypatch.setattr(send_stats, "_now_utc", lambda: now)
+
+    stats = reporting.summarize_period_stats("week", now=now)
+
+    assert stats.date_start.isoformat() == expected_start
+    assert stats.date_end == now.astimezone(MOSCOW_TZ).date()
+    assert stats.total_success == expected_count
+    assert stats.total_failed == 0
+    assert send_stats.summarize_week() == {
+        "ok": expected_count, "err": 0, "success": expected_count, "error": 0,
+    }
+
+
+def test_year_report_includes_weekend_values(monkeypatch):
     events = [
         _event("2026-08-08T10:00:00+03:00", "saturday@example.com", "sport"),
         _event("2026-08-09T10:00:00+03:00", "sunday@example.com", "sport"),
@@ -82,7 +204,7 @@ def test_year_report_includes_saturday_values(monkeypatch):
     )
 
     assert stats.date_end.isoformat() == "2026-08-10"
-    assert stats.total_success == 1
+    assert stats.total_success == 2
 
 
 @pytest.mark.parametrize(
@@ -137,7 +259,7 @@ def test_report_message_matches_agreed_layout():
     )
 
     assert format_send_stats_by_direction(stats) == (
-        "📊 Отчёт по отправленным письмам за неделю "
+        "📊 Отчёт по отправленным письмам за неделю №32 (2026)\n"
         "03.08.2026–07.08.2026\n\n"
         "Медицина ВО — 1 840\n"
         "Психология — 206\n\n"

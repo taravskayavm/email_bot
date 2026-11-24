@@ -8,7 +8,7 @@ import os
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Set
 
@@ -21,6 +21,7 @@ from emailbot.handlers.common import safe_answer
 from emailbot.notify import notify
 
 from bot.keyboards import build_templates_kb, send_flow_keyboard
+from services.templates import get_template_label
 
 from emailbot import config as C
 from emailbot import blocked_domains, mass_state, messaging
@@ -56,6 +57,8 @@ from emailbot.utils import log_error
 from emailbot.smtp_client import RobustSMTP
 from emailbot.cooldown import build_cooldown_service
 from emailbot.progress_watchdog import heartbeat_now
+from emailbot.delivery_monitor import check_batch_delivery, start_delivery_watch
+from emailbot.delivery_status import timestamp as delivery_timestamp
 
 from .preview import (
     go_back as preview_go_back,
@@ -460,11 +463,15 @@ async def send_all(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     **callbacks: Callable[[str], None],
-) -> None:
+) -> asyncio.Task | None:
     """Send all prepared e-mails respecting limits."""
 
     query = update.callback_query
     chat_id = query.message.chat.id
+    active_task = context.chat_data.get("mass_send_task")
+    if active_task is not None and not active_task.done():
+        await safe_answer(query, text="Рассылка уже выполняется", show_alert=True)
+        return active_task
     bot_handlers = _bot_handlers()
     # The main-menu toggle is shared by preview, manual send and bulk send.
     # Capture it once for this run so every validation stage uses the same
@@ -512,6 +519,7 @@ async def send_all(
     chat_lock = _get_chat_lock(context, chat_id)
 
     async def long_job() -> None:
+        started_at = datetime.now(timezone.utc)
         audit_start = _bulk_audit_api()
         audit_writer = None
         audit_path: Path | None = None
@@ -669,6 +677,7 @@ async def send_all(
             saved_state = mass_state.load_chat_state(chat_id)
             state_obj = None
             if saved_state and saved_state.get("pending"):
+                started_at = delivery_timestamp(saved_state.get("started_at")) or started_at
                 blocked_foreign = list(saved_state.get("blocked_foreign", []))
                 blocked_invalid = list(saved_state.get("blocked_invalid", []))
                 blocked_role = list(saved_state.get("blocked_role", []))
@@ -735,10 +744,6 @@ async def send_all(
                     pool = mapping.get(norm)
                     if pool:
                         ordered.append(pool.pop(0))
-                    else:
-                        original = frozen_originals.get(norm)
-                        if original:
-                            ordered.append(original)
                 return ordered
 
             ordered_candidates = []
@@ -894,6 +899,16 @@ async def send_all(
 
             available = max(0, MAX_EMAILS_PER_DAY - len(sent_today_norm))
             if available <= 0 and not bot_handlers.is_force_send(chat_id):
+                mass_state.save_chat_state(chat_id, {
+                    "group": group_code, "template": template_path,
+                    "template_label": template_label, "pending": list(to_send),
+                    "planned_emails": planned_emails, "sent_ok": sent_ok,
+                    "started_at": started_at.isoformat(),
+                    "blocked_foreign": blocked_foreign, "blocked_invalid": blocked_invalid,
+                    "blocked_role": blocked_role, "undeliverable": undeliverable,
+                    "skipped_recent": skipped_recent, "skipped_duplicates": skipped_duplicates,
+                    "source_map": filtered_sources,
+                })
                 logger.info(
                     "Daily limit reached: %s emails sent today (source=sent_log)",
                     len(sent_today_norm),
@@ -907,6 +922,7 @@ async def send_all(
                 )
                 return
             if not bot_handlers.is_force_send(chat_id) and len(to_send) > available:
+                overflow = to_send[available:]
                 to_send = to_send[:available]
                 await query.message.reply_text(
                     (
@@ -915,15 +931,19 @@ async def send_all(
                     )
                 )
 
+            else:
+                overflow = []
+
             mass_state.save_chat_state(
                 chat_id,
                 {
                     "group": group_code,
                     "template": template_path,
                     "template_label": template_label,
-                    "pending": to_send,
+                    "pending": [*to_send, *overflow],
                     "planned_emails": planned_emails,
                     "sent_ok": sent_ok,
+                    "started_at": started_at.isoformat(),
                     "blocked_foreign": blocked_foreign,
                     "blocked_invalid": blocked_invalid,
                     "blocked_role": blocked_role,
@@ -938,17 +958,28 @@ async def send_all(
                 f"✉️ Рассылка начата. Отправляем {len(to_send)} писем..."
             )
 
-        try:
+        from emailbot.sent_copy import SentCopySession
+        from emailbot.async_transport import MailWorker
+
+        worker = MailWorker()
+
+        def connect_imap():
             host = os.getenv("IMAP_HOST", "imap.mail.ru")
             port = int(os.getenv("IMAP_PORT", "993"))
-            imap = imaplib.IMAP4_SSL(host, port)
-            imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
-            sent_folder = get_preferred_sent_folder(imap)
-            imap.select(f'"{sent_folder}"')
-        except Exception as e:
-            log_error(f"imap connect: {e}")
-            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
-            return
+            connection = imaplib.IMAP4_SSL(host, port, timeout=30)
+            try:
+                connection.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
+            except Exception:
+                try:
+                    connection.shutdown()
+                except Exception:
+                    pass
+                raise
+            return connection
+
+        # IMAP failure must not prevent SMTP delivery. Copies reconnect lazily.
+        imap = SentCopySession(None, connect_imap, get_preferred_sent_folder)
+        sent_folder = None
 
         error_details: list[str] = []
         error_addresses: list[str] = []
@@ -958,7 +989,7 @@ async def send_all(
         processed = 0
         try:
             while to_send:
-                if should_stop():
+                if should_stop() or worker.cancel_requested:
                     aborted = True
                     break
                 if cancel_event and cancel_event.is_set():
@@ -972,7 +1003,8 @@ async def send_all(
                 processed += 1
                 email_addr = to_send.pop(0)
                 try:
-                    outcome, token, log_key, content_hash = send_email_with_sessions(
+                    outcome, token, log_key, content_hash = await worker.run(
+                        send_email_with_sessions,
                         smtp,
                         imap,
                         sent_folder,
@@ -998,7 +1030,6 @@ async def send_all(
                         )
                         sent_ok.append(email_addr)
                         audit_sent(email_addr)
-                        await asyncio.sleep(1.5)
                     elif outcome == SendOutcome.DUPLICATE:
                         if email_addr not in skipped_duplicates:
                             skipped_duplicates.append(email_addr)
@@ -1086,9 +1117,10 @@ async def send_all(
                         "group": group_code,
                         "template": template_path,
                         "template_label": template_label,
-                        "pending": to_send,
+                        "pending": [*to_send, *overflow],
                         "planned_emails": planned_emails,
                         "sent_ok": sent_ok,
+                        "started_at": started_at.isoformat(),
                         "blocked_foreign": blocked_foreign,
                         "blocked_invalid": blocked_invalid,
                         "blocked_role": blocked_role,
@@ -1098,11 +1130,30 @@ async def send_all(
                         "source_map": filtered_sources,
                     },
                 )
+                await asyncio.sleep(1.5)
+        except asyncio.CancelledError:
+            aborted = True
         finally:
-            smtp.close()
-        imap.logout()
-        if not to_send:
+            try:
+                await worker.run(smtp.close)
+            finally:
+                try:
+                    await worker.run(imap.logout)
+                finally:
+                    worker.close()
+        if not to_send and not overflow:
             mass_state.clear_chat_state(chat_id)
+
+        delivery_recipients = [a for a in sent_ok if messaging._normalize_key(a) in planned_norms]
+        delivery_rows, delivery_warning = ({}, "")
+        if delivery_recipients:
+            delivery_rows, delivery_warning = await check_batch_delivery(delivery_recipients, started_at)
+            for address, row in delivery_rows.items():
+                if address not in undeliverable:
+                    undeliverable.append(address)
+                audit_error(address, "delivery_bounce", row)
+                error_details.append(f"{address}: {row.get('reason', '')}")
+            sent_ok = [a for a in sent_ok if a.strip().lower() not in delivery_rows]
 
         accounted_norms: Set[str] = set()
 
@@ -1141,11 +1192,22 @@ async def send_all(
             aborted=aborted,
             role_like=total_role,
         )
+        copy_warning = imap.failure_report()
+        if delivery_warning:
+            report_text += "\n\n" + delivery_warning
+        elif delivery_recipients:
+            report_text += "\n\nПоздние возвраты проверяются в фоне и учитываются в отчёте за день."
+        if copy_warning:
+            report_text += "\n\n" + copy_warning
         if audit_path and audit_writer and getattr(audit_writer, "enabled", False):
             report_text = f"{report_text}\n\n📄 Аудит: {audit_path}"
 
         # Безопасная отправка: notify сам разрежет текст на куски < 4096
-        await notify(query.message, report_text, event="finish")
+        summary_message = await notify(query.message, report_text, event="finish")
+        start_delivery_watch(getattr(context, "application", None), query.message,
+                             delivery_recipients, started_at, delivery_rows, audit_writer,
+                             summary_message=summary_message, summary_text=report_text,
+                             sent_count=total_sent, undeliverable_count=total_undeliverable)
         if error_details:
             error_report = format_error_details(error_details)
             if error_report:
@@ -1155,11 +1217,17 @@ async def send_all(
         bot_handlers.disable_force_send(chat_id)
 
     clear_stop()
-    messaging.create_task_with_logging(
+    # Recheck after preparation awaits: two simultaneous callbacks may both enter.
+    active_task = context.chat_data.get("mass_send_task")
+    if active_task is not None and not active_task.done():
+        return active_task
+    task = messaging.create_task_with_logging(
         long_job(),
         query.message.reply_text,
-        task_name="manual_mass_send",
+        task_name=f"manual_mass_send:{chat_id}:{context.chat_data.get('batch_id', 'current')}",
     )
+    context.chat_data["mass_send_task"] = task
+    return task
 
 
 async def handle_send_flow_actions(

@@ -14,7 +14,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -22,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -37,7 +38,9 @@ from emailbot.utils import load_env
 
 load_env(SCRIPT_DIR)  # Раннее чтение .env.
 
-from emailbot.telegram_network import configure_telegram_api_ip
+from emailbot.telegram_network import (
+    FailoverHTTPXRequest, configure_telegram_api_ip, parse_telegram_api_ips,
+)
 
 # Default watchdog stall timeout in milliseconds (configurable via env).
 # Увеличено по умолчанию до 5 минут, чтобы не прерывать долгие задачи
@@ -130,9 +133,21 @@ class JsonFormatter(logging.Formatter):
             "name": record.name,
             "message": record.getMessage(),
         }
-        for key in ("event", "email", "source", "code", "phase", "count"):
+        for key in (
+            "event",
+            "email",
+            "source",
+            "code",
+            "phase",
+            "count",
+            "chat_id",
+            "update_type",
+            "traceback",
+        ):
             if key in record.__dict__:
                 data[key] = record.__dict__[key]
+        if record.exc_info:
+            data["exception"] = self.formatException(record.exc_info)
         return json.dumps(data, ensure_ascii=False)
 
 
@@ -168,9 +183,39 @@ def configure_logging(log_file: Path, secrets: list[str]) -> None:
     )
     file_handler.setFormatter(formatter)
 
+    secret_filter = SecretFilter(secrets)
+    # Logger filters are not inherited by child loggers. Attach the filter to
+    # every handler so third-party records are redacted as well.
+    stream.addFilter(secret_filter)
+    file_handler.addFilter(secret_filter)
     root.addHandler(stream)
     root.addHandler(file_handler)
-    root.addFilter(SecretFilter(secrets))
+    root.addFilter(secret_filter)
+
+    # Successful httpx records include the complete Bot API URL.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _timeout_from_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Invalid %s=%r; using %.1f seconds", name, raw, default
+        )
+        return default
+
+
+async def _on_telegram_initialized(application) -> None:
+    """Report readiness only after PTB has authenticated with Telegram."""
+    logging.getLogger(__name__).info("Соединение с Telegram установлено")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,6 +223,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
     logger = logging.getLogger(__name__)
     err = context.error
+    if update is None and isinstance(err, NetworkError) and not isinstance(err, BadRequest):
+        # PTB's polling loop already retries these failures with backoff.
+        logger.warning("Telegram polling network error; polling will retry: %s", err)
+        return
     try:
         tb = ""
         if err is not None:
@@ -202,12 +251,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
                 "update_type": type(update).__name__ if update else None,
                 "traceback": tb,
             },
+            exc_info=(type(err), err, err.__traceback__) if err is not None else None,
         )
         if chat_id:
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="⚠️ Произошла ошибка. Попробуйте ещё раз.",
+                    text=(
+                        "⚠️ Временная ошибка связи с Telegram. Попробуйте ещё раз."
+                        if isinstance(err, NetworkError) and not isinstance(err, BadRequest)
+                        else "⚠️ Произошла ошибка. Попробуйте ещё раз."
+                    ),
                 )
             except TelegramError:
                 pass
@@ -222,12 +276,15 @@ def main() -> None:
     if errs:
         _die("Selfcheck failed:\n - " + "\n - ".join(errs))
 
-    telegram_api_ip = os.getenv("TELEGRAM_API_IP", "").strip()
+    telegram_api_ips = ()
+    telegram_api_ip = (os.getenv("TELEGRAM_API_IPS", "").strip()
+                       or os.getenv("TELEGRAM_API_IP", "").strip())
     if telegram_api_ip:
         try:
-            configured_ip = configure_telegram_api_ip(telegram_api_ip)
+            telegram_api_ips = parse_telegram_api_ips(telegram_api_ip)
+            configured_ip = configure_telegram_api_ip(telegram_api_ips[0])
         except ValueError:
-            _die("TELEGRAM_API_IP must contain one valid IP address.")
+            _die("TELEGRAM_API_IPS / TELEGRAM_API_IP must contain valid IP addresses.")
         logging.getLogger(__name__).info(
             "[BOOT] Telegram API DNS override enabled: api.telegram.org -> %s",
             configured_ip,
@@ -284,8 +341,26 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[BOOT] path diagnostics failed: %s", _e)
 
-    app = ApplicationBuilder().token(token).build()
+    connect_timeout = _timeout_from_env("TELEGRAM_CONNECT_TIMEOUT", 20.0)
+    read_timeout = _timeout_from_env("TELEGRAM_READ_TIMEOUT", 30.0)
+    write_timeout = _timeout_from_env("TELEGRAM_WRITE_TIMEOUT", 30.0)
+    pool_timeout = _timeout_from_env("TELEGRAM_POOL_TIMEOUT", 20.0)
+    request_options = dict(
+        connect_timeout=connect_timeout, read_timeout=read_timeout,
+        write_timeout=write_timeout, pool_timeout=pool_timeout,
+    )
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_on_telegram_initialized)
+        .request(FailoverHTTPXRequest(telegram_api_ips, connection_pool_size=256, **request_options))
+        .get_updates_request(FailoverHTTPXRequest(telegram_api_ips, connection_pool_size=1, **request_options))
+        .build()
+    )
     app.add_error_handler(error_handler)
+    from emailbot.access import AccessPolicy, ptb_access_guard
+
+    app.add_handler(TypeHandler(Update, ptb_access_guard(AccessPolicy.from_env())), group=-100)
 
     app.add_handler(CommandHandler("start", bot_handlers.start))
     app.add_handler(CommandHandler("retry_last", bot_handlers.retry_last_command))
@@ -540,17 +615,25 @@ def main() -> None:
         CallbackQueryHandler(bot_handlers.choose_imap_folder, pattern="^imap_choose:")
     )
 
-    print("Бот запущен.")
+    print("Подключаюсь к Telegram и запускаю бота…", flush=True)
     stop_event = threading.Event()
     t = threading.Thread(
         target=messaging.periodic_unsubscribe_check, args=(stop_event,), daemon=True
     )
     t.start()
+    from utils.bounce import periodic_bounce_check
+
+    bounce_thread = threading.Thread(
+        target=periodic_bounce_check, args=(stop_event,), daemon=True,
+        name="bounce-scanner",
+    )
+    bounce_thread.start()
     try:
         app.run_polling()
     finally:
         stop_event.set()
         t.join()
+        bounce_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

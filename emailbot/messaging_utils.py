@@ -290,19 +290,27 @@ class SecretFilter(logging.Filter):
     def __init__(self, secrets: List[str]):
         super().__init__()
         self._secrets = [s for s in secrets if s]
+        self._telegram_token_re = re.compile(
+            r"\d{6,12}:[A-Za-z0-9_-]{20,}"
+        )
 
     def _mask(self, value: str) -> str:
         for s in self._secrets:
             value = value.replace(s, "***")
-        return value
+        return self._telegram_token_re.sub("***", value)
+
+    def _mask_arg(self, value):
+        return self._mask(value) if isinstance(value, str) else value
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
         if isinstance(record.msg, str):
             record.msg = self._mask(record.msg)
         if isinstance(record.args, dict):
-            record.args = {k: self._mask(str(v)) for k, v in record.args.items()}
+            record.args = {k: self._mask_arg(v) for k, v in record.args.items()}
         elif isinstance(record.args, tuple):
-            record.args = tuple(self._mask(str(a)) for a in record.args)
+            record.args = tuple(self._mask_arg(a) for a in record.args)
+        if isinstance(record.exc_text, str):
+            record.exc_text = self._mask(record.exc_text)
         return True
 
 
@@ -651,6 +659,30 @@ def _atomic_write(
             pass
 
 
+def mark_unsubscribed_in_log(path: str | Path, email: str) -> bool:
+    """Update unsubscribe flags under the same lock used by send-log writers."""
+    p = Path(path)
+    ensure_parent(p)
+    with FileLock(p):
+        if not p.exists():
+            return False
+        headers = _ensure_sent_log_schema_locked(p)
+        with p.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        changed = False
+        for row in rows:
+            if canonical_for_history(row.get("email", "")) == canonical_for_history(email):
+                row["unsubscribed"] = "1"
+                row["unsubscribed_at"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+        if changed:
+            for name in ("unsubscribed", "unsubscribed_at"):
+                if name not in headers:
+                    headers.append(name)
+            _atomic_write(p, rows, headers)
+        return changed
+
+
 def load_sent_log(path: Path) -> Dict[str, datetime]:
     data: Dict[str, datetime] = {}
     if not path.exists():
@@ -925,9 +957,10 @@ def was_sent_today_same_content(email: str, subject: str, body: str) -> bool:
             dt_local = dt.astimezone(tz)
         if dt_local < start_local:
             continue
-        row_key = (row.get("key") or "").strip()
+        # A log key identifies a send event, not necessarily the recipient.
+        row_key = canonical_for_history(row.get("email", ""))
         if not row_key:
-            row_key = canonical_for_history(row.get("email", ""))
+            row_key = (row.get("key") or "").strip()
         if row_key != key:
             continue
         existing_hash = (row.get("content_hash") or row.get("body_hash") or "").strip()

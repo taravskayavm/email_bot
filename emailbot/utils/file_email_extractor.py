@@ -58,13 +58,13 @@ def _find_obfuscated_emails(text: str) -> List[str]:
     """
 
     # локальная часть: 1–64, обязательно ≥1 буква и длина ≥2
-    local_part = r"(?P<local>(?=[A-Za-z0-9.+-]{2,64}$)(?=.*[A-Za-z])[A-Za-z0-9.+-]{2,64})"
-    at_token = r"(?:\(|\[)?\s*(?:@|at|собака)\s*(?:\)|\])?"
+    local_part = r"(?P<local>[A-Za-z0-9._%+-]{2,64})"
+    at_token = r"(?:@|\s+(?:at|собака)\s+|\s*[\[(]\s*(?:at|собака|@)\s*[\])]\s*)"
     # доменный лейбл: 1–63, ≥1 буква, не начин/заканч с дефиса
-    label = r"(?P<label>(?=[A-Za-z0-9-]{1,63}$)(?=.*[A-Za-z])[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)"
-    dot_token = r"(?:\(|\[)?\s*(?:\.|dot|точка)\s*(?:\)|\])?"
+    label = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    dot_token = r"(?:\.|\s+(?:dot|точка)\s+|\s*[\[(]\s*(?:dot|точка|\.)\s*[\])]\s*)"
     pattern = re.compile(
-        rf"\b{local_part}\b\s*{at_token}\s*\b{label}\b(?:\s*{dot_token}\s*\b{label}\b)*",
+        rf"(?<![\w.+-]){local_part}{at_token}(?P<domain>{label}(?:{dot_token}{label})+)(?![\w-])",
         re.IGNORECASE | re.UNICODE,
     )
 
@@ -75,18 +75,13 @@ def _find_obfuscated_emails(text: str) -> List[str]:
         if should_stop():
             break
         local = match.group("local")
-        span_text = match.group(0)
-        labels = re.findall(r"\b([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)\b", span_text)
-        if not labels:
+        if not re.search(r"[A-Za-z]", local):
             continue
-        parts = [p for p in labels if p.lower() != local.lower()]
-        if not parts:
-            continue
-        domain = ".".join(parts)
+        domain = re.sub(dot_token, ".", match.group("domain"), flags=re.I)
         if "." not in domain:
             continue
         tld = domain.rsplit(".", 1)[-1]
-        if not (2 <= len(tld) <= 24):
+        if not re.fullmatch(r"[A-Za-z]{2,24}", tld):
             continue
         labels_ok = True
         for lbl in domain.split("."):

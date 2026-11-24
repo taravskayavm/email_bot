@@ -78,7 +78,8 @@ def test_canonical_for_history_gmail_variants():
     )
 
 
-def test_schema_migration_from_legacy_headers(tmp_path):
+def test_schema_migration_from_legacy_headers(tmp_path, monkeypatch):
+    monkeypatch.setattr(mu, "REPORT_TZ", "UTC")
     path = tmp_path / "sent_log.csv"
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

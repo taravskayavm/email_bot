@@ -20,15 +20,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest ruff
+          pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run static checks
+      - name: Check syntax
         run: |
-          ruff check .
+          python -m compileall -q emailbot bot utils services pipelines crawler parser mailer
+          ruff check emailbot bot utils services pipelines crawler parser mailer email_bot.py --select E9,F63,F7,F82
 
-      - name: Run API contract tests
+      - name: Run complete test suite
         run: |
-          pytest -q tests/test_api_contract.py
+          pytest -q tests
+        env:
+          EMAIL_ADDRESS: test@example.test
+          EMAIL_PASSWORD: test-only
+          TELEGRAM_BOT_TOKEN: 123456:offline-test-token
+          APPEND_TO_SENT: '0'
+          SMTP_MAX_PER_MIN: '0'
+          SMTP_MAX_PER_HOUR: '0'
 
       - name: Verify exports
         run: |

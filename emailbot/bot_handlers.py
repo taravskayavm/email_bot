@@ -111,7 +111,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     Update,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import ApplicationHandlerStop, ContextTypes, ConversationHandler
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -214,9 +214,12 @@ from . import extraction_pdf as _pdf
 from .extraction import normalize_email, smart_extract_emails, extract_emails_manual
 from .progress_watchdog import heartbeat, start_watchdog, start_heartbeat_pulse
 from .reporting import (
+    MOSCOW_TZ,
     available_report_years,
     count_blocked,
     log_mass_filter_digest,
+    report_week_dates,
+    report_weeks_in_year,
     summarize_period_stats,
 )
 from . import settings
@@ -603,9 +606,54 @@ async def _download_file(update: Update, download_dir: str) -> str:
     safe_name = filename.replace(os.sep, "_")
     path = os.path.join(download_dir, f"{chat_id}_{int(time.time())}_{safe_name}")
 
-    telegram_file = await doc.get_file()
-    await telegram_file.download_to_drive(path)
-    return path
+    def _positive_float(name: str, default: float) -> float:
+        try:
+            value = float(os.getenv(name, "") or default)
+            return value if value > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        attempts = max(1, int(os.getenv("TELEGRAM_FILE_DOWNLOAD_ATTEMPTS", "3")))
+    except ValueError:
+        attempts = 3
+    connect_timeout = _positive_float("TELEGRAM_CONNECT_TIMEOUT", 20.0)
+    read_timeout = _positive_float("TELEGRAM_MEDIA_READ_TIMEOUT", 180.0)
+    pool_timeout = _positive_float("TELEGRAM_POOL_TIMEOUT", 20.0)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            telegram_file = await doc.get_file(
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                pool_timeout=pool_timeout,
+            )
+            await telegram_file.download_to_drive(
+                path,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                pool_timeout=pool_timeout,
+            )
+            return path
+        except NetworkError:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            if attempt >= attempts:
+                raise
+            delay = min(2 ** (attempt - 1), 5)
+            logger.warning(
+                "Telegram file download failed (attempt %s/%s); retrying in %ss",
+                attempt,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("Telegram file download attempts exhausted")
 
 
 async def extract_emails_from_zip(path: str, stop_event=None, *_, **__):
@@ -1765,7 +1813,14 @@ async def _apply_manual_text_corrections(
                 continue
             if old_raw not in updated:
                 continue
-            updated = [new_raw if item == old_raw else item for item in updated]
+            new_clean, _ = sanitize_email(new_raw)
+            if not new_clean:
+                await message.reply_text(
+                    "Некорректный новый адрес. Список не изменён. "
+                    "Пришлите правки ещё раз в формате «старый -> новый»."
+                )
+                return True
+            updated = [new_clean if item == old_raw else item for item in updated]
             changed = True
         if changed:
             deduped = list(dict.fromkeys(updated))
@@ -1775,6 +1830,11 @@ async def _apply_manual_text_corrections(
             context.user_data.pop("text_corrections", None)
             await message.reply_text("✏️ Применены замены адресов.")
             return True
+        await message.reply_text(
+            "Не найдены адреса для замены. Список не изменён. "
+            "Используйте формат «старый -> новый»."
+        )
+        return True
 
     # (2) Deletions prefixed with "-"/"—"/"удалить:"
     lowered = text.lower()
@@ -2421,6 +2481,19 @@ async def add_block_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     raise ApplicationHandlerStop
 
 
+async def _reply_list_text(message, text: str) -> None:
+    """Send plain-text lists in bounded chunks, preferring line boundaries."""
+    # 2000 code points fit even when every character needs two UTF-16 units.
+    while text:
+        end = min(len(text), 2000)
+        if end < len(text):
+            newline = text.rfind("\n", 0, end)
+            if newline >= 0:
+                end = newline + 1
+        await message.reply_text(text[:end], parse_mode=None)
+        text = text[end:]
+
+
 async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display the current list of blocked e-mail addresses."""
 
@@ -2429,7 +2502,8 @@ async def show_blocked_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not blocked:
         await update.message.reply_text("📄 Блок-лист пуст.")
     else:
-        await update.message.reply_text(
+        await _reply_list_text(
+            update.message,
             "📄 В блок-листе:\n" + "\n".join(sorted(blocked))
         )
 
@@ -2460,7 +2534,8 @@ async def show_blocked_domains(
     if not domains:
         await update.message.reply_text("📵 Список исключённых доменов пуст.")
         return
-    await update.message.reply_text(
+    await _reply_list_text(
+        update.message,
         f"📵 Исключённые домены ({len(domains)}):\n" + "\n".join(domains)
     )
 
@@ -2643,8 +2718,12 @@ def _report_main_markup() -> InlineKeyboardMarkup:
     )
 
 
-def _report_year_markup(years: Iterable[int], *, for_month: bool) -> InlineKeyboardMarkup:
-    prefix = "report_month_year_" if for_month else "report_year_value_"
+def _report_year_markup(years: Iterable[int], *, period: str) -> InlineKeyboardMarkup:
+    prefix = {
+        "week": "report_week_year_",
+        "month": "report_month_year_",
+        "year": "report_year_value_",
+    }[period]
     buttons = [
         InlineKeyboardButton(str(year), callback_data=f"{prefix}{year}")
         for year in sorted(set(years))
@@ -2664,6 +2743,41 @@ def _report_month_markup(year: int) -> InlineKeyboardMarkup:
     ]
     rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="report_month")])
+    return InlineKeyboardMarkup(rows)
+
+
+_REPORT_WEEKS_PER_PAGE = 12
+
+
+def _report_week_markup(year: int, page: int | None = None) -> InlineKeyboardMarkup:
+    total = report_weeks_in_year(year)
+    if page is None:
+        current = datetime.now(MOSCOW_TZ).isocalendar()
+        page = (current.week - 1) // _REPORT_WEEKS_PER_PAGE if current.year == year else 0
+    if not 0 <= page < (total + _REPORT_WEEKS_PER_PAGE - 1) // _REPORT_WEEKS_PER_PAGE:
+        raise ValueError("Invalid week selector page")
+    first = page * _REPORT_WEEKS_PER_PAGE + 1
+    last = min(first + _REPORT_WEEKS_PER_PAGE - 1, total)
+    buttons = []
+    for week in range(first, last + 1):
+        start, end = report_week_dates(year, week)
+        buttons.append(InlineKeyboardButton(
+            f"№{week:02d} · {start:%d.%m}–{end:%d.%m}",
+            callback_data=f"report_week_value_{year}_{week:02d}",
+        ))
+    rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            "◀️ Предыдущие", callback_data=f"report_week_page_{year}_{page - 1}"
+        ))
+    if last < total:
+        navigation.append(InlineKeyboardButton(
+            "Следующие ▶️", callback_data=f"report_week_page_{year}_{page + 1}"
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("⬅️ К выбору года", callback_data="report_week")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2748,7 +2862,14 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Navigate report selectors or render the selected detailed report."""
 
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        error = str(exc).lower()
+        if "query is too old" not in error and "query id is invalid" not in error:
+            raise
+        # An expired acknowledgement must not prevent this read-only report.
+        logger.debug("Report callback acknowledgement expired: %s", exc)
     data = str(query.data or "")
     target = query.message
 
@@ -2758,14 +2879,43 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if data in {"report_month", "report_year"}:
-        years = await asyncio.to_thread(available_report_years)
-        for_month = data == "report_month"
-        prompt = "📅 Выберите год, затем месяц:" if for_month else "📅 Выберите год отчёта:"
+    if data in {"report_week", "report_month", "report_year"}:
+        period = data.removeprefix("report_")
+        if period == "week":
+            years = await asyncio.to_thread(available_report_years, for_week=True)
+        else:
+            years = await asyncio.to_thread(available_report_years)
+        prompt = {
+            "week": "📅 Выберите год, затем неделю:",
+            "month": "📅 Выберите год, затем месяц:",
+            "year": "📅 Выберите год отчёта:",
+        }[period]
         await _safe_edit_message(
             target,
             text=prompt,
-            reply_markup=_report_year_markup(years, for_month=for_month),
+            reply_markup=_report_year_markup(years, period=period),
+        )
+        return
+
+    week_year_match = re.fullmatch(r"report_week_year_(\d{4})", data)
+    week_page_match = re.fullmatch(r"report_week_page_(\d{4})_(\d{1,2})", data)
+    if week_year_match or week_page_match:
+        match = week_year_match or week_page_match
+        selected_year = int(match.group(1))
+        page = int(week_page_match.group(2)) if week_page_match else None
+        try:
+            markup = _report_week_markup(selected_year, page)
+        except (ValueError, OverflowError):
+            await _safe_edit_message(
+                target,
+                text="Не удалось выбрать неделю. Выберите год заново.",
+                reply_markup=_report_main_markup(),
+            )
+            return
+        await _safe_edit_message(
+            target,
+            text=f"🗓 Выберите неделю — {selected_year}:\nПонедельник–воскресенье, время московское.",
+            reply_markup=markup,
         )
         return
 
@@ -2782,14 +2932,23 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     period: str | None = None
     selected_year: int | None = None
     selected_month: int | None = None
+    selected_week: int | None = None
     if data == "report_day":
         period = "day"
-    elif data == "report_week":
-        period = "week"
     else:
+        week_match = re.fullmatch(r"report_week_value_(\d{4})_(\d{2})", data)
         month_match = re.fullmatch(r"report_month_value_(\d{4})_(\d{2})", data)
         year_match = re.fullmatch(r"report_year_value_(\d{4})", data)
-        if month_match:
+        if week_match:
+            selected_year = int(week_match.group(1))
+            selected_week = int(week_match.group(2))
+            try:
+                report_week_dates(selected_year, selected_week)
+            except (ValueError, OverflowError):
+                pass
+            else:
+                period = "week"
+        elif month_match:
             period = "month"
             selected_year = int(month_match.group(1))
             selected_month = int(month_match.group(2))
@@ -2805,18 +2964,24 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    options = {"year": selected_year, "month": selected_month}
+    if period == "week":
+        options["week"] = selected_week
     stats = await asyncio.to_thread(
         summarize_period_stats,
         period,
-        year=selected_year,
-        month=selected_month,
+        **options,
     )
+    back_buttons = [InlineKeyboardButton("⬅️ К отчётам", callback_data="report_menu")]
+    if period == "week":
+        page = (selected_week - 1) // _REPORT_WEEKS_PER_PAGE
+        back_buttons.insert(0, InlineKeyboardButton(
+            "⬅️ К неделям", callback_data=f"report_week_page_{selected_year}_{page}"
+        ))
     await _safe_edit_message(
         target,
         text=format_send_stats_by_direction(stats),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ К отчётам", callback_data="report_menu")]]
-        ),
+        reply_markup=InlineKeyboardMarkup([back_buttons]),
     )
 
 
@@ -3148,9 +3313,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     job_name = _build_parse_task_name(update, "file")
     current_task = asyncio.current_task()
     idle_seconds = _watchdog_idle_seconds()
+    watchdog_task: asyncio.Task[None] | None = None
     if current_task:
         register_task(job_name, current_task)
-        asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
+        watchdog_task = asyncio.create_task(
+            start_watchdog(current_task, idle_seconds=idle_seconds)
+        )
     cancel_event = context.chat_data.get("cancel_event")
 
     progress_msg = None
@@ -3158,7 +3326,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await heartbeat()
-        progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        try:
+            progress_msg = await update.message.reply_text("📥 Загружаю файл…")
+        except TelegramError:
+            # Progress is optional; a brief Bot API timeout must not abort the
+            # actual file download and processing.
+            logger.warning("Unable to send upload progress message", exc_info=True)
+            progress_msg = None
         logging.info("[FLOW] start upload->text")
         try:
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -3267,6 +3441,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         return
     finally:
+        if watchdog_task:
+            watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watchdog_task
         if current_task:
             unregister_task(job_name, current_task)
 
@@ -4406,6 +4584,10 @@ async def route_text_message(
         await handle_text(update, context)
         raise ApplicationHandlerStop
 
+    if context.user_data.get("text_corrections"):
+        await _apply_manual_text_corrections(update, context, text)
+        raise ApplicationHandlerStop
+
     urls: list[str] = []
     entities = getattr(message, "entities", None)
     if entities:
@@ -4442,9 +4624,6 @@ async def route_text_message(
     )
     if not awaiting:
         return
-    if context.user_data.get("text_corrections"):
-        return
-
     if (
         not text
         or text in {"✉️ Ручная", "Ручная"}
@@ -4679,15 +4858,24 @@ async def _send_batch_with_sessions(
         reply_markup=_build_stop_markup(),
     )
 
+    from emailbot.async_transport import MailWorker
+
+    worker = MailWorker()
     imap = None
     try:
         host = os.getenv("IMAP_HOST", "imap.mail.ru")
         port = int(os.getenv("IMAP_PORT", "993"))
-        imap = imaplib.IMAP4_SSL(host, port)
-        imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
-        sent_folder = get_preferred_sent_folder(imap)
-        imap.select(f'"{sent_folder}"')
+        imap = await worker.run(imaplib.IMAP4_SSL, host, port)
+        await worker.run(imap.login, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
+        sent_folder = await worker.run(get_preferred_sent_folder, imap)
+        await worker.run(imap.select, f'"{sent_folder}"')
     except Exception as exc:
+        if imap is not None:
+            try:
+                await worker.run(imap.logout)
+            except Exception:
+                pass
+        worker.close()
         log_error(f"imap connect: {exc}")
         await query.message.reply_text(f"❌ IMAP ошибка: {exc}")
         return ManualBatchResult(
@@ -4719,15 +4907,15 @@ async def _send_batch_with_sessions(
     try:
         while to_send and not aborted and not retryable_failure and not template_failure:
             try:
-                with SmtpClient(
+                async with worker.session(SmtpClient(
                     host,
                     port,
                     messaging.EMAIL_ADDRESS,
                     messaging.EMAIL_PASSWORD,
                     use_ssl=use_ssl,
-                ) as client:
+                )) as client:
                     while to_send:
-                        if should_stop() or is_cancelled(chat_id):
+                        if should_stop() or is_cancelled(chat_id) or worker.cancel_requested:
                             aborted = True
                             break
                         if cancel_event and cancel_event.is_set():
@@ -4737,7 +4925,8 @@ async def _send_batch_with_sessions(
                         processed += 1
                         try:
                             await heartbeat()
-                            outcome, token, log_key, content_hash = send_email_with_sessions(
+                            outcome, token, log_key, content_hash = await worker.run(
+                                send_email_with_sessions,
                                 client,
                                 imap,
                                 sent_folder,
@@ -4866,12 +5055,16 @@ async def _send_batch_with_sessions(
                     break
                 await asyncio.sleep(backoff)
                 backoff *= 2
+    except asyncio.CancelledError:
+        aborted = True
     finally:
         try:
             if imap is not None:
-                imap.logout()
+                await worker.run(imap.logout)
         except Exception:
             pass
+        finally:
+            worker.close()
 
     if aborted:
         await query.message.reply_text(
@@ -5253,11 +5446,15 @@ async def handle_url_text(
 
     clear_stop()
     job_name = _build_parse_task_name(update, "url")
+    initial_state = get_state(context)
     current_task = asyncio.current_task()
     idle_seconds = _watchdog_idle_seconds()
+    watchdog_task: asyncio.Task[None] | None = None
     if current_task:
         register_task(job_name, current_task)
-        asyncio.create_task(start_watchdog(current_task, idle_seconds=idle_seconds))
+        watchdog_task = asyncio.create_task(
+            start_watchdog(current_task, idle_seconds=idle_seconds)
+        )
 
     status_msg = None
     pulse_task: asyncio.Task[None] | None = None
@@ -5274,12 +5471,11 @@ async def handle_url_text(
             except Exception:
                 pass
     try:
-        status_msg = await message.reply_text("⏳ Загружаю сайт, парсю адреса…")
-        await heartbeat()
-    except Exception:
-        status_msg = None
-
-    try:
+        try:
+            status_msg = await message.reply_text("⏳ Загружаю сайт, парсю адреса…")
+            await heartbeat()
+        except Exception:
+            status_msg = None
         async with lock:
             context.chat_data["last_url"] = {"url": url, "urls": [url], "ts": now}
             context.chat_data["entry_url"] = url
@@ -5326,6 +5522,10 @@ async def handle_url_text(
         await _reply_status_error(f"Не удалось получить страницу: {type(exc).__name__}")
         return
     finally:
+        if watchdog_task:
+            watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watchdog_task
         if pulse_task:
             pulse_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -5333,6 +5533,9 @@ async def handle_url_text(
         if current_task:
             unregister_task(job_name, current_task)
 
+    if get_state(context) is not initial_state:
+        # A reset started a new batch while this URL was still being fetched.
+        return
     if not found:
         if status_msg:
             try:
@@ -5646,827 +5849,8 @@ async def show_repairs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def send_manual_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send e-mails entered manually by the user."""
-
-    query = update.callback_query
-    await query.answer()
-    emails = context.user_data.get("manual_emails", [])
-    if not emails:
-        await query.message.reply_text("❗ Список email пуст.")
-        return
-
-    ignore_180d = _manual_override_enabled(context)
-    status_text = _manual_cooldown_status(context)
-    await query.message.reply_text(
-        "Запущено — выполняю в фоне...\n"
-        f"Правило давности: {status_text}."
-    )
-
-    async def long_job() -> None:
-        chat_id = query.message.chat.id
-        # Безопасно извлекаем код группы (поддержка <3.9 и без падений на шумных коллбэках)
-        group_code = (
-            query.data[len("manual_group_") :]
-            if (query.data or "").startswith("manual_group_")
-            else (query.data or "")
-        )
-        template_path = TEMPLATE_MAP[group_code]
-
-        start_cancel(chat_id)
-        await query.message.reply_text(
-            "⏳ Проверяю актуальность истории отправки…",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⏹️ Стоп", callback_data="stop_job")]]
-            ),
-        )
-        did_sync = False
-        with PerfTimer("imap_sync_gate_manual"):
-            loop = asyncio.get_running_loop()
-            did_sync, _, _ = await loop.run_in_executor(
-                None, lambda: maybe_sync_before_send(logger=logger, chat_id=chat_id)
-            )
-            clear_recent_sent_cache()
-        if did_sync:
-            await query.message.reply_text("🔄 Обновила историю (6 мес) из IMAP (дельта).")
-        else:
-            await query.message.reply_text("✅ История свежая — синхронизация не требуется.")
-        if is_cancelled(chat_id):
-            clear_cancel(chat_id)
-            await query.message.reply_text("⛔ Остановлено по запросу.")
-            return
-
-        # manual отправка не учитывает супресс-лист
-        blocked = get_blocked_emails()
-        sent_today = get_sent_today()
-        lookup_days = _manual_cooldown_days()
-        effective_lookup = 0 if ignore_180d else lookup_days
-
-        try:
-            host = os.getenv("IMAP_HOST", "imap.mail.ru")
-            port = int(os.getenv("IMAP_PORT", "993"))
-            imap = imaplib.IMAP4_SSL(host, port)
-            imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
-            sent_folder = get_preferred_sent_folder(imap)
-            imap.select(f'"{sent_folder}"')
-        except Exception as e:
-            log_error(f"imap connect: {e}")
-            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
-            clear_cancel(chat_id)
-            return
-
-        with PerfTimer("filtering_manual"):
-            to_send = build_send_list(
-                emails,
-                blocked,
-                sent_today,
-                lookup_days=effective_lookup,
-            )
-
-        if is_cancelled(chat_id):
-            await query.message.reply_text("⛔ Остановлено (после фильтрации).")
-            try:
-                imap.logout()
-            except Exception:
-                pass
-            clear_cancel(chat_id)
-            return
-
-        if not to_send:
-            reason = "стоп-листе"
-            if not ignore_180d:
-                reason += ", истории за 6 месяцев"
-            reason += " или уже отправлены сегодня"
-            await query.message.reply_text(
-                f"❗ Все адреса уже есть в {reason}."
-            )
-            context.user_data["manual_emails"] = []
-            try:
-                imap.logout()
-            except Exception:
-                pass
-            clear_recent_sent_cache()
-            clear_cancel(chat_id)
-            return
-        available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
-        if available <= 0 and not is_force_send(chat_id):
-            logger.info(
-                "Daily limit reached: %s emails sent today (source=sent_log)",
-                len(sent_today),
-            )
-            await update.callback_query.message.reply_text(
-                (
-                    f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                    "Если вы исправили ошибки — нажмите "
-                    "«🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
-                )
-            )
-            clear_cancel(chat_id)
-            return
-        if not is_force_send(chat_id) and len(to_send) > available:
-            to_send = to_send[:available]
-            await query.message.reply_text(
-                (
-                    f"⚠️ Учитываю дневной лимит: будет отправлено "
-                    f"{available} адресов из списка."
-                )
-            )
-
-        await query.message.reply_text(
-            (
-                f"✉️ Рассылка начата. Отправляем {len(to_send)} писем...\n"
-                f"Правило давности: {status_text}."
-            )
-        )
-
-        sent_count = 0
-        aborted = False
-        error_details: list[str] = []
-        duplicates: list[str] = []
-        cancel_event = context.chat_data.get("cancel_event")
-        host = os.getenv("SMTP_HOST", "smtp.mail.ru")
-        port = int(os.getenv("SMTP_PORT", "465"))
-        ssl_env = os.getenv("SMTP_SSL")
-        use_ssl = None if not ssl_env else (ssl_env == "1")
-        retries = int(os.getenv("SMTP_CONNECT_RETRIES", "3"))
-        backoff = float(os.getenv("SMTP_CONNECT_BACKOFF", "1.0"))
-
-        import smtplib  # наверху можно не поднимать, локальный импорт ок
-
-        attempt = 0
-        initial_count = len(to_send)
-        with PerfTimer("sending_manual", extra={"count": initial_count}):
-            while True:
-                try:
-                    with SmtpClient(
-                        host,
-                        port,
-                        messaging.EMAIL_ADDRESS,
-                        messaging.EMAIL_PASSWORD,
-                        use_ssl=use_ssl,
-                    ) as client:
-                        def on_sent(
-                            email_addr: str,
-                            token: str,
-                            log_key: str | None,
-                            content_hash: str | None,
-                        ) -> None:
-                            try:
-                                mark_soft_bounce_success(email_addr)
-                            except Exception:
-                                pass
-
-                        def on_duplicate(email_addr: str) -> None:
-                            duplicates.append(email_addr)
-                            error_details.append("пропущено (дубль за 24 ч)")
-
-                        def on_cooldown(email_addr: str) -> None:
-                            error_details.append("пропущено (кулдаун 180 дней)")
-
-                        def on_blocked(email_addr: str) -> None:
-                            error_details.append("пропущено (стоп-лист)")
-
-                        def on_unknown(email_addr: str) -> None:
-                            error_details.append("ошибка отправки")
-
-                        def on_error(
-                            email_addr: str,
-                            exc: Exception,
-                            code: Optional[int],
-                            msg: Optional[str],
-                        ) -> None:
-                            error_details.append(str(exc))
-                            add_bounce(email_addr, code, str(msg or exc), phase="send")
-                            if is_hard_bounce(code, msg):
-                                suppress_add(email_addr, code, "hard bounce on send")
-                            elif is_soft_bounce(code, msg):
-                                try:
-                                    code_int: Optional[int]
-                                    try:
-                                        code_int = int(code) if code is not None else None
-                                    except Exception:
-                                        code_int = None
-                                    if isinstance(msg, (bytes, bytearray)):
-                                        reason_text = msg.decode("utf-8", "ignore")
-                                    else:
-                                        reason_text = str(msg or exc)
-                                    log_soft_bounce(
-                                        email_addr,
-                                        reason=reason_text,
-                                        group_code=group_code,
-                                        chat_id=chat_id,
-                                        template_path=template_path,
-                                        code=code_int,
-                                    )
-                                except Exception:
-                                    pass
-
-                        sent_now, aborted_now = await run_smtp_send(
-                            client,
-                            to_send,
-                            template_path=template_path,
-                            group_code=group_code,
-                            imap=imap,
-                            sent_folder=sent_folder,
-                            chat_id=chat_id,
-                            sleep_between=None,  # Используем глобальную задержку отправки из конфигурации
-                            cancel_event=cancel_event,
-                            should_stop_cb=should_stop,
-                            on_sent=on_sent,
-                            on_duplicate=on_duplicate,
-                            on_cooldown=on_cooldown,
-                            on_blocked=on_blocked,
-                            on_error=on_error,
-                            on_unknown=on_unknown,
-                            override_180d=ignore_180d,
-                        )
-                        sent_count += sent_now
-                        aborted = aborted or aborted_now
-                    break  # успешно отработали без коннект-ошибок
-                except messaging.TemplateRenderError as err:
-                    missing = ", ".join(sorted(err.missing)) if err.missing else "—"
-                    await context.bot.send_message(
-                        chat_id=query.message.chat.id,
-                        text=(
-                            "⚠️ Шаблон не готов к отправке.\n"
-                            f"Файл: {err.path}\n"
-                            f"Не заполнены: {missing}\n\n"
-                            "Подставь значения или создай рядом файл с текстом письма:\n"
-                            "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{BODY}."
-                        ),
-                    )
-                    try:
-                        imap.logout()
-                    except Exception:
-                        pass
-                    clear_cancel(chat_id)
-                    return
-                except (smtplib.SMTPServerDisconnected, TimeoutError, OSError):
-                    attempt += 1
-                    if attempt >= retries:
-                        clear_cancel(chat_id)
-                        raise
-                    await asyncio.sleep(backoff)
-                    backoff *= 2
-        clear_cancel(chat_id)
-        imap.logout()
-        if aborted:
-            await query.message.reply_text(
-                f"🛑 Остановлено. Отправлено писем: {sent_count}"
-            )
-        else:
-            await query.message.reply_text(f"✅ Отправлено писем: {sent_count}")
-        if error_details:
-            summary = format_error_details(error_details)
-            if summary:
-                await query.message.reply_text(summary)
-    
-        context.user_data["manual_emails"] = []
-        clear_recent_sent_cache()
-        disable_force_send(chat_id)
-
-
-    async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send all prepared e-mails respecting limits."""
-    
-        query = update.callback_query
-        chat_id = query.message.chat.id
-        saved = mass_state.load_chat_state(chat_id)
-        if saved and saved.get("pending"):
-            emails = saved.get("pending", [])
-            group_code = saved.get("group")
-            template_path = saved.get("template")
-        else:
-            state = get_state(context)
-            emails = state.to_send
-            group_code = state.group
-            template_path = state.template
-        if not emails or not group_code or not template_path:
-            await query.answer("Нет данных для отправки", show_alert=True)
-            return
-        await query.answer()
-        await query.message.reply_text("Запущено — выполняю в фоне...")
-
-        async def long_job() -> None:
-            start_cancel(chat_id)
-            await query.message.reply_text(
-                "⏳ Проверяю актуальность истории отправки…",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⏹️ Стоп", callback_data="stop_job")]]
-                ),
-            )
-            state = get_state(context)
-            with PerfTimer("imap_sync_gate_bulk"):
-                loop = asyncio.get_running_loop()
-                did_sync, _, _ = await loop.run_in_executor(
-                    None, lambda: maybe_sync_before_send(logger=logger, chat_id=chat_id)
-                )
-                clear_recent_sent_cache()
-            if did_sync:
-                await query.message.reply_text("🔄 Обновила историю (6 мес) из IMAP (дельта).")
-            else:
-                await query.message.reply_text("✅ История свежая — синхронизация не требуется.")
-            if is_cancelled(chat_id):
-                clear_cancel(chat_id)
-                await query.message.reply_text("⛔ Остановлено по запросу.")
-                return
-
-            with PerfTimer("filtering_bulk"):
-                lookup_days = int(os.getenv("EMAIL_LOOKBACK_DAYS", "180"))
-                blocked = get_blocked_emails()
-                sent_today = get_sent_today()
-        
-                planned_total = len(emails)
-                try:
-                    planned_unique = len({normalize_email(e) for e in emails if e})
-                except Exception:
-                    planned_unique = len({(e or "").strip().lower() for e in emails if e})
-        
-                saved_state = mass_state.load_chat_state(chat_id)
-                duplicates: List[str]
-                batch_duplicates: List[str]
-                recent_180d_examples: set[str] = set()
-                today_examples: set[str] = set()
-                invalid_examples: set[str] = set()
-                foreign_examples: set[str] = set()
-                dup_examples: set[str] = set()
-                removed_today: list[str] = []
-                ready_after_cooldown: list[str] = []
-                digest: dict[str, object] = {}
-
-                state.override_cooldown = bool(context.user_data.get("ignore_cooldown"))
-
-                if saved_state and saved_state.get("pending"):
-                    blocked_foreign = list(saved_state.get("blocked_foreign", []))
-                    blocked_invalid = list(saved_state.get("blocked_invalid", []))
-                    skipped_recent = list(saved_state.get("skipped_recent", []))
-                    sent_ok = list(saved_state.get("sent_ok", []))
-                    to_send = list(saved_state.get("pending", []))
-                    duplicates = list(saved_state.get("skipped_duplicates", []))
-                    batch_duplicates = []
-                    dup_examples.update(duplicates)
-                    recent_180d_examples.update(skipped_recent[:10])
-                    foreign_examples.update(blocked_foreign[:10])
-                    invalid_examples.update(blocked_invalid[:10])
-                    snapshot = state.last_digest or _snapshot_mass_digest(
-                        {
-                            "ready_after_cooldown": len(to_send),
-                            "removed_recent_180d": len(skipped_recent),
-                            "removed_invalid": len(blocked_invalid),
-                            "removed_foreign": len(blocked_foreign),
-                            "removed_duplicates_in_batch": len(duplicates),
-                            "set_planned": len(to_send),
-                            "ready_final": len(to_send),
-                        },
-                        ready_after_cooldown=len(to_send),
-                        ready_final=len(to_send),
-                    )
-                    state.last_digest = snapshot
-                    context.chat_data["last_filter_digest"] = snapshot
-                    logger.info(
-                        "bulk_filter_digest",
-                        extra={"digest": snapshot, "chat_id": chat_id},
-                    )
-                    digest = dict(snapshot)
-                else:
-                    blocked_foreign = []
-                    blocked_invalid = []
-                    skipped_recent = []
-                    to_send = []
-                    sent_ok = []
-                    duplicates = []
-                    batch_duplicates = []
-
-                    filtered_initial: list[str] = []
-                    for e in emails:
-                        if e in blocked:
-                            blocked_invalid.append(e)
-                            invalid_examples.add(e)
-                            continue
-                        if e in sent_today:
-                            removed_today.append(e)
-                            today_examples.add(e)
-                            continue
-                        if is_foreign(e):
-                            blocked_foreign.append(e)
-                            foreign_examples.add(e)
-                            continue
-                        filtered_initial.append(e)
-
-                    queue: List[str] = []
-                    for e in filtered_initial:
-                        if is_suppressed(e):
-                            blocked_invalid.append(e)
-                            invalid_examples.add(e)
-                        else:
-                            queue.append(e)
-
-                    to_send = []
-                    ignore_cooldown = bool(context.user_data.get("ignore_cooldown"))
-                    state.override_cooldown = ignore_cooldown
-                    for e in queue:
-                        if not ignore_cooldown and was_emailed_recently(e, lookup_days):
-                            skipped_recent.append(e)
-                            recent_180d_examples.add(e)
-                        else:
-                            to_send.append(e)
-
-                    ready_after_cooldown = list(to_send)
-
-                    deduped: List[str] = []
-                    seen_norm: Set[str] = set()
-                    for e in to_send:
-                        norm = normalize_email(e)
-                        if norm in seen_norm:
-                            batch_duplicates.append(e)
-                            duplicates.append(e)
-                            dup_examples.add(e)
-                        else:
-                            seen_norm.add(norm)
-                            deduped.append(e)
-                    to_send = deduped
-
-                    digest = {
-                        "input_total": len(emails),
-                        "after_suppress": len(queue),
-                        "foreign_blocked": len(blocked_foreign),
-                        "ready_after_cooldown": len(ready_after_cooldown),
-                        "removed_recent_180d": len(skipped_recent),
-                        "removed_today": len(removed_today),
-                        "removed_invalid": len(blocked_invalid),
-                        "removed_foreign": len(blocked_foreign),
-                        "removed_duplicates_in_batch": len(batch_duplicates),
-                        "set_planned": len(to_send),
-                        "ready_final": len(to_send),
-                        "sent_planned": len(to_send),
-                    }
-
-                    snapshot = _snapshot_mass_digest(
-                        digest,
-                        ready_after_cooldown=len(ready_after_cooldown),
-                        ready_final=len(to_send),
-                    )
-                    state.last_digest = snapshot
-                    context.chat_data["last_filter_digest"] = snapshot
-
-                    try:
-                        var_dir = Path("var")
-                        var_dir.mkdir(parents=True, exist_ok=True)
-                        (var_dir / "last_batch_digest.json").write_text(
-                            json.dumps(snapshot, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
-                        examples = {
-                            "recent_180d": sorted(recent_180d_examples)[:10],
-                            "today": sorted(today_examples)[:10],
-                            "invalid": sorted(invalid_examples)[:10],
-                            "foreign": sorted(foreign_examples)[:10],
-                            "duplicates_in_batch": sorted(dup_examples)[:10],
-                        }
-                        (var_dir / "last_batch_examples.json").write_text(
-                            json.dumps(examples, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
-                    except Exception:
-                        logger.exception("failed_to_write_last_batch_digest")
-
-                    logger.info(
-                        "bulk_filter_digest",
-                        extra={"digest": snapshot, "chat_id": chat_id},
-                    )
-
-                    log_mass_filter_digest({**digest, "chat_id": chat_id})
-
-                    active_norms = set()
-                    for addr in to_send + duplicates:
-                        norm = normalize_email(addr) or str(addr).strip().lower()
-                        if norm:
-                            active_norms.add(norm)
-                    filtered_sources = {}
-                    if getattr(state, "source_map", None):
-                        try:
-                            filtered_sources = {
-                                norm: list(state.source_map.get(norm, []))
-                                for norm in active_norms
-                                if norm in state.source_map
-                            }
-                        except Exception:
-                            filtered_sources = {}
-
-                    mass_state.save_chat_state(
-                        chat_id,
-                        {
-                            "group": group_code,
-                            "template": template_path,
-                            "pending": to_send,
-                            "sent_ok": sent_ok,
-                            "blocked_foreign": blocked_foreign,
-                            "blocked_invalid": blocked_invalid,
-                            "skipped_recent": skipped_recent,
-                            "skipped_duplicates": duplicates,
-                            "source_map": filtered_sources,
-                        },
-                    )
-
-                digest_snapshot = state.last_digest or _snapshot_mass_digest(
-                    digest,
-                    ready_after_cooldown=len(to_send),
-                    ready_final=len(to_send),
-                )
-
-            if is_cancelled(chat_id):
-                clear_cancel(chat_id)
-                await query.message.reply_text("⛔ Остановлено (после фильтрации).")
-                return
-
-            limited_from: int | None = None
-
-            if not to_send:
-                explanation = _format_empty_send_explanation(digest_snapshot)
-                await query.message.reply_text(
-                    explanation,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                clear_cancel(chat_id)
-                return
-
-        available = max(0, MAX_EMAILS_PER_DAY - len(sent_today))
-        if available <= 0 and not is_force_send(chat_id):
-            logger.info(
-                "Daily limit reached: %s emails sent today (source=sent_log)",
-                len(sent_today),
-            )
-            await query.message.reply_text(
-                (
-                    f"❗ Дневной лимит {MAX_EMAILS_PER_DAY} уже исчерпан.\n"
-                    "Если вы исправили ошибки — нажмите "
-                    "«🚀 Игнорировать дневной лимит 300 писем» и запустите ещё раз."
-                )
-            )
-            clear_cancel(chat_id)
-            return
-        if not is_force_send(chat_id) and len(to_send) > available:
-            limited_from = len(to_send)
-            to_send = to_send[:available]
-            await query.message.reply_text(
-                (
-                    f"⚠️ Учитываю дневной лимит: будет отправлено "
-                    f"{available} адресов из списка."
-                )
-            )
-            limited_norms = set()
-            for addr in to_send + duplicates:
-                norm = normalize_email(addr) or str(addr).strip().lower()
-                if norm:
-                    limited_norms.add(norm)
-            limited_sources = {}
-            if getattr(state, "source_map", None):
-                try:
-                    limited_sources = {
-                        norm: list(state.source_map.get(norm, []))
-                        for norm in limited_norms
-                        if norm in state.source_map
-                    }
-                except Exception:
-                    limited_sources = {}
-            mass_state.save_chat_state(
-                chat_id,
-                {
-                    "group": group_code,
-                    "template": template_path,
-                    "pending": to_send,
-                    "sent_ok": sent_ok,
-                    "blocked_foreign": blocked_foreign,
-                    "blocked_invalid": blocked_invalid,
-                    "skipped_recent": skipped_recent,
-                    "skipped_duplicates": duplicates,
-                    "source_map": limited_sources,
-                },
-            )
-
-        start_text = format_dispatch_start(
-            planned_total,
-            planned_unique,
-            len(to_send),
-            deferred=len(skipped_recent),
-            suppressed=len(blocked_invalid),
-            blocked_domains=int(digest.get("blocked_domain", 0)),
-            foreign=len(blocked_foreign),
-            duplicates=len(batch_duplicates),
-            limited_from=limited_from,
-        )
-        await notify(query.message, start_text, event="start")
-
-        try:
-            host = os.getenv("IMAP_HOST", "imap.mail.ru")
-            port = int(os.getenv("IMAP_PORT", "993"))
-            imap = imaplib.IMAP4_SSL(host, port)
-            imap.login(messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD)
-            sent_folder = get_preferred_sent_folder(imap)
-            imap.select(f'"{sent_folder}"')
-        except Exception as e:
-            log_error(f"imap connect: {e}")
-            await query.message.reply_text(f"❌ IMAP ошибка: {e}")
-            clear_cancel(chat_id)
-            return
-
-        error_details: list[str] = []
-        cancel_event = context.chat_data.get("cancel_event")
-        aborted = False
-        initial_count = len(to_send)
-        with PerfTimer("sending_bulk", extra={"count": initial_count}):
-            with SmtpClient(
-                "smtp.mail.ru", 465, messaging.EMAIL_ADDRESS, messaging.EMAIL_PASSWORD
-            ) as client:
-                def on_sent(
-                    email_addr: str,
-                    token: str,
-                    log_key: str | None,
-                    content_hash: str | None,
-                ) -> None:
-                    sent_ok.append(email_addr)
-                    try:
-                        mark_soft_bounce_success(email_addr)
-                    except Exception:
-                        pass
-
-                def on_duplicate(email_addr: str) -> None:
-                    duplicates.append(email_addr)
-                    error_details.append("пропущено (дубль за 24 ч)")
-
-                def on_cooldown(email_addr: str) -> None:
-                    error_details.append("пропущено (кулдаун 180 дней)")
-                    if email_addr not in skipped_recent:
-                        skipped_recent.append(email_addr)
-
-                def on_blocked(email_addr: str) -> None:
-                    error_details.append("пропущено (стоп-лист)")
-                    if email_addr not in blocked_invalid:
-                        blocked_invalid.append(email_addr)
-
-                def on_unknown(email_addr: str) -> None:
-                    error_details.append("ошибка отправки")
-
-                def on_error(
-                    email_addr: str,
-                    exc: Exception,
-                    code: Optional[int],
-                    msg: Optional[str],
-                ) -> None:
-                    error_details.append(str(exc))
-                    add_bounce(email_addr, code, str(msg or exc), phase="send")
-                    if is_hard_bounce(code, msg):
-                        suppress_add(email_addr, code, "hard bounce on send")
-                    elif is_soft_bounce(code, msg):
-                        try:
-                            code_int: Optional[int]
-                            try:
-                                code_int = int(code) if code is not None else None
-                            except Exception:
-                                code_int = None
-                            if isinstance(msg, (bytes, bytearray)):
-                                reason_text = msg.decode("utf-8", "ignore")
-                            else:
-                                reason_text = str(msg or exc)
-                            log_soft_bounce(
-                                email_addr,
-                                reason=reason_text,
-                                group_code=group_code,
-                                chat_id=chat_id,
-                                template_path=template_path,
-                                code=code_int,
-                            )
-                        except Exception:
-                            pass
-
-                def after_each(email_addr: str) -> None:
-                    current_norms = set()
-                    for addr in to_send + duplicates:
-                        norm = normalize_email(addr) or str(addr).strip().lower()
-                        if norm:
-                            current_norms.add(norm)
-                    current_sources = {}
-                    if getattr(state, "source_map", None):
-                        try:
-                            current_sources = {
-                                norm: list(state.source_map.get(norm, []))
-                                for norm in current_norms
-                                if norm in state.source_map
-                            }
-                        except Exception:
-                            current_sources = {}
-                    mass_state.save_chat_state(
-                        chat_id,
-                        {
-                            "group": group_code,
-                            "template": template_path,
-                            "pending": to_send,
-                            "sent_ok": sent_ok,
-                            "blocked_foreign": blocked_foreign,
-                            "blocked_invalid": blocked_invalid,
-                            "skipped_recent": skipped_recent,
-                            "skipped_duplicates": duplicates,
-                            "source_map": current_sources,
-                        },
-                    )
-
-                try:
-                    sent_now, aborted_now = await run_smtp_send(
-                        client,
-                        to_send,
-                        template_path=template_path,
-                        group_code=group_code,
-                        imap=imap,
-                        sent_folder=sent_folder,
-                        chat_id=chat_id,
-                        sleep_between=None,  # Используем глобальную задержку отправки из конфигурации
-                        cancel_event=cancel_event,
-                        should_stop_cb=should_stop,
-                        on_sent=on_sent,
-                        on_duplicate=on_duplicate,
-                        on_cooldown=on_cooldown,
-                        on_blocked=on_blocked,
-                        on_error=on_error,
-                        on_unknown=on_unknown,
-                        after_each=after_each,
-                        override_180d=_is_ignore_cooldown_enabled(context),
-                    )
-                except messaging.TemplateRenderError as err:
-                    missing = ", ".join(sorted(err.missing)) if err.missing else "—"
-                    await context.bot.send_message(
-                        chat_id=query.message.chat.id,
-                        text=(
-                            "⚠️ Шаблон не готов к отправке.\n"
-                            f"Файл: {err.path}\n"
-                            f"Не заполнены: {missing}\n\n"
-                            "Подставь значения или создай рядом файл с текстом письма:\n"
-                            "• <имя_шаблона>.body.txt — будет вставлен в {BODY}/{BODY}."
-                        ),
-                    )
-                    try:
-                        imap.logout()
-                    except Exception:
-                        pass
-                    clear_cancel(chat_id)
-                    return
-                aborted = aborted or aborted_now
-        clear_cancel(chat_id)
-        if not to_send:
-            mass_state.clear_chat_state(chat_id)
-
-        total_sent = len(sent_ok)
-        total_skipped = len(skipped_recent)
-        total_blocked = len(blocked_foreign) + len(blocked_invalid)
-        total_duplicates = len(duplicates)
-        total_planned = initial_count
-        try:
-            stoplist_blocked = count_blocked(blocked_invalid)
-        except Exception:
-            stoplist_blocked = 0
-        blocked_line_value = (
-            stoplist_blocked if (stoplist_blocked or total_blocked == 0) else total_blocked
-        )
-        report_text = format_dispatch_result(
-            total_planned,
-            total_sent,
-            total_skipped,
-            total_blocked,
-            total_duplicates,
-            aborted=aborted,
-        )
-        lines = []
-        for line in report_text.splitlines():
-            if line.startswith("🚫"):
-                line = f"🚫 В стоп-листе: {blocked_line_value}"
-            lines.append(line)
-        report_text = "\n".join(lines)
-        if blocked_foreign:
-            report_text += f"\n🌍 Иностранные домены (отложены): {len(blocked_foreign)}"
-        undeliverable_count = len(blocked_invalid)
-        blocked_count = stoplist_blocked
-        undeliverable_only = max(0, undeliverable_count - blocked_count)
-        report_text += (
-            "\n🚫 Недоставляемые (без стоп-листа): "
-            f"{undeliverable_only}"
-        )
-        if stoplist_blocked:
-            report_text += f"\n🛑 Пропущено (стоп-лист): {stoplist_blocked}"
-
-        await query.message.reply_text(report_text)
-        if error_details:
-            summary = format_error_details(error_details)
-            if summary:
-                await query.message.reply_text(summary)
-
-        clear_recent_sent_cache()
-        disable_force_send(chat_id)
-
-    clear_stop()
-    messaging.create_task_with_logging(
-        long_job(),
-        query.message.reply_text,
-        task_name="bulk_mass_send",
-    )
+    """Compatibility alias for the active, session-aware manual send handler."""
+    await manual_select_group(update, context)
 
 
 async def show_skipped_examples(
@@ -6876,11 +6260,11 @@ async def start_sending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
                 async def _invoke(args: tuple[object, ...]) -> None:
                     if asyncio.iscoroutinefunction(handler):
-                        await handler(*args, **handler_kwargs)
-                        return
-                    result_obj = await asyncio.to_thread(
-                        handler, *args, **handler_kwargs
-                    )
+                        result_obj = await handler(*args, **handler_kwargs)
+                    else:
+                        result_obj = await asyncio.to_thread(
+                            handler, *args, **handler_kwargs
+                        )
                     if inspect.isawaitable(result_obj):
                         await result_obj
 

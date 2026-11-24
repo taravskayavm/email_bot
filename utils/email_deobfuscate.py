@@ -30,7 +30,7 @@ _TIMEOUT_ERRORS: Tuple[type[BaseException], ...]
 if _regex is not None and hasattr(_regex, "TimeoutError"):
     _TIMEOUT_ERRORS = (_regex.TimeoutError,)  # type: ignore[attr-defined]
 else:
-    _TIMEOUT_ERRORS = tuple()
+    _TIMEOUT_ERRORS = (TimeoutError,)
 
 try:  # pragma: no cover - optional dependency
     from emailbot.progress_watchdog import heartbeat_now as _heartbeat_now
@@ -113,8 +113,7 @@ def _word_pattern(base: str) -> str:
     letters = list(base)
     if not letters:
         return ""
-    rest = [rf"\\W?{_regex_mod.escape(ch)}" for ch in letters[1:]]
-    return rf"{_regex_mod.escape(letters[0])}\\s*" + "\\s*".join(rest)
+    return r"[\s-]*".join(_regex_mod.escape(ch) for ch in letters)
 
 
 _LOCAL_FRAGMENT = r"[\w.%+\-]{1,64}"
@@ -125,14 +124,14 @@ _AT_SEP = r"\W+"
 
 _PAT_ATS = [
     _regex_mod.compile(
-        rf"(?P<L>{_LOCAL_FRAGMENT}){_AT_SEP}(?:{_word_pattern('собака')}|{_word_pattern('at')}){_AT_SEP}(?P<R>{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*)",
+        rf"(?P<L>{_LOCAL_FRAGMENT}){_AT_SEP}(?:{_word_pattern('собака')}|{_word_pattern('at')}){_AT_SEP}(?P<R>{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+)(?![\w@])",
         _regex_mod.IGNORECASE,
     )
 ]
 
 _PAT_DOTS = [
     _regex_mod.compile(
-        rf"(?P<L>{_DOMAIN_LABEL})\s*[\(\[\{{]?\s*(?:{_word_pattern('точка')}|{_word_pattern('dot')})\s*[\)\]\}}]?\s*(?P<R>{_DOMAIN_LABEL})",
+        rf"(?P<L>{_DOMAIN_LABEL})(?:\s+|\s*[\(\[\{{]\s*)(?:{_word_pattern('точка')}|{_word_pattern('dot')})(?:\s+|\s*[\)\]\}}]\s*)(?P<R>{_DOMAIN_LABEL})",
         _regex_mod.IGNORECASE,
     )
 ]
@@ -157,7 +156,7 @@ def _deobfuscate_chunk(text: str, rules: Set[str]) -> str:
         changed = False
         for pat in patterns:
             new_current, count = _safe_subn(pat, current, repl_func, rule_name=rule_name, rules=rules)
-            if count:
+            if count and new_current != current:
                 current = new_current
                 changed = True
         return changed
@@ -178,7 +177,7 @@ def _deobfuscate_chunk(text: str, rules: Set[str]) -> str:
             changed = True
         if _apply(
             _PAT_SPACED_LETTERS,
-            lambda m: m.group(0).replace(" ", ""),
+            lambda m: "".join(m.group(0).split()),
             "spaced",
         ):
             changed = True
@@ -189,7 +188,7 @@ def _deobfuscate_chunk(text: str, rules: Set[str]) -> str:
             rule_name="hyphen",
             rules=rules,
         )
-        if hyphen_count:
+        if hyphen_count and new_current != current:
             current = new_current
             changed = True
         if not changed:

@@ -2,6 +2,7 @@ import json, os
 from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 
 from utils.paths import ensure_parent
 from emailbot.utils.paths import resolve_project_path
@@ -13,6 +14,7 @@ except Exception:  # pragma: no cover - fallback for older Python
     ZoneInfo = None
 
 _TZ_NAME = (os.getenv("REPORT_TZ", "Europe/Moscow") or "Europe/Moscow").strip()
+_BOUNCE_LOCK = RLock()
 
 
 def _normalize_group_value(group: object) -> str:
@@ -106,7 +108,8 @@ def log_error(email: str, group: str, reason: str, extra: dict | None = None) ->
     append_jsonl_atomic(path, rec)
 
 
-def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") -> None:
+def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "", *,
+               bounce_id: str = "", extra: dict | None = None) -> bool:
     email_value = _normalize_for_stats(email) or (email or "").strip()
     rec = {
         "ts": _now_utc().isoformat().replace("+00:00", "Z"),
@@ -118,8 +121,22 @@ def log_bounce(email: str, reason: str, uuid: str = "", message_id: str = "") ->
         rec["uuid"] = uuid
     if message_id:
         rec["message_id"] = message_id
+    if extra:
+        rec.update(extra)
+    if bounce_id:
+        rec["bounce_id"] = bounce_id
     path = _stats_path()
-    append_jsonl_atomic(path, rec)
+    with _BOUNCE_LOCK:
+        if bounce_id and path.exists():
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        if json.loads(line).get("bounce_id") == bounce_id:
+                            return False
+                    except (ValueError, AttributeError):
+                        continue
+        append_jsonl_atomic(path, rec)
+    return True
 
 
 def _iter_today_week(scope: str):
@@ -130,7 +147,7 @@ def _iter_today_week(scope: str):
         start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
     elif scope == "week":
-        # неделя с понедельника в локальной TZ
+        # Календарная неделя с понедельника 00:00 до конца воскресенья.
         start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
             days=now_local.weekday()
         )
@@ -150,26 +167,37 @@ def _iter_today_week(scope: str):
 
 
 def summarize(scope: str) -> dict:
+    from emailbot.delivery_status import failed_send_indices, failure_time, unique_bounces, successful_send_count
+
     ok = 0
     err = 0
     path = _stats_path()
     if not path.exists():
         return {"ok": 0, "err": 0}
     pred = _iter_today_week(scope)
+    events = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             try:
                 rec = json.loads(line)
             except Exception:
                 continue
-            ts = rec.get("ts")
-            if not ts or not pred(ts):
+            if not isinstance(rec, dict):
                 continue
-            status = rec.get("status")
-            if status == "success":
-                ok += 1
-            elif status in ("error", "bounce"):
-                err += 1
+            events.append(rec)
+    failures = unique_bounces(events)
+    accepted = []
+    for rec in events:
+        ts = rec.get("ts")
+        if not ts or not pred(ts):
+            continue
+        status = rec.get("status")
+        if status == "success":
+            accepted.append(rec)
+        elif status == "error":
+            err += 1
+    ok = successful_send_count(accepted, failed_send_indices(accepted, failures))
+    err += sum(1 for row in failures if failure_time(row) is not None and pred(failure_time(row).isoformat()))
     return {"ok": ok, "err": err, "success": ok, "error": err}
 
 

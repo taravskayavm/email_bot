@@ -20,6 +20,22 @@ from typing import Deque, Iterable, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
+class DeliveryUncertainError(Exception):
+    """The connection failed during SMTP transfer; automatic replay may duplicate mail."""
+
+
+def _close_smtp(server: smtplib.SMTP) -> None:
+    """Release a session without treating a failed QUIT as a failed send."""
+    try:
+        server.quit()
+    except (smtplib.SMTPException, OSError):
+        logger.warning("SMTP QUIT failed; closing socket", exc_info=True)
+        try:
+            server.close()
+        except OSError:
+            logger.warning("SMTP socket close failed", exc_info=True)
+
+
 def _env_float(env_name: str, default: float) -> float:
     try:
         return float(os.getenv(env_name, str(default)))
@@ -96,21 +112,34 @@ class SmtpClient:
             self._server = smtplib.SMTP(
                 self.host, self.port, timeout=self.timeout
             )
-            self._server.starttls(context=context)
-        self._server.login(self.username, self.password)
+        try:
+            if not self.use_ssl:
+                self._server.starttls(context=context)
+            self._server.login(self.username, self.password)
+        except BaseException:
+            try:
+                self._server.close()
+            except (smtplib.SMTPException, OSError):
+                logger.warning("SMTP socket close failed after connection error", exc_info=True)
+            finally:
+                self._server = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._server is not None:
             try:
-                self._server.quit()
+                _close_smtp(self._server)
             finally:
                 self._server = None
 
     def send(self, sender: str, recipient: str, raw_message: str) -> None:
         if self._server is None:
             raise RuntimeError("SMTP client is not connected")
-        self._server.sendmail(sender, recipient, raw_message)
+        try:
+            self._server.sendmail(sender, recipient, raw_message)
+        except (smtplib.SMTPServerDisconnected, TimeoutError, ConnectionError) as exc:
+            raise DeliveryUncertainError("SMTP delivery could not be confirmed") from exc
 
 
 def _parse_limit(env_name: str, default: int) -> int:
@@ -223,7 +252,8 @@ class RobustSMTP:
             self.port = int(os.getenv("SMTP_PORT", "465"))
         except Exception:
             self.port = 465
-        self.ssl = os.getenv("SMTP_SSL", "1") == "1"
+        ssl_setting = os.getenv("SMTP_SSL")
+        self.ssl = self.port == 465 if ssl_setting is None else ssl_setting == "1"
         try:
             self.timeout = int(os.getenv("SMTP_TIMEOUT", "20"))
         except Exception:
@@ -256,17 +286,20 @@ class RobustSMTP:
                 timeout=self.timeout,
                 context=self._ssl_ctx,
             )
-            smtp.ehlo()
         else:
             smtp = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
+        try:
             smtp.ehlo()
-            try:
+            if not self.ssl:
                 smtp.starttls(context=self._ssl_ctx)
-            except smtplib.SMTPNotSupportedError:
-                # сервер не поддерживает TLS — продолжаем без падения
-                pass
-            smtp.ehlo()
-        smtp.login(self.user, self.pwd)
+                smtp.ehlo()
+            smtp.login(self.user, self.pwd)
+        except BaseException:
+            try:
+                smtp.close()
+            except (smtplib.SMTPException, OSError):
+                logger.warning("SMTP socket close failed after connection error", exc_info=True)
+            raise
         self._smtp = smtp
 
     def ensure(self) -> None:
@@ -285,12 +318,15 @@ class RobustSMTP:
     def send(self, msg: EmailMessage):
         self.ensure()
         assert self._smtp is not None
-        return self._smtp.send_message(msg)
+        try:
+            return self._smtp.send_message(msg)
+        except (smtplib.SMTPServerDisconnected, TimeoutError, ConnectionError) as exc:
+            raise DeliveryUncertainError("SMTP delivery could not be confirmed") from exc
 
     def close(self) -> None:
         if self._smtp is not None:
             try:
-                self._smtp.quit()
+                _close_smtp(self._smtp)
             finally:
                 self._smtp = None
 

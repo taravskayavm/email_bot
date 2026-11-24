@@ -23,13 +23,13 @@ class FakeTime:
 def _reload_client(monkeypatch: pytest.MonkeyPatch, per_min: str, per_hour: str):
     monkeypatch.setenv("SMTP_MAX_PER_MIN", per_min)
     monkeypatch.setenv("SMTP_MAX_PER_HOUR", per_hour)
-    module = importlib.import_module("utils.smtp_client")
+    module = importlib.import_module("emailbot.smtp_client")
     return importlib.reload(module)
 
 
 @pytest.fixture(autouse=True)
 def _restore_smtp_client_state():
-    module = importlib.import_module("utils.smtp_client")
+    module = importlib.import_module("emailbot.smtp_client")
     orig_min = module.MAX_PER_MIN
     orig_hour = module.MAX_PER_HOUR
     yield

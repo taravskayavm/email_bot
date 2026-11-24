@@ -68,13 +68,11 @@ def imap_connect_ssl(
                     pass
                 sock = None
                 wrapped = None
-                client = imaplib.IMAP4_SSL(host=host, port=port)
-                if timeout is not None:
-                    try:
-                        client.sock.settimeout(timeout)
-                    except Exception:
-                        pass
-                return client
+                # The constructor also waits for TLS and the server greeting.
+                # Setting a timeout after it returns leaves those reads unbounded.
+                return imaplib.IMAP4_SSL(
+                    host=host, port=port, ssl_context=context, timeout=timeout
+                )
         except Exception as exc:  # pragma: no cover - network errors
             last_error = exc
             if wrapped is not None:

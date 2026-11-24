@@ -1,96 +1,119 @@
-import os, email, time
-from datetime import datetime, timedelta, timezone
-from .send_stats import log_bounce
-from .bounce_pop3 import sync_bounces_pop3
-from .bounce_common import (
-    is_bounce_from,
-    extract_original_message,
-    extract_recipient_fallback,
-)
+"""Read delivery failures without changing mailbox flags."""
 
+import imaplib
+import logging
+import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+from .bounce_pop3 import sync_bounces_pop3
+from .bounce_processing import record_bounce_message
 from emailbot.net_imap import get_imap_timeout, imap_connect_ssl
 
-BOUNCE_SINCE_DAYS = int(os.getenv("BOUNCE_SINCE_DAYS","7"))
-INBOX_MAILBOX = os.getenv("INBOX_MAILBOX","INBOX")
-IMAP_HOST = os.getenv("IMAP_HOST")
-IMAP_PORT = int(os.getenv("IMAP_PORT","993"))
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-IMAP_TIMEOUT = get_imap_timeout(15.0)
-IMAP_RETRIES = int(os.getenv("IMAP_RETRIES","3"))
+logger = logging.getLogger(__name__)
+_SCAN_LOCK = threading.Lock()
+_READ_UIDS: dict[tuple, set[bytes]] = {}
 
 
 def _imap_connect():
-    return imap_connect_ssl(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
+    return imap_connect_ssl(os.getenv("IMAP_HOST", "imap.mail.ru"),
+                            int(os.getenv("IMAP_PORT", "993")),
+                            timeout=get_imap_timeout(15.0))
+
 
 def try_imap_connect():
-    for attempt in range(IMAP_RETRIES):
+    retries = max(1, int(os.getenv("IMAP_RETRIES", "3")))
+    for attempt in range(retries):
         try:
             return _imap_connect()
-        except TimeoutError:
-            time.sleep(min(2 ** attempt, 8))
-            continue
-        except ConnectionRefusedError:
-            time.sleep(min(2 ** attempt, 8))
-            continue
-        except OSError as e:
-            if getattr(e, "winerror", None) == 10061 or "timed out" in str(e).lower():
+        except OSError:
+            if attempt + 1 < retries:
                 time.sleep(min(2 ** attempt, 8))
-                continue
-            raise
     return None
 
-def sync_bounces():
-    """Сканирует INBOX, находит bounce, логирует их в send_stats как status='bounce'."""
+
+def _raw_message(data):
+    return next((p[1] for p in data or []
+                 if isinstance(p, tuple) and isinstance(p[1], bytes)), b"")
+
+
+def _sync_imap():
     imap = try_imap_connect()
     if imap is None:
-        backend = os.getenv("BOUNCE_FETCH_BACKEND", "auto").lower()
-        if backend in ("auto", "pop3"):
+        raise OSError("IMAP unavailable")
+    try:
+        imap.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
+        typ, _ = imap.select(os.getenv("INBOX_MAILBOX", "INBOX"), readonly=True)
+        if typ != "OK":
+            raise RuntimeError("Cannot select bounce mailbox")
+        days = int(os.getenv("BOUNCE_SINCE_DAYS", "7"))
+        # IMAP dates require English month names regardless of Windows locale.
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 0))
+        month = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()[cutoff.month - 1]
+        criteria = ("SINCE", f"{cutoff.day:02d}-{month}-{cutoff.year}") if days > 0 else ("ALL",)
+        # Let the server select DSNs; avoid downloading every incoming message.
+        typ, data = imap.uid("search", None, *criteria, "OR", "OR", "FROM",
+            '"mailer-daemon"', "FROM", '"postmaster"', "OR", "SUBJECT",
+            '"failure"', "SUBJECT", '"undelivered"')
+        if typ != "OK":
+            raise RuntimeError(f"Bounce mailbox search failed: {data!r}")
+        count = 0
+        validity = imap.response("UIDVALIDITY")[1]
+        scope = (os.getenv("IMAP_HOST"), os.getenv("EMAIL_ADDRESS"),
+                 os.getenv("INBOX_MAILBOX", "INBOX"), repr(validity))
+        seen = _READ_UIDS.setdefault(scope, set())
+        for uid in data[0].split() if data and data[0] else []:
+            if uid in seen:
+                continue
+            typ, parts = imap.uid("fetch", uid, "(BODY.PEEK[])")
+            if typ != "OK":
+                raise RuntimeError("Bounce message fetch failed")
+            raw = _raw_message(parts)
+            if raw:
+                count += record_bounce_message(raw)
+                seen.add(uid)
+        return count
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            try:
+                imap.shutdown()
+            except Exception:
+                pass
+
+
+def sync_bounces() -> int:
+    """Record new failures; propagate scan errors instead of reporting zero."""
+    backend = os.getenv("BOUNCE_FETCH_BACKEND", "auto").strip().lower()
+    if backend not in {"auto", "imap", "pop3"}:
+        raise ValueError(f"Unknown bounce backend: {backend}")
+    if not os.getenv("EMAIL_ADDRESS") or not os.getenv("EMAIL_PASSWORD"):
+        raise RuntimeError("Bounce scanner requires mailbox credentials")
+    with _SCAN_LOCK:
+        if backend == "pop3":
             return sync_bounces_pop3()
-        raise RuntimeError("IMAP unavailable and POP3 fallback disabled")
+        try:
+            return _sync_imap()
+        except (OSError, imaplib.IMAP4.error):
+            if backend == "imap":
+                raise
+            logger.warning("IMAP bounce scan failed; trying POP3", exc_info=True)
+            return sync_bounces_pop3()
 
-    imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-    imap.select(INBOX_MAILBOX)
 
-    since = (datetime.now(timezone.utc) - timedelta(days=BOUNCE_SINCE_DAYS)).strftime("%d-%b-%Y")
-    typ, data = imap.search(None, 'SINCE', since)
-    if typ != "OK":
-        imap.logout()
-        return 0
-
-    count = 0
-    uids = data[0].split() if data and data[0] else []
-    for uid in uids:
-        typ, msgd = imap.fetch(uid, '(RFC822)')
-        if typ != "OK" or not msgd:
-            continue
-        m = email.message_from_bytes(msgd[0][1])
-        if not is_bounce_from(m.get('From','')):
-            continue
-
-        orig = extract_original_message(m)
-
-        if not orig:
-            # fallback: иногда поле Diagnostic-Code в тексте даёт получателя
-            rcpt = extract_recipient_fallback(m)
-            if rcpt:
-                log_bounce(rcpt, m.get('Subject','(bounce)'))
-                count += 1
-            continue
-
-        uuid = orig.get('X-EBOT-UUID','')
-        rcpt = orig.get('X-EBOT-Recipient','') or orig.get('To','')
-        mid  = orig.get('Message-ID','')
-        reason = m.get('Subject','(bounce)')
-        if rcpt:
-            log_bounce(rcpt, reason, uuid=uuid, message_id=mid)
-            count += 1
-
-    imap.logout()
-    return count
+def periodic_bounce_check(stop_event):
+    interval = max(10, int(os.getenv("BOUNCE_CHECK_INTERVAL_SECONDS", "60")))
+    while not stop_event.is_set():
+        try:
+            count = sync_bounces()
+            if count:
+                logger.info("Recorded %s new delivery failures", count)
+        except Exception:
+            logger.exception("Bounce scan failed")
+        stop_event.wait(interval)
 
 
 def scan_bounces() -> int:
-    """Backward compatible wrapper around :func:`sync_bounces`."""
-
     return sync_bounces()

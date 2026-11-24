@@ -20,8 +20,8 @@ def _button_texts(markup):
 def test_sociology_and_politology_registered_templates():
     """New direction codes should resolve to their existing HTML templates."""
 
-    assert messaging.TEMPLATE_MAP["sociology"].endswith("templates/sociology.html")
-    assert messaging.TEMPLATE_MAP["politology"].endswith("templates/politology.html")
+    assert Path(messaging.TEMPLATE_MAP["sociology"]).as_posix().endswith("templates/sociology.html")
+    assert Path(messaging.TEMPLATE_MAP["politology"]).as_posix().endswith("templates/politology.html")
 
 
 def test_runtime_direction_labels_include_icons():

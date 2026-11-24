@@ -5,6 +5,7 @@ def test_mass_state_uses_env_path(monkeypatch, tmp_path):
     p = tmp_path / "ms.json"
     monkeypatch.setenv("MASS_STATE_PATH", str(p))
     mod = importlib.import_module("emailbot.mass_state")
+    mod = importlib.reload(mod)
     state = {"x": 1}
     mod._state_cache = {"42": state}
     mod._save_all(state)  # type: ignore[arg-type]

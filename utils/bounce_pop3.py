@@ -3,11 +3,9 @@ import poplib
 from datetime import datetime, timedelta, timezone
 import email
 
-from .send_stats import log_bounce
+from .bounce_processing import record_bounce_message
 from .bounce_common import (
-    is_bounce_from,
-    extract_original_message,
-    extract_recipient_fallback,
+    is_bounce_message,
     parse_date_utc,
 )
 
@@ -33,29 +31,21 @@ def sync_bounces_pop3() -> int:
         num = len(pop.list()[1])
         lower = max(1, num - 500)
         for i in range(lower, num + 1):
-            resp, lines, octets = pop.retr(i)
+            # POP3 has no server-side sender/subject search. Read only headers
+            # until the message is identified as a delivery-report candidate.
+            # If TOP is unsupported, let the scan fail visibly rather than
+            # falling back to downloading ordinary mail bodies.
+            resp, lines, octets = pop.top(i, 0)
             msg = email.message_from_bytes(b"\r\n".join(lines))
             if cutoff is not None:
                 msg_dt = parse_date_utc(msg.get("Date"))
                 if msg_dt is not None and msg_dt < cutoff:
                     continue
-            if not is_bounce_from(msg.get("From", "")):
+            if not is_bounce_message(msg):
                 continue
 
-            orig = extract_original_message(msg)
-            uuid = rcpt = mid = ""
-            reason = msg.get("Subject", "(bounce)")
-
-            if orig:
-                uuid = orig.get("X-EBOT-UUID", "")
-                rcpt = orig.get("X-EBOT-Recipient", "") or orig.get("To", "")
-                mid = orig.get("Message-ID", "")
-            else:
-                rcpt = extract_recipient_fallback(msg)
-
-            if rcpt:
-                log_bounce(rcpt, reason, uuid=uuid, message_id=mid)
-                count += 1
+            resp, lines, octets = pop.retr(i)
+            count += record_bounce_message(b"\r\n".join(lines))
 
         return count
     finally:

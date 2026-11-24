@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
+import re
 from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from . import settings
@@ -50,6 +51,34 @@ def _split_ref(ref: str) -> Tuple[str, int]:
     except ValueError:
         base, page = ref, 0
     return base, page
+
+
+def remove_pdf_left_glue_duplicates(hits: List["EmailHit"], stats: Dict[str, int] | None = None) -> List["EmailHit"]:
+    """Drop PDF glue only when the exact shorter address exists in the same source."""
+    if stats is None:
+        stats = {}
+    evidence = {(h.source_ref, h.email.lower()) for h in hits}
+    result = []
+    for hit in hits:
+        address = hit.email.lower()
+        if not hit.source_ref.startswith("pdf:") or "@" not in address:
+            result.append(hit)
+            continue
+        local, domain = address.split("@", 1)
+        patterns = (
+            (r"^russia[.]?(?:\d+[.]?)?", "pdf_country_prefix_duplicates_removed"),
+            (r"^(?:p[.])?\d+[.]", "pdf_author_code_duplicates_removed"),
+        )
+        removed = False
+        for pattern, stat in patterns:
+            shorter = re.sub(pattern, "", local)
+            if shorter != local and shorter and (hit.source_ref, f"{shorter}@{domain}") in evidence:
+                stats[stat] = stats.get(stat, 0) + 1
+                removed = True
+                break
+        if not removed:
+            result.append(hit)
+    return result
 
 
 def merge_footnote_prefix_variants(hits: List["EmailHit"], stats: Dict[str, int] | None = None) -> List["EmailHit"]:
